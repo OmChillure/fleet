@@ -1,0 +1,17 @@
+stateDiagram-v2
+  [*] --> SpecDraft: Human writes task spec
+  SpecDraft --> Decomposed: Planner agent breaks into subtasks
+  Decomposed --> Queued: Cards land on board
+
+  state "Board statuses" as Board {
+    [*] --> InDev
+    InDev --> InProgress: Worker claims task
+    InProgress --> Blocked: Needs more input
+    Blocked --> InProgress: Human provides input
+    InProgress --> DoneSuccess: Acceptance criteria met
+    InProgress --> DoneFailed: Unrecoverable / max loops
+  }
+
+  Queued --> InDev
+  DoneSuccess --> [*]
+  DoneFailed --> [*]: Review / retry later

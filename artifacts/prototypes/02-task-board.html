@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Task Board (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; --green:#12b76a; --amber:#f79009; --red:#f04438; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:1.5rem}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem}
+  nav a.active{background:#1e293b;color:#fff}
+  main{padding:1.25rem 1.5rem}
+  h1{margin:0 0 .25rem;font-size:1.35rem}
+  .sub{color:var(--m);margin-bottom:1.25rem}
+  .board{display:grid;grid-template-columns:repeat(4,1fr);gap:.85rem;align-items:start}
+  .col{background:#e8ebf2;border-radius:12px;padding:.65rem}
+  .col h3{margin:0 .35rem .65rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;color:var(--m);display:flex;justify-content:space-between}
+  .col h3 span{background:#fff;border-radius:999px;padding:0 .45rem;font-size:.72rem}
+  .card{background:var(--s);border:1px solid var(--b);border-radius:10px;padding:.75rem;margin-bottom:.55rem;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .card .t{font-weight:600;font-size:.9rem;margin-bottom:.35rem}
+  .card .meta{display:flex;flex-wrap:wrap;gap:.35rem;font-size:.72rem;color:var(--m)}
+  .tag{background:#eff4ff;color:#3538cd;padding:.1rem .4rem;border-radius:4px;font-weight:600}
+  .tag.mkt{background:#f4f3ff;color:#5925dc}
+  .tag.sales{background:#fef6ee;color:#c4320a}
+  .agent{margin-top:.5rem;font-size:.75rem;color:var(--m)}
+  .agent b{color:var(--t)}
+  .ok{border-left:3px solid var(--green)}
+  .fail{border-left:3px solid var(--red)}
+  .wip{border-left:3px solid var(--blue)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a class="active" href="#">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+  </nav>
+  <main>
+    <h1>Task board</h1>
+    <p class="sub">Smaller work units derived from specs · statuses map to agent lifecycle</p>
+    <div class="board">
+      <div class="col">
+        <h3>In dev <span>3</span></h3>
+        <div class="card"><div class="t">Wire OAuth callback routes</div><div class="meta"><span class="tag">coding</span><span>spec · onboarding-v2</span></div></div>
+        <div class="card"><div class="t">Draft Q3 nurture email #2</div><div class="meta"><span class="tag mkt">marketing</span><span>spec · growth-emails</span></div></div>
+        <div class="card"><div class="t">Pipeline stage definitions</div><div class="meta"><span class="tag sales">sales</span><span>spec · crm-ops</span></div></div>
+      </div>
+      <div class="col">
+        <h3>Work in progress <span>3</span></h3>
+        <div class="card wip"><div class="t">API auth middleware</div><div class="meta"><span class="tag">coding</span><span>repo · web-app</span></div><div class="agent">claimed by <b>worker-03</b> · loop 1</div></div>
+        <div class="card wip"><div class="t">E2E test suite</div><div class="meta"><span class="tag">coding</span><span>repo · web-app</span></div><div class="agent">claimed by <b>worker-01</b> · loop 1</div></div>
+        <div class="card wip"><div class="t">Dashboard charts</div><div class="meta"><span class="tag">coding</span></div><div class="agent">claimed by <b>worker-02</b> · validating</div></div>
+      </div>
+      <div class="col">
+        <h3>Blocked / needs input <span>1</span></h3>
+        <div class="card" style="border-left:3px solid var(--amber)"><div class="t">Email drip sequence</div><div class="meta"><span class="tag mkt">marketing</span></div><div class="agent">worker-05 · <b>needs brand voice guide</b></div></div>
+      </div>
+      <div class="col">
+        <h3>Done <span>2</span></h3>
+        <div class="card ok"><div class="t">Scaffold feature branch</div><div class="meta"><span class="tag">coding</span><span style="color:var(--green);font-weight:600">succeeded</span></div></div>
+        <div class="card fail"><div class="t">Legacy CSS purge</div><div class="meta"><span class="tag">coding</span><span style="color:var(--red);font-weight:600">failed</span></div><div class="agent">max loops exceeded</div></div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

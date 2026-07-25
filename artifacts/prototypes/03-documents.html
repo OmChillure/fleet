@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Documents (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 240px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:1.5rem}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem}
+  nav a.active{background:#1e293b;color:#fff}
+  .list{background:#fff;border-right:1px solid var(--b);padding:1rem}
+  .list h2{font-size:.75rem;text-transform:uppercase;color:var(--m);letter-spacing:.05em;margin:0 0 .75rem}
+  .doc{padding:.65rem .7rem;border-radius:8px;margin-bottom:.35rem;cursor:default;border:1px solid transparent}
+  .doc.active{background:#eff4ff;border-color:#c7d7fe}
+  .doc .n{font-weight:600;font-size:.88rem}.doc .s{font-size:.75rem;color:var(--m);margin-top:.15rem}
+  main{padding:1.25rem 1.75rem}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem}
+  h1{margin:0;font-size:1.25rem}
+  .link{font-size:.85rem;color:var(--m)}.link b{color:var(--blue)}
+  .btn{background:var(--blue);color:#fff;border:0;border-radius:8px;padding:.55rem 1rem;font-weight:600;font-size:.85rem}
+  .btn.sec{background:#fff;color:var(--t);border:1px solid var(--b)}
+  .actions{display:flex;gap:.5rem}
+  .editor{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.25rem 1.5rem;line-height:1.65}
+  .editor h2{font-size:1rem;margin:1.25rem 0 .5rem}
+  .editor h2:first-child{margin-top:0}
+  .editor p,.editor li{color:#344054}
+  .chips{display:flex;gap:.4rem;flex-wrap:wrap;margin:1rem 0}
+  .chip{background:#f2f4f7;border-radius:6px;padding:.25rem .55rem;font-size:.78rem;color:var(--m)}
+  .chip strong{color:var(--t)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a class="active" href="#">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+  </nav>
+  <aside class="list">
+    <h2>Repository</h2>
+    <div class="doc active"><div class="n">onboarding-v2.md</div><div class="s">coding · linked repo</div></div>
+    <div class="doc"><div class="n">growth-emails.md</div><div class="s">marketing</div></div>
+    <div class="doc"><div class="n">crm-pipeline.md</div><div class="s">sales</div></div>
+    <div class="doc"><div class="n">churn-analysis.md</div><div class="s">analysis</div></div>
+  </aside>
+  <main>
+    <div class="head">
+      <div>
+        <h1>onboarding-v2.md</h1>
+        <p class="link">Target repository: <b>github.com/acme/web-app</b> · branch strategy: feature/*</p>
+      </div>
+      <div class="actions">
+        <button class="btn sec">Save</button>
+        <button class="btn">Decompose → board</button>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip"><strong>Owner</strong> product</span>
+      <span class="chip"><strong>Priority</strong> P1</span>
+      <span class="chip"><strong>Parallelizable</strong> yes</span>
+    </div>
+    <div class="editor">
+      <h2>Goal</h2>
+      <p>Redesign the post-signup onboarding flow so new users reach “first value” within 5 minutes. Ship behind a feature flag and open a draft PR.</p>
+      <h2>Acceptance criteria</h2>
+      <ul>
+        <li>OAuth callback routes handle Google + GitHub</li>
+        <li>Empty states copy reviewed by design</li>
+        <li>E2E coverage for happy path</li>
+        <li>Dashboard shows completion funnel chart</li>
+      </ul>
+      <h2>Suggested decomposition</h2>
+      <p>Operator may ask a planner agent to split this into board cards: auth middleware, UI empty states, E2E suite, charts, PR packaging — then parallelize across the fleet up to max agents.</p>
+      <h2>Out of scope</h2>
+      <p>Billing upgrades, multi-org invites, mobile-native clients.</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

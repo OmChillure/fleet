@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Monitoring Dashboard (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; --green:#12b76a; --amber:#f79009; --red:#f04438; --violet:#7a5af8; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;font-size:1rem;margin-bottom:1.5rem;letter-spacing:-.02em}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem;font-size:.9rem}
+  nav a.active{background:#1e293b;color:#fff}
+  main{padding:1.25rem 1.5rem 2rem}
+  .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
+  h1{margin:0;font-size:1.35rem;letter-spacing:-.02em}
+  .pills{display:flex;gap:.5rem}
+  .pill{background:var(--s);border:1px solid var(--b);border-radius:999px;padding:.3rem .7rem;font-size:.8rem;color:var(--m)}
+  .pill b{color:var(--t)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem}
+  .stat{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1rem}
+  .stat .l{color:var(--m);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+  .stat .v{font-size:1.6rem;font-weight:700;margin-top:.25rem}
+  .grid{display:grid;grid-template-columns:1.4fr 1fr;gap:1rem}
+  .card{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1rem}
+  .card h2{margin:0 0 .85rem;font-size:.95rem}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:.72rem;color:var(--m);text-transform:uppercase;padding:0 .5rem .5rem 0;border-bottom:1px solid var(--b)}
+  td{padding:.65rem .5rem .65rem 0;border-bottom:1px solid #f2f4f7;vertical-align:middle}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:.4rem}
+  .dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.b{background:var(--blue)}.dot.r{background:var(--red)}
+  .badge{font-size:.7rem;font-weight:600;padding:.15rem .45rem;border-radius:6px}
+  .badge.run{background:#eff8ff;color:#175cd3}.badge.wait{background:#fffaeb;color:#b54708}
+  .badge.ok{background:#ecfdf3;color:#027a48}.badge.fail{background:#fef3f2;color:#b42318}
+  .stream{font-family:ui-monospace,Menlo,monospace;font-size:.75rem;background:#0f172a;color:#cbd5e1;border-radius:8px;padding:.75rem;max-height:220px;overflow:auto;line-height:1.5}
+  .stream .ts{color:#64748b}.stream .ok{color:#4ade80}.stream .warn{color:#fbbf24}
+  .bar{height:8px;background:#eef2ff;border-radius:4px;overflow:hidden;margin-top:.35rem}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--violet));border-radius:4px}
+  .goal{font-size:.85rem;color:var(--m);background:#f8fafc;border:1px dashed var(--b);border-radius:8px;padding:.75rem;margin-bottom:1rem}
+  .goal strong{color:var(--t);display:block;margin-bottom:.25rem;font-size:.8rem}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <a class="active" href="#">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+    <a href="#">CLI / TUI</a>
+  </nav>
+  <main>
+    <div class="top">
+      <div>
+        <h1>Fleet monitoring</h1>
+        <div class="goal"><strong>Common goal (global system prompt)</strong>
+          Ship the onboarding redesign: implement, test, and open a draft PR for review.</div>
+      </div>
+      <div class="pills">
+        <span class="pill">Env <b>prod-sandbox</b></span>
+        <span class="pill">Max agents <b>6</b></span>
+        <span class="pill">Live <b style="color:var(--green)">● streaming</b></span>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="l">Active agents</div><div class="v">4<span style="font-size:.9rem;color:var(--m);font-weight:500"> / 6</span></div></div>
+      <div class="stat"><div class="l">In progress</div><div class="v">3</div></div>
+      <div class="stat"><div class="l">Blocked (HITL)</div><div class="v" style="color:var(--amber)">1</div></div>
+      <div class="stat"><div class="l">Done today</div><div class="v" style="color:var(--green)">7</div></div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2>Agents</h2>
+        <table>
+          <thead><tr><th>Agent</th><th>Task</th><th>Status</th><th>Track</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="dot g"></span>worker-03</td>
+              <td>API auth middleware</td>
+              <td><span class="badge run">running</span></td>
+              <td>On track<div class="bar"><i style="width:72%"></i></div></td>
+            </tr>
+            <tr>
+              <td><span class="dot g"></span>worker-01</td>
+              <td>E2E test suite</td>
+              <td><span class="badge run">running</span></td>
+              <td>On track<div class="bar"><i style="width:48%"></i></div></td>
+            </tr>
+            <tr>
+              <td><span class="dot a"></span>worker-05</td>
+              <td>Email drip sequence</td>
+              <td><span class="badge wait">needs input</span></td>
+              <td>Waiting on brand copy<div class="bar"><i style="width:30%;background:#f79009"></i></div></td>
+            </tr>
+            <tr>
+              <td><span class="dot b"></span>worker-02</td>
+              <td>Dashboard charts</td>
+              <td><span class="badge run">validating</span></td>
+              <td>Loop 2/3<div class="bar"><i style="width:88%"></i></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Live event stream</h2>
+        <div class="stream">
+<span class="ts">15:02:11</span> worker-03 <span class="ok">passed</span> unit tests (auth middleware)<br/>
+<span class="ts">15:02:18</span> worker-02 starting validation loop 2<br/>
+<span class="ts">15:02:24</span> worker-05 <span class="warn">blocked</span> — missing brand voice guide<br/>
+<span class="ts">15:02:31</span> operator capacity 4/6 · no new spawn<br/>
+<span class="ts">15:02:40</span> worker-01 opened draft PR #184<br/>
+<span class="ts">15:02:51</span> screenshot saved → artifacts/worker-02/ui.png
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

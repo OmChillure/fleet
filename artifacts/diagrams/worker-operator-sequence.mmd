@@ -1,0 +1,35 @@
+sequenceDiagram
+  autonumber
+  participant H as Human
+  participant UI as Web UI
+  participant Op as Operator service
+  participant W as Worker agent
+  participant S as Shared state
+  participant T as Target repo / system
+
+  H->>UI: Set global goal, max agents, secrets
+  UI->>Op: Save configuration
+  H->>UI: Publish task specification
+  UI->>Op: Ingest document + link target
+  Op->>Op: Decompose into board cards
+  Op->>W: Spawn worker (tmux session)
+  W->>S: Claim task (In progress)
+  loop Until done or blocked
+    W->>T: Act (code, email, analysis…)
+    W->>W: Validate / self-check
+    W->>Op: Stream progress (WebSocket)
+  end
+  alt Success
+    W->>S: Mark Done (succeeded)
+    W->>Op: Artifacts + screenshot
+  else Needs input
+    W->>S: Mark Blocked
+    W->>Op: Request human input
+    Op->>UI: Notify reviewer
+    H->>UI: Provide input
+    UI->>Op: Resume worker
+  else Failure
+    W->>S: Mark Done (failed)
+    W->>Op: Failure report
+  end
+  Op->>UI: Dashboard update
