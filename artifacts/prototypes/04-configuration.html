@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Configuration (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:1.5rem}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem}
+  nav a.active{background:#1e293b;color:#fff}
+  main{padding:1.25rem 1.5rem 2rem;max-width:820px}
+  h1{margin:0 0 .35rem;font-size:1.35rem}
+  .sub{color:var(--m);margin:0 0 1.25rem}
+  .card{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.15rem 1.25rem;margin-bottom:1rem}
+  .card h2{margin:0 0 .85rem;font-size:.95rem}
+  label{display:block;font-size:.8rem;font-weight:600;margin-bottom:.35rem;color:#344054}
+  input,textarea,select{width:100%;border:1px solid var(--b);border-radius:8px;padding:.55rem .7rem;font:inherit;background:#fff;margin-bottom:.85rem}
+  textarea{min-height:110px;resize:vertical;font-family:ui-monospace,Menlo,monospace;font-size:.82rem}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:.85rem}
+  .hint{font-size:.75rem;color:var(--m);margin:-.55rem 0 .85rem}
+  .secret{display:flex;gap:.5rem;align-items:center;padding:.55rem .7rem;border:1px solid var(--b);border-radius:8px;margin-bottom:.5rem;background:#fafafa}
+  .secret code{flex:1;font-size:.8rem}
+  .secret span{font-size:.72rem;background:#ecfdf3;color:#027a48;padding:.15rem .4rem;border-radius:4px;font-weight:600}
+  .btn{background:var(--blue);color:#fff;border:0;border-radius:8px;padding:.6rem 1.1rem;font-weight:600}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a class="active" href="#">Configuration</a>
+  </nav>
+  <main>
+    <h1>Configuration manager</h1>
+    <p class="sub">Operator service settings · applies to new and (optionally) running workers</p>
+
+    <div class="card">
+      <h2>Fleet capacity</h2>
+      <div class="row">
+        <div>
+          <label>Max concurrent agents</label>
+          <input type="number" value="6" />
+          <p class="hint">Scheduler will not spawn beyond this cap.</p>
+        </div>
+        <div>
+          <label>Idle reclaim (minutes)</label>
+          <input type="number" value="15" />
+          <p class="hint">Tear down idle tmux worker sessions after this period.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Max validation loops</label>
+          <input type="number" value="3" />
+        </div>
+        <div>
+          <label>Default worker image / profile</label>
+          <select><option>coding-rust-node</option><option>marketing-writer</option><option>analysis-python</option></select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Common goal — global system prompt</h2>
+      <label>System prompt shared by all agents</label>
+      <textarea>You are part of Agent Fleet working toward: ship the onboarding redesign.
+Prefer small, reviewable commits. Report blockers early. Capture a screenshot or PDF
+when a UI or document artifact is ready for human verification.</textarea>
+    </div>
+
+    <div class="card">
+      <h2>Environment & secrets</h2>
+      <p class="hint" style="margin-top:0">Confidential values encrypted at rest (Postgres / SQLite). Never written to Markdown workspaces.</p>
+      <div class="secret"><code>OPENAI_API_KEY</code><span>encrypted</span></div>
+      <div class="secret"><code>GITHUB_TOKEN</code><span>encrypted</span></div>
+      <div class="secret"><code>SMTP_PASSWORD</code><span>encrypted</span></div>
+      <label style="margin-top:.75rem">Add environment variable</label>
+      <div class="row">
+        <input placeholder="NAME" />
+        <input placeholder="value" type="password" />
+      </div>
+    </div>
+
+    <button class="btn">Save configuration</button>
+  </main>
+</div>
+</body>
+</html>

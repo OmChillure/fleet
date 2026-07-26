@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Fleet — Product Vision (Tarun)</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6fa;
+      --surface: #ffffff;
+      --text: #1a1d26;
+      --muted: #5a6270;
+      --border: #e2e6ee;
+      --accent: #2563eb;
+      --accent-soft: #eff4ff;
+      --ok: #0d7a4f;
+      --warn: #b45309;
+      --card-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-size: 16px;
+    }
+    header {
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #3b82f6 100%);
+      color: #fff;
+      padding: 2.75rem 1.5rem 2.5rem;
+    }
+    header .wrap, main.wrap, footer.wrap {
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    header h1 {
+      margin: 0 0 0.35rem;
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    header .subtitle {
+      margin: 0;
+      opacity: 0.92;
+      font-size: 1.05rem;
+      max-width: 42rem;
+    }
+    header .meta {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .pill {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.16);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    nav.toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    nav.toc strong {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    nav.toc ol {
+      margin: 0;
+      padding-left: 1.2rem;
+      columns: 2;
+      gap: 1.5rem;
+    }
+    nav.toc a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.92rem;
+    }
+    nav.toc a:hover { text-decoration: underline; }
+    main.wrap { padding: 1.75rem 1.5rem 1rem; }
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1.5rem 1.65rem;
+      margin-bottom: 1.25rem;
+    }
+    h2 {
+      margin: 0 0 0.85rem;
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    h2 .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    h3 {
+      margin: 1.25rem 0 0.5rem;
+      font-size: 1rem;
+      font-weight: 650;
+    }
+    p { margin: 0 0 0.85rem; }
+    p.lead { font-size: 1.05rem; color: var(--muted); }
+    ul, ol { margin: 0.35rem 0 0.85rem; padding-left: 1.25rem; }
+    li { margin-bottom: 0.4rem; }
+    .components {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+    @media (min-width: 700px) {
+      .components { grid-template-columns: 1fr 1fr; }
+      nav.toc ol { columns: 2; }
+    }
+    .component {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.1rem 1.15rem;
+    }
+    .component h3 {
+      margin: 0 0 0.5rem;
+      color: var(--accent);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .component ul { margin-bottom: 0; }
+    .feature-grid {
+      display: grid;
+      gap: 0.65rem;
+      margin-top: 0.5rem;
+    }
+    .feature {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .feature .icon {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .feature h4 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+    .feature p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin: 0.5rem 0 0.85rem;
+    }
+    .tag {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid #dbe6ff;
+      border-radius: 6px;
+      padding: 0.2rem 0.55rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .tag.neutral {
+      background: #f0f2f6;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .note {
+      border-left: 3px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 0.75rem 0 0;
+      font-size: 0.92rem;
+      color: #1e3a5f;
+    }
+    .diagram {
+      background: #fafbfe;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      margin: 0.75rem 0 1rem;
+      overflow-x: auto;
+    }
+    .diagram .caption {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0.5rem 0 0;
+      text-align: center;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    figure.hero {
+      margin: 0 0 1.25rem;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: var(--card-shadow);
+      background: #fff;
+    }
+    figure.hero img {
+      display: block;
+      width: 100%;
+      height: auto;
+      vertical-align: middle;
+    }
+    figure.hero figcaption {
+      padding: 0.65rem 1rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      background: #fafbfe;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+    @media (min-width: 700px) {
+      .gallery { grid-template-columns: 1fr 1fr; }
+    }
+    .proto {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+    }
+    .proto .chrome {
+      background: #e8ebf0;
+      padding: 0.45rem 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .proto .chrome i {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #d0d5dd;
+      display: inline-block;
+    }
+    .proto .chrome i:nth-child(1) { background: #f97066; }
+    .proto .chrome i:nth-child(2) { background: #fdb022; }
+    .proto .chrome i:nth-child(3) { background: #32d583; }
+    .proto iframe {
+      width: 100%;
+      height: 320px;
+      border: 0;
+      background: #f0f2f7;
+    }
+    .proto .meta {
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.88rem;
+    }
+    .proto .meta a {
+      color: var(--accent);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .proto .meta a:hover { text-decoration: underline; }
+    .proto .meta p { margin: 0.25rem 0 0; font-size: 0.82rem; color: var(--muted); }
+    table.matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin: 0.5rem 0 0.85rem;
+    }
+    table.matrix th, table.matrix td {
+      border: 1px solid var(--border);
+      padding: 0.55rem 0.7rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    table.matrix th {
+      background: var(--bg);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+    footer.wrap {
+      padding: 0 1.5rem 2.5rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    code {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.88em;
+      background: #f0f2f6;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    @media print {
+      body { background: #fff; }
+      nav.toc { break-after: avoid; }
+      section.card { box-shadow: none; break-inside: avoid; }
+      .proto iframe { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Agent Fleet</h1>
+      <p class="subtitle">
+        Product vision: a control plane and worker fleet that lets agents operate with
+        minimal input—autonomously completing large goals or many small tasks, with humans
+        in the loop when it matters.
+      </p>
+      <div class="meta">
+        <span class="pill">Product vision + artifacts</span>
+        <span class="pill">Author: Tarun</span>
+        <span class="pill">Diagrams · prototypes · elaboration</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <figure class="hero">
+      <img src="artifacts/hero-fleet-concept.jpg" alt="Concept art: operator hub connected to a fleet of worker agents" />
+      <figcaption>Concept: a central operator hub coordinating a constellation of worker agents.</figcaption>
+    </figure>
+
+    <nav class="toc" aria-label="Table of contents">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#vision">Vision &amp; problem</a></li>
+        <li><a href="#architecture">Core architecture</a></li>
+        <li><a href="#flows">Key flows (Mermaid)</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#loop">Loop engineering</a></li>
+        <li><a href="#state">State, data &amp; HITL</a></li>
+        <li><a href="#prototypes">UI prototypes</a></li>
+        <li><a href="#stack">Stack &amp; considerations</a></li>
+        <li><a href="#success">Success picture</a></li>
+        <li><a href="#open">Open questions</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 -->
+    <section class="card" id="vision">
+      <h2><span class="num">1</span> Vision &amp; problem</h2>
+      <p class="lead">
+        We are building a tool that allows a <strong>fleet of agents</strong> to operate with
+        <strong>minimal inputs</strong> and work <strong>autonomously</strong> toward a bigger
+        task—or a list of smaller tasks—while remaining observable and interruptible.
+      </p>
+      <h3>Why this exists</h3>
+      <p>
+        Single-agent chat sessions do not scale to real delivery work. Real work is a
+        <em>portfolio</em>: many subtasks, shared context, capacity limits, secrets, and
+        periodic human judgment. Today that portfolio is managed in sticky notes, Slack
+        threads, and ad-hoc terminals. Agent Fleet makes the portfolio a first-class system:
+        an <strong>operator</strong> owns lifecycle and policy; <strong>workers</strong> own
+        execution and reporting.
+      </p>
+      <h3>What “minimal inputs” means</h3>
+      <ul>
+        <li>A <strong>common goal</strong> (global system prompt) set once for the fleet.</li>
+        <li>Task <strong>specifications</strong> in a document repository—not step-by-step micromanagement.</li>
+        <li>Optional human answers only when a worker is <strong>blocked</strong>.</li>
+        <li>Capacity and secrets configured in one place, not per agent chat.</li>
+      </ul>
+      <p>
+        The vision is <strong>not limited to coding</strong>. The same orchestration model
+        should support marketing emails, sales pipelines, analysis jobs, and other multi-step
+        operations that benefit from parallel workers and a shared goal.
+      </p>
+    </section>
+
+    <!-- 2 -->
+    <section class="card" id="architecture">
+      <h2><span class="num">2</span> Core architecture</h2>
+      <p>Two primary services, plus shared state and a web (primary) / CLI·TUI (secondary) surface.</p>
+
+      <div class="components">
+        <div class="component">
+          <h3>Operator service</h3>
+          <p style="margin:0 0 0.5rem;font-size:0.92rem;color:var(--muted)">
+            Orchestration · management · control plane
+          </p>
+          <ul>
+            <li><strong>Lifecycle</strong> of worker processes: prompts, environment, start, stop, delete.</li>
+            <li><strong>Capacity-aware spawning</strong> from the task queue up to <em>max agents</em>.</li>
+            <li><strong>Configuration manager</strong>: max agents, env/secrets, common goal.</li>
+            <li><strong>Monitoring aggregation</strong>: status, logs/events, artifacts for the UI.</li>
+            <li>Likely backed by <strong>tmux sessions</strong> (or equivalent) for attachable isolation.</li>
+          </ul>
+        </div>
+        <div class="component">
+          <h3>Worker service</h3>
+          <p style="margin:0 0 0.5rem;font-size:0.92rem;color:var(--muted)">
+            Execution plane · one agent unit of work
+          </p>
+          <ul>
+            <li>Spawn, <strong>claim a task</strong>, work it through plan → act → validate loops.</li>
+            <li>Report to operator: <strong>success</strong>, <strong>failure</strong>, or <strong>needs input</strong>.</li>
+            <li>Advance the <strong>common goal</strong> independently when local tasks allow.</li>
+            <li><strong>Screenshot / PDF</strong> artifacts for human verification.</li>
+            <li>Stream progress over <strong>WebSockets</strong> to the control plane.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>System context</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  subgraph Humans["Humans"]
+    OP[Operator / owner]
+    HITL[HITL reviewer]
+  end
+
+  subgraph ControlPlane["Operator service"]
+    API[API + WebSocket gateway]
+    CFG[Configuration manager]
+    SCH[Scheduler / capacity]
+    LIFE[Lifecycle manager]
+    MON[Monitoring aggregator]
+  end
+
+  subgraph DataPlane["Shared state"]
+    BOARD[(Task board)]
+    DOCS[(Document repository)]
+    MD[Markdown workspaces]
+    SECRETS[(Encrypted secrets)]
+  end
+
+  subgraph Workers["Worker fleet"]
+    W1[Worker 1]
+    W2[Worker 2]
+    WN[Worker N]
+  end
+
+  subgraph Targets["Targets"]
+    REPO[Git repositories]
+    EXT[Email / CRM / analysis]
+  end
+
+  OP --> API
+  HITL --> API
+  API --> CFG & SCH & LIFE & MON
+  SCH --> LIFE
+  LIFE --> W1 & W2 & WN
+  W1 & W2 & WN <--> BOARD & DOCS & MD
+  CFG --> SECRETS
+  W1 & W2 & WN --> REPO & EXT
+  W1 & W2 & WN -->|status · artifacts| MON
+  MON --> API
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/system-architecture.mmd</code></p>
+      </div>
+    </section>
+
+    <!-- 3 -->
+    <section class="card" id="flows">
+      <h2><span class="num">3</span> Key flows</h2>
+
+      <h3>Operator ↔ worker sequence</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant H as Human
+  participant UI as Web UI
+  participant Op as Operator
+  participant W as Worker
+  participant S as Shared state
+  participant T as Target system
+
+  H->>UI: Set goal, max agents, secrets
+  UI->>Op: Save configuration
+  H->>UI: Publish task specification
+  UI->>Op: Ingest document + link target
+  Op->>Op: Decompose into board cards
+  Op->>W: Spawn worker (tmux)
+  W->>S: Claim task (In progress)
+  loop Until done or blocked
+    W->>T: Act
+    W->>W: Validate
+    W->>Op: Stream progress
+  end
+  alt Success
+    W->>S: Done succeeded
+    W->>Op: Artifacts + screenshot
+  else Needs input
+    W->>S: Blocked
+    Op->>UI: Notify reviewer
+    H->>UI: Provide input
+  else Failure
+    W->>S: Done failed
+  end
+  Op->>UI: Dashboard update
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/worker-operator-sequence.mmd</code></p>
+      </div>
+
+      <h3>Task board lifecycle</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+stateDiagram-v2
+  [*] --> SpecDraft: Human writes spec
+  SpecDraft --> Decomposed: Planner breaks into subtasks
+  Decomposed --> InDev: Cards on board
+  InDev --> InProgress: Worker claims task
+  InProgress --> Blocked: Needs more input
+  Blocked --> InProgress: Human provides input
+  InProgress --> DoneSuccess: Criteria met
+  InProgress --> DoneFailed: Max loops / unrecoverable
+  DoneSuccess --> [*]
+  DoneFailed --> [*]
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/task-lifecycle.mmd</code> · Board columns: In dev → WIP → Done (succeeded / failed), plus blocked.</p>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="card" id="features">
+      <h2><span class="num">4</span> Features</h2>
+      <div class="feature-grid">
+        <div class="feature">
+          <div class="icon">UI</div>
+          <div>
+            <h4>Web-based control UI</h4>
+            <p>Primary interface: agent lifecycle, configuration, board, documents, and live monitoring.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">KB</div>
+          <div>
+            <h4>Trello-style task board</h4>
+            <p>Organize subtasks and move them across In dev → Work in progress → Done (succeeded / failed), with a blocked/needs-input path.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">Doc</div>
+          <div>
+            <h4>Central document repository</h4>
+            <p>Write specs; an agent decomposes them into parallelizable components. Link each spec to a target repository or system of record.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">∞</div>
+          <div>
+            <h4>Domain-agnostic fleet</h4>
+            <p>Coding, marketing email, sales pipelines, analysis—same operator/worker model, different worker profiles.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">↻</div>
+          <div>
+            <h4>Loop engineering</h4>
+            <p>Closed loops for implement → test/validate → deploy-or-ship → report, until criteria pass or budget is exhausted.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">◉</div>
+          <div>
+            <h4>Monitoring dashboard</h4>
+            <p>High-level view of all agents: current task, progress, whether they are on track, and live event stream.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">⌘</div>
+          <div>
+            <h4>CLI &amp; TUI (secondary)</h4>
+            <p>Initialize tasks and inspect fleet state from the terminal; web remains the primary operator surface.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="card" id="loop">
+      <h2><span class="num">5</span> Loop engineering</h2>
+      <p>
+        Workers do not “one-shot” tasks. They run a bounded engineering loop so quality is
+        enforced by feedback, not by a single generation.
+      </p>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart LR
+  A[Pull next task] --> B[Plan steps]
+  B --> C[Act / implement]
+  C --> D[Test / validate]
+  D --> E{Pass?}
+  E -->|yes| F[Report success]
+  E -->|no| G{Retries left?}
+  G -->|yes| B
+  G -->|no| H[Report failure / escalate]
+  F --> I[Screenshot / PDF]
+  H --> I
+  I --> J[Update board + notify operator]
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/agent-loop.mmd</code></p>
+      </div>
+      <ul>
+        <li><strong>Deployments and tests</strong> are first-class loop steps when the domain is software.</li>
+        <li>For non-code domains, “validate” may mean lint of email copy, CRM schema checks, or analysis notebook smoke tests.</li>
+        <li><strong>Max loops</strong> is a configuration knob so runaway agents cost is bounded.</li>
+      </ul>
+    </section>
+
+    <!-- 6 -->
+    <section class="card" id="state">
+      <h2><span class="num">6</span> State, data &amp; human-in-the-loop</h2>
+      <figure class="hero" style="margin-top:0.25rem">
+        <img src="artifacts/hitl-verification-concept.jpg" alt="Concept art: human verification of agent artifacts" />
+        <figcaption>Human-in-the-loop: workers surface verifiable artifacts (screenshots, PDFs, board status), not only logs.</figcaption>
+      </figure>
+
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Concern</th>
+            <th>Mechanism</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Shared agent context</td>
+            <td>Markdown workspaces + optional MongoDB</td>
+            <td>Rich, human-readable collaboration between agents</td>
+          </tr>
+          <tr>
+            <td>Task queue / board</td>
+            <td>Board store (DB-backed)</td>
+            <td>Source of truth for claim / status transitions</td>
+          </tr>
+          <tr>
+            <td>Specifications</td>
+            <td>Document repository</td>
+            <td>Linked to target repo or external system</td>
+          </tr>
+          <tr>
+            <td>Secrets / confidential data</td>
+            <td>Encrypted Postgres or SQLite</td>
+            <td>Never dumped into shared Markdown</td>
+          </tr>
+          <tr>
+            <td>Live UX</td>
+            <td>WebSockets client/server streaming</td>
+            <td>Dashboard and worker progress</td>
+          </tr>
+          <tr>
+            <td>Verification</td>
+            <td>Browser screenshot / PDF capture</td>
+            <td>HITL reviews artifacts when status is blocked or done</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        HITL is first-class: agents pause for inputs and surface verifiable artifacts rather than
+        only free-form logs. The operator UI should make “needs input” as visible as “running.”
+      </p>
+    </section>
+
+    <!-- 7 -->
+    <section class="card" id="prototypes">
+      <h2><span class="num">7</span> UI prototypes</h2>
+      <p>
+        Interactive HTML mockups (accurate labels via code, not image models). Open any card in a
+        full tab for the complete layout. Files live under <code>artifacts/prototypes/</code>.
+      </p>
+      <div class="gallery">
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · dashboard</div>
+          <iframe src="artifacts/prototypes/01-fleet-dashboard.html" title="Fleet dashboard prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/01-fleet-dashboard.html" target="_blank" rel="noopener">01 — Fleet monitoring dashboard</a>
+            <p>Active agents, on-track bars, HITL blocked count, live event stream, common goal banner.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · board</div>
+          <iframe src="artifacts/prototypes/02-task-board.html" title="Task board prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/02-task-board.html" target="_blank" rel="noopener">02 — Task board</a>
+            <p>In dev / WIP / blocked / Done (succeeded · failed); multi-domain tags (coding, marketing, sales).</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · documents</div>
+          <iframe src="artifacts/prototypes/03-documents.html" title="Documents prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/03-documents.html" target="_blank" rel="noopener">03 — Document repository</a>
+            <p>Spec editor, target repo link, “Decompose → board” action for parallelization.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · config</div>
+          <iframe src="artifacts/prototypes/04-configuration.html" title="Configuration prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/04-configuration.html" target="_blank" rel="noopener">04 — Configuration manager</a>
+            <p>Max agents, max loops, global system prompt, encrypted secrets list.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="card" id="stack">
+      <h2><span class="num">8</span> Stack &amp; technical considerations</h2>
+      <div class="stack">
+        <span class="tag">Operator</span>
+        <span class="tag">Worker</span>
+        <span class="tag">WebSockets</span>
+        <span class="tag">tmux</span>
+        <span class="tag">Next.js</span>
+        <span class="tag">Rust / Go</span>
+        <span class="tag">Postgres / SQLite</span>
+        <span class="tag">MongoDB</span>
+        <span class="tag neutral">CLI + TUI</span>
+      </div>
+      <ul>
+        <li><strong>Backend:</strong> Rust and/or Go for operator and worker runtimes (lifecycle, scheduling, streaming).</li>
+        <li><strong>Frontend:</strong> React / <strong>Next.js</strong> for the primary web UI.</li>
+        <li><strong>Process model:</strong> tmux (or similar) sessions for attachable agent isolation.</li>
+        <li><strong>Streaming:</strong> client/server WebSockets for live dashboards and worker events.</li>
+        <li><strong>Artifacts:</strong> browser screenshot and PDF capabilities for status reporting.</li>
+        <li><strong>Interfaces:</strong> web first; supporting TUI/CLI to kick off and inspect tasks.</li>
+      </ul>
+      <h3>Non-goals (for an initial cut)</h3>
+      <ul>
+        <li>Fully unsupervised production deploys without HITL gates.</li>
+        <li>Replacing specialized CI; Fleet <em>orchestrates</em> loops that may call CI.</li>
+        <li>A single mega-agent that holds all context—prefer many small workers + shared docs.</li>
+      </ul>
+    </section>
+
+    <!-- 9 -->
+    <section class="card" id="success">
+      <h2><span class="num">9</span> Success picture</h2>
+      <ol>
+        <li>An operator sets a <strong>common goal</strong>, secrets, and max fleet size.</li>
+        <li>A human (or agent) drops a <strong>task spec</strong> into the document repository and links a target.</li>
+        <li>The system decomposes work onto a <strong>board</strong>; the operator spawns workers up to the cap.</li>
+        <li>Workers loop implement → validate → report, update board status, and stream progress.</li>
+        <li>Humans use the dashboard, review screenshots/artifacts, and intervene only when blocked or at done gates.</li>
+      </ol>
+      <p class="note">
+        Success is not “agents that never need people.” Success is <strong>high parallel throughput</strong>
+        with <strong>low operator toil</strong> and <strong>auditable outcomes</strong>.
+      </p>
+    </section>
+
+    <!-- 10 -->
+    <section class="card" id="open">
+      <h2><span class="num">10</span> Open questions</h2>
+      <ul>
+        <li>How aggressive should auto-decomposition be vs. human-authored board cards?</li>
+        <li>What is the unit of a “worker”—one LLM session, one tmux pane, one container?</li>
+        <li>How do agents coordinate file locks / PR ownership on a shared repo?</li>
+        <li>Which domains ship in v1 (coding only) vs. later (marketing, sales, analysis)?</li>
+        <li>Retention and redaction policy for screenshots and prompt logs containing secrets?</li>
+        <li>Multi-tenant vs. single-team deployment model?</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    Agent Fleet · <code>product_vision_tarun.html</code> · artifacts under <code>artifacts/</code>
+    · diagram sources in <code>artifacts/diagrams/*.mmd</code>
+    · prototypes in <code>artifacts/prototypes/</code>
+  </footer>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        primaryColor: "#eff4ff",
+        primaryTextColor: "#1a1d26",
+        primaryBorderColor: "#93b4fd",
+        lineColor: "#64748b",
+        secondaryColor: "#f8fafc",
+        tertiaryColor: "#ffffff",
+        fontFamily: "Inter, Segoe UI, system-ui, sans-serif"
+      },
+      flowchart: { curve: "basis", padding: 12 },
+      sequence: { actorMargin: 28, messageMargin: 32 }
+    });
+  </script>
+</body>
+</html>

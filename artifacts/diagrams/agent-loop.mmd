@@ -1,0 +1,15 @@
+flowchart LR
+  subgraph Loop["Loop engineering cycle"]
+    direction TB
+    A[Pull next task] --> B[Plan steps]
+    B --> C[Act / implement]
+    C --> D[Test / validate]
+    D --> E{Pass?}
+    E -->|yes| F[Report success + artifacts]
+    E -->|no| G{Retries left?}
+    G -->|yes| B
+    G -->|no| H[Report failure / escalate]
+    F --> I[Screenshot / PDF snapshot]
+    H --> I
+    I --> J[Update board + notify operator]
+  end
