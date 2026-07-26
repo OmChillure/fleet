@@ -1,0 +1,1274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Fleet — Product Vision (Viny)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #f3f5f8;
+      --surface: #ffffff;
+      --text: #141820;
+      --muted: #5a6270;
+      --border: #e0e5ee;
+      --accent: #0f766e;
+      --accent-soft: #ecfdf8;
+      --accent-deep: #115e59;
+      --accent-mid: #14b8a6;
+      --card-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-size: 16px;
+    }
+    header {
+      background: linear-gradient(135deg, #134e4a 0%, #0f766e 55%, #14b8a6 100%);
+      color: #fff;
+      padding: 2.75rem 1.5rem 2.5rem;
+    }
+    header .wrap, main.wrap, footer.wrap {
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    header h1 {
+      margin: 0 0 0.35rem;
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    header .kicker {
+      margin: 0 0 0.5rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      opacity: 0.85;
+    }
+    header .subtitle {
+      margin: 0;
+      opacity: 0.94;
+      font-size: 1.08rem;
+      max-width: 46rem;
+      line-height: 1.55;
+    }
+    header .meta {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .pill {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.16);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    nav.toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    nav.toc strong {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    nav.toc ol {
+      margin: 0;
+      padding-left: 1.2rem;
+      columns: 2;
+      gap: 1.5rem;
+    }
+    nav.toc a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.92rem;
+    }
+    nav.toc a:hover { text-decoration: underline; }
+    main.wrap { padding: 1.75rem 1.5rem 1rem; }
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1.5rem 1.65rem;
+      margin-bottom: 1.25rem;
+    }
+    h2 {
+      margin: 0 0 0.85rem;
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    h2 .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    h3 {
+      margin: 1.25rem 0 0.5rem;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+    p { margin: 0 0 0.85rem; }
+    p.lead { font-size: 1.06rem; color: var(--muted); }
+    p.lead strong { color: var(--text); font-weight: 600; }
+    ul, ol { margin: 0.35rem 0 0.85rem; padding-left: 1.25rem; }
+    li { margin-bottom: 0.4rem; }
+    .components {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+    @media (min-width: 700px) {
+      .components { grid-template-columns: 1fr 1fr; }
+    }
+    .component {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.1rem 1.15rem;
+    }
+    .component h3 {
+      margin: 0 0 0.5rem;
+      color: var(--accent);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .component .role {
+      margin: 0 0 0.55rem;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+    .component ul { margin-bottom: 0; }
+    .feature-grid {
+      display: grid;
+      gap: 0.65rem;
+      margin-top: 0.5rem;
+    }
+    .feature {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .feature .icon {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .feature h4 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+    .feature p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin: 0.5rem 0 0.85rem;
+    }
+    .tag {
+      background: var(--accent-soft);
+      color: var(--accent-deep);
+      border: 1px solid #99f6e4;
+      border-radius: 6px;
+      padding: 0.2rem 0.55rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .tag.neutral {
+      background: #f0f2f6;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .note {
+      border-left: 3px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 0.75rem 0 0;
+      font-size: 0.92rem;
+      color: #134e4a;
+    }
+    .diagram {
+      background: #fafbfc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      margin: 0.75rem 0 1rem;
+      overflow-x: auto;
+    }
+    .diagram .caption {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0.5rem 0 0;
+      text-align: center;
+    }
+    .mermaid { display: flex; justify-content: center; }
+
+    /* Concept hero (inline SVG — no external assets) */
+    figure.hero {
+      margin: 0 0 1.25rem;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: var(--card-shadow);
+      background: #0b3d3a;
+    }
+    figure.hero .hero-art {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 200px;
+    }
+    figure.hero figcaption {
+      padding: 0.65rem 1rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      background: #fafbfc;
+    }
+
+    .pillars {
+      display: grid;
+      gap: 0.65rem;
+      margin: 0.85rem 0 0.25rem;
+    }
+    @media (min-width: 700px) {
+      .pillars { grid-template-columns: 1fr 1fr 1fr; }
+    }
+    .pillar {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.05rem;
+    }
+    .pillar .n {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.35rem;
+      height: 1.35rem;
+      border-radius: 5px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-weight: 700;
+      margin-bottom: 0.45rem;
+    }
+    .pillar h4 {
+      margin: 0 0 0.35rem;
+      font-size: 0.95rem;
+    }
+    .pillar p {
+      margin: 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+    @media (min-width: 700px) {
+      .gallery { grid-template-columns: 1fr 1fr; }
+    }
+    .proto {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+    }
+    .proto .chrome {
+      background: #e8ebf0;
+      padding: 0.45rem 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .proto .chrome i {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #d0d5dd;
+      display: inline-block;
+    }
+    .proto .chrome i:nth-child(1) { background: #f97066; }
+    .proto .chrome i:nth-child(2) { background: #fdb022; }
+    .proto .chrome i:nth-child(3) { background: #32d583; }
+    .proto .screen {
+      padding: 0.85rem;
+      background: linear-gradient(180deg, #f7faf9 0%, #f0f4f3 100%);
+      min-height: 240px;
+      font-size: 0.78rem;
+    }
+    .proto .screen .bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.65rem;
+      font-weight: 600;
+      color: var(--text);
+      font-size: 0.82rem;
+    }
+    .proto .screen .row {
+      display: flex;
+      gap: 0.4rem;
+      margin-bottom: 0.45rem;
+      flex-wrap: wrap;
+    }
+    .proto .pill-s {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.15rem 0.5rem;
+      color: var(--muted);
+    }
+    .proto .pill-s.on {
+      background: var(--accent-soft);
+      border-color: #99f6e4;
+      color: var(--accent-deep);
+      font-weight: 600;
+    }
+    .proto .box {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.55rem 0.65rem;
+      margin-bottom: 0.4rem;
+    }
+    .proto .box strong { display: block; font-size: 0.8rem; }
+    .proto .box span { color: var(--muted); font-size: 0.72rem; }
+    .proto .tree-line {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.7rem;
+      line-height: 1.6;
+      color: #334155;
+      white-space: pre;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem 0.7rem;
+    }
+    .proto .dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 0.35rem;
+      vertical-align: middle;
+    }
+    .proto .dot.g { background: #12b76a; }
+    .proto .dot.b { background: #2e90fa; }
+    .proto .dot.a { background: #f79009; }
+    .proto .meta {
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.88rem;
+    }
+    .proto .meta strong {
+      color: var(--accent-deep);
+      font-weight: 600;
+    }
+    .proto .meta p { margin: 0.25rem 0 0; font-size: 0.82rem; color: var(--muted); }
+
+    table.matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin: 0.5rem 0 0.85rem;
+    }
+    table.matrix th, table.matrix td {
+      border: 1px solid var(--border);
+      padding: 0.55rem 0.7rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    table.matrix th {
+      background: var(--bg);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+    footer.wrap {
+      padding: 0 1.5rem 2.5rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    code {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.88em;
+      background: #f0f2f6;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .two-col {
+      display: grid;
+      gap: 0.75rem;
+      margin: 0.75rem 0;
+    }
+    @media (min-width: 700px) {
+      .two-col { grid-template-columns: 1fr 1fr; }
+    }
+    .callout {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+    }
+    .callout h4 {
+      margin: 0 0 0.35rem;
+      font-size: 0.88rem;
+      color: var(--accent-deep);
+    }
+    .callout p, .callout ul {
+      margin: 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .callout ul { padding-left: 1.1rem; margin-top: 0.35rem; }
+    .success-steps {
+      counter-reset: step;
+      list-style: none;
+      padding-left: 0;
+      margin: 0.5rem 0 0.85rem;
+    }
+    .success-steps li {
+      position: relative;
+      padding: 0.65rem 0.75rem 0.65rem 2.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 0.5rem;
+    }
+    .success-steps li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 0.75rem;
+      top: 0.7rem;
+      width: 1.4rem;
+      height: 1.4rem;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.8rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    @media print {
+      body { background: #fff; }
+      nav.toc { break-after: avoid; }
+      section.card { box-shadow: none; break-inside: avoid; }
+      figure.hero { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <p class="kicker">Product vision · Viny</p>
+      <h1>Agent Fleet</h1>
+      <p class="subtitle">
+        A cooperative multi-agent platform for software teams: design workflows with
+        success criteria and guardrails, run many feature workflows in parallel, and let
+        an agent tree grow—and expand—when work is hard or quality fails.
+      </p>
+      <div class="meta">
+        <span class="pill">Software-team multi-agent</span>
+        <span class="pill">Workflows · criteria · guardrails</span>
+        <span class="pill">~1000 agents</span>
+        <span class="pill">Manager / Worker</span>
+        <span class="pill">Expand on failure</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- Concept hero -->
+    <figure class="hero" aria-label="Concept diagram of Manager, workers, and nested agent trees">
+      <svg class="hero-art" viewBox="0 0 960 280" xmlns="http://www.w3.org/2000/svg" role="img">
+        <title>Manager web coordinates workers; each feature run has a nested agent tree in its own worktree</title>
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#0b3d3a"/>
+            <stop offset="100%" stop-color="#0f766e"/>
+          </linearGradient>
+          <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.25"/>
+          </filter>
+          <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#99f6e4"/>
+          </marker>
+        </defs>
+        <rect width="960" height="280" fill="url(#bg)"/>
+        <!-- subtle grid -->
+        <g stroke="#14b8a6" stroke-opacity="0.08" stroke-width="1">
+          <path d="M0 70 H960 M0 140 H960 M0 210 H960"/>
+          <path d="M160 0 V280 M320 0 V280 M480 0 V280 M640 0 V280 M800 0 V280"/>
+        </g>
+
+        <!-- Manager -->
+        <g filter="url(#soft)">
+          <rect x="48" y="88" width="160" height="104" rx="14" fill="#ecfdf8" stroke="#99f6e4" stroke-width="1.5"/>
+          <text x="128" y="122" text-anchor="middle" fill="#115e59" font-family="Inter,sans-serif" font-size="13" font-weight="700">Manager</text>
+          <text x="128" y="144" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">Projects · workflows</text>
+          <text x="128" y="162" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">Criteria · guardrails</text>
+          <text x="128" y="180" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">Monitor · approvals</text>
+        </g>
+
+        <!-- arrows to workers -->
+        <path d="M218 140 H268" stroke="#99f6e4" stroke-width="2" fill="none" marker-end="url(#arr)"/>
+
+        <!-- Worker A -->
+        <g filter="url(#soft)">
+          <rect x="280" y="36" width="200" height="208" rx="14" fill="#0d5c56" stroke="#5eead4" stroke-width="1.2" stroke-opacity="0.5"/>
+          <text x="380" y="58" text-anchor="middle" fill="#ecfdf8" font-family="Inter,sans-serif" font-size="12" font-weight="700">Worker host A</text>
+          <!-- instance 1 -->
+          <rect x="296" y="72" width="168" height="78" rx="10" fill="#ecfdf8"/>
+          <text x="380" y="92" text-anchor="middle" fill="#115e59" font-family="Inter,sans-serif" font-size="11" font-weight="600">Feature: payments</text>
+          <text x="312" y="112" fill="#0f766e" font-family="ui-monospace,monospace" font-size="10">├ orchestrator</text>
+          <text x="312" y="126" fill="#0f766e" font-family="ui-monospace,monospace" font-size="10">│  ├ leaf · leaf</text>
+          <text x="312" y="140" fill="#5a6270" font-family="Inter,sans-serif" font-size="9">worktree + SQLite</text>
+          <!-- instance 2 -->
+          <rect x="296" y="160" width="168" height="68" rx="10" fill="#ccfbf1"/>
+          <text x="380" y="180" text-anchor="middle" fill="#115e59" font-family="Inter,sans-serif" font-size="11" font-weight="600">Feature: checkout</text>
+          <text x="312" y="200" fill="#0f766e" font-family="ui-monospace,monospace" font-size="10">└ tree growing…</text>
+          <text x="312" y="214" fill="#5a6270" font-family="Inter,sans-serif" font-size="9">own environment</text>
+        </g>
+
+        <!-- Worker B -->
+        <g filter="url(#soft)">
+          <rect x="520" y="70" width="200" height="140" rx="14" fill="#0d5c56" stroke="#5eead4" stroke-width="1.2" stroke-opacity="0.5"/>
+          <text x="620" y="94" text-anchor="middle" fill="#ecfdf8" font-family="Inter,sans-serif" font-size="12" font-weight="700">Worker host B</text>
+          <rect x="536" y="110" width="168" height="78" rx="10" fill="#ecfdf8"/>
+          <text x="620" y="132" text-anchor="middle" fill="#115e59" font-family="Inter,sans-serif" font-size="11" font-weight="600">Feature: billing</text>
+          <text x="552" y="152" fill="#0f766e" font-family="ui-monospace,monospace" font-size="10">expand → sub-orch</text>
+          <text x="552" y="168" fill="#0f766e" font-family="ui-monospace,monospace" font-size="10">  ├ smaller chunks</text>
+        </g>
+
+        <!-- path worker B -->
+        <path d="M480 140 C500 140, 500 140, 520 140" stroke="#99f6e4" stroke-width="2" fill="none" opacity="0.7"/>
+
+        <!-- Git remotes -->
+        <g filter="url(#soft)">
+          <rect x="760" y="88" width="152" height="104" rx="14" fill="#ecfdf8" stroke="#99f6e4" stroke-width="1.5"/>
+          <text x="836" y="122" text-anchor="middle" fill="#115e59" font-family="Inter,sans-serif" font-size="13" font-weight="700">Customer git</text>
+          <text x="836" y="148" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">GitLab · GitHub</text>
+          <text x="836" y="168" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">branch per feature</text>
+          <text x="836" y="186" text-anchor="middle" fill="#5a6270" font-family="Inter,sans-serif" font-size="11">MR / PR</text>
+        </g>
+        <path d="M720 140 H760" stroke="#99f6e4" stroke-width="2" fill="none" opacity="0.7"/>
+      </svg>
+      <figcaption>
+        Concept: the Manager is the team’s control plane; workers run many isolated feature
+        workflows at once—each with its own worktree, shared SQLite, and a nested agent tree
+        that can expand when quality fails.
+      </figcaption>
+    </figure>
+
+    <nav class="toc" aria-label="Table of contents">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#vision">Vision &amp; problem</a></li>
+        <li><a href="#architecture">Core architecture</a></li>
+        <li><a href="#flows">Key flows</a></li>
+        <li><a href="#features">What the product does</a></li>
+        <li><a href="#tree">Agent tree &amp; expand</a></li>
+        <li><a href="#state">How state is kept</a></li>
+        <li><a href="#ui">Manager UI sketches</a></li>
+        <li><a href="#stack">Stack &amp; boundaries</a></li>
+        <li><a href="#success">Success picture</a></li>
+        <li><a href="#open">Open questions</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 -->
+    <section class="card" id="vision">
+      <h2><span class="num">1</span> Vision &amp; problem</h2>
+      <p class="lead">
+        We are building a tool that lets <strong>dev teams work cooperatively</strong> on projects
+        by spawning up to <strong>~1000 agents</strong>, using <strong>local and cloud models</strong>
+        (via API keys), and running <strong>several feature workflows at the same time</strong>.
+        Each workflow has its own environment and copy of the worktree; agents in the same
+        workflow share state through SQLite.
+      </p>
+
+      <h3>Why this exists</h3>
+      <p>
+        One-agent chat does not match how software is delivered. Real work is many features
+        in flight, shared repositories, explicit quality bars, and several people watching the
+        same system. When an agent does a poor job, teams today restart chats or abandon runs.
+        Agent Fleet makes the <strong>workflow and the agent tree</strong> first-class: you design
+        the path of work, define what “done” means, and the system can <em>rewind and expand</em>
+        the place that failed—without throwing away the whole effort.
+      </p>
+
+      <h3>Three ideas the product is built around</h3>
+      <div class="pillars">
+        <div class="pillar">
+          <div class="n">1</div>
+          <h4>Workflows, not chats</h4>
+          <p>Teams design multi-step workflows with success criteria and guardrails for each step—then run them as versioned recipes.</p>
+        </div>
+        <div class="pillar">
+          <div class="n">2</div>
+          <h4>A tree that grows</h4>
+          <p>Each run has an orchestrator that spawns agents. Hard tasks become sub-orchestrators that split work into smaller chunks.</p>
+        </div>
+        <div class="pillar">
+          <div class="n">3</div>
+          <h4>Expand on failure</h4>
+          <p>When quality checks prove poor work, stop, expand the blamed node, and re-run only what depended on it—leave the rest intact.</p>
+        </div>
+      </div>
+
+      <h3>What the team configures</h3>
+      <ul>
+        <li><strong>Projects</strong> — linked to a customer git remote (GitLab or GitHub).</li>
+        <li><strong>Workflows</strong> — steps, models preferred per step, and <strong>criteria of success</strong>.</li>
+        <li><strong>Guardrails</strong> — e.g. do not deploy before testing; do not merge to main without a human.</li>
+        <li><strong>Capacity</strong> — how many agents and concurrent feature runs the fleet may use.</li>
+      </ul>
+
+      <p class="note">
+        The UI is <strong>web-based</strong> because companies often restrict software installs on
+        work PCs. A desktop app is only a later option if we need deeper OS control. A TUI is
+        off the table—it is too limited for this product.
+      </p>
+    </section>
+
+    <!-- 2 -->
+    <section class="card" id="architecture">
+      <h2><span class="num">2</span> Core architecture</h2>
+      <p>
+        So several developers can manage the same agents, the product splits like
+        <strong>Temporal</strong> into two apps: a <strong>Manager</strong> (control plane) and
+        <strong>Workers</strong> (execution plane). Workers can run on infrastructure we provide
+        or be <strong>self-hosted</strong> by the team. They can install local models when the
+        Manager asks for them. Cloud model calls (Grok, Claude, and similar) are made
+        <strong>from the worker</strong>, next to the code and tools.
+      </p>
+
+      <div class="components">
+        <div class="component">
+          <h3>Manager app</h3>
+          <p class="role">Where the team designs, starts, and watches work</p>
+          <ul>
+            <li>Create projects and workflows; set success criteria and models.</li>
+            <li>Put <strong>guardrails</strong> in the workflow (not only in tribal knowledge).</li>
+            <li>Trigger workflows and monitor results—including the live agent tree.</li>
+            <li>Collect human approvals when a run needs a person.</li>
+            <li>Registry of workers; one shared view for the whole team.</li>
+          </ul>
+        </div>
+        <div class="component">
+          <h3>Worker app</h3>
+          <p class="role">Where agents actually run</p>
+          <ul>
+            <li>Registers with the Manager and pulls new feature runs.</li>
+            <li>Gives each run its own isolated environment (container + disk).</li>
+            <li>Holds the git worktree and the SQLite state agents share.</li>
+            <li>Spawns the orchestrator and the agents under it.</li>
+            <li>Calls local and cloud models; reports progress back to the Manager.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>System context</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  subgraph Team["Dev team"]
+    UI[Manager Web]
+  end
+
+  subgraph Control["Manager"]
+    API[Manager API]
+    PG[(Team database)]
+    API --> PG
+  end
+
+  subgraph Workers["Worker hosts"]
+    W1[Worker A]
+    W2[Worker B]
+    subgraph R1["Feature run 1"]
+      WT1[Worktree]
+      SQL1[(SQLite)]
+      T1[Agent tree]
+    end
+    subgraph R2["Feature run 2"]
+      T2[Agent tree]
+    end
+    W1 --> R1
+    W1 --> R2
+    W2 --> R3[Feature run on B]
+  end
+
+  subgraph Git["Customer remotes"]
+    GL[GitLab]
+    GH[GitHub]
+  end
+
+  UI --> API
+  W1 -->|register · progress · approvals| API
+  W2 --> API
+  API -->|assign new runs| W1
+  R1 --> GL
+  R1 --> GH
+  R3 --> GL
+        </pre>
+        <p class="caption">
+          Isolation is per feature run: many agents share one environment, worktree, and SQLite.
+          Other runs do not share that state.
+        </p>
+      </div>
+
+      <div class="two-col">
+        <div class="callout">
+          <h4>Concurrent features</h4>
+          <p>Several workflows can run at once—each on a different feature, each with its own environment and worktree copy.</p>
+        </div>
+        <div class="callout">
+          <h4>Where a run lives</h4>
+          <p>Once a run starts on a worker, it stays there until it finishes. More workers mean more capacity for <em>new</em> runs, not automatic migration of live ones.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 -->
+    <section class="card" id="flows">
+      <h2><span class="num">3</span> Key flows</h2>
+
+      <h3>From design to a running feature</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Dev as Developer
+  participant UI as Manager Web
+  participant M as Manager
+  participant W as Worker
+  participant R as Feature run
+  participant DB as SQLite
+
+  Dev->>UI: Design workflow (steps, criteria, guardrails)
+  UI->>M: Publish workflow version
+  Dev->>UI: Start a run on a project
+  UI->>M: Create run (pin workflow + base commit)
+  W->>M: Pull next assignment
+  M->>W: Assign this run to the worker
+  W->>R: Start isolated environment
+  R->>DB: Init agent tree + shared state
+  loop Until done or waiting on a human
+    R->>R: Orchestrator schedules ready agents
+    R->>R: Agents use models, tools, success checks
+    R->>M: Stream progress
+  end
+  alt Needs a human
+    R->>M: Request approval
+    M->>UI: Show in team queue
+    Dev->>UI: Approve or deny
+    M->>W: Deliver decision · resume
+  else Finished
+    R->>M: Final status
+    M->>UI: Update tree and dashboard
+  end
+        </pre>
+        <p class="caption">
+          Everyone uses the Manager; workers do the work. Progress and human decisions are visible to the whole team.
+        </p>
+      </div>
+
+      <h3>When quality fails — expand</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant O as Orchestrator
+  participant N as Agent that failed
+  participant S as Sub-orchestrator
+  participant DB as SQLite
+  participant WT as Worktree
+
+  N->>DB: Success criteria failed
+  O->>DB: Record blame (who · nesting)
+  O->>S: Expand: split into smaller chunks
+  O->>WT: Rewind carefully · keep good sibling work
+  S->>DB: Spawn agents · do the work thoroughly
+  S->>DB: Children succeed · record outputs
+  O->>O: Re-run only work that depended on N
+  O->>DB: Leave independent completed work intact
+        </pre>
+        <p class="caption">
+          The database knows which agent did which task and how the tree nested—so expand targets the right place.
+        </p>
+      </div>
+
+      <h3>Life of one agent task</h3>
+      <div class="diagram">
+        <pre class="mermaid">
+stateDiagram-v2
+  [*] --> Pending
+  Pending --> Running: ready to work
+  Running --> WaitingHuman: needs a person
+  WaitingHuman --> Running: decision arrives
+  Running --> Succeeded: criteria pass
+  Running --> Failed: criteria fail
+  Failed --> Superseded: expand on poor work
+  Succeeded --> Pending: depended on expanded work
+  Failed --> Pending: depended on expanded work
+  Succeeded --> [*]
+  Superseded --> [*]
+  Running --> Canceled: run stopped
+  Canceled --> [*]
+        </pre>
+        <p class="caption">
+          Expand replaces a failed node with a sub-orchestrator. Downstream work is re-opened only when it depended on the bad result.
+        </p>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="card" id="features">
+      <h2><span class="num">4</span> What the product does</h2>
+      <div class="feature-grid">
+        <div class="feature">
+          <div class="icon">WF</div>
+          <div>
+            <h4>Workflows with success criteria</h4>
+            <p>Design steps, prefer models per step, and define hard checks for “done”—then publish a version the team can run again.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">||</div>
+          <div>
+            <h4>Many features at once</h4>
+            <p>Run several workflows concurrently. Each feature gets its own environment, git worktree, and SQLite shared state.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">Tr</div>
+          <div>
+            <h4>Recursive agent tree</h4>
+            <p>An orchestrator spawns agents. If a task is too complex, it can be replaced by a sub-orchestrator that chunks the work.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">Ex</div>
+          <div>
+            <h4>Expand on proven poor work</h4>
+            <p>Stop, expand the blamed node, protect good sibling work, and re-run only dependents of the bad outputs.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">Gr</div>
+          <div>
+            <h4>Guardrails in the workflow</h4>
+            <p>Do not deploy before tests; do not merge main without human approval; limit what agents are allowed to do.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">MW</div>
+          <div>
+            <h4>Manager and Worker split</h4>
+            <p>Multi-developer control plane; workers that run on our cloud or self-hosted; local and cloud models from the worker.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">Web</div>
+          <div>
+            <h4>Web Manager</h4>
+            <p>Projects, workflow design, live agent trees, and approval queues—usable without installing a desktop client.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">1k</div>
+          <div>
+            <h4>Scale toward ~1000 agents</h4>
+            <p>Capacity comes from many workers and many concurrent runs—not one process trying to hold everything.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="card" id="tree">
+      <h2><span class="num">5</span> Agent tree &amp; expand</h2>
+      <p>
+        Each workflow has an <strong>orchestrator agent</strong> that spawns the others. If an agent
+        realizes its task is too complex, it can request to be replaced by a
+        <strong>sub-orchestrator</strong>, which splits the task into smaller chunks and spawns
+        agents to do them. That is a recursive nested architecture: the agent tree grows with
+        the complexity of the task.
+      </p>
+      <p>
+        If it is proven that an agent did a poor job, the workflow stops and goes back to where
+        the poor behavior was detected. The task is handed to a sub-orchestrator that breaks it
+        down more thoroughly. The database keeps track of which agent did each task and the
+        nesting—so the orchestrator knows who is to blame and which node of the tree should
+        expand. After the sub-orchestrator finishes, the parent decides which following work must
+        be re-done and which completed work can stay as-is.
+      </p>
+
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TD
+  R[Root orchestrator] --> T1[Step: implement]
+  R --> T2[Step: open PR]
+  T1 --> L0[First agent attempt]
+  L0 -.->|criteria failed| SO1[Sub-orchestrator]
+  SO1 --> L1[Smaller chunk: schema]
+  SO1 --> L2[Smaller chunk: handlers]
+  SO1 --> L3[Smaller chunk: tests]
+  T2 -.->|waits on implement| T1
+        </pre>
+        <p class="caption">The tree grows under the step that needs it. Expand does not force you to rewrite the whole workflow definition.</p>
+      </div>
+
+      <div class="two-col">
+        <div class="callout">
+          <h4>What expand is for</h4>
+          <ul>
+            <li>Success criteria failed (proven poor work)</li>
+            <li>Or a human marks work as poor and asks to expand</li>
+          </ul>
+        </div>
+        <div class="callout">
+          <h4>What expand is not for</h4>
+          <ul>
+            <li>Config mistakes and policy denials</li>
+            <li>Someone cancelling a run</li>
+            <li>A worker disappearing mid-run</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="note">
+        Workflow steps are the spine of a run. Nested agents fill complexity under those steps.
+        That keeps structure predictable for teams—and still allows depth when a feature is hard.
+      </p>
+    </section>
+
+    <!-- 6 -->
+    <section class="card" id="state">
+      <h2><span class="num">6</span> How state is kept</h2>
+      <p>
+        Control data and execution data are deliberately separate. The Manager holds what the
+        team needs to design, assign, and observe. Each feature run holds what the agents need
+        to cooperate—on the worker that owns that run.
+      </p>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Concern</th>
+            <th>Where it lives</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Projects, workflows, users, approvals</td>
+            <td>Manager database (Postgres)</td>
+            <td>Shared multi-developer control plane</td>
+          </tr>
+          <tr>
+            <td>Agent tree, who did what, nesting</td>
+            <td>Per-run SQLite on the worker</td>
+            <td>Fast local shared state for agents in one feature</td>
+          </tr>
+          <tr>
+            <td>Source code for a feature run</td>
+            <td>Git worktree on the worker</td>
+            <td>Isolated branch per run; push and open MR/PR</td>
+          </tr>
+          <tr>
+            <td>Process isolation</td>
+            <td>One environment per run (container)</td>
+            <td>Agents in a run share it; other runs stay separate</td>
+          </tr>
+          <tr>
+            <td>Local and cloud models</td>
+            <td>Called from the worker</td>
+            <td>Next to tools and code; keys stay off the browser</td>
+          </tr>
+          <tr>
+            <td>Success checks and tools</td>
+            <td>Allowlisted, named checks</td>
+            <td>Criteria are real gates—not free-form shell strings</td>
+          </tr>
+          <tr>
+            <td>Human gates</td>
+            <td>Manager approval queue</td>
+            <td>Guardrails like “merge main needs a human” surface to the team</td>
+          </tr>
+          <tr>
+            <td>Customer repositories</td>
+            <td>GitLab or GitHub</td>
+            <td>Project points at the remote the team already uses</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        A run’s durability lives with the worker that owns it. Adding workers increases how many
+        features you can start—not how many live runs automatically fail over.
+      </p>
+    </section>
+
+    <!-- 7 -->
+    <section class="card" id="ui">
+      <h2><span class="num">7</span> Manager UI sketches</h2>
+      <p>
+        Conceptual web surfaces for the Manager. The primary metaphor is
+        <strong>projects → workflows → instance trees</strong>, with a team queue for human
+        decisions.
+      </p>
+      <div class="gallery">
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; manager · projects</div>
+          <div class="screen">
+            <div class="bar"><span>Projects</span><span class="pill-s on">+ New project</span></div>
+            <div class="box">
+              <strong>payments-service</strong>
+              <span>github.com/acme/payments · 3 members · 2 running</span>
+            </div>
+            <div class="box">
+              <strong>checkout-web</strong>
+              <span>gitlab.example.com/acme/checkout · 5 members · idle</span>
+            </div>
+            <div class="box">
+              <strong>billing-api</strong>
+              <span>github.com/acme/billing · 2 members · 1 waiting on human</span>
+            </div>
+          </div>
+          <div class="meta">
+            <strong>01 — Projects</strong>
+            <p>Each project binds a team to a customer repo. From here you open workflows and live runs.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; manager · workflow</div>
+          <div class="screen">
+            <div class="bar"><span>feature-with-tests · v3</span><span class="pill-s on">Published</span></div>
+            <div class="row">
+              <span class="pill-s on">Steps</span>
+              <span class="pill-s">Criteria</span>
+              <span class="pill-s">Guardrails</span>
+              <span class="pill-s">Models</span>
+            </div>
+            <div class="box">
+              <strong>1 · Implement feature</strong>
+              <span>orchestrator · success: tests pass · on failure: expand</span>
+            </div>
+            <div class="box">
+              <strong>2 · Open pull request</strong>
+              <span>depends on implement · guardrail: human before merge to main</span>
+            </div>
+          </div>
+          <div class="meta">
+            <strong>02 — Workflow design</strong>
+            <p>This is where teams encode how work should proceed—and what “good” means—before agents run.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; manager · agent tree</div>
+          <div class="screen">
+            <div class="bar"><span>Run · payments feature</span><span class="pill-s on">Running</span></div>
+            <div class="tree-line"><span class="dot b"></span>root orchestrator · running
+├─ implement · expanded once
+│  ├─ schema · <span class="dot g"></span>succeeded
+│  ├─ handlers · <span class="dot b"></span>running
+│  └─ tests · pending
+└─ open PR · waiting on implement
+</div>
+          </div>
+          <div class="meta">
+            <strong>03 — Instance agent tree</strong>
+            <p>See nesting, expand, and status at a glance—who is working, what finished, what waits.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; manager · approvals</div>
+          <div class="screen">
+            <div class="bar"><span>Needs a human</span><span class="pill-s"><span class="dot a"></span>2 pending</span></div>
+            <div class="box">
+              <strong>Merge to main?</strong>
+              <span>billing-api · open PR · guardrail: human required</span>
+            </div>
+            <div class="row">
+              <span class="pill-s on">Approve</span>
+              <span class="pill-s">Deny</span>
+              <span class="pill-s">Comment</span>
+            </div>
+            <div class="box">
+              <strong>Deploy staging?</strong>
+              <span>checkout-web · blocked until unit + integration criteria pass</span>
+            </div>
+          </div>
+          <div class="meta">
+            <strong>04 — Human approvals</strong>
+            <p>Guardrails and explicit gates surface here so people are not buried in agent logs.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="card" id="stack">
+      <h2><span class="num">8</span> Stack &amp; boundaries</h2>
+      <p>
+        These choices support the product shape above. They are implementation stance for v1,
+        not the vision itself—but they make the vision concrete.
+      </p>
+      <div class="stack">
+        <span class="tag">Manager API · Rust</span>
+        <span class="tag">Worker · Rust</span>
+        <span class="tag">Manager Web · Vite + React</span>
+        <span class="tag">Postgres · team data</span>
+        <span class="tag">SQLite · per-run data</span>
+        <span class="tag">OpenAPI contracts</span>
+        <span class="tag">Containers per run</span>
+        <span class="tag neutral">TUI · out of scope</span>
+      </div>
+      <ul>
+        <li><strong>Rust</strong> for Manager API and Worker—concurrency, process control, shared types.</li>
+        <li><strong>Web SPA</strong> for the Manager so corporate browsers are enough.</li>
+        <li><strong>Contracts</strong> between UI, Manager, and Worker so multi-dev and multi-worker stay coherent.</li>
+        <li><strong>Models:</strong> worker initiates local and cloud inference; Manager does not need to proxy every call.</li>
+      </ul>
+
+      <h3>v1 product focus</h3>
+      <p>
+        Software-team feature workflows: implement → verify against success criteria → open
+        merge request or pull request—with multi-developer Manager oversight.
+      </p>
+
+      <h3>Out of scope for early product</h3>
+      <ul>
+        <li>TUI or a rich terminal product as the main surface.</li>
+        <li>Desktop packaging (possible later if OS control becomes necessary).</li>
+        <li>Moving a live feature run to another worker mid-flight.</li>
+        <li>One container or process per agent (agents in a run share an environment on purpose).</li>
+        <li>Unrestricted shell as the default way to define success or run tools.</li>
+      </ul>
+    </section>
+
+    <!-- 9 -->
+    <section class="card" id="success">
+      <h2><span class="num">9</span> Success picture</h2>
+      <p class="lead">
+        A day when the product is working looks like this—not “agents that never need people,”
+        but high parallel throughput with clear quality and low team toil.
+      </p>
+      <ol class="success-steps">
+        <li>The team creates a <strong>project</strong> linked to GitLab or GitHub and invites members.</li>
+        <li>They design a <strong>workflow</strong>: steps, success criteria, models, and guardrails—then publish it.</li>
+        <li>They start several runs for different features. Each gets its own worktree, environment, and SQLite state.</li>
+        <li>Orchestrators grow agent trees. Agents implement, run success checks, and open MRs or PRs.</li>
+        <li>When criteria prove poor work, the system <strong>expands the blamed node</strong> and re-runs only what depended on it.</li>
+        <li>People use the web Manager to watch trees, answer approvals, and enforce merge or deploy gates—without installing a local control app.</li>
+      </ol>
+      <p class="note">
+        Success is <strong>cooperative scale</strong> (many agents, many features),
+        <strong>explicit quality</strong> (criteria + expand), and
+        <strong>team-safe control</strong> (Manager / Worker, guardrails, web UI).
+      </p>
+    </section>
+
+    <!-- 10 -->
+    <section class="card" id="open">
+      <h2><span class="num">10</span> Open questions</h2>
+      <h3>Settled for this vision</h3>
+      <ul>
+        <li><strong>Cloud models</strong> are called from the <strong>worker</strong> (alongside local models).</li>
+        <li><strong>Web</strong> is the product surface; TUI is out.</li>
+        <li><strong>Manager / Worker</strong> split is required for multi-developer use.</li>
+        <li><strong>Per-run isolation</strong> (environment + worktree + SQLite) is foundational.</li>
+        <li><strong>Customer git</strong> may be GitLab or GitHub.</li>
+      </ul>
+      <h3>Still open</h3>
+      <ul>
+        <li>How aggressive should automatic “request a sub-orchestrator” be versus steps the team designed by hand?</li>
+        <li>Default expand depth and cost budgets before the system stops or asks a human?</li>
+        <li>When—if ever—should a desktop worker host be offered for deeper OS control?</li>
+        <li>Later: restore a paused run on another machine, or always start a fresh run?</li>
+        <li>How far multi-organization tenancy goes beyond a single-team deployment?</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    Agent Fleet · product vision by <strong>Viny</strong>
+    · <code>product_vision_viny.html</code>
+    · notes: <code>vinys-vision.md</code>
+    · deeper design: <code>docs/repo-architecture-vinys-vision.md</code>
+    · peer document: <code>product_vision_tarun.html</code>
+  </footer>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "base",
+      themeVariables: {
+        primaryColor: "#ecfdf8",
+        primaryTextColor: "#141820",
+        primaryBorderColor: "#5eead4",
+        lineColor: "#64748b",
+        secondaryColor: "#f8fafc",
+        tertiaryColor: "#ffffff",
+        fontFamily: "Inter, Segoe UI, system-ui, sans-serif"
+      },
+      flowchart: { curve: "basis", padding: 12 },
+      sequence: { actorMargin: 28, messageMargin: 32 }
+    });
+  </script>
+</body>
+</html>
