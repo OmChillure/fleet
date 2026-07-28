@@ -1,0 +1,10 @@
+# Sandbox Hosting Tool
+
+Pluggable compute backends (Kubernetes, VMs, rootless podman / aibox-style local runners, self-hosted workers) invoked by the Sandbox Manager.
+
+This folder will hold the component-level design. Until then, the system-wide
+architecture and event catalogue live in:
+
+- [`docs/architecture/README.md`](../../architecture/README.md) — layers, components, sequences
+- [`docs/architecture/events.md`](../../architecture/events.md) — commands & events
+- [`docs/architecture/diagrams/`](../../architecture/diagrams/) — Mermaid sources

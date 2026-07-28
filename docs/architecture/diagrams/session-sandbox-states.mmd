@@ -1,0 +1,31 @@
+%% Parallel session and sandbox state machines
+stateDiagram-v2
+  [*] --> SessionRequested: Integration / UI
+
+  state "Session" as S {
+    [*] --> Pending
+    Pending --> AwaitingSandbox: Orchestrator accepts
+    AwaitingSandbox --> Provisioning: SandboxReady
+    Provisioning --> Ready: WorkspaceReady
+    Ready --> Running: AgentTurnStarted
+    Running --> WaitingHITL: PermissionRequired / HumanInputNeeded
+    WaitingHITL --> Running: DecisionGranted / HumanReply
+    Running --> Ready: AgentTurnCompleted
+    Ready --> Running: next prompt
+    Running --> Failed: AgentError / SandboxFailed
+    Ready --> Stopping: SessionStopRequested
+    Failed --> Stopping
+    Stopping --> Archived: SandboxArchived / SandboxDestroyed
+  }
+
+  state "Sandbox" as B {
+    [*] --> Creating
+    Creating --> Ready: SandboxReady
+    Ready --> Unhealthy: OOM / node loss / probe fail
+    Unhealthy --> Ready: recovered
+    Unhealthy --> Failed: unrecoverable
+    Ready --> Stopping: SandboxStopRequested
+    Failed --> Stopping
+    Stopping --> Destroyed
+    Stopping --> Archived: keep volumes/snapshot
+  }

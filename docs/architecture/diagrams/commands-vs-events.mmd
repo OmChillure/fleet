@@ -1,0 +1,28 @@
+%% Commands (imperative) vs events (facts)
+flowchart LR
+  subgraph Commands["Commands"]
+    C1[CreateSandbox]
+    C2[StopSandbox]
+    C3[ArchiveSandbox]
+    C4[StartAgentTurn]
+    C5[CancelAgentTurn]
+    C6[PermissionDecision]
+    C7[InjectHumanMessage]
+  end
+
+  subgraph Events["Events"]
+    E1[SandboxReady / Failed / …]
+    E2[WorkspaceReady / Failed]
+    E3[AgentEvent / ToolCallProposed]
+    E4[SessionCompleted / Failed]
+    E5[TaskIngested / HumanMessage]
+  end
+
+  ORC[Orchestrator] -->|commands| SM[Sandbox Manager]
+  ORC -->|commands| DRV[Driver]
+  SM -->|events| BUS{{bus}}
+  DRV -->|events| BUS
+  INT[Integrations] -->|events| BUS
+  BUS --> ORC
+  BUS --> INT
+  BUS --> PG[(Postgres event log)]

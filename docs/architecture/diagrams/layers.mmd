@@ -1,0 +1,23 @@
+%% Three orchestration layers
+flowchart TB
+  subgraph L3["Layer 3 — Agent session control"]
+    direction LR
+    ORC[Orchestrator] <-->|prompts · ACP events · permissions · traces| DRV[Driver]
+    DRV <-->|ACP| AGENT[Coding agent]
+  end
+
+  subgraph L2["Layer 2 — Workspace provision"]
+    direction LR
+    DRV2[Driver on first boot] --> INST[Install agent · tools · skills · plugins]
+    INST --> CLONE[Clone repo · restore caches]
+  end
+
+  subgraph L1["Layer 1 — Sandbox lifecycle"]
+    direction LR
+    SM[Sandbox Manager] --> HOST[Hosting backend<br/>k8s / VM / podman]
+    HOST --> BOX[Sandbox compute]
+  end
+
+  L3 -.->|runs inside| L1
+  L2 -.->|runs inside| L1
+  ORC -->|CreateSandbox / Stop / Archive| SM
