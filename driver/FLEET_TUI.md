@@ -5,9 +5,9 @@ Ratatui control plane that runs coding agents over **ACP** (Agent Client Protoco
 ## Quick start
 
 ```bash
-cargo run --release
+cargo run -p agent-fleet-driver --release
 # or
-cargo install --path .
+cargo install --path driver
 agent-fleet
 agent-fleet --print-db-path
 agent-fleet --db ./fleet.db

@@ -1,5 +1,5 @@
 [package]
-name = "agent-fleet"
+name = "agent-fleet-driver"
 version = "0.1.0"
 edition = "2021"
 description = "TUI control plane for running coding agents over ACP"
@@ -7,7 +7,7 @@ license = "Apache-2.0"
 rust-version = "1.88"
 
 [[bin]]
-name = "agent-fleet"
+name = "agent-fleet-driver"
 path = "src/main.rs"
 
 [dependencies]
