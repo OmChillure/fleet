@@ -1,0 +1,50 @@
+%% Happy-path: task → sandbox → provision → agent turn → archive
+sequenceDiagram
+  autonumber
+  participant Ext as Integration
+  participant O as Orchestrator
+  participant DB as Postgres
+  participant SM as Sandbox Manager
+  participant H as Hosting backend
+  participant D as Driver
+  participant A as Coding agent ACP
+
+  Ext->>O: TaskIngested / HumanMessage
+  O->>DB: persist Session Pending
+  O->>SM: CreateSandbox params
+  SM->>H: allocate pod/VM/container
+  H-->>SM: running
+  SM->>H: start Driver entrypoint
+  SM-->>O: SandboxReady
+  O->>DB: Session Provisioning
+
+  D->>D: provision workspace
+  D-->>O: WorkspaceReady
+  O->>DB: Session Ready
+
+  O->>D: StartAgentTurn
+  D->>A: ACP prompt
+  loop Agent loop
+    A-->>D: ACP events
+    D-->>O: AgentEvent / ToolCallProposed
+    O->>DB: append trace
+    alt needs permission
+      O-->>Ext: PermissionRequired
+      Ext->>O: PermissionDecision
+      O->>D: PermissionDecision
+    else MCP / external API
+      O->>O: proxy with secrets
+      O->>D: ToolCallResult
+    else interactive
+      O-->>Ext: AgentMessage
+    end
+  end
+  A-->>D: turn complete
+  D-->>O: AgentTurnCompleted
+  O->>DB: Session Ready + artifacts
+
+  opt done with sandbox
+    O->>SM: StopSandbox / ArchiveSandbox
+    SM->>H: teardown
+    SM-->>O: SandboxDestroyed / SandboxArchived
+  end

@@ -1,8 +1,7 @@
 /target
+**/target/
 **/*.rs.bk
 .DS_Store
 default.profraw
 *.db
 *.db-*
-/target/
-**/target/

@@ -1,0 +1,23 @@
+%% Async sandbox failure mid-session
+sequenceDiagram
+  autonumber
+  participant O as Orchestrator
+  participant DB as Postgres
+  participant SM as Sandbox Manager
+  participant H as Hosting backend
+  participant Ext as Integration
+
+  Note over H: e.g. kubelet OOMKills the pod
+  H-->>SM: watch Failed / OOMKilled
+  SM-->>O: SandboxFailed reason=OOMKilled
+  O->>DB: Session Failed + event
+  O-->>Ext: SessionFailed / notify
+
+  alt policy = retry on fresh sandbox
+    O->>SM: CreateSandbox params
+    SM-->>O: SandboxReady
+    O->>O: reattach session, re-provision Driver
+    Note over O: durable history remains in Postgres
+  else policy = escalate
+    O-->>Ext: HumanInputNeeded / blocked
+  end

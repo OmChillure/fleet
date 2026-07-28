@@ -3,7 +3,17 @@
 version = 4
 
 [[package]]
-name = "agent-fleet"
+name = "agent-fleet-contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "agent-fleet-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
