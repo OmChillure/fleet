@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
+    "crates/fleet-ui",
 ]
 default-members = [
     "crates/agent-fleet-contracts",
@@ -18,3 +19,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+dioxus = "=0.7.3"
