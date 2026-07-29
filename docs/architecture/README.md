@@ -18,6 +18,7 @@ Related component folders (stubs for deeper specs):
 | Orchestrator | [`docs/components/orchestrator/`](../components/orchestrator/) | Session control plane; durable state; event routing |
 | Sandbox Manager | [`docs/components/sandbox-manager/`](../components/sandbox-manager/) | Create / observe / destroy sandboxes on hosting backends |
 | Sandbox Hosting Tool | [`docs/components/sandbox-hosting-tool/`](../components/sandbox-hosting-tool/) | Concrete runtime backends (k8s, VM, podman, …) |
+| Web UI | [`docs/components/fleet-ui/`](../components/fleet-ui/) | Browser app (Dioxus): landing, auth, dashboard shell |
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

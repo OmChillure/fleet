@@ -1,0 +1,18 @@
+[application]
+name = "fleet-ui"
+default_platform = "web"
+
+[web.app]
+title = "Agent Fleet"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []
