@@ -175,6 +175,39 @@ impl WorkRunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    pub fn from_db(s: &str) -> Option<Self> {
+        Some(match s {
+            "intent_received" => Self::IntentReceived,
+            "sources_resolved" => Self::SourcesResolved,
+            "ingested" => Self::Ingested,
+            "planning" => Self::Planning,
+            "plan_ready" => Self::PlanReady,
+            "accepted" => Self::Accepted,
+            "active" => Self::Active,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+impl BoardTaskStatus {
+    pub fn from_db(s: &str) -> Option<Self> {
+        Some(match s {
+            "queued" => Self::Queued,
+            "ready" => Self::Ready,
+            "assigned" => Self::Assigned,
+            "in_progress" => Self::InProgress,
+            "blocked" => Self::Blocked,
+            "retry_wait" => Self::RetryWait,
+            "done_success" => Self::DoneSuccess,
+            "done_failed" => Self::DoneFailed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
 }
 
 #[cfg(test)]

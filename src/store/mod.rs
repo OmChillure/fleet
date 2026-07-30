@@ -306,6 +306,131 @@ impl Store {
         .await?;
         Ok(res.rows_affected() == 1)
     }
+
+    /// List accepted plans not yet materialized for a project (Step 3 candidates).
+    pub async fn list_pending_materialize_plans(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<PendingPlanRow>> {
+        sqlx::query_as::<_, PendingPlanRow>(
+            r#"
+            SELECT p.id AS plan_id, p.run_id, r.status AS run_status,
+                   r.cancel_requested_at, p.materialized_at
+            FROM work_plans p
+            JOIN work_runs r ON r.id = p.run_id
+            WHERE p.project_id = $1
+              AND p.status = 'accepted'
+              AND p.materialized_at IS NULL
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_runs_for_rollup(&self, project_id: Uuid) -> Result<Vec<WorkRunRow>> {
+        sqlx::query_as::<_, WorkRunRow>(
+            r#"
+            SELECT id, project_id, status, source, cancel_requested_at,
+                   orchestration_owned_at, first_spawn_at, terminal_at,
+                   created_at, updated_at
+            FROM work_runs
+            WHERE project_id = $1
+              AND (
+                status IN ('accepted', 'active')
+                OR (cancel_requested_at IS NOT NULL AND status NOT IN ('completed', 'failed', 'cancelled'))
+              )
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn update_task_status(
+        &self,
+        task_id: Uuid,
+        from: &str,
+        to: &str,
+        failure_reason: Option<&str>,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET status = $3,
+                failure_reason = COALESCE($4, failure_reason),
+                terminal_at = CASE
+                    WHEN $3 IN ('done_success', 'done_failed', 'cancelled') THEN now()
+                    ELSE terminal_at
+                END,
+                updated_at = now()
+            WHERE id = $1 AND status = $2
+            "#,
+        )
+        .bind(task_id)
+        .bind(from)
+        .bind(to)
+        .bind(failure_reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    pub async fn set_run_terminal(
+        &self,
+        run_id: Uuid,
+        status: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE work_runs
+            SET status = $2,
+                terminal_at = now(),
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Acquire session-held advisory lock for a project tick (hold `conn` until unlock).
+    pub async fn lock_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+            .bind(project_id.to_string())
+            .execute(&mut *conn)
+            .await?;
+        Ok(conn)
+    }
+
+    pub async fn unlock_project(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        project_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
+            .bind(project_id.to_string())
+            .execute(&mut **conn)
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PendingPlanRow {
+    pub plan_id: Uuid,
+    pub run_id: Uuid,
+    pub run_status: String,
+    pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub materialized_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(sqlx::FromRow)]

@@ -32,20 +32,21 @@ src/
   notify/     # NotificationSink + Noop/Log (PR4)
   sync/       # ExternalBoardSync + Noop/Log (PR4)
   store/      # Postgres repositories + migrate (PR3)
+  orch/       # reconcile tick PR5a: materialize + deps + rollup
 migrations/   # 001_init.sql
-tests/        # store_integration (needs DATABASE_URL)
+tests/        # store_integration, tick_integration (need DATABASE_URL)
 schemas/workplan.v1.json
 ```
 
 ## TDD
 
-Domain / validate / config / sandbox were developed with unit tests in-module.
+Domain / validate / config / sandbox / orch pure steps were developed with unit tests in-module.
 
 ```bash
 cargo test --lib          # unit tests (no Postgres required)
 docker compose up -d postgres
 export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
-cargo test --test store_integration
+cargo test --test store_integration --test tick_integration
 ```
 
 Host port **5433** maps to container 5432 (avoids clashing with a local Postgres on 5432).
@@ -59,4 +60,5 @@ set -a && source .env && set +a
 cargo run
 ```
 
-Reconcile tick lands in PR5; HTTP API in PR6.
+**PR5a landed:** `TickRunner` does lock → materialize → dep promote → rollup (no spawn yet).  
+**Next:** PR5b schedule/spawn/stuck; PR6 HTTP API.
