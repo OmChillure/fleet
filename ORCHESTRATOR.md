@@ -32,7 +32,7 @@ src/
   notify/     # NotificationSink + Noop/Log (PR4)
   sync/       # ExternalBoardSync + Noop/Log (PR4)
   store/      # Postgres repositories + migrate (PR3)
-  orch/       # reconcile tick PR5a: materialize + deps + rollup
+  orch/       # reconcile tick PR5a–c (materialize → spawn → cancel → rollup)
 migrations/   # 001_init.sql
 tests/        # store_integration, tick_integration (need DATABASE_URL)
 schemas/workplan.v1.json
@@ -60,5 +60,5 @@ set -a && source .env && set +a
 cargo run
 ```
 
-**PR5a landed:** `TickRunner` does lock → materialize → dep promote → rollup (no spawn yet).  
-**Next:** PR5b schedule/spawn/stuck; PR6 HTTP API.
+**PR5a–c landed:** full reconcile loop with stub workers (inbox, spawn, stuck/kill/retry, cancel drain, orphan reap, rollup).  
+**Next:** PR6 HTTP API (projects, fixture plan, workers, cancel, admin/tick).
