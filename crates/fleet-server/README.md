@@ -5,7 +5,7 @@
 ```bash
 # workspace root, with .env (DATABASE_URL, JWT_SECRET, …)
 cargo run
-# → http://127.0.0.1:3001
+# → http://localhost:8080
 ```
 
 Same as:
@@ -21,6 +21,7 @@ cargo run -p fleet-server
 | `GET /health` | server |
 | `GET /api` | API index |
 | `/api/auth/*` | [`fleet-auth`](../fleet-auth/) |
+| `/api/workspaces` | [`fleet-auth`](../fleet-auth/) |
 
 Future domain crates (orchestrator, sandboxes, …) merge into the same process
 the same way — one port, one `cargo run`.
@@ -33,9 +34,9 @@ See [`.env.example`](../../.env.example).
 | --- | --- | --- |
 | `DATABASE_URL` | required | Neon / Supabase / local |
 | `JWT_SECRET` | required (≥32 chars) | |
-| `HOST` | `127.0.0.1` | also accepts legacy `AUTH_HOST` |
-| `PORT` | `3001` | also accepts legacy `AUTH_PORT` |
-| `CORS_ORIGINS` | UI localhost | comma-separated |
+| `HOST` | `localhost` | also accepts legacy `AUTH_HOST` |
+| `PORT` | `8080` | also accepts legacy `AUTH_PORT` |
+| `CORS_ORIGINS` | UI on `:3030` | comma-separated |
 
 ## Layout
 

@@ -21,8 +21,7 @@ pub fn Navbar() -> Element {
                     }
                     Link {
                         class: "rounded-lg px-3 py-1.5 text-[0.92rem] font-medium text-neutral-400 transition hover:bg-neutral-900 hover:text-white",
-                        to: Route::Dashboard {},
-                        active_class: "bg-neutral-900 text-white",
+                        to: Route::Login {},
                         "Dashboard"
                     }
                 }

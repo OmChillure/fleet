@@ -3,7 +3,7 @@
 //! ```bash
 //! # from workspace root (with `.env`)
 //! cargo run
-//! # → http://127.0.0.1:3001
+//! # → http://localhost:8080
 //! ```
 //!
 //! Mounts all domain routers (auth today; more APIs later on the same process).
@@ -80,7 +80,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth"],
+        "apis": ["auth", "workspaces"],
     }))
 }
 
@@ -94,6 +94,10 @@ async fn api_index() -> Json<Value> {
                 "logout": "POST /api/auth/logout",
                 "refresh": "POST /api/auth/refresh",
                 "me": "GET /api/auth/me",
+            },
+            "workspaces": {
+                "list": "GET /api/workspaces",
+                "create": "POST /api/workspaces",
             }
         }
     }))

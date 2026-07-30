@@ -21,11 +21,11 @@ cp .env.example .env
 
 # Backend — one process, all APIs (auth today; more later)
 cargo run
-# → http://127.0.0.1:3001
+# → http://localhost:8080
 
 # UI (requires Dioxus CLI 0.7.x matching workspace dioxus pin)
-dx serve --package fleet-ui
-# → http://127.0.0.1:8080
+dx serve --package fleet-ui --port 3030
+# → http://localhost:3030
 ```
 
 See [`crates/fleet-server/README.md`](crates/fleet-server/README.md),

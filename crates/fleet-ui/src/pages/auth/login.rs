@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use super::api::{LoginBody, login as api_login, take_just_registered};
+use super::api::{LoginBody, list_workspaces, login as api_login, take_just_registered};
 use super::layout::AuthSplit;
 use crate::Route;
 
@@ -47,9 +47,30 @@ pub fn Login() -> Element {
             })
             .await
             {
-                Ok(_) => {
+                Ok(res) => {
+                    // Prefer workspace returned by login (created on the spot if none).
+                    let mut ws_id = res.default_workspace.map(|w| w.id);
+                    if ws_id.is_none() {
+                        // Fallback: list (server ensures a default exists).
+                        match list_workspaces().await {
+                            Ok(list) => ws_id = list.into_iter().next().map(|w| w.id),
+                            Err(e) => {
+                                loading.set(false);
+                                error.set(Some(e.message()));
+                                return;
+                            }
+                        }
+                    }
                     loading.set(false);
-                    navigator.push(Route::Dashboard {});
+                    if let Some(id) = ws_id {
+                        navigator.push(Route::Dashboard {
+                            workspace_id: id,
+                        });
+                    } else {
+                        error.set(Some(
+                            "Logged in, but no workspace was found. Try again.".into(),
+                        ));
+                    }
                 }
                 Err(e) => {
                     loading.set(false);

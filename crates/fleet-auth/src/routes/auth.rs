@@ -5,18 +5,43 @@ use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::repos::{sessions as session_repo, users as user_repo, workspaces as workspace_repo};
-use fleet_db::{NewAuthSession, User, UserPublic};
+use fleet_db::{NewAuthSession, User, UserPublic, WorkspacePublic};
 use uuid::Uuid;
 
 use crate::cookies::{clear_auth_cookies, set_auth_cookies};
 use crate::error::{AppError, AppResult};
 use crate::models::{AuthResponse, LoginRequest, MeResponse, SignupRequest};
 use crate::password::{hash_password, verify_password};
+use crate::routes::workspaces::{
+    default_workspace_name, ensure_default_workspace, workspace_slug_for_user,
+};
 use crate::state::AuthState;
 use crate::tokens::{
     ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, generate_refresh_token, hash_refresh_token,
     issue_access_token,
 };
+
+/// Resolve the authenticated user from access-cookie JWT + live session row.
+pub async fn require_user(state: &AuthState, jar: &CookieJar) -> AppResult<User> {
+    let access = jar
+        .get(ACCESS_COOKIE)
+        .map(|c| c.value().to_string())
+        .ok_or_else(|| AppError::unauthorized("not authenticated"))?;
+
+    let claims = decode_access_token(&state.config.jwt_secret, &access)?;
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::unauthorized("invalid token subject"))?;
+    let session_id = Uuid::parse_str(&claims.sid)
+        .map_err(|_| AppError::unauthorized("invalid token session"))?;
+
+    if !session_repo::is_session_active(&state.db, session_id, user_id).await? {
+        return Err(AppError::unauthorized("session is no longer valid"));
+    }
+
+    user_repo::find_active_by_id(&state.db, user_id)
+        .await?
+        .ok_or_else(|| AppError::unauthorized("user not found"))
+}
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -131,15 +156,9 @@ pub async fn signup(
     let now = Utc::now();
 
     let workspace_id = Uuid::now_v7();
-    let slug_base: String = email_normalized
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let slug = format!(
-        "{}-{}",
-        slug_base.chars().take(24).collect::<String>(),
-        &user_id.to_string()[..8]
-    );
+    let slug = workspace_slug_for_user(&email_normalized, user_id);
+    let workspace_name =
+        default_workspace_name(display_name.as_deref(), &email_normalized);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
@@ -161,7 +180,7 @@ pub async fn signup(
         workspace_id,
         user_id,
         &slug,
-        display_name.as_deref().unwrap_or("Personal workspace"),
+        &workspace_name,
         now,
     )
     .await?;
@@ -175,6 +194,12 @@ pub async fn signup(
         Json(AuthResponse {
             user: UserPublic::from(user),
             message: "account created — please log in".into(),
+            default_workspace: Some(WorkspacePublic {
+                id: workspace_id,
+                slug,
+                name: workspace_name,
+                role: "owner".into(),
+            }),
         }),
     )
         .into_response())
@@ -202,12 +227,21 @@ pub async fn login(
 
     let (access, refresh, _sid) = create_session_and_tokens(&state, &user, &headers).await?;
 
+    let default_ws = ensure_default_workspace(
+        &state,
+        user.id,
+        &user.email,
+        user.display_name.as_deref(),
+    )
+    .await?;
+
     Ok(auth_json_response(
         &state,
         StatusCode::OK,
         AuthResponse {
             user: UserPublic::from(user),
             message: "logged in".into(),
+            default_workspace: Some(WorkspacePublic::from(default_ws)),
         },
         &access,
         &refresh,
@@ -316,12 +350,21 @@ pub async fn refresh(
         state.config.access_ttl,
     )?;
 
+    let default_ws = ensure_default_workspace(
+        &state,
+        user.id,
+        &user.email,
+        user.display_name.as_deref(),
+    )
+    .await?;
+
     Ok(auth_json_response(
         &state,
         StatusCode::OK,
         AuthResponse {
             user: UserPublic::from(user),
             message: "token refreshed".into(),
+            default_workspace: Some(WorkspacePublic::from(default_ws)),
         },
         &access,
         &new_refresh,
@@ -329,26 +372,23 @@ pub async fn refresh(
 }
 
 pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Json<MeResponse>> {
-    let access = jar
-        .get(ACCESS_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| AppError::unauthorized("not authenticated"))?;
-
-    let claims = decode_access_token(&state.config.jwt_secret, &access)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| AppError::unauthorized("invalid token subject"))?;
-    let session_id = Uuid::parse_str(&claims.sid)
-        .map_err(|_| AppError::unauthorized("invalid token session"))?;
-
-    if !session_repo::is_session_active(&state.db, session_id, user_id).await? {
-        return Err(AppError::unauthorized("session is no longer valid"));
-    }
-
-    let user = user_repo::find_active_by_id(&state.db, user_id)
+    let user = require_user(&state, &jar).await?;
+    // Ensure a default workspace exists for older accounts / edge cases.
+    let _ = ensure_default_workspace(
+        &state,
+        user.id,
+        &user.email,
+        user.display_name.as_deref(),
+    )
+    .await?;
+    let workspaces = workspace_repo::list_for_user(&state.db, user.id)
         .await?
-        .ok_or_else(|| AppError::unauthorized("user not found"))?;
+        .into_iter()
+        .map(WorkspacePublic::from)
+        .collect();
 
     Ok(Json(MeResponse {
         user: UserPublic::from(user),
+        workspaces,
     }))
 }

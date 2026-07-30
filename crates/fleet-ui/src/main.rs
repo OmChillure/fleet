@@ -21,7 +21,7 @@ use pages::settings::Settings;
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
-    /// Marketing: no app sidebar / theme toggle.
+    // Marketing: no app sidebar / theme toggle.
     #[layout(MarketingLayout)]
         #[route("/")]
         Home {},
@@ -29,19 +29,34 @@ pub enum Route {
         Login {},
         #[route("/signup")]
         Signup {},
+    // App shell: `/{workspace_id}/dashboard` etc.
+    // `end_layout` must hang on the next variant (not trail the enum).
     #[end_layout]
-    /// App: sidebar + black/white theme toggle (top right).
     #[layout(AppShell)]
-        #[route("/dashboard")]
-        Dashboard {},
-        #[route("/sessions")]
-        Sessions {},
-        #[route("/agents")]
-        Agents {},
-        #[route("/sandboxes")]
-        Sandboxes {},
-        #[route("/settings")]
-        Settings {},
+        #[route("/:workspace_id/dashboard")]
+        Dashboard { workspace_id: String },
+        #[route("/:workspace_id/sessions")]
+        Sessions { workspace_id: String },
+        #[route("/:workspace_id/agents")]
+        Agents { workspace_id: String },
+        #[route("/:workspace_id/sandboxes")]
+        Sandboxes { workspace_id: String },
+        #[route("/:workspace_id/settings")]
+        Settings { workspace_id: String },
+}
+
+impl Route {
+    /// Active workspace id when inside the app shell routes.
+    pub fn workspace_id(&self) -> Option<&str> {
+        match self {
+            Route::Dashboard { workspace_id }
+            | Route::Sessions { workspace_id }
+            | Route::Agents { workspace_id }
+            | Route::Sandboxes { workspace_id }
+            | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
+            _ => None,
+        }
+    }
 }
 
 fn main() {

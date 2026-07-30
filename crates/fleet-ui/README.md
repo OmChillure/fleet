@@ -15,20 +15,21 @@ Web UI for [Agent Fleet](../../README.md): landing, auth, and app shell.
 ```bash
 # From workspace root (agent-fleet/)
 # Requires: dioxus-cli 0.7.x matching dioxus = 0.7.3
-dx serve --package fleet-ui
+# Backend on :8080 must already be running (`cargo run`)
+dx serve --package fleet-ui --port 3030
 ```
 
-Open the URL printed by `dx` (usually `http://127.0.0.1:8080`).
+Open `http://localhost:3030`. API: `http://localhost:8080`.
 
 ```bash
 cargo check -p fleet-ui
 dx build --package fleet-ui
 ```
 
-**Auth:** `/signup` creates an account via `fleet-auth`, then redirects to `/login`.
-Login sets httpOnly JWT cookies and routes to `/dashboard`.
+**Auth:** `/signup` creates an account, then redirects to `/login`.
+Login sets httpOnly JWT cookies and routes to `/{workspace_id}/dashboard`.
 
-Requires `fleet-auth` running (`cargo run -p fleet-auth`) and `DATABASE_URL` in `.env`.
+Requires `fleet-server` (`cargo run` from workspace root) and `DATABASE_URL` in `.env`.
 
 ---
 

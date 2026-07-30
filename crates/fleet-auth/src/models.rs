@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use fleet_db::UserPublic;
+use fleet_db::{UserPublic, WorkspacePublic};
 
 #[derive(Debug, Deserialize)]
 pub struct SignupRequest {
@@ -22,9 +22,30 @@ pub struct LoginRequest {
 pub struct AuthResponse {
     pub user: UserPublic,
     pub message: String,
+    /// First / default workspace so the UI can open `/{id}/dashboard` after login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_workspace: Option<WorkspacePublic>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MeResponse {
     pub user: UserPublic,
+    pub workspaces: Vec<WorkspacePublic>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+    /// Optional; auto-derived from name when omitted.
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceListResponse {
+    pub workspaces: Vec<WorkspacePublic>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceResponse {
+    pub workspace: WorkspacePublic,
 }
