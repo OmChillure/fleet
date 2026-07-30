@@ -1,17 +1,33 @@
 use dioxus::prelude::*;
 
+use super::api::{LoginBody, login as api_login, take_just_registered};
+use super::layout::AuthSplit;
 use crate::Route;
 
-/// Placeholder login — accepts any non-empty email/password and routes to dashboard.
+/// Login — left form, right product panel. Sets JWT cookies via fleet-auth.
 #[component]
 pub fn Login() -> Element {
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
     let mut error = use_signal(|| Option::<String>::None);
+    let mut loading = use_signal(|| false);
+    let mut notice = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
+
+    // Banner after successful signup → login redirect.
+    use_effect(move || {
+        if take_just_registered() {
+            notice.set(Some(
+                "Account created. Log in with your email and password.".into(),
+            ));
+        }
+    });
 
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
+        if loading() {
+            return;
+        }
         error.set(None);
 
         let email_val = email.read().trim().to_string();
@@ -22,61 +38,92 @@ pub fn Login() -> Element {
             return;
         }
 
-        // Demo auth: any credentials work. Wire to real API via super::api later.
-        navigator.push(Route::Dashboard {});
+        loading.set(true);
+        let navigator = navigator.clone();
+        spawn(async move {
+            match api_login(LoginBody {
+                email: email_val,
+                password: password_val,
+            })
+            .await
+            {
+                Ok(_) => {
+                    loading.set(false);
+                    navigator.push(Route::Dashboard {});
+                }
+                Err(e) => {
+                    loading.set(false);
+                    error.set(Some(e.message()));
+                }
+            }
+        });
+    };
+
+    let form = rsx! {
+        h1 { class: "mb-1.5 text-2xl font-bold tracking-tight text-white", "Welcome back" }
+        p { class: "mb-6 text-[0.95rem] text-neutral-400",
+            "Sign in to manage your agent fleet."
+        }
+
+        if let Some(msg) = notice() {
+            p { class: "mb-4 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-200",
+                "{msg}"
+            }
+        }
+
+        form { onsubmit: on_submit, class: "space-y-4",
+            div { class: "flex flex-col gap-1.5",
+                label { class: "text-sm font-semibold text-neutral-400", r#for: "email", "Email" }
+                input {
+                    class: "rounded-lg border border-neutral-800 bg-black px-3.5 py-2.5 text-[0.95rem] text-white outline-none transition focus:border-neutral-500",
+                    id: "email",
+                    r#type: "email",
+                    name: "email",
+                    placeholder: "you@company.com",
+                    autocomplete: "username",
+                    value: "{email}",
+                    oninput: move |e| email.set(e.value()),
+                }
+            }
+            div { class: "flex flex-col gap-1.5",
+                label { class: "text-sm font-semibold text-neutral-400", r#for: "password", "Password" }
+                input {
+                    class: "rounded-lg border border-neutral-800 bg-black px-3.5 py-2.5 text-[0.95rem] text-white outline-none transition focus:border-neutral-500",
+                    id: "password",
+                    r#type: "password",
+                    name: "password",
+                    placeholder: "••••••••",
+                    autocomplete: "current-password",
+                    value: "{password}",
+                    oninput: move |e| password.set(e.value()),
+                }
+            }
+
+            if let Some(msg) = error() {
+                p { class: "text-sm text-red-400", "{msg}" }
+            }
+
+            button {
+                class: "inline-flex w-full items-center justify-center rounded-lg bg-white px-4 py-2.5 text-[0.92rem] font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-60",
+                r#type: "submit",
+                disabled: loading(),
+                if loading() { "Signing in…" } else { "Log in" }
+            }
+        }
+
+        p { class: "mt-6 text-center text-sm text-neutral-500",
+            "No account yet? "
+            Link { class: "font-semibold text-white underline-offset-2 hover:underline", to: Route::Signup {},
+                "Create one"
+            }
+        }
     };
 
     rsx! {
-        div { class: "grid min-h-[calc(100vh-4rem)] place-items-center bg-black px-4 py-8 text-white",
-            div { class: "w-full max-w-[420px] rounded-2xl border border-neutral-800 bg-neutral-950 p-7",
-                h1 { class: "mb-1.5 text-2xl font-bold tracking-tight text-white", "Welcome back" }
-                p { class: "mb-6 text-[0.95rem] text-neutral-400",
-                    "Sign in to manage your agent fleet."
-                }
-
-                form { onsubmit: on_submit,
-                    div { class: "mb-4 flex flex-col gap-1.5",
-                        label { class: "text-sm font-semibold text-neutral-400", r#for: "email", "Email" }
-                        input {
-                            class: "rounded-lg border border-neutral-800 bg-black px-3.5 py-2.5 text-[0.95rem] text-white outline-none transition focus:border-neutral-500",
-                            id: "email",
-                            r#type: "email",
-                            name: "email",
-                            placeholder: "you@company.com",
-                            autocomplete: "username",
-                            value: "{email}",
-                            oninput: move |e| email.set(e.value()),
-                        }
-                    }
-                    div { class: "mb-4 flex flex-col gap-1.5",
-                        label { class: "text-sm font-semibold text-neutral-400", r#for: "password", "Password" }
-                        input {
-                            class: "rounded-lg border border-neutral-800 bg-black px-3.5 py-2.5 text-[0.95rem] text-white outline-none transition focus:border-neutral-500",
-                            id: "password",
-                            r#type: "password",
-                            name: "password",
-                            placeholder: "••••••••",
-                            autocomplete: "current-password",
-                            value: "{password}",
-                            oninput: move |e| password.set(e.value()),
-                        }
-                    }
-
-                    if let Some(msg) = error() {
-                        p { class: "mb-3 text-sm text-neutral-300", "{msg}" }
-                    }
-
-                    button {
-                        class: "inline-flex w-full items-center justify-center rounded-lg bg-white px-4 py-2.5 text-[0.92rem] font-semibold text-black transition hover:bg-neutral-200",
-                        r#type: "submit",
-                        "Log in"
-                    }
-                }
-
-                p { class: "mt-4 text-center text-[0.82rem] text-neutral-500",
-                    "Demo mode — any email and password will open the dashboard."
-                }
-            }
+        AuthSplit {
+            form,
+            right_title: "Pick up where the fleet left off".to_string(),
+            right_subtitle: "Sessions, sandboxes, and approvals stay durable — sign in and supervise work that outlives any single agent.".to_string(),
         }
     }
 }

@@ -11,9 +11,9 @@ use dioxus::prelude::*;
 use components::app_shell::AppShell;
 use components::navbar::Navbar;
 use pages::agents::Agents;
+use pages::auth::{Login, Signup};
 use pages::dashboard::Dashboard;
 use pages::home::Home;
-use pages::auth::Login;
 use pages::sandboxes::Sandboxes;
 use pages::sessions::Sessions;
 use pages::settings::Settings;
@@ -27,6 +27,8 @@ pub enum Route {
         Home {},
         #[route("/login")]
         Login {},
+        #[route("/signup")]
+        Signup {},
     #[end_layout]
     /// App: sidebar + black/white theme toggle (top right).
     #[layout(AppShell)]

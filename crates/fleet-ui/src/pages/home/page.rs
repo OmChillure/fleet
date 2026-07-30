@@ -21,13 +21,13 @@ pub fn Home() -> Element {
                 div { class: "flex flex-wrap gap-3",
                     Link {
                         class: "inline-flex items-center justify-center rounded-lg bg-white px-4 py-2.5 text-[0.92rem] font-semibold text-black transition hover:bg-neutral-200",
-                        to: Route::Login {},
-                        "Log in"
+                        to: Route::Signup {},
+                        "Get started"
                     }
                     Link {
                         class: "inline-flex items-center justify-center rounded-lg border border-neutral-700 bg-transparent px-4 py-2.5 text-[0.92rem] font-semibold text-white transition hover:border-neutral-500 hover:bg-neutral-950",
-                        to: Route::Dashboard {},
-                        "View dashboard"
+                        to: Route::Login {},
+                        "Log in"
                     }
                 }
             }

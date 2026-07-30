@@ -163,10 +163,10 @@ dx build --package fleet-ui
 
 | Status | Item |
 | --- | --- |
-| Done | Routes, app shell, feature folders, B/W theme, demo login |
-| Not done | Real auth (`fleet-auth` + Postgres) |
+| Done | Routes, app shell, feature folders, B/W theme |
+| Done | Login + signup split UI; JWT cookies via [`fleet-auth`](../../../crates/fleet-auth/) |
 | Not done | Live data from orchestrator / contracts |
-| Not done | Signup UI under `pages/auth/` |
+| Not done | Route guards / session bootstrap on app shell |
 | Not done | Theme persistence (localStorage) |
 | Not done | Route guards (require session for app shell) |
 

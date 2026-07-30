@@ -1,8 +1,11 @@
-//! Auth feature: login today, signup later.
+//! Auth feature: login + signup (JWT cookies via fleet-auth).
 //!
-//! URLs: `/login` (and `/signup` when added). Folder is `auth/`, not the path.
+//! URLs: `/login`, `/signup`.
 
 mod api;
+mod layout;
 mod login;
+mod signup;
 
 pub use login::Login;
+pub use signup::Signup;
