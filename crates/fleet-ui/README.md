@@ -1,35 +1,50 @@
 # fleet-ui
 
-Web UI for [Agent Fleet](../../README.md): landing, auth, and app shell.
+Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app shell.
 
 | | |
 | --- | --- |
 | Stack | [Dioxus](https://dioxuslabs.com/) 0.7 (web) + Tailwind CSS v4 |
-| Design doc | [`docs/components/fleet-ui/README.md`](../../docs/components/fleet-ui/README.md) |
+| Design doc | [`docs/components/ui/README.md`](../../docs/components/ui/README.md) |
 | Workspace crate | `fleet-ui` |
+| API base (default) | `http://localhost:8080` (`pages/auth/api.rs`) |
 
 ---
 
 ## Quick start
 
 ```bash
-# From workspace root (agent-fleet/)
+# Terminal 1 — backend (workspace root)
+cargo run
+# → http://localhost:8080
+
+# Terminal 2 — UI
 # Requires: dioxus-cli 0.7.x matching dioxus = 0.7.3
-# Backend on :8080 must already be running (`cargo run`)
 dx serve --package fleet-ui --port 3030
+# → http://localhost:3030
 ```
 
-Open `http://localhost:3030`. API: `http://localhost:8080`.
+Open **`http://localhost:3030`** (same hostname you use for cookies/CORS).
 
 ```bash
 cargo check -p fleet-ui
 dx build --package fleet-ui
 ```
 
-**Auth:** `/signup` creates an account, then redirects to `/login`.
-Login sets httpOnly JWT cookies and routes to `/{workspace_id}/dashboard`.
+### Auth flow
 
-Requires `fleet-server` (`cargo run` from workspace root) and `DATABASE_URL` in `.env`.
+1. `/signup` → `POST /api/auth/signup` (creates account + default workspace) → `/login`
+2. `/login` → `POST /api/auth/login` (httpOnly cookies) → `/{workspace_id}/dashboard`
+3. `AppShell` calls `GET /api/auth/me`; on failure → redirect `/login`
+4. Sidebar loads `GET /api/workspaces`; can `POST /api/workspaces` to create more
+
+API client: `src/pages/auth/api.rs` (credentials included for cross-origin cookies).
+
+Override API origin at build time:
+
+```bash
+FLEET_AUTH_URL=https://api.example.com dx serve --package fleet-ui --port 3030
+```
 
 ---
 
@@ -43,18 +58,22 @@ Requires `fleet-server` (`cargo run` from workspace root) and `DATABASE_URL` in 
 | `/login` | `src/pages/auth/login.rs` | Split layout; JWT cookie login |
 | `/signup` | `src/pages/auth/signup.rs` | Split layout; then → login |
 
-### App shell (sidebar + black/white theme toggle)
+### App shell (sidebar + workspace switcher + B/W theme)
+
+All app routes are **workspace-scoped**.
 
 | Path | Feature folder | Notes |
 | --- | --- | --- |
-| `/dashboard` | `src/pages/dashboard/` | Empty placeholder |
-| `/sessions` | `src/pages/sessions/` | Empty placeholder |
-| `/agents` | `src/pages/agents/` | Empty placeholder |
-| `/sandboxes` | `src/pages/sandboxes/` | Empty placeholder |
-| `/settings` | `src/pages/settings/` | Empty placeholder |
+| `/{workspace_id}/dashboard` | `src/pages/dashboard/` | Empty placeholder |
+| `/{workspace_id}/sessions` | `src/pages/sessions/` | Empty placeholder |
+| `/{workspace_id}/agents` | `src/pages/agents/` | Empty placeholder |
+| `/{workspace_id}/sandboxes` | `src/pages/sandboxes/` | Empty placeholder |
+| `/{workspace_id}/settings` | `src/pages/settings/` | Empty placeholder |
 
-Routes are defined in `src/main.rs`. Folder names organize code only; they do
-not change URL paths.
+Routes are defined in `src/main.rs`. Folder names organize code only.
+
+`Route::workspace_id()` returns the active id for shell chrome (sidebar links,
+workspace dropdown).
 
 ---
 
@@ -62,23 +81,18 @@ not change URL paths.
 
 ```text
 src/
-  main.rs                 # Route, MarketingLayout, App
+  main.rs                 # Route enum, MarketingLayout, App
   theme.rs                # Theme::Black | Theme::White
-  components/             # Shared chrome
-    app_shell.rs          # App layout + theme provider
+  components/
+    app_shell.rs          # Auth gate + sidebar + theme provider
     navbar.rs             # Marketing navbar
-    sidebar.rs
+    sidebar.rs            # Workspace dropdown + nav links
     theme_toggle.rs
   pages/
-    auth/                 # All auth UI lives here
-      login.rs            # /login
-      api.rs              # login/signup client helpers (stubs)
-      # signup.rs         # add later → /signup
-    dashboard/
-      page.rs             # UI
-      api.rs              # feature client API (stubs)
-      mod.rs
-    sessions/  agents/  sandboxes/  settings/
+    auth/
+      login.rs / signup.rs / layout.rs
+      api.rs              # login, me, workspaces client
+    dashboard/ sessions/ agents/ sandboxes/ settings/
     home/
     shared/               # EmptyPage, etc.
 tailwind.css              # Tailwind v4 entry (dx auto-detect)
@@ -93,26 +107,29 @@ assets/tailwind.css       # Generated output (served via asset!)
 | `api.rs` | Client-side fetch/types for this feature |
 | `mod.rs` | Module exports |
 
-Auth is **`pages/auth/`**, not a separate `login` feature folder. Future signup
-belongs in the same folder.
-
 ---
 
 ## Layouts & theme
 
 | Layout | Used by | Chrome |
 | --- | --- | --- |
-| `MarketingLayout` | `/`, `/login` | Navbar + footer; fixed black |
-| `AppShell` | dashboard and other app routes | Sidebar + top bar; B/W theme |
+| `MarketingLayout` | `/`, `/login`, `/signup` | Navbar + footer; fixed black |
+| `AppShell` | `/{workspace_id}/*` | Auth gate, sidebar (workspace switcher), theme toggle |
 
 App theme CSS variables: `.theme-black` / `.theme-white` in `tailwind.css`.
 Toggle is top-right on app pages only.
+
+### Sidebar
+
+- **Workspace dropdown** above Dashboard: switch workspace, create new
+- Nav links rebuild with the current `workspace_id`
+- Create uses `POST /api/workspaces` then navigates to the new dashboard
 
 ---
 
 ## Styling (Tailwind)
 
-Use utilities on elements (React-style):
+Use utilities on elements:
 
 ```rust
 div { class: "flex min-h-screen flex-col gap-4",
@@ -123,8 +140,6 @@ div { class: "flex min-h-screen flex-col gap-4",
 Dioxus 0.7 runs Tailwind when it finds root `tailwind.css` (`dx serve` /
 `dx build`). Output: `assets/tailwind.css`.
 
-No npm/`node_modules` required for the normal `dx` workflow.
-
 ---
 
 ## Status
@@ -134,14 +149,19 @@ No npm/`node_modules` required for the normal `dx` workflow.
 | Routing + feature folders | Done |
 | Marketing landing (black) | Done |
 | App shell, sidebar, B/W theme | Done |
-| Login + signup UI (split layout) | Done |
+| Login + signup UI | Done |
 | Real auth / Postgres (`fleet-auth`) | Done (JWT cookies) |
-| Live fleet data | Not started |
+| Default workspace on signup/login | Done |
+| Workspace-scoped routes + switcher | Done |
+| App shell session gate | Done |
+| Live fleet / orchestrator data | Not started |
 
 ---
 
 ## Related
 
-- Component design: [`docs/components/fleet-ui/`](../../docs/components/fleet-ui/)
+- Component design: [`docs/components/ui/`](../../docs/components/ui/)
+- Auth design: [`docs/components/auth/`](../../docs/components/auth/)
+- API library: [`crates/fleet-auth/`](../fleet-auth/)
 - Contracts: [`crates/agent-fleet-contracts/`](../agent-fleet-contracts/)
 - Architecture: [`docs/architecture/README.md`](../../docs/architecture/README.md)
