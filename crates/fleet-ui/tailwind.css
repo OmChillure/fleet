@@ -1,0 +1,56 @@
+@import "tailwindcss";
+@source "./src/**/*.{rs,html,css}";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+  /* Landing (fixed dark marketing look) */
+  --color-fleet-bg: #0b0f14;
+  --color-fleet-elevated: #121820;
+  --color-fleet-card: #161d27;
+  --color-fleet-border: #243041;
+  --color-fleet-muted: #8b9bb0;
+  --color-fleet-accent: #3d8bfd;
+  --color-fleet-accent-hover: #5c9fff;
+}
+
+/* App shell themes — pure black / pure white */
+.theme-black {
+  --app-bg: #000000;
+  --app-bg-elevated: #0a0a0a;
+  --app-bg-hover: #141414;
+  --app-border: #262626;
+  --app-fg: #fafafa;
+  --app-muted: #a3a3a3;
+  --app-accent: #ffffff;
+  --app-accent-fg: #000000;
+}
+
+.theme-white {
+  --app-bg: #ffffff;
+  --app-bg-elevated: #f5f5f5;
+  --app-bg-hover: #ebebeb;
+  --app-border: #e5e5e5;
+  --app-fg: #0a0a0a;
+  --app-muted: #737373;
+  --app-accent: #000000;
+  --app-accent-fg: #ffffff;
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply m-0 min-h-full font-sans;
+  }
+
+  a {
+    @apply no-underline text-inherit;
+  }
+
+  button {
+    @apply cursor-pointer font-sans;
+  }
+}

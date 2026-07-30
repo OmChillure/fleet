@@ -18,6 +18,12 @@ Related component folders (stubs for deeper specs):
 | Orchestrator | [`docs/components/orchestrator/`](../components/orchestrator/) | Session control plane; durable state; event routing |
 | Sandbox Manager | [`docs/components/sandbox-manager/`](../components/sandbox-manager/) | Create / observe / destroy sandboxes on hosting backends |
 | Sandbox Hosting Tool | [`docs/components/sandbox-hosting-tool/`](../components/sandbox-hosting-tool/) | Concrete runtime backends (k8s, VM, podman, …) |
+| Web UI | [`docs/components/ui/`](../components/ui/) | Browser app (Dioxus): landing, auth, workspace-scoped shell |
+| Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
+
+**Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
+(auth + workspaces) over `fleet-db` (Postgres). UI on `:3030` talks to the API
+with cookie credentials. Orchestrator / sandboxes are design-only.
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

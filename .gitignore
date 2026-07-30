@@ -5,3 +5,10 @@
 default.profraw
 *.db
 *.db-*
+.env
+.env.local
+*.pem
+
+# fleet-ui — npm leftover (not used; dx auto-tailwind)
+crates/fleet-ui/node_modules/
+crates/fleet-ui/package-lock.json
