@@ -1,9 +1,14 @@
 use chrono::{DateTime, Utc};
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::error::DbResult;
+use crate::error::{DbError, DbResult};
+use crate::models::{Workspace, WorkspaceWithRole};
 use crate::pool::map_query_err;
+
+const WORKSPACE_COLS: &str = r#"
+    id, slug, name, created_at, updated_at, version
+"#;
 
 #[derive(Debug, Clone)]
 pub struct NewWorkspace {
@@ -77,4 +82,62 @@ pub async fn create_personal_workspace_tx(
     .await?;
     add_member_tx(tx, workspace_id, user_id, "owner", at).await?;
     Ok(())
+}
+
+/// Workspaces the user belongs to, oldest first (default = first).
+pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<WorkspaceWithRole>> {
+    sqlx::query_as::<_, WorkspaceWithRole>(
+        r#"
+        SELECT w.id, w.slug, w.name, w.created_at, w.updated_at, w.version, m.role
+        FROM workspaces w
+        INNER JOIN workspace_members m ON m.workspace_id = w.id
+        WHERE m.user_id = $1
+        ORDER BY w.created_at ASC, w.id ASC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn find_for_user(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<WorkspaceWithRole>> {
+    sqlx::query_as::<_, WorkspaceWithRole>(
+        r#"
+        SELECT w.id, w.slug, w.name, w.created_at, w.updated_at, w.version, m.role
+        FROM workspaces w
+        INNER JOIN workspace_members m ON m.workspace_id = w.id
+        WHERE w.id = $1 AND m.user_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+/// Create a workspace and make `user_id` the owner (standalone, not in a parent tx).
+pub async fn create_owned(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    slug: &str,
+    name: &str,
+    at: DateTime<Utc>,
+) -> DbResult<Workspace> {
+    let mut tx = pool.begin().await.map_err(DbError::from)?;
+    create_personal_workspace_tx(&mut tx, workspace_id, user_id, slug, name, at).await?;
+    let q = format!("SELECT {WORKSPACE_COLS} FROM workspaces WHERE id = $1");
+    let ws = sqlx::query_as::<_, Workspace>(&q)
+        .bind(workspace_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_query_err)?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(ws)
 }

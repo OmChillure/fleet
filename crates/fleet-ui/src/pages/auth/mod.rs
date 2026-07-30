@@ -2,7 +2,7 @@
 //!
 //! URLs: `/login`, `/signup`.
 
-mod api;
+pub mod api;
 mod layout;
 mod login;
 mod signup;

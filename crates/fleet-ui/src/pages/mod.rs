@@ -1,15 +1,15 @@
 //! Feature-based pages.
 //!
 //! Each subdirectory is one feature. URL routes are declared in `main.rs`
-//! (`/dashboard`, etc.) — folders are only for code organization.
+//! (`/{workspace_id}/dashboard`, etc.) — folders are only for code organization.
 //!
 //! ```text
 //! pages/
-//!   dashboard/     → route /dashboard
+//!   dashboard/     → route /{workspace_id}/dashboard
 //!     mod.rs
 //!     page.rs      → UI component
 //!     api.rs       → client fetch helpers for this page
-//!   sessions/      → route /sessions
+//!   sessions/      → route /{workspace_id}/sessions
 //!   …
 //!   shared/        → EmptyPage and other cross-page UI
 //! ```

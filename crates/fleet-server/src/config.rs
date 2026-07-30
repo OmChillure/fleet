@@ -19,6 +19,8 @@ impl ServerConfig {
             .context("DATABASE_URL is required (Neon, Supabase, or local Postgres)")?;
 
         // Prefer HOST/PORT; fall back to AUTH_HOST/AUTH_PORT for older .env files.
+        // Backend default: 127.0.0.1:8080 (UI on localhost:3030). Use an IP for bind
+        // — `localhost` is not a valid SocketAddr host.
         let host = env::var("HOST")
             .or_else(|_| env::var("AUTH_HOST"))
             .unwrap_or_else(|_| "127.0.0.1".into());
@@ -26,14 +28,14 @@ impl ServerConfig {
             .or_else(|_| env::var("AUTH_PORT"))
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(3001);
+            .unwrap_or(8080);
 
         let bind: SocketAddr = format!("{host}:{port}")
             .parse()
             .with_context(|| format!("invalid HOST/PORT: {host}:{port}"))?;
 
         let cors_origins = env::var("CORS_ORIGINS")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080,http://localhost:8080".into())
+            .unwrap_or_else(|_| "http://localhost:3030,http://127.0.0.1:3030".into())
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

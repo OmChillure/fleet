@@ -1,15 +1,23 @@
-//! Browser client for `fleet-auth` (cookies via credentials: include).
+//! Browser client for fleet-server auth + workspaces (cookies via credentials: include).
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
+/// Backend origin. Frontend: `localhost:3030`, backend: `localhost:8080`.
 /// Override at build time: `FLEET_AUTH_URL=https://api.example.com dx serve …`
-/// Default matches local `fleet-auth` bind.
 pub fn auth_base_url() -> String {
     option_env!("FLEET_AUTH_URL")
-        .unwrap_or("http://127.0.0.1:3001")
+        .unwrap_or("http://localhost:8080")
         .to_string()
+}
+
+fn api_url(path: &str) -> String {
+    format!(
+        "{}/{}",
+        auth_base_url().trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,22 +34,39 @@ pub struct LoginBody {
     pub password: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UserPublic {
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WorkspacePublic {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub role: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthResponse {
     pub user: UserPublic,
     pub message: String,
+    #[serde(default)]
+    pub default_workspace: Option<WorkspacePublic>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ErrorBody {
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateWorkspaceBody {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,8 +125,7 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
 }
 
 pub async fn signup(body: SignupBody) -> Result<AuthResponse, AuthError> {
-    let url = format!("{}/api/auth/signup", auth_base_url());
-    let res = with_credentials(client().post(url).json(&body))
+    let res = with_credentials(client().post(api_url("/api/auth/signup")).json(&body))
         .send()
         .await
         .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
@@ -109,31 +133,56 @@ pub async fn signup(body: SignupBody) -> Result<AuthResponse, AuthError> {
 }
 
 pub async fn login(body: LoginBody) -> Result<AuthResponse, AuthError> {
-    let url = format!("{}/api/auth/login", auth_base_url());
-    let res = with_credentials(client().post(url).json(&body))
+    let res = with_credentials(client().post(api_url("/api/auth/login")).json(&body))
         .send()
         .await
         .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
     parse_json_or_error(res).await
 }
 
-pub async fn me() -> Result<UserPublic, AuthError> {
+pub async fn me() -> Result<(UserPublic, Vec<WorkspacePublic>), AuthError> {
     #[derive(Deserialize)]
     struct MeResponse {
         user: UserPublic,
+        #[serde(default)]
+        workspaces: Vec<WorkspacePublic>,
     }
-    let url = format!("{}/api/auth/me", auth_base_url());
-    let res = with_credentials(client().get(url))
+    let res = with_credentials(client().get(api_url("/api/auth/me")))
         .send()
         .await
         .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
     let body: MeResponse = parse_json_or_error(res).await?;
-    Ok(body.user)
+    Ok((body.user, body.workspaces))
+}
+
+pub async fn list_workspaces() -> Result<Vec<WorkspacePublic>, AuthError> {
+    #[derive(Deserialize)]
+    struct ListResponse {
+        workspaces: Vec<WorkspacePublic>,
+    }
+    let res = with_credentials(client().get(api_url("/api/workspaces")))
+        .send()
+        .await
+        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    let body: ListResponse = parse_json_or_error(res).await?;
+    Ok(body.workspaces)
+}
+
+pub async fn create_workspace(body: CreateWorkspaceBody) -> Result<WorkspacePublic, AuthError> {
+    #[derive(Deserialize)]
+    struct CreateResponse {
+        workspace: WorkspacePublic,
+    }
+    let res = with_credentials(client().post(api_url("/api/workspaces")).json(&body))
+        .send()
+        .await
+        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    let body: CreateResponse = parse_json_or_error(res).await?;
+    Ok(body.workspace)
 }
 
 pub async fn logout() -> Result<(), AuthError> {
-    let url = format!("{}/api/auth/logout", auth_base_url());
-    let res = with_credentials(client().post(url))
+    let res = with_credentials(client().post(api_url("/api/auth/logout")))
         .send()
         .await
         .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;

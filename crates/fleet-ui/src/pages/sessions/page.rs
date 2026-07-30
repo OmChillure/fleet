@@ -3,7 +3,8 @@ use dioxus::prelude::*;
 use crate::pages::shared::EmptyPage;
 
 #[component]
-pub fn Sessions() -> Element {
+pub fn Sessions(workspace_id: String) -> Element {
+    let _ = &workspace_id;
     rsx! {
         EmptyPage {
             title: "Sessions",

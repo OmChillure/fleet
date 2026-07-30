@@ -226,14 +226,23 @@
   .-right-24 {
     right: calc(var(--spacing) * -24);
   }
+  .right-2 {
+    right: calc(var(--spacing) * 2);
+  }
   .-bottom-32 {
     bottom: calc(var(--spacing) * -32);
   }
   .-left-16 {
     left: calc(var(--spacing) * -16);
   }
+  .left-2 {
+    left: calc(var(--spacing) * 2);
+  }
   .z-10 {
     z-index: 10;
+  }
+  .z-20 {
+    z-index: 20;
   }
   .z-50 {
     z-index: 50;
@@ -243,6 +252,9 @@
   }
   .mx-auto {
     margin-inline: auto;
+  }
+  .my-1 {
+    margin-block: calc(var(--spacing) * 1);
   }
   .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
@@ -315,6 +327,9 @@
   }
   .h-screen {
     height: 100vh;
+  }
+  .max-h-72 {
+    max-height: calc(var(--spacing) * 72);
   }
   .min-h-0 {
     min-height: calc(var(--spacing) * 0);
@@ -412,12 +427,24 @@
   .gap-4 {
     gap: calc(var(--spacing) * 4);
   }
+  .space-y-1\.5 {
+    :where(& > :not(:last-child)) {
+      --tw-space-y-reverse: 0;
+      margin-block-start: calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));
+      margin-block-end: calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)));
+    }
+  }
   .space-y-4 {
     :where(& > :not(:last-child)) {
       --tw-space-y-reverse: 0;
       margin-block-start: calc(calc(var(--spacing) * 4) * var(--tw-space-y-reverse));
       margin-block-end: calc(calc(var(--spacing) * 4) * calc(1 - var(--tw-space-y-reverse)));
     }
+  }
+  .truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .overflow-auto {
     overflow: auto;
@@ -481,6 +508,12 @@
   }
   .bg-\[var\(--app-bg-elevated\)\] {
     background-color: var(--app-bg-elevated);
+  }
+  .bg-\[var\(--app-bg-hover\)\] {
+    background-color: var(--app-bg-hover);
+  }
+  .bg-\[var\(--app-fg\)\] {
+    background-color: var(--app-fg);
   }
   .bg-black {
     background-color: var(--color-black);
@@ -584,6 +617,9 @@
   .text-center {
     text-align: center;
   }
+  .text-left {
+    text-align: left;
+  }
   .text-2xl {
     font-size: var(--text-2xl);
     line-height: var(--tw-leading, var(--text-2xl--line-height));
@@ -621,6 +657,9 @@
   }
   .text-\[1\.05rem\] {
     font-size: 1.05rem;
+  }
+  .text-\[10px\] {
+    font-size: 10px;
   }
   .text-\[clamp\(2rem\,4vw\,3rem\)\] {
     font-size: clamp(2rem, 4vw, 3rem);
@@ -660,6 +699,9 @@
   .text-\[var\(--app-accent-fg\)\] {
     color: var(--app-accent-fg);
   }
+  .text-\[var\(--app-bg\)\] {
+    color: var(--app-bg);
+  }
   .text-\[var\(--app-fg\)\] {
     color: var(--app-fg);
   }
@@ -692,6 +734,10 @@
   }
   .opacity-\[0\.35\] {
     opacity: 0.35;
+  }
+  .shadow-lg {
+    --tw-shadow: 0 10px 15px -3px var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 4px 6px -4px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .blur-3xl {
     --tw-blur: blur(var(--blur-3xl));
@@ -765,6 +811,11 @@
       @media (hover: hover) {
         text-decoration-line: underline;
       }
+    }
+  }
+  .focus\:border-\[var\(--app-muted\)\] {
+    &:focus {
+      border-color: var(--app-muted);
     }
   }
   .focus\:border-neutral-500 {
@@ -895,6 +946,71 @@
   syntax: "*";
   inherits: false;
 }
+@property --tw-shadow {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0 0 #0000;
+}
+@property --tw-shadow-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-shadow-alpha {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+@property --tw-inset-shadow {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0 0 #0000;
+}
+@property --tw-inset-shadow-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-inset-shadow-alpha {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+@property --tw-ring-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-ring-shadow {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0 0 #0000;
+}
+@property --tw-inset-ring-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-inset-ring-shadow {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0 0 #0000;
+}
+@property --tw-ring-inset {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-ring-offset-width {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --tw-ring-offset-color {
+  syntax: "*";
+  inherits: false;
+  initial-value: #fff;
+}
+@property --tw-ring-offset-shadow {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0 0 #0000;
+}
 @property --tw-blur {
   syntax: "*";
   inherits: false;
@@ -992,6 +1108,20 @@
       --tw-leading: initial;
       --tw-font-weight: initial;
       --tw-tracking: initial;
+      --tw-shadow: 0 0 #0000;
+      --tw-shadow-color: initial;
+      --tw-shadow-alpha: 100%;
+      --tw-inset-shadow: 0 0 #0000;
+      --tw-inset-shadow-color: initial;
+      --tw-inset-shadow-alpha: 100%;
+      --tw-ring-color: initial;
+      --tw-ring-shadow: 0 0 #0000;
+      --tw-inset-ring-color: initial;
+      --tw-inset-ring-shadow: 0 0 #0000;
+      --tw-ring-inset: initial;
+      --tw-ring-offset-width: 0px;
+      --tw-ring-offset-color: #fff;
+      --tw-ring-offset-shadow: 0 0 #0000;
       --tw-blur: initial;
       --tw-brightness: initial;
       --tw-contrast: initial;

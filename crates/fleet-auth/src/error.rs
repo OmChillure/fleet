@@ -11,6 +11,10 @@ pub enum AppError {
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
     Internal(String),
@@ -23,6 +27,14 @@ impl AppError {
 
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self::Unauthorized(msg.into())
+    }
+
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::Forbidden(msg.into())
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(msg.into())
     }
 
     pub fn conflict(msg: impl Into<String>) -> Self {
@@ -38,7 +50,7 @@ impl From<DbError> for AppError {
     fn from(err: DbError) -> Self {
         match err {
             DbError::Conflict(msg) => Self::Conflict(msg),
-            DbError::NotFound(msg) => Self::Unauthorized(msg),
+            DbError::NotFound(msg) => Self::NotFound(msg),
             DbError::Connect { ref target, ref source } => {
                 tracing::error!(target = %target, error = %source, "database connect error");
                 Self::Internal("database unavailable".into())
@@ -79,6 +91,8 @@ impl IntoResponse for AppError {
         let (status, msg) = match &self {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m.clone()),
+            AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
+            AppError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
         };
