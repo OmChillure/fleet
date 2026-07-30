@@ -2,9 +2,11 @@
 
 mod models;
 mod pool;
+mod tick_ops;
 
 pub use models::*;
 pub use pool::*;
+pub use tick_ops::SpawnAssignment;
 
 use crate::domain::{
     stable_board_task_id, WorkPlanBody, WorkPlanStatus, WorkRunStatus,

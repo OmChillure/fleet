@@ -121,6 +121,18 @@ pub enum WorkerSessionStatus {
 }
 
 impl WorkerSessionStatus {
+    pub fn from_db(s: &str) -> Option<Self> {
+        Some(match s {
+            "spawning" => Self::Spawning,
+            "healthy" => Self::Healthy,
+            "stuck" => Self::Stuck,
+            "killing" => Self::Killing,
+            "exited" => Self::Exited,
+            "failed_spawn" => Self::FailedSpawn,
+            _ => return None,
+        })
+    }
+
     /// K8: spawning|healthy|stuck|killing hold capacity slots.
     pub fn holds_capacity(self) -> bool {
         matches!(
