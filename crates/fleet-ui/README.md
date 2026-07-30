@@ -25,7 +25,10 @@ cargo check -p fleet-ui
 dx build --package fleet-ui
 ```
 
-**Demo login:** any non-empty email and password → `/dashboard`.
+**Auth:** `/signup` creates an account via `fleet-auth`, then redirects to `/login`.
+Login sets httpOnly JWT cookies and routes to `/dashboard`.
+
+Requires `fleet-auth` running (`cargo run -p fleet-auth`) and `DATABASE_URL` in `.env`.
 
 ---
 
@@ -36,7 +39,8 @@ dx build --package fleet-ui
 | Path | Feature folder | Notes |
 | --- | --- | --- |
 | `/` | `src/pages/home/` | Pure black monochrome landing |
-| `/login` | `src/pages/auth/login.rs` | Demo only; signup not implemented |
+| `/login` | `src/pages/auth/login.rs` | Split layout; JWT cookie login |
+| `/signup` | `src/pages/auth/signup.rs` | Split layout; then → login |
 
 ### App shell (sidebar + black/white theme toggle)
 
@@ -129,10 +133,9 @@ No npm/`node_modules` required for the normal `dx` workflow.
 | Routing + feature folders | Done |
 | Marketing landing (black) | Done |
 | App shell, sidebar, B/W theme | Done |
-| Demo login | Done (no backend) |
-| Real auth / Postgres | Not started (`fleet-auth`) |
+| Login + signup UI (split layout) | Done |
+| Real auth / Postgres (`fleet-auth`) | Done (JWT cookies) |
 | Live fleet data | Not started |
-| Signup | Not started (place under `pages/auth/`) |
 
 ---
 

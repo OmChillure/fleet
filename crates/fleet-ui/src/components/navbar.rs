@@ -35,8 +35,8 @@ pub fn Navbar() -> Element {
                     }
                     Link {
                         class: "inline-flex items-center justify-center rounded-lg bg-white px-4 py-2 text-[0.92rem] font-semibold text-black transition hover:bg-neutral-200",
-                        to: Route::Dashboard {},
-                        "Open dashboard"
+                        to: Route::Signup {},
+                        "Sign up"
                     }
                 }
             }

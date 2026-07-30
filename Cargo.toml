@@ -2,10 +2,14 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
+    "crates/fleet-db",
+    "crates/fleet-auth",
+    "crates/fleet-server",
     "crates/fleet-ui",
 ]
+# `cargo run` from the workspace root starts the unified API.
 default-members = [
-    "crates/agent-fleet-contracts",
+    "crates/fleet-server",
 ]
 
 [workspace.package]
@@ -20,3 +24,26 @@ serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 dioxus = "=0.7.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+# Neon/Supabase require TLS; without a tls-* feature, connect fails with
+# "TLS upgrade required … SQLx was built without TLS support".
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "migrate"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+dotenvy = "0.15"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+cookie = "0.18"
+time = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+fleet-db = { path = "crates/fleet-db" }
+fleet-auth = { path = "crates/fleet-auth" }
+fleet-server = { path = "crates/fleet-server" }

@@ -9,18 +9,29 @@ Rust workspace (see root `Cargo.toml`).
 
 | Crate | Path | Role |
 | --- | --- | --- |
-| [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types (`serde` → JSON by default) |
-| [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) — landing, auth, app shell |
+| [`fleet-server`](crates/fleet-server/) | `crates/fleet-server` | **Unified API** — `cargo run` entrypoint |
+| [`fleet-auth`](crates/fleet-auth/) | `crates/fleet-auth` | Auth library (mounted by server) |
+| [`fleet-db`](crates/fleet-db/) | `crates/fleet-db` | Postgres — migrations, pool, models, repos |
+| [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
+| [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
 
 ```bash
-cargo test -p agent-fleet-contracts
+# Copy env and set DATABASE_URL (Neon / Supabase / local Postgres)
+cp .env.example .env
+
+# Backend — one process, all APIs (auth today; more later)
+cargo run
+# → http://127.0.0.1:3001
 
 # UI (requires Dioxus CLI 0.7.x matching workspace dioxus pin)
 dx serve --package fleet-ui
+# → http://127.0.0.1:8080
 ```
 
-See [`crates/fleet-ui/README.md`](crates/fleet-ui/README.md) and
-[`docs/components/fleet-ui/`](docs/components/fleet-ui/) for UI docs.
+See [`crates/fleet-server/README.md`](crates/fleet-server/README.md),
+[`crates/fleet-ui/README.md`](crates/fleet-ui/README.md),
+[`crates/fleet-db/README.md`](crates/fleet-db/README.md), and
+[`docs/components/ui/`](docs/components/ui/) for docs.
 
 ## Docs
 
