@@ -1,0 +1,27 @@
+flowchart TB
+  PLAT[Agent Fleet platform]
+
+  PLAT --> T1[Organization A · Acme Corp]
+  PLAT --> T2[Organization B · Contoso]
+
+  T1 --> P1[Project · onboarding-redesign]
+  T1 --> P2[Project · growth-emails]
+  T1 --> P3[Project · crm-pipeline]
+
+  T2 --> P4[Project · …]
+
+  subgraph ProjectScope["Each project owns"]
+    ORCH[Project orchestrator / operator]
+    DOCS[Document tree]
+    BOARD[Task board]
+    CFG[Config · max agents · secrets · goal]
+    FLEET[Worker fleet]
+  end
+
+  P1 --> ORCH
+  P1 --> DOCS
+  P1 --> BOARD
+  P1 --> CFG
+  P1 --> FLEET
+  ORCH --> FLEET
+  DOCS --> BOARD

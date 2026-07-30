@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Starter personas (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:.75rem}
+  .org-switch{background:#1e293b;border-radius:8px;padding:.55rem .7rem;margin-bottom:1.25rem;font-size:.8rem}
+  .org-switch label{display:block;color:#64748b;font-size:.68rem;text-transform:uppercase;margin-bottom:.2rem}
+  .org-switch select{width:100%;background:transparent;border:0;color:#fff;font:inherit;font-weight:600}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem;font-size:.9rem}
+  nav a.active{background:#1e293b;color:#fff}
+  nav .sec{margin:1rem 0 .35rem;padding:0 .75rem;font-size:.68rem;text-transform:uppercase;color:#64748b}
+  main{padding:1.25rem 1.5rem 2rem;max-width:1100px}
+  h1{margin:0 0 .25rem;font-size:1.35rem}
+  .sub{color:var(--m);margin:0 0 1.25rem;max-width:48rem}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.85rem}
+  @media(min-width:960px){.grid{grid-template-columns:repeat(3,1fr)}}
+  .persona{background:var(--s);border:2px solid var(--b);border-radius:14px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.45rem;min-height:0}
+  .persona:hover{border-color:#93b4fd}
+  .persona.selected{border-color:var(--blue);box-shadow:0 0 0 3px #dbeafe}
+  .persona .top{display:flex;align-items:center;gap:.55rem}
+  .persona .icon{width:2.1rem;height:2.1rem;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:.95rem;font-weight:700;color:#fff;flex-shrink:0}
+  .i-sd{background:linear-gradient(135deg,#2563eb,#7a5af8)}
+  .i-sp{background:linear-gradient(135deg,#f79009,#f63d68)}
+  .i-mp{background:linear-gradient(135deg,#12b76a,#0ba5ec)}
+  .i-cs{background:linear-gradient(135deg,#0ba5ec,#6172f3)}
+  .i-an{background:linear-gradient(135deg,#7a5af8,#ee46bc)}
+  .i-do{background:linear-gradient(135deg,#344054,#667085)}
+  .i-pd{background:linear-gradient(135deg,#ee46bc,#f79009)}
+  .i-cd{background:linear-gradient(135deg,#099250,#32d583)}
+  .i-bl{background:linear-gradient(135deg,#98a2b3,#667085)}
+  .persona h2{margin:0;font-size:.95rem}
+  .persona p{margin:0;font-size:.82rem;color:var(--m);flex:1}
+  .seeds{font-size:.72rem;color:#475467;background:#f8fafc;border:1px solid var(--b);border-radius:8px;padding:.5rem .6rem;line-height:1.45}
+  .seeds strong{color:var(--t)}
+  .int{margin-top:.15rem}
+  .int-label{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--m);margin-bottom:.3rem}
+  .chips{display:flex;flex-wrap:wrap;gap:.3rem}
+  .chip{font-size:.68rem;font-weight:600;padding:.18rem .45rem;border-radius:999px;background:#eff4ff;color:#3538cd;border:1px solid #c7d7fe}
+  .chip.alt{background:#f4f3ff;color:#5925dc;border-color:#d9d6fe}
+  .chip.warm{background:#fef6ee;color:#c4320a;border-color:#f9dbaf}
+  .chip.ok{background:#ecfdf3;color:#027a48;border-color:#abefc6}
+  .chip.muted{background:#f2f4f7;color:#475467;border-color:var(--b)}
+  .actions{margin-top:1.25rem;display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}
+  .btn{background:var(--blue);color:#fff;border:0;border-radius:8px;padding:.6rem 1.1rem;font-weight:600;font-size:.9rem}
+  .btn.sec{background:#fff;color:var(--t);border:1px solid var(--b);text-decoration:none;display:inline-block}
+  .hint{font-size:.82rem;color:var(--m)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <div class="org-switch">
+      <label>Organization</label>
+      <select><option selected>Acme Corp</option><option>Contoso Labs</option></select>
+    </div>
+    <div class="sec">Organization</div>
+    <a href="00-projects.html">Projects</a>
+    <a class="active" href="05-starter-personas.html">Starter personas</a>
+    <a href="06-org-integrations.html">Integrations</a>
+    <a href="#">Members &amp; roles</a>
+    <div class="sec">Active project</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+  </nav>
+  <main>
+    <h1>New project — choose a starter persona</h1>
+    <p class="sub">Eight sample domain personas plus blank. Each seeds tree, workers, validation—and recommends <strong>org board integrations</strong> (must be connected at organization level first). <a href="06-org-integrations.html" style="color:var(--blue);font-weight:600">Manage integrations</a></p>
+    <div class="grid">
+      <div class="persona selected">
+        <div class="top"><div class="icon i-sd">{ }</div><h2>Software development</h2></div>
+        <p>Features, bugs, and refactors with implement → test → draft PR loops.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: specs/ runbooks/ adr/<br/>Workers: coding, review, e2e<br/>Validate: unit/e2e, draft PR<br/>Secrets: GITHUB_TOKEN, CI</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip">Jira</span>
+            <span class="chip alt">Linear</span>
+            <span class="chip muted">Azure Boards</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-sp">◎</div><h2>Sales pipeline</h2></div>
+        <p>Opportunity research, outreach, stage moves, and CRM hygiene.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: pipeline/ playbooks/ accounts/<br/>Workers: research, outreach, CRM sync<br/>Validate: stage rules, CRM schema<br/>Secrets: CRM API keys</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip warm">Monday.com</span>
+            <span class="chip">Jira</span>
+            <span class="chip muted">Asana</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-mp">✉</div><h2>Marketing pipeline</h2></div>
+        <p>Campaigns, nurture drips, calendars, brand-safe content with approval gates.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: campaigns/ brand/ calendar/<br/>Workers: copywriter, design-assist<br/>Validate: brand checklist, screenshots<br/>Secrets: ESP / CMS tokens</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip warm">Monday.com</span>
+            <span class="chip muted">Asana</span>
+            <span class="chip ok">Trello</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-cs">?</div><h2>Customer support</h2></div>
+        <p>Ticket triage, reply drafts, knowledge updates, and escalation packages.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: tickets/ macros/ knowledge/<br/>Workers: triage, reply, escalate<br/>Validate: tone policy, PII scrub<br/>Secrets: helpdesk API</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip">Jira</span>
+            <span class="chip alt">Linear</span>
+            <span class="chip muted">Asana</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-an">∑</div><h2>Analysis &amp; research</h2></div>
+        <p>Data pulls, notebooks, cited memos, and decision briefs.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: questions/ datasets/ memos/<br/>Workers: analyst, viz<br/>Validate: reproducibility checklist<br/>Secrets: warehouse credentials</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip">Jira</span>
+            <span class="chip warm">Monday.com</span>
+            <span class="chip muted">Asana</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-do">⚙</div><h2>DevOps &amp; platform</h2></div>
+        <p>Infra changes, runbooks, deploy/validate loops, incident follow-ups.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: runbooks/ changes/ postmortems/<br/>Workers: infra, deploy, verify<br/>Validate: plan apply, health checks<br/>Secrets: cloud + deploy tokens</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip">Jira</span>
+            <span class="chip muted">Azure Boards</span>
+            <span class="chip alt">Linear</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-pd">◇</div><h2>Product discovery</h2></div>
+        <p>Interview synthesis, problem briefs, opportunity scoring, experiment design.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: interviews/ opportunities/ experiments/<br/>Workers: synthesizer, writer<br/>Validate: evidence links, rubric<br/>Secrets: research repo access</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip">Jira</span>
+            <span class="chip alt">Linear</span>
+            <span class="chip warm">Monday.com</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-cd">¶</div><h2>Content &amp; documentation</h2></div>
+        <p>Docs, release notes, help center, and knowledge-base upkeep.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: drafts/ published/ style/<br/>Workers: writer, editor, publisher<br/>Validate: style guide, link checks<br/>Secrets: docs CMS token</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip muted">Asana</span>
+            <span class="chip ok">Trello</span>
+            <span class="chip warm">Monday.com</span>
+          </div>
+        </div>
+      </div>
+      <div class="persona">
+        <div class="top"><div class="icon i-bl">+</div><h2>Blank / custom</h2></div>
+        <p>Minimal project. Build your own and save it as an organization persona.</p>
+        <div class="seeds"><strong>Seeds</strong><br/>Tree: docs/ only<br/>Workers: generic<br/>Validate: none by default</div>
+        <div class="int">
+          <div class="int-label">Supported integrations</div>
+          <div class="chips">
+            <span class="chip muted">Any org-connected board</span>
+            <span class="chip">Jira</span>
+            <span class="chip warm">Monday.com</span>
+            <span class="chip alt">Linear</span>
+            <span class="chip muted">Asana</span>
+            <span class="chip ok">Trello</span>
+            <span class="chip muted">Azure Boards</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn">Create project from persona</button>
+      <a class="btn sec" href="00-projects.html">Cancel</a>
+      <span class="hint">Selected: <strong>Software development</strong> · suggested boards: Jira, Linear, Azure Boards</span>
+    </div>
+  </main>
+</div>
+</body>
+</html>

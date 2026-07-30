@@ -1,0 +1,21 @@
+flowchart TB
+  subgraph Catalog["Starter persona catalog"]
+    SD[Software development]
+    SP[Sales pipeline]
+    MP[Marketing pipeline]
+    CS[Customer support]
+    AN[Analysis and research]
+    DO[DevOps and platform]
+    PD[Product discovery]
+    CD[Content and docs]
+    BL[Blank / custom]
+  end
+
+  SD & SP & MP & CS & AN & DO & PD & CD & BL --> P[New project]
+
+  P --> DT[Document tree skeleton]
+  P --> GOAL[Default project goal prompt]
+  P --> WP[Worker profiles]
+  P --> BD[Board defaults]
+  P --> VAL[Validation / loop hooks]
+  P --> SEC[Suggested secrets]

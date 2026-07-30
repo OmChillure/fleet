@@ -1,0 +1,52 @@
+%% Sequence: initiation → plan → accept → orchestrate
+sequenceDiagram
+  autonumber
+  actor H as Human
+  participant UI as Web UI
+  participant API as Project API
+  participant INT as Integration hub
+  participant PS as Planning service
+  participant LLM as LLM
+  participant DB as Durable state
+  participant OR as Orchestrator
+  participant W as Worker
+  participant EXT as External board
+
+  H->>UI: Initiate work (integration / doc / ad-hoc)
+  UI->>API: POST WorkRun
+  API->>DB: CP1 IntentReceived
+  alt Integration run
+    API->>INT: Fetch issues (filter)
+    INT->>EXT: List/get issues
+    EXT-->>INT: Issue payloads
+    INT-->>API: Raw items
+  else Document / ad-hoc
+    API->>DB: Load docs / normalize body
+  end
+  API->>DB: CP2 SourcesResolved · CP3 Ingested
+  API->>PS: Enqueue PlanJob
+  API->>DB: CP4 PlanningQueued
+  PS->>DB: Read work_items + docs + goal
+  PS->>LLM: Decompose / prioritize / criteria
+  LLM-->>PS: Structured plan
+  PS->>DB: CP5 PlanDraft (WorkPlan vN)
+  PS-->>UI: Plan ready for review
+  alt Auto-accept policy
+    API->>DB: CP6 PlanAccepted
+  else Human gate
+    H->>UI: Approve / edit plan
+    UI->>API: Accept plan
+    API->>DB: CP6 PlanAccepted
+  end
+  Note over OR,DB: Orchestrator is logic-only from here
+  loop Every X seconds
+    OR->>DB: Reconcile tick
+    OR->>DB: CP8 Materialize cards if needed
+    OR->>W: Spawn / assign under capacity
+    W->>DB: Heartbeat · status · artifacts
+    OR->>DB: Stuck detect · kill · retry
+    OR->>EXT: Sync mapped statuses
+    OR-->>UI: Dashboard / HITL events
+  end
+  W-->>OR: Done success / fail / blocked
+  OR->>DB: CP10 RunTerminal when all done
