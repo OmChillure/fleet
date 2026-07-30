@@ -1,0 +1,25 @@
+{
+  "type": "analyze_repo",
+  "harness": "opencode",
+  "repo_url": "https://github.com/octocat/Hello-World.git",
+  "git_ref": "master",
+  "prompt": "Summarize top-level files. Do not run shell installs.",
+  "model": "lmstudio/google/gemma-4-e4b",
+  "timeout_sec": 300,
+  "auto_approve": false,
+  "permission_allow": [],
+  "project_setup": {
+    "strategy": "commands",
+    "timeout_sec": 60,
+    "commands": ["true"],
+    "smoke_commands": [],
+    "tools": {}
+  },
+  "provider": {
+    "id": "lmstudio",
+    "npm": "@ai-sdk/openai-compatible",
+    "base_url": "http://10.77.0.2:1234/v1",
+    "api_key": "lm-studio",
+    "models": { "google/gemma-4-e4b": { "name": "Gemma" } }
+  }
+}

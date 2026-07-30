@@ -1,21 +1,23 @@
-%% Three orchestration layers
+%% Three orchestration layers (+ harness vs workspace inside sandbox)
 flowchart TB
   subgraph L3["Layer 3 — Agent session control"]
     direction LR
     ORC[Orchestrator] <-->|prompts · ACP events · permissions · traces| DRV[Driver]
-    DRV <-->|ACP| AGENT[Coding agent]
+    DRV <-->|ACP| AGENT[Coding agent harness]
+    DRV -.->|exec build/test| WSENV[Workspace env]
   end
 
   subgraph L2["Layer 2 — Workspace provision"]
     direction LR
-    DRV2[Driver on first boot] --> INST[Install agent · tools · skills · plugins]
-    INST --> CLONE[Clone repo · restore caches]
+    DRV2[Driver] --> CLONE[Clone repo onto shared volume]
+    CLONE --> DEPS[Install project deps<br/>in workspace container]
+    DEPS --> HCFG[Harness config only<br/>stable agent image]
   end
 
   subgraph L1["Layer 1 — Sandbox lifecycle"]
     direction LR
     SM[Sandbox Manager] --> HOST[Hosting backend<br/>k8s / VM / podman]
-    HOST --> BOX[Sandbox compute]
+    HOST --> BOX[Sandbox unit<br/>harness + workspace containers]
   end
 
   L3 -.->|runs inside| L1

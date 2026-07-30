@@ -1,0 +1,43 @@
+{
+  "type": "implement_and_test",
+  "harness": "opencode",
+  "repo_url": "https://github.com/octocat/Hello-World.git",
+  "git_ref": "master",
+  "prompt": "You are in a prepared tree with allowlisted workspace tools only.\n\n1) Create docs/FLEET_SMOKE.md with one line: fleet-ok\n2) Run fleet-wsexec list_root\n3) Summarize tool output.\n\nUse only fleet-wsexec <tool-name>. No free shell.",
+  "model": "lmstudio/google/gemma-4-e4b",
+  "timeout_sec": 600,
+  "auto_approve": false,
+  "permission_allow": ["*"],
+  "project_setup": {
+    "strategy": "commands",
+    "timeout_sec": 120,
+    "commands": [
+      "mkdir -p docs",
+      "true"
+    ],
+    "smoke_commands": [
+      "test -f README"
+    ],
+    "tools": {
+      "list_root": {
+        "argv": ["ls", "-la"],
+        "description": "List work_dir root (workspace)"
+      },
+      "show_readme": {
+        "argv": ["head", "-n", "20", "README"],
+        "description": "Show first lines of README"
+      }
+    }
+  },
+  "provider": {
+    "id": "lmstudio",
+    "name": "LM Studio (local)",
+    "npm": "@ai-sdk/openai-compatible",
+    "base_url": "http://10.77.0.2:1234/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "api_key": "lm-studio",
+    "models": {
+      "google/gemma-4-e4b": { "name": "Gemma 4 E4B" }
+    }
+  }
+}

@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
-    "driver",
+    "crates/fleet-driver",
     "crates/fleet-db",
     "crates/fleet-auth",
     "crates/fleet-server",

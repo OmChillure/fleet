@@ -326,6 +326,12 @@ Workspace provisioning is the Driver's job *after* `sandbox.ready`.
 #### `driver.provision_workspace`
 May be implicit on Driver boot via config; explicit command allows re-provision.
 
+Prepares the **project environment** (clone, dependency install, optional
+smoke) on the sandbox **workspace** side (shared volume and/or workspace
+container), and harness-local agent config on the **stable harness** image.
+Does **not** install project libraries into harness image layers.
+See [`sandbox-workspace.md`](./sandbox-workspace.md).
+
 ```
 session_id, sandbox_id,
 repo { url, ref, depth?, auth_via (proxy|deploy_key_ref) },
@@ -333,8 +339,14 @@ agent { package, version, skills[], plugins[], tools[] },
 caches[] { name, uri, mount_path },
 env_public{} ,            # non-secret env only
 network_profile,
-success_criteria?
+success_criteria?,
+project_setup?            # future: strategy, workspace_image, commands[], script?
+                          # e.g. pip/npm/cargo install on workspace volume
 ```
+
+`workspace.provisioning` milestones should include not only `clone_*` /
+`agent_installed` but also project-env steps such as `deps_install_*` and
+optional `smoke_ok` when `project_setup` is used.
 
 #### `driver.start_agent_turn`
 
@@ -379,9 +391,9 @@ session_id?, reason, mode (graceful|immediate)
 | Type | When |
 | --- | --- |
 | `driver.heartbeat` | Liveness + resource stats |
-| `workspace.provisioning` | Progress milestones (clone started, agent installed, …) |
-| `workspace.ready` | Agent binary present, repo on disk, ready for turns |
-| `workspace.failed` | Provision error (clone denied, install failed, …) |
+| `workspace.provisioning` | Progress milestones (clone, project deps on workspace, harness config, …) |
+| `workspace.ready` | Prepared project env on volume + harness configured; ready for ACP turns |
+| `workspace.failed` | Provision error (clone denied, deps install failed, …) |
 | `agent.turn_started` | ACP session active for `turn_id` |
 | `agent.event` | Generic ACP/trace event (thought, message delta, status) |
 | `agent.tool_call_proposed` | Agent wants to invoke a tool |

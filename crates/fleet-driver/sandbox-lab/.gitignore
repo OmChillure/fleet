@@ -1,0 +1,8 @@
+.env
+config/job.local.json
+config/*.local.json
+*.pem
+id_*
+__pycache__/
+*.pyc
+.venv/

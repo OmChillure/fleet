@@ -1,0 +1,96 @@
+{
+  "type": "implement_and_test",
+  "harness": "pi",
+  "repo_url": "https://github.com/eugenepyvovarov/123-invoices.git",
+  "git_ref": "main",
+  "prompt": "You are in a prepared Django invoices repo (deps installed, migrate already run once).\n\nThis job is the Pi harness task (model field \u2014 different from the OpenCode marker job).\n\nDo ALL of these, in order. Keep changes minimal.\n\n1) Edit `invoices/models/animal.py` (Animal model):\n   - Add field: notes = models.CharField(max_length=200, blank=True, default=\"\")\n   - Do not change speak() behavior.\n\n2) Create unit test `tests/test_fleet_animal_notes.py` that:\n   - uses django.test.TestCase (DB needed)\n   - creates an Animal with name/sound and notes=\"fleet-note\"\n   - asserts animal.notes == \"fleet-note\"\n\n3) Run tools only via fleet-wsexec (see FLEET_TOOLS.md), in this order:\n   a) fleet-wsexec django_makemigrations\n   b) fleet-wsexec django_migrate\n   c) fleet-wsexec django_check\n   d) fleet-wsexec django_test_fleet   (required \u2014 must pass)\n   e) fleet-wsexec django_test         (full suite \u2014 try once; timeout/fail OK to report)\n\n4) Final summary: report pass/fail/timeout for each tool and that the field + test exist.\n\nRules:\n- You may ONLY edit under `invoices/` and `tests/` (project tree). Do not create app/fleet_marker.py.\n- Use ONLY fleet-wsexec <tool-name>. Do NOT pip install.\n- Do NOT skip django_test_fleet.\n- If makemigrations/migrate/check/test_fleet fails, fix only Animal.notes + your test and re-run.\n",
+  "model": "lmstudio/google/gemma-4-e4b",
+  "timeout_sec": 1200,
+  "auto_approve": false,
+  "permission_allow": [
+    "invoices/",
+    "tests/",
+    "fleet-wsexec",
+    "bash",
+    "read",
+    "makemigrations",
+    "migrate"
+  ],
+  "project_setup": {
+    "strategy": "commands",
+    "timeout_sec": 900,
+    "commands": [
+      "cp -n env.example .env || true",
+      "mkdir -p db media docs tests",
+      "python -m pip install -r requirements.txt",
+      "python manage.py migrate --noinput"
+    ],
+    "smoke_commands": [
+      "python manage.py check"
+    ],
+    "tools": {
+      "django_check": {
+        "argv": [
+          "python",
+          "manage.py",
+          "check"
+        ],
+        "description": "Django system check"
+      },
+      "django_makemigrations": {
+        "argv": [
+          "python",
+          "manage.py",
+          "makemigrations",
+          "invoices",
+          "--name",
+          "fleet_animal_notes"
+        ],
+        "description": "Create migration for Animal.notes field"
+      },
+      "django_migrate": {
+        "argv": [
+          "python",
+          "manage.py",
+          "migrate",
+          "--noinput"
+        ],
+        "description": "Apply DB migrations"
+      },
+      "django_test_fleet": {
+        "argv": [
+          "python",
+          "manage.py",
+          "test",
+          "tests.test_fleet_animal_notes",
+          "--verbosity",
+          "2"
+        ],
+        "description": "Run only the Animal.notes fleet unit test (required)"
+      },
+      "django_test": {
+        "argv": [
+          "python",
+          "manage.py",
+          "test",
+          "--verbosity",
+          "1"
+        ],
+        "description": "Full Django test suite (optional stretch; timeout/fail OK)"
+      }
+    }
+  },
+  "provider": {
+    "id": "lmstudio",
+    "name": "LM Studio (local)",
+    "npm": "@ai-sdk/openai-compatible",
+    "base_url": "http://10.77.0.2:1234/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "api_key": "lm-studio",
+    "models": {
+      "google/gemma-4-e4b": {
+        "name": "Gemma 4 E4B"
+      }
+    }
+  }
+}

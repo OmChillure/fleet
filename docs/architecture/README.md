@@ -21,9 +21,13 @@ Related component folders (stubs for deeper specs):
 | Web UI | [`docs/components/ui/`](../components/ui/) | Browser app (Dioxus): landing, auth, workspace-scoped shell |
 | Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
 
-**Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
-(auth + workspaces) over `fleet-db` (Postgres). UI on `:3030` talks to the API
-with cookie credentials. Orchestrator / sandboxes are design-only.
+**Implemented today:**
+
+| Surface | Status |
+| --- | --- |
+| HTTP API + UI | `fleet-server` `:8080` (`fleet-auth` + workspaces over `fleet-db`); UI `:3030` (cookie credentials) |
+| **Driver lab** | [`crates/fleet-driver`](../../crates/fleet-driver/) — per-task sandbox (compose + volume + workspace + harness), named tools (`fleet-wsexec`), OpenCode + Pi, path-scoped ACP permissions; see [`sandbox-workspace.md`](./sandbox-workspace.md) |
+| Orchestrator / Sandbox Manager | Design-only (lab scripts stand in for SM create/destroy) |
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 
@@ -31,6 +35,7 @@ Diagram sources live in [`diagrams/`](./diagrams/).
 | --- | --- |
 | [`events-overview.md`](./events-overview.md) | Typical events outline (lifecycle map, domains, MVP set) |
 | [`events.md`](./events.md) | Field-level catalogue + **JSON serialization** recommendation |
+| [`sandbox-workspace.md`](./sandbox-workspace.md) | **Harness vs workspace**, per-task isolation, named tools, OpenCode/Pi invoices lab |
 | [`crates/agent-fleet-contracts`](../../crates/agent-fleet-contracts/) | Rust structs (`serde`) implementing the catalogue |
 | [`transport-zenoh.md`](./transport-zenoh.md) | Zenoh as live control-plane transport (evaluation + key-space) |
 
@@ -41,23 +46,29 @@ Diagram sources live in [`diagrams/`](./diagrams/).
 There are three distinct jobs that are easy to conflate:
 
 1. **Spin up a sandbox** — allocate compute (k8s pod, VM, container, …) with
-   the right resource limits, network policy, and isolation.
-2. **Provision the workspace** — install the coding agent, tools, skills,
-   plugins; clone the git repo; restore artifact caches; apply network
-   egress rules. This is *inside* the sandbox, after compute exists.
+   the right resource limits, network policy, and isolation. A sandbox may
+   contain **more than one container** (stable harness + project workspace).
+2. **Provision the workspace** — prepare the **project environment** on the
+   workspace side of the sandbox: clone the git repo; install **project**
+   dependencies (e.g. `pip` / `npm` / `cargo`); restore artifact caches;
+   optional smoke; install/configure the coding agent, skills, and plugins on
+   the **harness** side without mutating harness image layers; apply network
+   egress rules. See [`sandbox-workspace.md`](./sandbox-workspace.md).
 3. **Drive the coding agent** — send prompts, manage ACP sessions, evaluate
-   tool calls / permissions, store traces, and (for interactive work) forward
+   tool calls / permissions (including routing build/test exec into the
+   workspace container), store traces, and (for interactive work) forward
    model output to Slack / the web UI / etc.
 
 These have different failure modes, different owners, and different lifetimes.
 Keeping them as separate actors (Orchestrator, Sandbox Manager, Driver) lets
 each layer recover independently and keeps secrets out of the sandbox
 (MCP / external API calls are proxied by the control plane — see product
-vision).
+vision). **Harness images stay stable; project env variance stays in the
+workspace volume/container.**
 
 ```
   Layer 1  Sandbox lifecycle     →  Sandbox Manager (+ hosting backend)
-  Layer 2  Workspace provision   →  Driver (first boot inside sandbox)
+  Layer 2  Workspace provision   →  Driver (project env + harness config)
   Layer 3  Agent session control →  Driver ↔ Orchestrator (ACP + events)
 ```
 
@@ -90,10 +101,13 @@ flowchart TB
     POD[Podman / local]
   end
 
-  subgraph Sandbox["Sandbox instance"]
+  subgraph Sandbox["Sandbox instance (one per task)"]
     DRV[Driver]
     WS[Workspace<br/>repo · tools · caches]
-    AGENT[Coding agent<br/>ACP server]
+    VOL[(volume /workspace)]
+    AGENT[Coding agent<br/>opencode / pi / … ACP]
+    WS --- VOL
+    AGENT --- VOL
   end
 
   Jira & GH & Slack & UI --> INT
@@ -146,14 +160,26 @@ flowchart TB
 
 #### Driver (runs inside the sandbox)
 
-- **Provisions** the workspace on first boot: install agent binary, tools,
-  skills, plugins; clone the target repo; restore caches; write local
-  config the agent expects.
+- **Provisions** the workspace after sandbox create:
+  - **Workspace / project env** (separate container + **sandbox-local volume**):
+    clone repo, install project libraries, migrations/bootstrap, optional
+    smoke tests — **not** into harness image layers.
+  - **Harness side**: agent config (OpenCode providers, Pi `models.json`, …)
+    on the **stable** harness image; no project `pip`/`npm` into that image.
 - Launches and controls the coding agent through **ACP** (Agent Client
   Protocol): prompts, cancellations, session state, tool-call mediation.
-- Streams agent events upward to the Orchestrator over the control channel.
-- Does **not** hold long-lived secrets; external credentials are injected
-  only on proxied requests by the Orchestrator.
+  Project commands during turns go through **named allowlisted tools**
+  (`fleet-wsexec <name>` → fixed argv in the workspace container).
+- Enforces **path-scoped ACP permissions** (folder prefixes gate writes) and
+  default-deny when `auto_approve` is false.
+- Streams agent events / results upward (lab: Redis result key; target: bus
+  to Orchestrator). Does **not** hold long-lived secrets; external credentials
+  are injected only on proxied requests by the Orchestrator.
+
+**Lab today** (`crates/fleet-driver`): one Compose project + volume per task;
+harnesses **opencode** and **pi** (plus images for codex/grok); dual 123-invoices
+jobs. Details: [`sandbox-workspace.md`](./sandbox-workspace.md),
+[`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md).
 
 #### Integrations
 
@@ -297,12 +323,13 @@ sequenceDiagram
   SM-->>O: SandboxReady(sandbox_id, endpoint)
   O->>DB: Session(AwaitingSandbox → Provisioning)
 
-  D->>D: provision workspace (agent, tools, clone, caches)
+  Note over D: provision: workspace env (clone, deps) + harness config
+  D->>D: provision workspace (shared volume; project deps on workspace side)
   D-->>O: WorkspaceReady
   O->>DB: Session(Ready)
 
   O->>D: StartAgentTurn(prompt, session_id)
-  D->>A: ACP session/prompt
+  D->>A: ACP session/prompt (cwd on shared /workspace)
   loop Agent loop
     A-->>D: ACP events (thoughts, tool calls, messages)
     D-->>O: AgentEvent / ToolCallProposed
@@ -311,6 +338,8 @@ sequenceDiagram
       O-->>Ext: PermissionRequired (HITL)
       Ext->>O: PermissionDecision
       O->>D: PermissionDecision
+    else project build/test
+      D->>D: exec tool in workspace container (not harness image)
     else MCP / external API
       O->>O: proxy with secrets
       O->>D: ToolCallResult
