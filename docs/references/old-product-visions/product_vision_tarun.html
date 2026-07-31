@@ -353,7 +353,7 @@
       <div class="meta">
         <span class="pill">Product vision + artifacts</span>
         <span class="pill">Author: Tarun</span>
-        <span class="pill">Diagrams · prototypes · elaboration</span>
+        <span class="pill">Organizations · projects · orchestrators</span>
       </div>
     </div>
   </header>
@@ -368,6 +368,9 @@
       <strong>Contents</strong>
       <ol>
         <li><a href="#vision">Vision &amp; problem</a></li>
+        <li><a href="#organizations">Organizations &amp; projects</a></li>
+        <li><a href="#personas">Starter personas</a></li>
+        <li><a href="#integrations">Org board integrations</a></li>
         <li><a href="#architecture">Core architecture</a></li>
         <li><a href="#flows">Key flows (Mermaid)</a></li>
         <li><a href="#features">Features</a></li>
@@ -411,85 +414,464 @@
       </p>
     </section>
 
+
+    <!-- 1b -->
+    <section class="card" id="organizations">
+      <h2><span class="num">1b</span> Organizations &amp; projects</h2>
+      <p class="lead">
+        Work is organized as <strong>organizations → projects → document trees + project orchestrators</strong>.
+        Isolation and management scale with the organization, not a single global fleet.
+      </p>
+
+      <h3>Hierarchy</h3>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Layer</th>
+            <th>What it is</th>
+            <th>Owns</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Platform</strong></td>
+            <td>Agent Fleet deployment</td>
+            <td>Auth, organization registry, shared infrastructure</td>
+          </tr>
+          <tr>
+            <td><strong>Organization</strong></td>
+            <td>Company, team, or workspace boundary</td>
+            <td>Members &amp; roles, policies &amp; quotas, projects, optional defaults, and <strong>board integrations</strong> (Jira, Monday.com, …)</td>
+          </tr>
+          <tr>
+            <td><strong>Project</strong></td>
+            <td>Unit of delivery work inside an organization</td>
+            <td>
+              <strong>Its own orchestrator (operator)</strong>, configuration (max agents, secrets, project goal),
+              task board, worker fleet, and a <strong>document tree</strong>
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Documents</strong></td>
+            <td>Specs and shared context under a project path</td>
+            <td>Folders/files (e.g. <code>specs/</code>, <code>notes/</code>), links to target repos/systems, decomposition into board cards</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  PLAT[Agent Fleet platform]
+  PLAT --> T1[Organization A · Acme Corp]
+  PLAT --> T2[Organization B · Contoso]
+  T1 --> P1[Project · onboarding-redesign]
+  T1 --> P2[Project · growth-emails]
+  T1 --> P3[Project · crm-pipeline]
+  T2 --> P4[Project · …]
+
+  subgraph Scope["Each project owns"]
+    ORCH[Project orchestrator]
+    DOCS[Document tree]
+    BOARD[Task board]
+    CFG[Config · capacity · secrets · goal]
+    FLEET[Worker fleet]
+  end
+
+  P1 --> ORCH & DOCS & BOARD & CFG & FLEET
+  ORCH --> FLEET
+  DOCS --> BOARD
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/organization-project-hierarchy.mmd</code></p>
+      </div>
+
+      <h3>Organization</h3>
+      <ul>
+        <li>Hard isolation boundary for people, billing/quotas (if multi-organization SaaS), and project membership.</li>
+        <li>An organization contains <strong>many projects</strong>; users switch organization context in the UI.</li>
+        <li>May define organization-level policies (e.g. max projects, default max agents, allowed worker profiles) without running agents itself.</li>
+        <li>Hosts <strong>external board integrations</strong> (credentials/OAuth once): Jira, Monday.com, Linear, Asana, Trello, Azure Boards, etc.</li>
+      </ul>
+
+      <h3>Project</h3>
+      <ul>
+        <li>May be created from a <strong>starter persona</strong> (software, sales, marketing, support, analysis, DevOps, product discovery, content/docs, or blank).</li>
+        <li>The primary place operators <strong>manage a fleet</strong>: dashboard, board, config, live stream.</li>
+        <li>Has a dedicated <strong>orchestrator / operator service instance</strong> (logical isolation at minimum; physical isolation optional per deploy).</li>
+        <li>Holds a <strong>document tree</strong>—not a flat global doc dump. Specs and notes live under the project path and decompose into that project’s board only.</li>
+        <li>Project goal (system prompt), secrets, and capacity apply to <em>this</em> project’s workers, not sibling projects.</li>
+        <li>Worker fleets do not cross projects; shared learning happens via explicit docs or organization libraries if added later.</li>
+        <li>May <strong>map its fleet board</strong> to an external board/project already connected on the organization (e.g. Jira project <code>WEB</code>, Monday board “Q3 Campaigns”).</li>
+      </ul>
+
+      <h3>Document tree (per project)</h3>
+      <ul>
+        <li>Hierarchical storage: folders for specs, runbooks, decisions, agent-shared Markdown workspaces.</li>
+        <li>Each document can link to a target repository or external system where work is committed/executed.</li>
+        <li>“Decompose → board” runs in the <strong>project orchestrator</strong>, producing cards only on that project’s board.</li>
+      </ul>
+
+      <h3>Per-project orchestration &amp; management</h3>
+      <ul>
+        <li><strong>Lifecycle:</strong> spawn/stop workers for this project only, within project max-agents.</li>
+        <li><strong>Configuration manager:</strong> project goal, env/secrets, loop budgets, worker profiles.</li>
+        <li><strong>Monitoring:</strong> project dashboard; organization-level rollup can show health across projects without mixing fleets.</li>
+        <li><strong>HITL:</strong> blockers and artifacts route to project members / reviewers.</li>
+      </ul>
+
+      <p class="note">
+        Mental model: <em>organization = who you work with</em> (and where integrations live);
+        <em>project = what fleet is working on</em> (and which external board it maps to).
+        Switching projects switches orchestrator context, document tree, board, and worker set.
+      </p>
+    </section>
+
+
+    <!-- 1c -->
+    <section class="card" id="personas">
+      <h2><span class="num">1c</span> Starter personas</h2>
+      <p class="lead">
+        A catalog of <strong>sample starter personas</strong> (eight domain templates plus blank) helps teams spin up a project without designing
+        structure from scratch. A persona is a reusable template that seeds orchestrator defaults
+        for a domain—not a separate product.
+      </p>
+
+      <h3>What a persona seeds</h3>
+      <ul>
+        <li><strong>Document tree skeleton</strong> (folders and starter specs)</li>
+        <li><strong>Default project goal</strong> prompt tone and constraints</li>
+        <li><strong>Worker profiles</strong> (e.g. coding vs copywriter vs CRM sync)</li>
+        <li><strong>Board / task conventions</strong> and suggested card types</li>
+        <li><strong>Validation &amp; loop hooks</strong> (tests/PR, brand checklist, CRM schema, etc.)</li>
+        <li><strong>Suggested secrets</strong> checklist (tokens to attach, not values)</li>
+        <li><strong>Supported board integrations</strong> recommended for the domain (org must connect provider first; project maps target)</li>
+      </ul>
+
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  subgraph Catalog["Starter persona catalog"]
+    SD[Software development]
+    SP[Sales pipeline]
+    MP[Marketing pipeline]
+    CS[Customer support]
+    AN[Analysis and research]
+    DO[DevOps and platform]
+    PD[Product discovery]
+    CD[Content and docs]
+    BL[Blank / custom]
+  end
+  SD & SP & MP & CS & AN & DO & PD & CD & BL --> P[New project]
+  P --> DT[Document tree]
+  P --> GOAL[Project goal prompt]
+  P --> WP[Worker profiles]
+  P --> BD[Board defaults]
+  P --> VAL[Validation hooks]
+  P --> SEC[Suggested secrets]
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/starter-personas.mmd</code></p>
+      </div>
+
+      <h3>Sample catalog (8 domains + blank)</h3>
+      <p style="font-size:0.92rem;color:var(--muted);margin-top:-0.25rem">
+        <strong>Supported integrations</strong> on each persona are recommended org board providers.
+        Connecting happens at organization level; the project maps a specific board/project after create.
+      </p>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Persona</th>
+            <th>Typical goal</th>
+            <th>Document tree</th>
+            <th>Workers &amp; validation</th>
+            <th>Supported integrations</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td><strong>Software development</strong></td>
+            <td>Implement, test, open draft PRs</td>
+            <td><code>specs/</code> <code>runbooks/</code> <code>adr/</code></td>
+            <td>coding · review · e2e · unit/e2e + draft PR</td>
+            <td>Jira · Linear · Azure Boards</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><strong>Sales pipeline</strong></td>
+            <td>Advance opportunities, keep CRM clean</td>
+            <td><code>pipeline/</code> <code>playbooks/</code> <code>accounts/</code></td>
+            <td>research · outreach · CRM sync · stage rules</td>
+            <td>Monday.com · Jira · Asana</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><strong>Marketing pipeline</strong></td>
+            <td>Campaigns, drips, brand-safe content</td>
+            <td><code>campaigns/</code> <code>brand/</code> <code>calendar/</code></td>
+            <td>copy · design-assist · brand checklist + screenshots</td>
+            <td>Monday.com · Asana · Trello</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td><strong>Customer support</strong></td>
+            <td>Triage tickets, draft replies, update knowledge</td>
+            <td><code>tickets/</code> <code>macros/</code> <code>knowledge/</code></td>
+            <td>triage · reply · escalate · tone policy + PII scrub</td>
+            <td>Jira · Linear · Asana</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td><strong>Analysis &amp; research</strong></td>
+            <td>Answer questions with cited memos</td>
+            <td><code>questions/</code> <code>datasets/</code> <code>memos/</code></td>
+            <td>analyst · viz · reproducibility checklist</td>
+            <td>Jira · Monday.com · Asana</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td><strong>DevOps &amp; platform</strong></td>
+            <td>Safe infra change, deploy, verify health</td>
+            <td><code>runbooks/</code> <code>changes/</code> <code>postmortems/</code></td>
+            <td>infra · deploy · verify · plan/apply + health checks</td>
+            <td>Jira · Azure Boards · Linear</td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td><strong>Product discovery</strong></td>
+            <td>Synthesize research into opportunities &amp; experiments</td>
+            <td><code>interviews/</code> <code>opportunities/</code> <code>experiments/</code></td>
+            <td>synthesizer · writer · evidence links + scoring rubric</td>
+            <td>Jira · Linear · Monday.com</td>
+          </tr>
+          <tr>
+            <td>8</td>
+            <td><strong>Content &amp; documentation</strong></td>
+            <td>Ship docs, release notes, help-center articles</td>
+            <td><code>drafts/</code> <code>published/</code> <code>style/</code></td>
+            <td>writer · editor · publisher · style guide + link checks</td>
+            <td>Asana · Trello · Monday.com</td>
+          </tr>
+          <tr>
+            <td>—</td>
+            <td><strong>Blank / custom</strong></td>
+            <td>User-defined</td>
+            <td><code>docs/</code></td>
+            <td>generic · no default validation; org can save as new persona</td>
+            <td>Any org-connected board</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>How it fits the model</h3>
+      <ul>
+        <li>Personas live in a <strong>platform or organization catalog</strong>; creating a project applies one persona as the starting point.</li>
+        <li>After creation, the project remains free to override goal, tree, workers, and hooks—persona is a bootstrap, not a cage.</li>
+        <li>Organizations can <strong>clone and customize</strong> sample personas into private org personas (e.g. “Acme enterprise sales”).</li>
+        <li>Same operator/worker architecture for every persona; only defaults, domain hooks, and <strong>suggested board integrations</strong> differ.</li>
+        <li>Persona integration chips are recommendations; the org must already (or next) connect that provider under Integrations.</li>
+      </ul>
+
+      <p class="note">
+        Starter personas make the “not just coding” vision concrete: sales, marketing, support,
+        analysis, DevOps, product discovery, and documentation sit beside software development as first-class templates.
+      </p>
+    </section>
+
+
+    <!-- 1d -->
+    <section class="card" id="integrations">
+      <h2><span class="num">1d</span> Organization board integrations</h2>
+      <p class="lead">
+        Teams already live in <strong>Jira</strong>, <strong>Monday.com</strong>, and similar tools.
+        Agent Fleet connects those boards at the <strong>organization</strong> level, then lets each
+        <strong>project</strong> map its internal task board to an external project/board.
+      </p>
+
+      <h3>Why organization level?</h3>
+      <ul>
+        <li><strong>Credentials once:</strong> OAuth apps, API tokens, site URLs, and webhooks belong to the org—not copied into every project.</li>
+        <li><strong>Shared providers, many mappings:</strong> one Jira site can back several fleet projects (<code>WEB</code>, <code>SALES</code>, …).</li>
+        <li><strong>Governance:</strong> org admins control which providers are allowed; projects only pick targets they can access.</li>
+        <li><strong>Security:</strong> tokens stay in the encrypted org vault; workers receive short-lived capability via the orchestrator.</li>
+      </ul>
+
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  subgraph Org["Organization"]
+    INT[Integration hub]
+    P1[Project A]
+    P2[Project B]
+  end
+  subgraph External["External boards"]
+    JIRA[Jira]
+    MON[Monday.com]
+    LIN[Linear]
+    ASA[Asana]
+    TRE[Trello]
+    AZD[Azure Boards]
+  end
+  INT --> JIRA & MON & LIN & ASA & TRE & AZD
+  P1 & P2 --> INT
+  P1 <-.-> JIRA
+  P2 <-.-> MON
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/org-board-integrations.mmd</code></p>
+      </div>
+
+      <h3>Supported-style providers (examples)</h3>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Org connection</th>
+            <th>Project mapping target</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Jira</strong></td>
+            <td>Cloud/Server site + OAuth / token</td>
+            <td>Jira project + board + optional epic/parent</td>
+          </tr>
+          <tr>
+            <td><strong>Monday.com</strong></td>
+            <td>Workspace + API token</td>
+            <td>Board + groups as columns</td>
+          </tr>
+          <tr>
+            <td><strong>Linear</strong></td>
+            <td>Workspace OAuth</td>
+            <td>Team + project / cycle</td>
+          </tr>
+          <tr>
+            <td><strong>Asana</strong></td>
+            <td>Workspace OAuth</td>
+            <td>Project + sections</td>
+          </tr>
+          <tr>
+            <td><strong>Trello</strong></td>
+            <td>Workspace + API key/token</td>
+            <td>Board + lists</td>
+          </tr>
+          <tr>
+            <td><strong>Azure Boards</strong></td>
+            <td>Org + PAT</td>
+            <td>Team project + board</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Sync model</h3>
+      <ul>
+        <li><strong>Fleet-native board remains primary</strong> for agents (claim, loops, HITL). External boards stay the company system of record when mapped.</li>
+        <li><strong>Modes:</strong> external → fleet (import/pull), fleet → external (publish), or bidirectional with a conflict policy (e.g. external wins on status, fleet wins on agent fields).</li>
+        <li><strong>Status mapping:</strong> per project (In dev / WIP / Blocked / Done succeeded|failed ↔ provider columns/states).</li>
+        <li><strong>Identity:</strong> fleet card stores external key (<code>WEB-184</code>, Monday item id); agents can comment progress and attach screenshots to the external issue.</li>
+        <li><strong>Webhooks + polling:</strong> org integration hub receives provider webhooks and fans out to mapped project orchestrators.</li>
+      </ul>
+
+      <h3>What does not live on the project alone</h3>
+      <ul>
+        <li>Re-entering Jira/Monday credentials per project (discouraged / blocked).</li>
+        <li>Cross-organization sharing of integration credentials.</li>
+      </ul>
+
+      <p class="note">
+        Pattern: <em>organization connects providers</em>; <em>project maps a board</em>;
+        <em>orchestrator syncs cards</em> so humans can keep working in Jira or Monday while agents run in Fleet.
+      </p>
+    </section>
+
     <!-- 2 -->
     <section class="card" id="architecture">
       <h2><span class="num">2</span> Core architecture</h2>
-      <p>Two primary services, plus shared state and a web (primary) / CLI·TUI (secondary) surface.</p>
+      <p>
+        Platform hosts many organizations; each organization hosts many projects. Inside a project, two primary
+        roles apply: the <strong>project orchestrator (operator)</strong> and <strong>workers</strong>,
+        plus project-scoped state. Web is primary; CLI/TUI secondary.
+      </p>
 
       <div class="components">
         <div class="component">
-          <h3>Operator service</h3>
+          <h3>Project orchestrator</h3>
           <p style="margin:0 0 0.5rem;font-size:0.92rem;color:var(--muted)">
-            Orchestration · management · control plane
+            Per-project operator · management · control plane
           </p>
           <ul>
-            <li><strong>Lifecycle</strong> of worker processes: prompts, environment, start, stop, delete.</li>
-            <li><strong>Capacity-aware spawning</strong> from the task queue up to <em>max agents</em>.</li>
-            <li><strong>Configuration manager</strong>: max agents, env/secrets, common goal.</li>
-            <li><strong>Monitoring aggregation</strong>: status, logs/events, artifacts for the UI.</li>
-            <li>Likely backed by <strong>tmux sessions</strong> (or equivalent) for attachable isolation.</li>
+            <li><strong>Lifecycle</strong> of this project’s worker processes only.</li>
+            <li><strong>Capacity-aware spawning</strong> from the project board up to project max agents.</li>
+            <li><strong>Configuration manager</strong>: project goal, env/secrets, loop budgets.</li>
+            <li><strong>Monitoring</strong> for the project fleet; feeds organization rollups optionally.</li>
+            <li>Backed by <strong>tmux</strong> (or equivalent) sessions namespaced to the project.</li>
           </ul>
         </div>
         <div class="component">
           <h3>Worker service</h3>
           <p style="margin:0 0 0.5rem;font-size:0.92rem;color:var(--muted)">
-            Execution plane · one agent unit of work
+            Execution plane · project-scoped agent unit
           </p>
           <ul>
-            <li>Spawn, <strong>claim a task</strong>, work it through plan → act → validate loops.</li>
-            <li>Report to operator: <strong>success</strong>, <strong>failure</strong>, or <strong>needs input</strong>.</li>
-            <li>Advance the <strong>common goal</strong> independently when local tasks allow.</li>
-            <li><strong>Screenshot / PDF</strong> artifacts for human verification.</li>
-            <li>Stream progress over <strong>WebSockets</strong> to the control plane.</li>
+            <li>Spawned by the <strong>project orchestrator</strong>; claims tasks from that project’s board.</li>
+            <li>Report success / failure / needs input to the project orchestrator.</li>
+            <li>Advance the <strong>project goal</strong>; read/write the project document tree.</li>
+            <li><strong>Screenshot / PDF</strong> artifacts for project HITL reviewers.</li>
+            <li>Stream progress over <strong>WebSockets</strong> on the project channel.</li>
           </ul>
         </div>
       </div>
 
-      <h3>System context</h3>
+      <h3>System context (platform → organization → project)</h3>
       <div class="diagram">
         <pre class="mermaid">
 flowchart TB
-  subgraph Humans["Humans"]
-    OP[Operator / owner]
-    HITL[HITL reviewer]
+  subgraph Platform["Platform"]
+    AUTH[Auth / membership]
+    ORGreg[Organization registry]
   end
 
-  subgraph ControlPlane["Operator service"]
-    API[API + WebSocket gateway]
-    CFG[Configuration manager]
-    SCH[Scheduler / capacity]
-    LIFE[Lifecycle manager]
-    MON[Monitoring aggregator]
+  subgraph Org["Organization"]
+    MEM[Members & roles]
+    TPOL[Policies · quotas]
+    PROJS[Projects]
   end
 
-  subgraph DataPlane["Shared state"]
-    BOARD[(Task board)]
-    DOCS[(Document repository)]
-    MD[Markdown workspaces]
-    SECRETS[(Encrypted secrets)]
-  end
-
-  subgraph Workers["Worker fleet"]
-    W1[Worker 1]
-    W2[Worker 2]
-    WN[Worker N]
+  subgraph Project["Project"]
+    subgraph ControlPlane["Project orchestrator"]
+      API[API + WebSocket]
+      CFG[Config manager]
+      SCH[Scheduler]
+      LIFE[Lifecycle]
+      MON[Monitoring]
+    end
+    subgraph DataPlane["Project data"]
+      DOCTREE[(Document tree)]
+      BOARD[(Task board)]
+      MD[Markdown workspaces]
+      SECRETS[(Encrypted secrets)]
+    end
+    subgraph Workers["Project fleet"]
+      W1[Worker 1]
+      W2[Worker 2]
+      WN[Worker N]
+    end
   end
 
   subgraph Targets["Targets"]
     REPO[Git repositories]
-    EXT[Email / CRM / analysis]
+    EXT[External systems]
   end
 
-  OP --> API
-  HITL --> API
+  AUTH --> ORGreg --> Org
+  MEM --> PROJS --> Project
   API --> CFG & SCH & LIFE & MON
-  SCH --> LIFE
-  LIFE --> W1 & W2 & WN
-  W1 & W2 & WN <--> BOARD & DOCS & MD
+  SCH --> LIFE --> W1 & W2 & WN
+  W1 & W2 & WN <--> DOCTREE & BOARD & MD
   CFG --> SECRETS
   W1 & W2 & WN --> REPO & EXT
-  W1 & W2 & WN -->|status · artifacts| MON
-  MON --> API
+  W1 & W2 & WN -->|artifacts| MON
         </pre>
         <p class="caption">Source: <code>artifacts/diagrams/system-architecture.mmd</code></p>
       </div>
@@ -506,34 +888,37 @@ sequenceDiagram
   autonumber
   participant H as Human
   participant UI as Web UI
-  participant Op as Operator
+  participant Plat as Platform
+  participant Orch as Project orchestrator
   participant W as Worker
-  participant S as Shared state
+  participant S as Project state
   participant T as Target system
 
-  H->>UI: Set goal, max agents, secrets
-  UI->>Op: Save configuration
-  H->>UI: Publish task specification
-  UI->>Op: Ingest document + link target
-  Op->>Op: Decompose into board cards
-  Op->>W: Spawn worker (tmux)
-  W->>S: Claim task (In progress)
+  H->>UI: Select organization + project
+  UI->>Plat: Authorize membership
+  H->>UI: Set project goal, capacity, secrets
+  UI->>Orch: Save project configuration
+  H->>UI: Add document under project tree
+  UI->>Orch: Ingest document + link target
+  Orch->>Orch: Decompose into project board cards
+  Orch->>W: Spawn worker in project fleet
+  W->>S: Claim task
   loop Until done or blocked
     W->>T: Act
     W->>W: Validate
-    W->>Op: Stream progress
+    W->>Orch: Stream progress
   end
   alt Success
     W->>S: Done succeeded
-    W->>Op: Artifacts + screenshot
+    W->>Orch: Artifacts + screenshot
   else Needs input
     W->>S: Blocked
-    Op->>UI: Notify reviewer
+    Orch->>UI: Notify project reviewer
     H->>UI: Provide input
   else Failure
     W->>S: Done failed
   end
-  Op->>UI: Dashboard update
+  Orch->>UI: Project dashboard update
         </pre>
         <p class="caption">Source: <code>artifacts/diagrams/worker-operator-sequence.mmd</code></p>
       </div>
@@ -565,28 +950,42 @@ stateDiagram-v2
           <div class="icon">UI</div>
           <div>
             <h4>Web-based control UI</h4>
-            <p>Primary interface: agent lifecycle, configuration, board, documents, and live monitoring.</p>
+            <p>Organization/project switcher; per-project lifecycle, configuration, board, document tree, and live monitoring.</p>
           </div>
         </div>
         <div class="feature">
           <div class="icon">KB</div>
           <div>
             <h4>Trello-style task board</h4>
-            <p>Organize subtasks and move them across In dev → Work in progress → Done (succeeded / failed), with a blocked/needs-input path.</p>
+            <p>Organize subtasks and move them across In dev → Work in progress → Done (succeeded / failed), with a blocked/needs-input path. Optionally sync to org-connected external boards.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">⇄</div>
+          <div>
+            <h4>External board integrations</h4>
+            <p>Organization-level Jira, Monday.com, Linear, Asana, Trello, Azure Boards—projects map fleet cards to the company system of record.</p>
           </div>
         </div>
         <div class="feature">
           <div class="icon">Doc</div>
           <div>
-            <h4>Central document repository</h4>
-            <p>Write specs; an agent decomposes them into parallelizable components. Link each spec to a target repository or system of record.</p>
+            <h4>Per-project document tree</h4>
+            <p>Hierarchical specs and notes under each project; decompose into that project’s board; link to target repos/systems.</p>
           </div>
         </div>
         <div class="feature">
           <div class="icon">∞</div>
           <div>
             <h4>Domain-agnostic fleet</h4>
-            <p>Coding, marketing email, sales pipelines, analysis—same operator/worker model, different worker profiles.</p>
+            <p>Same operator/worker model across domains—bootstrapped by eight sample personas (software, sales, marketing, support, analysis, DevOps, product discovery, content) plus blank.</p>
+          </div>
+        </div>
+        <div class="feature">
+          <div class="icon">P</div>
+          <div>
+            <h4>Starter personas</h4>
+            <p>Eight sample domain templates (+ blank) that seed trees, goals, workers, validation, and recommended board integrations.</p>
           </div>
         </div>
         <div class="feature">
@@ -599,8 +998,8 @@ stateDiagram-v2
         <div class="feature">
           <div class="icon">◉</div>
           <div>
-            <h4>Monitoring dashboard</h4>
-            <p>High-level view of all agents: current task, progress, whether they are on track, and live event stream.</p>
+            <h4>Project monitoring dashboard</h4>
+            <p>High-level view of this project’s agents; optional organization rollup across projects without mixing fleets.</p>
           </div>
         </div>
         <div class="feature">
@@ -662,24 +1061,34 @@ flowchart LR
         </thead>
         <tbody>
           <tr>
+            <td>Organization / project membership</td>
+            <td>Platform auth + organization registry</td>
+            <td>Who can see and operate which projects</td>
+          </tr>
+          <tr>
+            <td>External board links</td>
+            <td>Org integration hub + per-project mapping</td>
+            <td>Jira/Monday/… credentials at org; board/project target per fleet project</td>
+          </tr>
+          <tr>
             <td>Shared agent context</td>
-            <td>Markdown workspaces + optional MongoDB</td>
-            <td>Rich, human-readable collaboration between agents</td>
+            <td>Project Markdown workspaces + optional MongoDB</td>
+            <td>Collaboration between agents <em>within</em> a project</td>
           </tr>
           <tr>
             <td>Task queue / board</td>
-            <td>Board store (DB-backed)</td>
-            <td>Source of truth for claim / status transitions</td>
+            <td>Per-project board store</td>
+            <td>Claim / status transitions; not shared across projects</td>
           </tr>
           <tr>
             <td>Specifications</td>
-            <td>Document repository</td>
-            <td>Linked to target repo or external system</td>
+            <td>Per-project document tree</td>
+            <td>Folders/files; linked to target repo or system</td>
           </tr>
           <tr>
             <td>Secrets / confidential data</td>
-            <td>Encrypted Postgres or SQLite</td>
-            <td>Never dumped into shared Markdown</td>
+            <td>Encrypted Postgres or SQLite (project-scoped)</td>
+            <td>Never dumped into Markdown; optional organization-level vault later</td>
           </tr>
           <tr>
             <td>Live UX</td>
@@ -705,14 +1114,39 @@ flowchart LR
       <p>
         Interactive HTML mockups (accurate labels via code, not image models). Open any card in a
         full tab for the complete layout. Files live under <code>artifacts/prototypes/</code>.
+        All project screens assume organization <strong>Acme Corp</strong> and a selected project.
       </p>
       <div class="gallery">
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · projects</div>
+          <iframe src="artifacts/prototypes/00-projects.html" title="Projects prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/00-projects.html" target="_blank" rel="noopener">00 — Organization projects</a>
+            <p>Organization switcher, project cards with persona labels, orchestrator status, document tree preview.</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · personas</div>
+          <iframe src="artifacts/prototypes/05-starter-personas.html" title="Starter personas prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/05-starter-personas.html" target="_blank" rel="noopener">05 — Starter personas</a>
+            <p>Create project from 8 domain personas (or blank); each card lists supported board integrations (Jira, Monday, …).</p>
+          </div>
+        </div>
+        <div class="proto">
+          <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · integrations</div>
+          <iframe src="artifacts/prototypes/06-org-integrations.html" title="Org integrations prototype" loading="lazy"></iframe>
+          <div class="meta">
+            <a href="artifacts/prototypes/06-org-integrations.html" target="_blank" rel="noopener">06 — Organization integrations</a>
+            <p>Jira, Monday.com, Linear, Asana, Trello, Azure Boards at org level; project board mappings and sync modes.</p>
+          </div>
+        </div>
         <div class="proto">
           <div class="chrome"><i></i><i></i><i></i> &nbsp; fleet · dashboard</div>
           <iframe src="artifacts/prototypes/01-fleet-dashboard.html" title="Fleet dashboard prototype" loading="lazy"></iframe>
           <div class="meta">
             <a href="artifacts/prototypes/01-fleet-dashboard.html" target="_blank" rel="noopener">01 — Fleet monitoring dashboard</a>
-            <p>Active agents, on-track bars, HITL blocked count, live event stream, common goal banner.</p>
+            <p>Project-scoped agents, HITL blocked count, live stream, project goal banner, organization/project chrome.</p>
           </div>
         </div>
         <div class="proto">
@@ -720,7 +1154,7 @@ flowchart LR
           <iframe src="artifacts/prototypes/02-task-board.html" title="Task board prototype" loading="lazy"></iframe>
           <div class="meta">
             <a href="artifacts/prototypes/02-task-board.html" target="_blank" rel="noopener">02 — Task board</a>
-            <p>In dev / WIP / blocked / Done (succeeded · failed); multi-domain tags (coding, marketing, sales).</p>
+            <p>In dev / WIP / blocked / Done; optional sync banner to org-connected Jira/Monday boards.</p>
           </div>
         </div>
         <div class="proto">
@@ -728,7 +1162,7 @@ flowchart LR
           <iframe src="artifacts/prototypes/03-documents.html" title="Documents prototype" loading="lazy"></iframe>
           <div class="meta">
             <a href="artifacts/prototypes/03-documents.html" target="_blank" rel="noopener">03 — Document repository</a>
-            <p>Spec editor, target repo link, “Decompose → board” action for parallelization.</p>
+            <p>Project document tree (folders/files), target repo link, “Decompose → board” into this project only.</p>
           </div>
         </div>
         <div class="proto">
@@ -736,7 +1170,7 @@ flowchart LR
           <iframe src="artifacts/prototypes/04-configuration.html" title="Configuration prototype" loading="lazy"></iframe>
           <div class="meta">
             <a href="artifacts/prototypes/04-configuration.html" target="_blank" rel="noopener">04 — Configuration manager</a>
-            <p>Max agents, max loops, global system prompt, encrypted secrets list.</p>
+            <p>Persona, external board mapping (org providers), capacity, project goal, secrets.</p>
           </div>
         </div>
       </div>
@@ -768,7 +1202,8 @@ flowchart LR
       <ul>
         <li>Fully unsupervised production deploys without HITL gates.</li>
         <li>Replacing specialized CI; Fleet <em>orchestrates</em> loops that may call CI.</li>
-        <li>A single mega-agent that holds all context—prefer many small workers + shared docs.</li>
+        <li>A single mega-agent that holds all context—prefer many small workers + project docs.</li>
+        <li>One global orchestrator for all organizations/projects—orchestration is <strong>per project</strong>.</li>
       </ul>
     </section>
 
@@ -776,11 +1211,11 @@ flowchart LR
     <section class="card" id="success">
       <h2><span class="num">9</span> Success picture</h2>
       <ol>
-        <li>An operator sets a <strong>common goal</strong>, secrets, and max fleet size.</li>
-        <li>A human (or agent) drops a <strong>task spec</strong> into the document repository and links a target.</li>
-        <li>The system decomposes work onto a <strong>board</strong>; the operator spawns workers up to the cap.</li>
-        <li>Workers loop implement → validate → report, update board status, and stream progress.</li>
-        <li>Humans use the dashboard, review screenshots/artifacts, and intervene only when blocked or at done gates.</li>
+        <li>A user joins an <strong>organization</strong> and creates a <strong>project</strong> from a <strong>starter persona</strong> (or blank).</li>
+        <li>They refine that project’s <strong>goal</strong>, secrets, and max fleet size on its orchestrator—and optionally map the board to <strong>Jira / Monday.com</strong> via org integrations.</li>
+        <li>They add a <strong>spec under the project document tree</strong> and link a target.</li>
+        <li>The <strong>project orchestrator</strong> decomposes work onto the project board and spawns workers up to the cap.</li>
+        <li>Workers loop implement → validate → report; humans monitor the project dashboard and HITL only when needed.</li>
       </ol>
       <p class="note">
         Success is not “agents that never need people.” Success is <strong>high parallel throughput</strong>
@@ -795,9 +1230,15 @@ flowchart LR
         <li>How aggressive should auto-decomposition be vs. human-authored board cards?</li>
         <li>What is the unit of a “worker”—one LLM session, one tmux pane, one container?</li>
         <li>How do agents coordinate file locks / PR ownership on a shared repo?</li>
-        <li>Which domains ship in v1 (coding only) vs. later (marketing, sales, analysis)?</li>
+        <li>Which of the eight starter personas ship in v1, and which wait for later releases?</li>
+        <li>Can organizations publish custom personas back to a private catalog?</li>
         <li>Retention and redaction policy for screenshots and prompt logs containing secrets?</li>
-        <li>Multi-tenant vs. single-team deployment model?</li>
+        <li>How hard is project isolation—logical namespaces vs. dedicated orchestrator processes per project?</li>
+        <li>Can documents or secrets be shared across projects within an organization (libraries) without breaking isolation?</li>
+        <li>Organization rollup dashboard: what metrics aggregate without leaking project-sensitive content?</li>
+        <li>Default conflict policy when Jira/Monday status disagrees with fleet agent state?</li>
+        <li>Which providers are v1 (Jira + Monday) vs. later (Linear, Asana, Trello, Azure Boards)?</li>
+        <li>Multi-organization SaaS vs. single-organization deploy: same model, different packaging?</li>
       </ul>
     </section>
   </main>
@@ -805,7 +1246,7 @@ flowchart LR
   <footer class="wrap">
     Agent Fleet · <code>product_vision_tarun.html</code> · artifacts under <code>artifacts/</code>
     · diagram sources in <code>artifacts/diagrams/*.mmd</code>
-    · prototypes in <code>artifacts/prototypes/</code>
+    · prototypes in <code>artifacts/prototypes/</code> · organizations &amp; projects model
   </footer>
 
   <script>

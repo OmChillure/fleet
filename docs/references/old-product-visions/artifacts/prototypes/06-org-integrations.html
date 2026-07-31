@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Organization integrations (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; --green:#12b76a; --amber:#f79009; --red:#f04438; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:.75rem}
+  .org-switch{background:#1e293b;border-radius:8px;padding:.55rem .7rem;margin-bottom:1.25rem;font-size:.8rem}
+  .org-switch label{display:block;color:#64748b;font-size:.68rem;text-transform:uppercase;margin-bottom:.2rem}
+  .org-switch select{width:100%;background:transparent;border:0;color:#fff;font:inherit;font-weight:600}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem;font-size:.9rem}
+  nav a.active{background:#1e293b;color:#fff}
+  nav .sec{margin:1rem 0 .35rem;padding:0 .75rem;font-size:.68rem;text-transform:uppercase;color:#64748b}
+  main{padding:1.25rem 1.5rem 2rem;max-width:960px}
+  h1{margin:0 0 .25rem;font-size:1.35rem}
+  .sub{color:var(--m);margin:0 0 1.25rem;max-width:40rem}
+  .note{background:#eff4ff;border:1px solid #c7d7fe;border-radius:10px;padding:.75rem 1rem;font-size:.88rem;color:#1e3a5f;margin-bottom:1.25rem}
+  h2{font-size:.95rem;margin:0 0 .75rem}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:.85rem;margin-bottom:1.25rem}
+  @media(min-width:800px){.grid{grid-template-columns:1fr 1fr 1fr}}
+  .card{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.45rem}
+  .card .row{display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem}
+  .card h3{margin:0;font-size:.95rem}
+  .card p{margin:0;font-size:.82rem;color:var(--m);flex:1}
+  .badge{font-size:.7rem;font-weight:600;padding:.15rem .45rem;border-radius:6px;white-space:nowrap}
+  .badge.on{background:#ecfdf3;color:#027a48}
+  .badge.off{background:#f2f4f7;color:#667085}
+  .badge.err{background:#fef3f2;color:#b42318}
+  .btn{background:var(--blue);color:#fff;border:0;border-radius:8px;padding:.4rem .75rem;font-weight:600;font-size:.8rem}
+  .btn.sec{background:#fff;color:var(--t);border:1px solid var(--b)}
+  .btn.sm{padding:.3rem .55rem;font-size:.75rem}
+  .panel{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.1rem 1.2rem;margin-bottom:1rem}
+  table{width:100%;border-collapse:collapse;font-size:.85rem}
+  th{text-align:left;font-size:.72rem;color:var(--m);text-transform:uppercase;padding:0 .4rem .5rem 0;border-bottom:1px solid var(--b)}
+  td{padding:.6rem .4rem .6rem 0;border-bottom:1px solid #f2f4f7;vertical-align:middle}
+  code{font-size:.8em;background:#f2f4f7;padding:.1em .35em;border-radius:4px}
+  .map{font-size:.78rem;color:var(--m)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <div class="org-switch">
+      <label>Organization</label>
+      <select><option selected>Acme Corp</option><option>Contoso Labs</option></select>
+    </div>
+    <div class="sec">Organization</div>
+    <a href="00-projects.html">Projects</a>
+    <a href="05-starter-personas.html">Starter personas</a>
+    <a class="active" href="06-org-integrations.html">Integrations</a>
+    <a href="#">Members &amp; roles</a>
+    <a href="#">Organization policies</a>
+    <div class="sec">Active project</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+  </nav>
+  <main>
+    <h1>Organization integrations</h1>
+    <p class="sub">Connect external boards once at the <strong>organization</strong> level. Projects map their fleet board to a Jira project, Monday board, or similar workspace.</p>
+    <div class="note">Credentials and OAuth live on the organization. Projects only choose <em>which</em> board/project to sync—they do not re-enter org-wide secrets.</div>
+
+    <h2>Board providers</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="row"><h3>Jira</h3><span class="badge on">Connected</span></div>
+        <p>Cloud site <code>acme.atlassian.net</code> · OAuth app · webhooks active</p>
+        <div class="row"><span class="map">2 projects mapped</span><button class="btn sec sm">Manage</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><h3>Monday.com</h3><span class="badge on">Connected</span></div>
+        <p>Workspace <code>Acme GTM</code> · API token · board webhooks</p>
+        <div class="row"><span class="map">1 project mapped</span><button class="btn sec sm">Manage</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><h3>Linear</h3><span class="badge off">Not connected</span></div>
+        <p>Issues &amp; cycles as external board source of truth.</p>
+        <div class="row"><span class="map">—</span><button class="btn sm">Connect</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><h3>Asana</h3><span class="badge off">Not connected</span></div>
+        <p>Projects &amp; sections mapped to fleet columns.</p>
+        <div class="row"><span class="map">—</span><button class="btn sm">Connect</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><h3>Trello</h3><span class="badge off">Not connected</span></div>
+        <p>Boards &amp; lists for lightweight GTM workflows.</p>
+        <div class="row"><span class="map">—</span><button class="btn sm">Connect</button></div>
+      </div>
+      <div class="card">
+        <div class="row"><h3>Azure Boards</h3><span class="badge err">Error</span></div>
+        <p>Token expired · reconnect to restore sync.</p>
+        <div class="row"><span class="map">0 mapped</span><button class="btn sm">Reconnect</button></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Project ↔ external board mappings</h2>
+      <table>
+        <thead>
+          <tr><th>Fleet project</th><th>Provider</th><th>External target</th><th>Sync</th><th>Status map</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>onboarding-redesign</strong></td>
+            <td>Jira</td>
+            <td><code>WEB</code> · board Scrum · epic ONB-2</td>
+            <td>Bidirectional</td>
+            <td>In dev→To Do · WIP→In Progress · Done→Done</td>
+          </tr>
+          <tr>
+            <td><strong>growth-emails</strong></td>
+            <td>Monday.com</td>
+            <td>Board <code>Q3 Campaigns</code></td>
+            <td>Fleet → Monday</td>
+            <td>WIP→Working on it · Done→Done</td>
+          </tr>
+          <tr>
+            <td><strong>crm-pipeline</strong></td>
+            <td>Jira</td>
+            <td><code>SALES</code> · kanban</td>
+            <td>Monday pull only*</td>
+            <td>Blocked→Blocked · Done failed→Won’t Do</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin:.75rem 0 0;font-size:.8rem;color:var(--m)">* Example modes: pull external → fleet, push fleet → external, or bidirectional with conflict policy.</p>
+    </div>
+
+    <div class="panel">
+      <h2>What syncs</h2>
+      <table>
+        <thead><tr><th>Object</th><th>Direction options</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Cards / issues</td><td>Create · update · archive</td><td>External key stored on fleet card</td></tr>
+          <tr><td>Status / columns</td><td>Mapped enums</td><td>Per-project mapping table</td></tr>
+          <tr><td>Assignee</td><td>Optional</td><td>Map org members ↔ external users</td></tr>
+          <tr><td>Comments / events</td><td>Agent progress summaries</td><td>Rate-limited; no secrets in body</td></tr>
+          <tr><td>Attachments / screenshots</td><td>Fleet → external</td><td>HITL artifacts linked on external ticket</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+</body>
+</html>

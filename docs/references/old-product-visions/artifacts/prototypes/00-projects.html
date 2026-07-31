@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Fleet — Projects (prototype)</title>
+<style>
+  :root { --bg:#f0f2f7; --s:#fff; --t:#141821; --m:#667085; --b:#e4e7ec; --blue:#2563eb; --green:#12b76a; --amber:#f79009; }
+  *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t);font-size:14px}
+  .shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{background:#0f172a;color:#e2e8f0;padding:1.25rem 1rem}
+  nav .logo{font-weight:700;margin-bottom:.75rem}
+  .org-switch{background:#1e293b;border-radius:8px;padding:.55rem .7rem;margin-bottom:1.25rem;font-size:.8rem}
+  .org-switch label{display:block;color:#64748b;font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.2rem}
+  .org-switch select{width:100%;background:transparent;border:0;color:#fff;font:inherit;font-weight:600}
+  nav a{display:block;color:#94a3b8;text-decoration:none;padding:.55rem .75rem;border-radius:8px;margin-bottom:.25rem;font-size:.9rem}
+  nav a.active{background:#1e293b;color:#fff}
+  nav .sec{margin:1rem 0 .35rem;padding:0 .75rem;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:#64748b}
+  main{padding:1.25rem 1.5rem 2rem}
+  .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
+  h1{margin:0;font-size:1.35rem}
+  .sub{color:var(--m);margin:.25rem 0 0;font-size:.9rem}
+  .btn{background:var(--blue);color:#fff;border:0;border-radius:8px;padding:.55rem 1rem;font-weight:600;font-size:.85rem}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+  .card{background:var(--s);border:1px solid var(--b);border-radius:12px;padding:1.1rem 1.15rem;display:flex;flex-direction:column;gap:.5rem}
+  .card h2{margin:0;font-size:1rem}
+  .card p{margin:0;font-size:.85rem;color:var(--m);flex:1}
+  .meta{display:flex;flex-wrap:wrap;gap:.4rem;font-size:.75rem}
+  .chip{background:#f2f4f7;border-radius:6px;padding:.15rem .45rem;color:var(--m)}
+  .chip.on{background:#ecfdf3;color:#027a48;font-weight:600}
+  .chip.warn{background:#fffaeb;color:#b54708;font-weight:600}
+  .card a{font-size:.85rem;font-weight:600;color:var(--blue);text-decoration:none;margin-top:.25rem}
+  .tree{margin-top:.5rem;font-size:.78rem;font-family:ui-monospace,Menlo,monospace;background:#f8fafc;border:1px solid var(--b);border-radius:8px;padding:.55rem .7rem;color:#475467;line-height:1.55}
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav>
+    <div class="logo">⚡ Agent Fleet</div>
+    <div class="org-switch">
+      <label>Organization</label>
+      <select>
+        <option selected>Acme Corp</option>
+        <option>Contoso Labs</option>
+      </select>
+    </div>
+    <div class="sec">Organization</div>
+    <a class="active" href="00-projects.html">Projects</a>
+    <a href="05-starter-personas.html">Starter personas</a>
+    <a href="06-org-integrations.html">Integrations</a>
+    <a href="#">Members &amp; roles</a>
+    <a href="#">Organization policies</a>
+    <div class="sec">Active project</div>
+    <a href="01-fleet-dashboard.html">Dashboard</a>
+    <a href="02-task-board.html">Task board</a>
+    <a href="03-documents.html">Documents</a>
+    <a href="04-configuration.html">Configuration</a>
+  </nav>
+  <main>
+    <div class="top">
+      <div>
+        <h1>Projects</h1>
+        <p class="sub">Organization <strong>Acme Corp</strong> · each project has its own orchestrator, document tree, board, and fleet</p>
+      </div>
+      <a class="btn" href="05-starter-personas.html" style="text-decoration:none;display:inline-block">+ New project</a>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h2>onboarding-redesign</h2>
+        <p>Ship post-signup onboarding behind a feature flag; draft PR for review.</p>
+        <div class="meta">
+          <span class="chip" style="background:#eff4ff;color:#3538cd;font-weight:600">persona · software development</span>
+          <span class="chip" style="background:#eff4ff;color:#3538cd">Jira · Linear · Azure Boards</span>
+          <span class="chip on">orchestrator running</span>
+          <span class="chip">agents 4/6</span>
+          <span class="chip">docs 12</span>
+        </div>
+        <div class="tree">docs/<br/>├── specs/onboarding-v2.md<br/>├── specs/auth.md<br/>└── notes/decisions.md</div>
+        <a href="01-fleet-dashboard.html">Open project →</a>
+      </div>
+      <div class="card">
+        <h2>growth-emails</h2>
+        <p>Q3 nurture sequences and brand-aligned drip campaigns.</p>
+        <div class="meta">
+          <span class="chip" style="background:#ecfdf3;color:#027a48;font-weight:600">persona · marketing pipeline</span>
+          <span class="chip" style="background:#fef6ee;color:#c4320a">Monday.com · Asana · Trello</span>
+          <span class="chip on">orchestrator running</span>
+          <span class="chip">agents 1/3</span>
+          <span class="chip warn">1 blocked</span>
+        </div>
+        <div class="tree">docs/<br/>├── growth-emails.md<br/>└── brand-voice.md</div>
+        <a href="01-fleet-dashboard.html">Open project →</a>
+      </div>
+      <div class="card">
+        <h2>crm-pipeline</h2>
+        <p>Sales pipeline stage definitions and CRM automation.</p>
+        <div class="meta">
+          <span class="chip" style="background:#fef6ee;color:#c4320a;font-weight:600">persona · sales pipeline</span>
+          <span class="chip" style="background:#fef6ee;color:#c4320a">Monday.com · Jira · Asana</span>
+          <span class="chip">orchestrator idle</span>
+          <span class="chip">agents 0/4</span>
+          <span class="chip">docs 3</span>
+        </div>
+        <div class="tree">docs/<br/>└── crm-pipeline.md</div>
+        <a href="01-fleet-dashboard.html">Open project →</a>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
