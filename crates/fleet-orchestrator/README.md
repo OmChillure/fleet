@@ -62,3 +62,27 @@ cargo run
 
 **PR5a–c landed:** full reconcile loop with stub workers (inbox, spawn, stuck/kill/retry, cancel drain, orphan reap, rollup).  
 **Next:** PR6 HTTP API (projects, fixture plan, workers, cancel, admin/tick).
+
+## HTTP API (PR6)
+
+Standalone control plane (default bind from `HTTP_ADDR`, often `:8080` — avoid clashing with `fleet-server`).
+
+| Method | Path | Auth |
+|--------|------|------|
+| GET | `/healthz`, `/readyz` | none |
+| POST | `/v1/projects` | admin bearer |
+| GET | `/v1/projects/{id}` | admin |
+| POST | `/v1/projects/{id}/runs/fixture` | admin |
+| POST | `/v1/projects/{id}/admin/tick` | admin |
+| POST | `/v1/projects/{id}/runs/{run}/cancel` | admin |
+| GET | `/v1/projects/{id}/tasks` | admin |
+| POST | `/v1/projects/{id}/workers/{session}/heartbeat` | worker token |
+| POST | `/v1/projects/{id}/workers/{session}/status` | worker token |
+
+```bash
+export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
+export ADMIN_TOKEN=dev-admin-token-change-me
+export DATA_DIR=/tmp/fleet-data
+export HTTP_ADDR=127.0.0.1:8081
+cargo run -p fleet-orchestrator
+```
