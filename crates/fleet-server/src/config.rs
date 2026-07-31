@@ -3,14 +3,16 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use fleet_auth::AuthConfig;
+use fleet_integrations::IntegrationsConfig;
 
-/// Full server configuration (bind + CORS + auth + database).
+/// Full server configuration (bind + CORS + auth + database + integrations OAuth).
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub database_url: String,
     pub bind: SocketAddr,
     pub cors_origins: Vec<String>,
     pub auth: AuthConfig,
+    pub integrations: IntegrationsConfig,
 }
 
 impl ServerConfig {
@@ -42,12 +44,14 @@ impl ServerConfig {
             .collect();
 
         let auth = AuthConfig::from_env()?;
+        let integrations = IntegrationsConfig::from_env()?;
 
         Ok(Self {
             database_url,
             bind,
             cors_origins,
             auth,
+            integrations,
         })
     }
 }

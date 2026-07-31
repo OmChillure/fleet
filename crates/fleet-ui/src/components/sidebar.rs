@@ -220,6 +220,10 @@ pub fn Sidebar() -> Element {
                     label: "Sandboxes",
                 }
                 SidebarLink {
+                    to: Route::Integrations { workspace_id: workspace_id.clone() },
+                    label: "Integrations",
+                }
+                SidebarLink {
                     to: Route::Settings { workspace_id: workspace_id.clone() },
                     label: "Settings",
                 }

@@ -1302,6 +1302,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-integrations"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "chrono",
+ "fleet-auth",
+ "fleet-db",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fleet-server"
 version = "0.1.0"
 dependencies = [
@@ -1310,6 +1328,7 @@ dependencies = [
  "dotenvy",
  "fleet-auth",
  "fleet-db",
+ "fleet-integrations",
  "serde",
  "serde_json",
  "tokio",

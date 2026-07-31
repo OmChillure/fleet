@@ -31,6 +31,8 @@ dx serve --package fleet-ui --port 3030
 | `GET /api` | server — API index JSON |
 | `/api/auth/*` | [`fleet-auth`](../fleet-auth/) |
 | `GET`/`POST` `/api/workspaces` | [`fleet-auth`](../fleet-auth/) |
+| `/api/workspaces/{id}/integrations…` | [`fleet-integrations`](../fleet-integrations/) — OAuth connect platforms for AI |
+| `/api/integrations/oauth/callback/{provider}` | OAuth callbacks (GitHub, Slack, …) |
 
 Future domain crates (orchestrator, sandboxes, …) merge into the same process
 the same way — one port, one `cargo run`.

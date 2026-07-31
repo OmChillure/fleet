@@ -51,7 +51,8 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 | `/{workspace_id}/sessions` | Agent sessions / streams | Empty placeholder |
 | `/{workspace_id}/agents` | Roles, models, budgets | Empty placeholder |
 | `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
-| `/{workspace_id}/settings` | Workspace / integrations | Empty placeholder |
+| `/{workspace_id}/integrations` | Connect GitHub, Jira, Slack, … | Catalog cards from API |
+| `/{workspace_id}/settings` | Workspace preferences | Empty placeholder |
 
 ```text
 Marketing                          App shell
@@ -89,7 +90,7 @@ crates/fleet-ui/src/
       login.rs signup.rs layout.rs
       api.rs              # fleet-server client (cookies + workspaces)
     dashboard/            # /{workspace_id}/dashboard
-    sessions/ agents/ sandboxes/ settings/
+    sessions/ agents/ sandboxes/ integrations/ settings/
     shared/               # EmptyPage, cross-page widgets
 ```
 

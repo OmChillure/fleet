@@ -35,7 +35,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info")
+                EnvFilter::new(
+                    "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_integrations=info,fleet_server=info",
+                )
             }),
         )
         .init();
@@ -48,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         auth: config.auth.clone(),
+        integrations: config.integrations.clone(),
     };
 
     let app = build_router()
@@ -69,6 +72,8 @@ fn build_router() -> Router<AppState> {
         .route("/api", get(api_index))
         // Auth (signup / login / logout / refresh / me)
         .merge(fleet_auth::router::<AppState>())
+        // Integrations catalog (GitHub, Jira, Slack, …)
+        .merge(fleet_integrations::router::<AppState>())
     // Future:
     // .merge(fleet_orchestrator::router::<AppState>())
     // .merge(fleet_sandboxes::router::<AppState>())
@@ -80,7 +85,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces"],
+        "apis": ["auth", "workspaces", "integrations"],
     }))
 }
 
@@ -98,6 +103,12 @@ async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+            },
+            "integrations": {
+                "list": "GET /api/workspaces/{workspace_id}/integrations",
+                "oauth_start": "GET /api/workspaces/{workspace_id}/integrations/{provider}/oauth/start",
+                "oauth_callback": "GET /api/integrations/oauth/callback/{provider}",
+                "disconnect": "DELETE /api/workspaces/{workspace_id}/integrations/{provider}",
             }
         }
     }))

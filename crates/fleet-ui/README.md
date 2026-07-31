@@ -68,6 +68,7 @@ All app routes are **workspace-scoped**.
 | `/{workspace_id}/sessions` | `src/pages/sessions/` | Empty placeholder |
 | `/{workspace_id}/agents` | `src/pages/agents/` | Empty placeholder |
 | `/{workspace_id}/sandboxes` | `src/pages/sandboxes/` | Empty placeholder |
+| `/{workspace_id}/integrations` | `src/pages/integrations/` | Catalog from `GET /api/integrations` |
 | `/{workspace_id}/settings` | `src/pages/settings/` | Empty placeholder |
 
 Routes are defined in `src/main.rs`. Folder names organize code only.
