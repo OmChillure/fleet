@@ -6,8 +6,10 @@ mod state;
 
 pub use state::{build_app_state, AppState};
 
+use axum::http::{header, HeaderValue, Method};
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use handlers::{
@@ -45,5 +47,34 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/projects/{project_id}/admin/tick", post(admin_tick))
         .layer(TraceLayer::new_for_http())
+        .layer(play_cors())
         .with_state(state)
 }
+
+/// Local play: UI on :3030 calling orchestrator on :8081 with admin bearer.
+fn play_cors() -> CorsLayer {
+    let origins = [
+        "http://localhost:3030",
+        "http://127.0.0.1:3030",
+    ]
+    .into_iter()
+    .filter_map(|o| o.parse::<HeaderValue>().ok())
+    .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::AUTHORIZATION,
+        ])
+}
+

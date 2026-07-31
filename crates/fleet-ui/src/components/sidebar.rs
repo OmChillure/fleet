@@ -208,6 +208,10 @@ pub fn Sidebar() -> Element {
                     label: "Dashboard",
                 }
                 SidebarLink {
+                    to: Route::Fleet { workspace_id: workspace_id.clone() },
+                    label: "Fleet play",
+                }
+                SidebarLink {
                     to: Route::Sessions { workspace_id: workspace_id.clone() },
                     label: "Sessions",
                 }
