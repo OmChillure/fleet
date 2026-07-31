@@ -199,7 +199,7 @@ mod tests {
             "SANDBOX_BACKEND",
             "LOCK_WAIT_TIMEOUT_S",
         ] {
-            env::remove_var(k);
+            unsafe { env::remove_var(k) };
         }
     }
 
@@ -208,12 +208,12 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        env::set_var(
+        unsafe { env::set_var(
             "DATABASE_URL",
             "postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable",
-        );
-        env::set_var("ADMIN_TOKEN", "test-admin-token");
-        env::set_var("DATA_DIR", dir.path());
+        ) };
+        unsafe { env::set_var("ADMIN_TOKEN", "test-admin-token") };
+        unsafe { env::set_var("DATA_DIR", dir.path()) };
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.tick_interval, Duration::from_secs(5));
         assert_eq!(cfg.max_agents, 3);
@@ -228,8 +228,8 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        env::set_var("ADMIN_TOKEN", "x");
-        env::set_var("DATA_DIR", dir.path());
+        unsafe { env::set_var("ADMIN_TOKEN", "x") };
+        unsafe { env::set_var("DATA_DIR", dir.path()) };
         assert!(Config::from_env().is_err());
     }
 
@@ -238,9 +238,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        env::set_var("DATABASE_URL", "postgres://x");
-        env::set_var("AUTH_MODE", "token");
-        env::set_var("DATA_DIR", dir.path());
+        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
+        unsafe { env::set_var("AUTH_MODE", "token") };
+        unsafe { env::set_var("DATA_DIR", dir.path()) };
         assert!(Config::from_env().is_err());
     }
 
@@ -249,13 +249,13 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        env::set_var("DATABASE_URL", "postgres://x");
-        env::set_var("AUTH_MODE", "none");
-        env::set_var("HTTP_ADDR", ":8080");
-        env::set_var("DATA_DIR", dir.path());
+        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
+        unsafe { env::set_var("AUTH_MODE", "none") };
+        unsafe { env::set_var("HTTP_ADDR", ":8080") };
+        unsafe { env::set_var("DATA_DIR", dir.path()) };
         assert!(Config::from_env().is_err());
 
-        env::set_var("HTTP_ADDR", "127.0.0.1:8080");
+        unsafe { env::set_var("HTTP_ADDR", "127.0.0.1:8080") };
         assert!(Config::from_env().is_ok());
     }
 }

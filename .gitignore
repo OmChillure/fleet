@@ -1,5 +1,5 @@
+/target
 bin/
-target/
 data/
 *.exe
 *.test
@@ -7,6 +7,12 @@ data/
 .DS_Store
 .env
 .env.*
+.env.local
 !.env.example
 coverage.out
 vendor/
+*.pem
+
+# fleet-ui — npm leftover (not used; dx auto-tailwind)
+crates/fleet-ui/node_modules/
+crates/fleet-ui/package-lock.json

@@ -1,33 +1,52 @@
-[package]
-name = "fleet-orchestrator"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
-description = "Agent Fleet project orchestration control plane (pure logic)"
-license = "UNLICENSED"
-default-run = "fleet-orchestrator"
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-fleet-contracts",
+    "crates/fleet-db",
+    "crates/fleet-auth",
+    "crates/fleet-server",
+    "crates/fleet-ui",
+    "crates/fleet-orchestrator",
+]
+# `cargo run` from the workspace root starts the unified API.
+default-members = [
+    "crates/fleet-server",
+]
 
-[[bin]]
-name = "fleet-orchestrator"
-path = "src/main.rs"
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/dvratil/agent-fleet"
+rust-version = "1.85"
 
-[dependencies]
-uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0"
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde", "clock"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+dioxus = "=0.7.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "test-util"] }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "migrate"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 dotenvy = "0.15"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+cookie = "0.18"
+time = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+async-trait = "0.1"
 subtle = "2.6"
-
-[dev-dependencies]
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "test-util"] }
-tempfile = "3.15"
+tempfile = "3"
+fleet-db = { path = "crates/fleet-db" }
+fleet-auth = { path = "crates/fleet-auth" }
+fleet-server = { path = "crates/fleet-server" }
+fleet-orchestrator = { path = "crates/fleet-orchestrator" }

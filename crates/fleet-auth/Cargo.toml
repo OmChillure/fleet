@@ -1,0 +1,31 @@
+[package]
+name = "fleet-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Agent Fleet auth library — JWT cookies, signup/login routes (mounted by fleet-server)"
+
+[lib]
+name = "fleet_auth"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+argon2 = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+chrono = { workspace = true }
+cookie = { workspace = true }
+fleet-db = { workspace = true }
+hex = { workspace = true }
+jsonwebtoken = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
