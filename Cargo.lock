@@ -1342,6 +1342,7 @@ dependencies = [
  "dotenvy",
  "fleet-auth",
  "fleet-db",
+ "fleet-orchestrator",
  "serde",
  "serde_json",
  "tokio",

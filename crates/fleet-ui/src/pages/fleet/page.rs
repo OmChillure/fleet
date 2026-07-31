@@ -32,8 +32,8 @@ pub fn Fleet(workspace_id: String) -> Element {
             div {
                 h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Fleet play" }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Talks to the standalone orchestrator API (not fleet-server auth). "
-                    "Default: http://localhost:8081 with ADMIN_TOKEN."
+                    "Talks to the orchestrator control plane (mounted on fleet-server at /v1). "
+                    "Default: http://localhost:8080 with ADMIN_TOKEN (same origin as auth)."
                 }
             }
 

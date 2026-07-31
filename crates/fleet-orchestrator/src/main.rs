@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use fleet_orchestrator::api::{build_app_state, router};
+use fleet_orchestrator::api::{build_app_state, router_standalone};
 use fleet_orchestrator::config::Config;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     // Keep a wake channel future for multi-project loop later.
     let _tick_interval = cfg.tick_interval;
 
-    let app = router(state);
+    let app = router_standalone(state);
 
     let addr: SocketAddr = if cfg.http_addr.starts_with(':') {
         format!("0.0.0.0{}", cfg.http_addr).parse()?

@@ -6,21 +6,22 @@
 //! # → http://localhost:8080
 //! ```
 //!
-//! Mounts all domain routers (auth today; more APIs later on the same process).
+//! Mounts auth/workspaces and the orchestrator control plane (`/v1`, `/healthz`).
 
 mod config;
 mod state;
 
 use std::net::SocketAddr;
 
-use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, header};
+use axum::http::{header, HeaderValue, Method};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use fleet_auth::validate_cookie_policy;
 use fleet_db::connect_and_migrate;
-use serde_json::{Value, json};
+use fleet_orchestrator::api::{build_app_state, router as orch_router};
+use fleet_orchestrator::config::Config as OrchConfig;
+use serde_json::{json, Value};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -33,11 +34,11 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info")
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info,fleet_orchestrator=info",
+            )
+        }))
         .init();
 
     let config = ServerConfig::from_env()?;
@@ -50,28 +51,35 @@ async fn main() -> anyhow::Result<()> {
         auth: config.auth.clone(),
     };
 
+    // Orchestrator control plane (same process). Prefer ORCHESTRATOR_DATABASE_URL
+    // only if you must isolate DBs; default shares DATABASE_URL (migrations co-exist).
+    let orch_cfg = OrchConfig::from_env_for_server(&config.database_url, &config.bind.to_string())?;
+    let orch_state = build_app_state(&orch_cfg).await?;
+    let orch = orch_router(orch_state);
+
     let app = build_router()
+        .with_state(state)
+        // Unmatched routes fall through to orchestrator (/v1/*, /healthz, /readyz).
+        .fallback_service(orch)
         .layer(TraceLayer::new_for_http())
-        .layer(build_cors(&config)?)
-        .with_state(state);
+        .layer(build_cors(&config)?);
 
     let addr: SocketAddr = config.bind;
-    tracing::info!(%addr, "fleet-server listening (all APIs)");
+    tracing::info!(
+        %addr,
+        "fleet-server listening (auth + workspaces + orchestrator)"
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// Compose every domain API into one router.
+/// Compose domain APIs that share AppState.
 fn build_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/api", get(api_index))
-        // Auth (signup / login / logout / refresh / me)
         .merge(fleet_auth::router::<AppState>())
-    // Future:
-    // .merge(fleet_orchestrator::router::<AppState>())
-    // .merge(fleet_sandboxes::router::<AppState>())
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
@@ -80,7 +88,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces"],
+        "apis": ["auth", "workspaces", "orchestrator"],
     }))
 }
 
@@ -98,6 +106,12 @@ async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+            },
+            "orchestrator": {
+                "healthz": "GET /healthz",
+                "projects": "POST /v1/projects",
+                "fixture": "POST /v1/projects/{id}/runs/fixture",
+                "tick": "POST /v1/projects/{id}/admin/tick",
             }
         }
     }))

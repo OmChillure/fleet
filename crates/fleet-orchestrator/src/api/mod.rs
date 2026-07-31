@@ -4,7 +4,7 @@ mod auth;
 mod handlers;
 mod state;
 
-pub use state::{build_app_state, AppState};
+pub use state::{build_app_state, build_app_state_from_parts, AppState};
 
 use axum::http::{header, HeaderValue, Method};
 use axum::routing::{get, post};
@@ -17,6 +17,7 @@ use handlers::{
     list_runs, list_tasks, list_workers, post_heartbeat, post_status, readyz, resume_task,
 };
 
+/// Core routes (no CORS). Safe to nest/fallback into fleet-server.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -46,20 +47,22 @@ pub fn router(state: AppState) -> Router {
             post(post_status),
         )
         .route("/v1/projects/{project_id}/admin/tick", post(admin_tick))
-        .layer(TraceLayer::new_for_http())
-        .layer(play_cors())
         .with_state(state)
 }
 
-/// Local play: UI on :3030 calling orchestrator on :8081 with admin bearer.
+/// Standalone binary: same routes + CORS for the Dioxus UI origin.
+pub fn router_standalone(state: AppState) -> Router {
+    router(state)
+        .layer(TraceLayer::new_for_http())
+        .layer(play_cors())
+}
+
+/// Local play: UI on :3030 calling orchestrator (standalone :8081 or embedded :8080).
 fn play_cors() -> CorsLayer {
-    let origins = [
-        "http://localhost:3030",
-        "http://127.0.0.1:3030",
-    ]
-    .into_iter()
-    .filter_map(|o| o.parse::<HeaderValue>().ok())
-    .collect::<Vec<_>>();
+    let origins = ["http://localhost:3030", "http://127.0.0.1:3030"]
+        .into_iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
@@ -77,4 +80,3 @@ fn play_cors() -> CorsLayer {
             header::AUTHORIZATION,
         ])
 }
-

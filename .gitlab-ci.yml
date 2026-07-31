@@ -1,0 +1,44 @@
+# Agent Fleet CI
+stages:
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  POSTGRES_DB: fleet
+  POSTGRES_USER: fleet
+  POSTGRES_PASSWORD: fleet
+  DATABASE_URL: "postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable"
+  ADMIN_TOKEN: "ci-admin-token"
+  JWT_SECRET: "ci-jwt-secret-at-least-32-characters-long"
+  DATA_DIR: "/tmp/fleet-data"
+
+unit:
+  stage: test
+  image: rust:1.85-bookworm
+  script:
+    - cargo test -p fleet-orchestrator --lib
+    - cargo test -p agent-fleet-contracts --lib || true
+  cache:
+    key: cargo-unit
+    paths:
+      - target/
+      - $CARGO_HOME/registry/
+
+orch-integration:
+  stage: test
+  image: rust:1.85-bookworm
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_HOST_AUTH_METHOD: trust
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq libssl-dev pkg-config >/dev/null
+    - until pg_isready -h postgres -U fleet; do sleep 1; done
+  script:
+    - cargo test -p fleet-orchestrator --test store_integration --test tick_integration --test api_integration
+  cache:
+    key: cargo-orch-int
+    paths:
+      - target/
+      - $CARGO_HOME/registry/

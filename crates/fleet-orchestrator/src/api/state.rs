@@ -13,6 +13,11 @@ pub struct AppState {
 }
 
 pub async fn build_app_state(cfg: &Config) -> anyhow::Result<AppState> {
+    build_app_state_from_parts(cfg).await
+}
+
+/// Build orchestrator state (used by standalone binary and fleet-server mount).
+pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState> {
     let pool = connect(&cfg.database_url).await?;
     migrate(&pool).await?;
     let store = Store::new(pool);

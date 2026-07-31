@@ -11,8 +11,10 @@ const ORCH_TOKEN_KEY: &str = "fleet_orch_token";
 const ORCH_PROJECT_KEY: &str = "fleet_orch_project_id";
 
 pub fn default_orch_url() -> String {
+    // Prefer explicit override; else same origin as fleet-server (orchestrator mounted).
     option_env!("FLEET_ORCH_URL")
-        .unwrap_or("http://localhost:8081")
+        .or(option_env!("FLEET_AUTH_URL"))
+        .unwrap_or("http://localhost:8080")
         .to_string()
 }
 

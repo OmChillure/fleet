@@ -13,7 +13,9 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
+    // ignore_missing: local DBs that applied the old `001_init` version after renumbering.
     sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
         .run(pool)
         .await
         .map_err(|e| StoreError::Validation(format!("migrate: {e}")))?;
