@@ -77,9 +77,31 @@ async fn main() -> anyhow::Result<()> {
 /// Compose domain APIs that share AppState.
 fn build_router() -> Router<AppState> {
     Router::new()
+        .route("/", get(root_index))
         .route("/health", get(health))
         .route("/api", get(api_index))
         .merge(fleet_auth::router::<AppState>())
+}
+
+/// Browser-friendly landing for `GET /` (was empty 404).
+async fn root_index() -> Json<Value> {
+    Json(json!({
+        "service": "fleet-server",
+        "status": "ok",
+        "message": "Agent Fleet unified API",
+        "links": {
+            "health": "/health",
+            "healthz": "/healthz",
+            "readyz": "/readyz",
+            "api_index": "/api",
+            "ui": "http://localhost:3030",
+        },
+        "apis": {
+            "auth": "/api/auth/*",
+            "workspaces": "/api/workspaces",
+            "orchestrator": "/v1/*",
+        }
+    }))
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
