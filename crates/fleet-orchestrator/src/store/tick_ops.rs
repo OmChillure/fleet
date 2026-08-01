@@ -704,3 +704,46 @@ impl Store {
         }
     }
 }
+
+
+impl Store {
+    /// Create project with a fixed id if missing (workspace_id == project_id mapping).
+    pub async fn ensure_project(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        max_agents: i32,
+    ) -> Result<super::ProjectRow> {
+        if let Some(p) = self.get_project(project_id).await? {
+            return Ok(p);
+        }
+        let mut tx = self.pool.begin().await?;
+        let project = sqlx::query_as::<_, super::ProjectRow>(
+            r#"
+            INSERT INTO projects (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id, name, created_at
+            "#,
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO project_configs (project_id, max_agents)
+            VALUES ($1, $2)
+            ON CONFLICT (project_id) DO NOTHING
+            "#,
+        )
+        .bind(project_id)
+        .bind(max_agents)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(project)
+    }
+}

@@ -1,6 +1,8 @@
 mod auth;
 mod workspaces;
 
+pub use auth::require_user;
+
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{get, post};

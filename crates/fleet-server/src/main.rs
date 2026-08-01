@@ -1,14 +1,9 @@
 //! Unified Agent Fleet HTTP API.
 //!
-//! ```bash
-//! # from workspace root (with `.env`)
-//! cargo run
-//! # → http://localhost:8080
-//! ```
-//!
-//! Mounts auth/workspaces and the orchestrator control plane (`/v1`, `/healthz`).
+//! Auth + workspaces + orchestrator control plane on one process.
 
 mod config;
+mod fleet_routes;
 mod state;
 
 use std::net::SocketAddr;
@@ -47,45 +42,43 @@ async fn main() -> anyhow::Result<()> {
 
     let db = connect_and_migrate(&config.database_url).await?;
 
+    let orch_cfg = OrchConfig::from_env_for_server(&config.database_url, &config.bind.to_string())?;
+    let orch = build_app_state(&orch_cfg).await?;
+
     let state = AppState {
         db,
         auth: config.auth.clone(),
+        orch: orch.clone(),
     };
 
-    // Orchestrator control plane (same process). Prefer ORCHESTRATOR_DATABASE_URL
-    // only if you must isolate DBs; default shares DATABASE_URL (migrations co-exist).
-    let orch_cfg = OrchConfig::from_env_for_server(&config.database_url, &config.bind.to_string())?;
-    let orch_state = build_app_state(&orch_cfg).await?;
-    let orch = orch_router(orch_state);
+    // Admin / worker bearer routes remain on orch_router (/v1, /healthz).
+    let orch_service = orch_router(orch);
 
     let app = build_router()
         .with_state(state)
-        // Unmatched routes fall through to orchestrator (/v1/*, /healthz, /readyz).
-        .fallback_service(orch)
+        .fallback_service(orch_service)
         .layer(TraceLayer::new_for_http())
         .layer(build_cors(&config)?);
 
     let addr: SocketAddr = config.bind;
     tracing::info!(
         %addr,
-        "fleet-server listening (auth + workspaces + orchestrator)"
+        "fleet-server listening (auth + workspaces + fleet + orchestrator)"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// Compose domain APIs that share AppState.
 fn build_router() -> Router<AppState> {
     Router::new()
         .route("/", get(root_index))
         .route("/health", get(health))
         .route("/api", get(api_index))
         .merge(fleet_auth::router::<AppState>())
+        .merge(fleet_routes::router())
 }
 
-/// Browser-friendly landing for `GET /` (was empty 404).
-/// Returns HTML when the client prefers it (browsers); JSON otherwise (curl/API).
 async fn root_index(headers: HeaderMap) -> Response {
     let body = json!({
         "service": "fleet-server",
@@ -94,14 +87,15 @@ async fn root_index(headers: HeaderMap) -> Response {
         "links": {
             "health": "/health",
             "healthz": "/healthz",
-            "readyz": "/readyz",
             "api_index": "/api",
             "ui": "http://localhost:3030",
+            "fleet": "/api/workspaces/{workspace_id}/fleet",
         },
         "apis": {
             "auth": "/api/auth/*",
             "workspaces": "/api/workspaces",
-            "orchestrator": "/v1/*",
+            "fleet": "/api/workspaces/{workspace_id}/fleet/*",
+            "orchestrator_admin": "/v1/*",
         }
     });
 
@@ -114,36 +108,22 @@ async fn root_index(headers: HeaderMap) -> Response {
         let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         Html(format!(
             r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Agent Fleet API</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem;
-           background: #f4f6fa; color: #1a1d26; line-height: 1.5; }}
-    h1 {{ font-size: 1.35rem; margin: 0 0 0.35rem; }}
-    p {{ color: #5a6270; margin: 0 0 1rem; }}
-    a {{ color: #2563eb; }}
-    ul {{ padding-left: 1.2rem; }}
-    pre {{ background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 10px;
-          overflow: auto; font-size: 0.82rem; }}
-    .ok {{ color: #0d7a4f; font-weight: 600; }}
-  </style>
-</head>
-<body>
-  <h1>Agent Fleet API</h1>
-  <p class="ok">status: ok</p>
-  <p>Unified backend — auth, workspaces, and orchestrator control plane.</p>
-  <ul>
-    <li><a href="/health">/health</a> — liveness + DB</li>
-    <li><a href="/healthz">/healthz</a> — orchestrator health</li>
-    <li><a href="/api">/api</a> — route index (JSON)</li>
-    <li><a href="http://localhost:3030">UI</a> — fleet-ui (run separately)</li>
-  </ul>
-  <pre>{pretty}</pre>
-</body>
-</html>"#
+<html lang="en"><head><meta charset="utf-8"/><title>Agent Fleet API</title>
+<style>
+body{{font-family:system-ui,sans-serif;max-width:42rem;margin:2rem auto;padding:0 1rem;background:#f4f6fa;color:#1a1d26}}
+a{{color:#2563eb}} pre{{background:#0f172a;color:#e2e8f0;padding:1rem;border-radius:10px;overflow:auto;font-size:.82rem}}
+.ok{{color:#0d7a4f;font-weight:600}}
+</style></head><body>
+<h1>Agent Fleet API</h1>
+<p class="ok">status: ok</p>
+<p>Use the UI at <a href="http://localhost:3030">localhost:3030</a>. Fleet routes are cookie-authenticated under each workspace.</p>
+<ul>
+<li><a href="/health">/health</a></li>
+<li><a href="/healthz">/healthz</a></li>
+<li><a href="/api">/api</a></li>
+</ul>
+<pre>{pretty}</pre>
+</body></html>"#
         ))
         .into_response()
     } else {
@@ -157,7 +137,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces", "orchestrator"],
+        "apis": ["auth", "workspaces", "fleet", "orchestrator"],
     }))
 }
 
@@ -168,18 +148,22 @@ async fn api_index() -> Json<Value> {
             "auth": {
                 "signup": "POST /api/auth/signup",
                 "login": "POST /api/auth/login",
-                "logout": "POST /api/auth/logout",
-                "refresh": "POST /api/auth/refresh",
                 "me": "GET /api/auth/me",
             },
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
             },
-            "orchestrator": {
-                "healthz": "GET /healthz",
+            "fleet": {
+                "project": "GET /api/workspaces/{workspace_id}/fleet",
+                "fixture": "POST /api/workspaces/{workspace_id}/fleet/runs/fixture",
+                "tick": "POST /api/workspaces/{workspace_id}/fleet/tick",
+                "tasks": "GET /api/workspaces/{workspace_id}/fleet/tasks",
+                "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
+            },
+            "orchestrator_admin": {
+                "note": "Bearer ADMIN_TOKEN for automation / workers",
                 "projects": "POST /v1/projects",
-                "fixture": "POST /v1/projects/{id}/runs/fixture",
                 "tick": "POST /v1/projects/{id}/admin/tick",
             }
         }

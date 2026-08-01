@@ -1,325 +1,356 @@
-//! Local play UI for fleet-orchestrator: project, fixture, tick, task board.
+//! Workspace-scoped fleet control plane UI (cookie auth).
 
 use dioxus::prelude::*;
+use serde_json::Value;
 
 use super::api::{
-    CreateProjectBody, admin_tick, cancel_latest_run, create_project, fixture_two_task_chain,
-    get_project, healthz, list_runs, list_tasks, load_settings, save_settings,
+    cancel_run, ensure_fleet, list_runs, list_tasks, run_tick, start_fixture,
 };
+
+#[derive(Clone, PartialEq)]
+struct TaskCard {
+    id: String,
+    plan_task_id: String,
+    title: String,
+    status: String,
+    priority: i64,
+    attempt: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct RunCard {
+    id: String,
+    status: String,
+    source: String,
+}
+
+fn parse_tasks(v: &Value) -> Vec<TaskCard> {
+    v["tasks"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(TaskCard {
+                        id: t["id"].as_str()?.to_string(),
+                        plan_task_id: t["plan_task_id"].as_str().unwrap_or("?").to_string(),
+                        title: t["title"].as_str().unwrap_or("Untitled").to_string(),
+                        status: t["status"].as_str().unwrap_or("?").to_string(),
+                        priority: t["priority"].as_i64().unwrap_or(0),
+                        attempt: t["attempt"].as_i64().unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_runs(v: &Value) -> Vec<RunCard> {
+    v["runs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some(RunCard {
+                        id: r["id"].as_str()?.to_string(),
+                        status: r["status"].as_str().unwrap_or("?").to_string(),
+                        source: r["source"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn status_column(status: &str) -> &'static str {
+    match status {
+        "queued" | "ready" => "Ready",
+        "assigned" | "in_progress" => "In progress",
+        "blocked" | "retry_wait" => "Blocked",
+        "done_success" => "Done",
+        "done_failed" | "cancelled" => "Failed",
+        _ => "Other",
+    }
+}
+
+fn status_pill_class(status: &str) -> &'static str {
+    match status {
+        "done_success" => "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+        "done_failed" | "cancelled" => "bg-red-500/15 text-red-400 border-red-500/30",
+        "in_progress" | "assigned" => "bg-sky-500/15 text-sky-400 border-sky-500/30",
+        "blocked" | "retry_wait" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
+        "ready" | "queued" => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
+        _ => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
+    }
+}
 
 #[component]
 pub fn Fleet(workspace_id: String) -> Element {
-    let _ = &workspace_id; // workspace is auth shell only for now
-
-    let (init_url, init_token, init_project) = load_settings();
-    let mut orch_url = use_signal(|| init_url);
-    let mut orch_token = use_signal(|| init_token);
-    let mut project_id = use_signal(|| init_project);
-    let mut project_name = use_signal(|| "demo-fleet".to_string());
-    let mut status_line = use_signal(|| "Ready. Configure orchestrator URL/token, then create a project.".to_string());
-    let mut health = use_signal(|| "unknown".to_string());
-    let mut tasks_json = use_signal(|| "[]".to_string());
-    let mut runs_json = use_signal(|| "[]".to_string());
+    let mut status_line = use_signal(|| "Loading workspace fleet…".to_string());
+    let mut project_name = use_signal(|| String::new());
+    let mut tasks = use_signal(|| Vec::<TaskCard>::new());
+    let mut runs = use_signal(|| Vec::<RunCard>::new());
     let mut last_tick = use_signal(|| String::new());
     let mut busy = use_signal(|| false);
+    let mut ready = use_signal(|| false);
 
-    let persist = move || {
-        save_settings(&orch_url(), &orch_token(), &project_id());
-    };
+    let ws = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws.clone();
+        spawn(async move {
+            match ensure_fleet(&ws).await {
+                Ok(v) => {
+                    project_name.set(
+                        v["name"]
+                            .as_str()
+                            .unwrap_or("Workspace fleet")
+                            .to_string(),
+                    );
+                    status_line.set(format!(
+                        "Fleet ready · project {}",
+                        v["project_id"].as_str().unwrap_or(&ws)
+                    ));
+                    ready.set(true);
+                    if let Ok(t) = list_tasks(&ws).await {
+                        tasks.set(parse_tasks(&t));
+                    }
+                    if let Ok(r) = list_runs(&ws).await {
+                        runs.set(parse_runs(&r));
+                    }
+                }
+                Err(e) => {
+                    status_line.set(e.message());
+                    ready.set(false);
+                }
+            }
+        });
+    });
+
+    let columns = ["Ready", "In progress", "Blocked", "Done", "Failed"];
 
     rsx! {
-        div { class: "mx-auto flex w-full max-w-5xl flex-col gap-4",
-            div {
-                h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Fleet play" }
-                p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Talks to the orchestrator control plane (mounted on fleet-server at /v1). "
-                    "Default: http://localhost:8080 with ADMIN_TOKEN (same origin as auth)."
-                }
-            }
-
-            // Connection
-            section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Connection" }
-                div { class: "grid gap-3 md:grid-cols-2",
-                    label { class: "flex flex-col gap-1 text-xs text-[var(--app-muted)]",
-                        "Orchestrator URL"
-                        input {
-                            class: "rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2.5 py-2 text-sm text-[var(--app-fg)]",
-                            value: "{orch_url}",
-                            oninput: move |e| orch_url.set(e.value()),
+        div { class: "mx-auto flex w-full max-w-6xl flex-col gap-4",
+            div { class: "flex flex-wrap items-start justify-between gap-3",
+                div {
+                    h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Fleet" }
+                    p { class: "mt-1 text-sm text-[var(--app-muted)]",
+                        if project_name().is_empty() {
+                            "Workspace-scoped orchestrator project"
+                        } else {
+                            "{project_name}"
                         }
                     }
-                    label { class: "flex flex-col gap-1 text-xs text-[var(--app-muted)]",
-                        "Admin token"
-                        input {
-                            class: "rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2.5 py-2 font-mono text-sm text-[var(--app-fg)]",
-                            value: "{orch_token}",
-                            oninput: move |e| orch_token.set(e.value()),
-                        }
-                    }
+                    p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "workspace {workspace_id}" }
                 }
-                div { class: "mt-3 flex flex-wrap items-center gap-2",
-                    button {
-                        class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
-                        disabled: busy(),
-                        r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            spawn(async move {
-                                match healthz(&base).await {
-                                    Ok(v) => {
-                                        health.set(v["status"].as_str().unwrap_or("ok").to_string());
-                                        status_line.set("Orchestrator reachable.".into());
-                                    }
-                                    Err(e) => {
-                                        health.set("down".into());
-                                        status_line.set(e.message());
-                                    }
-                                }
-                                busy.set(false);
-                            });
-                        },
-                        "Ping /healthz"
-                    }
-                    span { class: "text-xs text-[var(--app-muted)]", "Health: {health}" }
-                }
-            }
-
-            // Project
-            section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Project" }
-                div { class: "grid gap-3 md:grid-cols-2",
-                    label { class: "flex flex-col gap-1 text-xs text-[var(--app-muted)]",
-                        "Name (for create)"
-                        input {
-                            class: "rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2.5 py-2 text-sm text-[var(--app-fg)]",
-                            value: "{project_name}",
-                            oninput: move |e| project_name.set(e.value()),
-                        }
-                    }
-                    label { class: "flex flex-col gap-1 text-xs text-[var(--app-muted)]",
-                        "Project id"
-                        input {
-                            class: "rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2.5 py-2 font-mono text-sm text-[var(--app-fg)]",
-                            value: "{project_id}",
-                            oninput: move |e| {
-                                project_id.set(e.value());
-                                persist();
-                            },
-                        }
-                    }
-                }
-                div { class: "mt-3 flex flex-wrap gap-2",
-                    button {
-                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
-                        disabled: busy(),
-                        r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let name = project_name();
-                            spawn(async move {
-                                match create_project(
-                                    &base,
-                                    &token,
-                                    CreateProjectBody {
-                                        name,
-                                        max_agents: 3,
-                                    },
-                                )
-                                .await
-                                {
-                                    Ok(v) => {
-                                        if let Some(id) = v["id"].as_str() {
-                                            project_id.set(id.to_string());
-                                            save_settings(&base, &token, id);
-                                        }
-                                        status_line.set(format!("Created project {}", v["id"]));
-                                    }
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                busy.set(false);
-                            });
-                        },
-                        "Create project"
-                    }
-                    button {
-                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
-                        disabled: busy() || project_id().is_empty(),
-                        r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let pid = project_id();
-                            spawn(async move {
-                                match get_project(&base, &token, &pid).await {
-                                    Ok(v) => status_line.set(format!("Project {} ({})", v["name"], v["id"])),
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                busy.set(false);
-                            });
-                        },
-                        "Load project"
-                    }
-                }
-            }
-
-            // Actions
-            section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Run" }
                 div { class: "flex flex-wrap gap-2",
                     button {
                         class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
-                        disabled: busy() || project_id().is_empty(),
+                        disabled: busy() || !ready(),
                         r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let pid = project_id();
-                            spawn(async move {
-                                match fixture_two_task_chain(&base, &token, &pid).await {
-                                    Ok(v) => status_line.set(format!(
-                                        "Fixture run {} plan {}",
-                                        v["run_id"], v["plan_id"]
-                                    )),
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                busy.set(false);
-                            });
+                        onclick: {
+                            let workspace_id = workspace_id.clone();
+                            move |_| {
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match start_fixture(&ws).await {
+                                        Ok(v) => {
+                                            status_line.set(format!(
+                                                "Started run {}",
+                                                v["run_id"].as_str().unwrap_or("?")
+                                            ));
+                                        }
+                                        Err(e) => status_line.set(e.message()),
+                                    }
+                                    if let Ok(t) = list_tasks(&ws).await {
+                                        tasks.set(parse_tasks(&t));
+                                    }
+                                    if let Ok(r) = list_runs(&ws).await {
+                                        runs.set(parse_runs(&r));
+                                    }
+                                    busy.set(false);
+                                });
+                            }
                         },
-                        "Start 2-task fixture"
+                        "Start 2-task run"
                     }
                     button {
                         class: "rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
-                        disabled: busy() || project_id().is_empty(),
+                        disabled: busy() || !ready(),
                         r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let pid = project_id();
-                            spawn(async move {
-                                match admin_tick(&base, &token, &pid).await {
-                                    Ok(v) => {
-                                        last_tick.set(
-                                            serde_json::to_string_pretty(&v).unwrap_or_default(),
-                                        );
-                                        status_line.set(format!(
-                                            "Tick {} — spawned={} completed={} terminated={}",
-                                            v["tick_id"],
-                                            v["spawned"],
-                                            v["completed_via_runtime"],
-                                            v["runs_terminated"]
-                                        ));
+                        onclick: {
+                            let workspace_id = workspace_id.clone();
+                            move |_| {
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match run_tick(&ws).await {
+                                        Ok(v) => {
+                                            last_tick.set(
+                                                serde_json::to_string_pretty(&v).unwrap_or_default(),
+                                            );
+                                            status_line.set(format!(
+                                                "Tick · spawned {} · completed {} · runs ended {}",
+                                                v["spawned"],
+                                                v["completed_via_runtime"],
+                                                v["runs_terminated"]
+                                            ));
+                                        }
+                                        Err(e) => status_line.set(e.message()),
                                     }
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                // refresh board
-                                if let Ok(t) = list_tasks(&base, &token, &pid).await {
-                                    tasks_json.set(
-                                        serde_json::to_string_pretty(&t["tasks"])
-                                            .unwrap_or_else(|_| "[]".into()),
-                                    );
-                                }
-                                if let Ok(r) = list_runs(&base, &token, &pid).await {
-                                    runs_json.set(
-                                        serde_json::to_string_pretty(&r["runs"])
-                                            .unwrap_or_else(|_| "[]".into()),
-                                    );
-                                }
-                                busy.set(false);
-                            });
+                                    if let Ok(t) = list_tasks(&ws).await {
+                                        tasks.set(parse_tasks(&t));
+                                    }
+                                    if let Ok(r) = list_runs(&ws).await {
+                                        runs.set(parse_runs(&r));
+                                    }
+                                    busy.set(false);
+                                });
+                            }
                         },
                         "Run tick"
                     }
                     button {
                         class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
-                        disabled: busy() || project_id().is_empty(),
+                        disabled: busy() || !ready(),
                         r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let pid = project_id();
-                            spawn(async move {
-                                match list_tasks(&base, &token, &pid).await {
-                                    Ok(t) => {
-                                        tasks_json.set(
-                                            serde_json::to_string_pretty(&t["tasks"])
-                                                .unwrap_or_else(|_| "[]".into()),
-                                        );
-                                        status_line.set("Refreshed tasks.".into());
+                        onclick: {
+                            let workspace_id = workspace_id.clone();
+                            move |_| {
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match list_tasks(&ws).await {
+                                        Ok(t) => {
+                                            tasks.set(parse_tasks(&t));
+                                            status_line.set("Board refreshed.".into());
+                                        }
+                                        Err(e) => status_line.set(e.message()),
                                     }
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                if let Ok(r) = list_runs(&base, &token, &pid).await {
-                                    runs_json.set(
-                                        serde_json::to_string_pretty(&r["runs"])
-                                            .unwrap_or_else(|_| "[]".into()),
-                                    );
-                                }
-                                busy.set(false);
-                            });
+                                    if let Ok(r) = list_runs(&ws).await {
+                                        runs.set(parse_runs(&r));
+                                    }
+                                    busy.set(false);
+                                });
+                            }
                         },
-                        "Refresh board"
+                        "Refresh"
                     }
                     button {
                         class: "rounded-md border border-red-500/40 px-3 py-1.5 text-sm font-medium text-red-400 hover:bg-red-500/10 disabled:opacity-50",
-                        disabled: busy() || project_id().is_empty(),
+                        disabled: busy() || !ready() || runs().is_empty(),
                         r#type: "button",
-                        onclick: move |_| {
-                            persist();
-                            busy.set(true);
-                            let base = orch_url();
-                            let token = orch_token();
-                            let pid = project_id();
-                            spawn(async move {
-                                match cancel_latest_run(&base, &token, &pid).await {
-                                    Ok(v) => status_line.set(format!("Cancel requested: {v}")),
-                                    Err(e) => status_line.set(e.message()),
-                                }
-                                busy.set(false);
-                            });
+                        onclick: {
+                            let workspace_id = workspace_id.clone();
+                            move |_| {
+                                let Some(run) = runs().into_iter().next() else { return };
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match cancel_run(&ws, &run.id).await {
+                                        Ok(_) => status_line.set(format!("Cancel requested for {}", run.id)),
+                                        Err(e) => status_line.set(e.message()),
+                                    }
+                                    if let Ok(r) = list_runs(&ws).await {
+                                        runs.set(parse_runs(&r));
+                                    }
+                                    if let Ok(t) = list_tasks(&ws).await {
+                                        tasks.set(parse_tasks(&t));
+                                    }
+                                    busy.set(false);
+                                });
+                            }
                         },
-                        "Cancel latest run"
+                        "Cancel latest"
                     }
                 }
-                p { class: "mt-3 text-sm text-[var(--app-fg)]", "{status_line}" }
             }
 
-            // Board
-            section { class: "grid gap-4 md:grid-cols-2",
-                div { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                    h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Tasks" }
-                    pre { class: "max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[var(--app-bg)] p-3 font-mono text-xs text-[var(--app-fg)]",
-                        "{tasks_json}"
+            p { class: "text-sm text-[var(--app-fg)]", "{status_line}" }
+
+            // Runs strip
+            section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs" }
+                if runs().is_empty() {
+                    p { class: "text-sm text-[var(--app-muted)]", "No runs yet. Start a 2-task run." }
+                } else {
+                    div { class: "flex flex-col gap-2",
+                        for run in runs() {
+                            div {
+                                key: "{run.id}",
+                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
+                                div { class: "min-w-0",
+                                    p { class: "m-0 font-mono text-xs text-[var(--app-muted)]", "{run.id}" }
+                                    p { class: "m-0 text-sm text-[var(--app-fg)]", "source: {run.source}" }
+                                }
+                                span {
+                                    class: "rounded-full border px-2 py-0.5 text-xs font-medium {status_pill_class(&run.status)}",
+                                    "{run.status}"
+                                }
+                            }
+                        }
                     }
                 }
-                div { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                    h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs / last tick" }
-                    pre { class: "mb-3 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[var(--app-bg)] p-3 font-mono text-xs text-[var(--app-fg)]",
-                        "{runs_json}"
+            }
+
+            // Kanban-ish board
+            section {
+                h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Board" }
+                div { class: "grid gap-3 md:grid-cols-5",
+                    for col in columns {
+                        {
+                            let col_tasks: Vec<TaskCard> = tasks()
+                                .into_iter()
+                                .filter(|t| status_column(&t.status) == col)
+                                .collect();
+                            rsx! {
+                                div {
+                                    key: "{col}",
+                                    class: "flex min-h-48 flex-col rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-2",
+                                    h3 { class: "m-0 mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-[var(--app-muted)]",
+                                        "{col} ({col_tasks.len()})"
+                                    }
+                                    div { class: "flex flex-1 flex-col gap-2",
+                                        if col_tasks.is_empty() {
+                                            p { class: "px-1 text-xs text-[var(--app-muted)]", "—" }
+                                        }
+                                        for t in col_tasks {
+                                            div {
+                                                key: "{t.id}",
+                                                class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-2.5 shadow-sm",
+                                                p { class: "m-0 text-sm font-medium text-[var(--app-fg)]", "{t.title}" }
+                                                p { class: "m-0 mt-0.5 font-mono text-[10px] text-[var(--app-muted)]", "{t.plan_task_id}" }
+                                                div { class: "mt-2 flex flex-wrap items-center gap-1.5",
+                                                    span {
+                                                        class: "rounded-full border px-1.5 py-0.5 text-[10px] font-medium {status_pill_class(&t.status)}",
+                                                        "{t.status}"
+                                                    }
+                                                    span { class: "text-[10px] text-[var(--app-muted)]", "p{t.priority}" }
+                                                    span { class: "text-[10px] text-[var(--app-muted)]", "try {t.attempt}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    pre { class: "max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[var(--app-bg)] p-3 font-mono text-xs text-[var(--app-muted)]",
+                }
+            }
+
+            if !last_tick().is_empty() {
+                details { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-3",
+                    summary { class: "cursor-pointer text-xs font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Last tick JSON" }
+                    pre { class: "mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--app-muted)]",
                         "{last_tick}"
                     }
                 }
             }
 
             p { class: "text-xs text-[var(--app-muted)]",
-                "Tip: Start fixture, then press "
+                "Uses your login session (cookies). Project id = workspace id. "
+                "After starting a run, press "
                 strong { "Run tick" }
-                " a few times until tasks are done_success and the run is completed."
+                " a few times until the board reaches Done."
             }
         }
     }
