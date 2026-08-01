@@ -32,6 +32,20 @@ pub async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Standalone binary root (when not mounted under fleet-server).
+pub async fn root_index() -> Json<Value> {
+    Json(json!({
+        "service": "fleet-orchestrator",
+        "status": "ok",
+        "message": "Orchestrator control plane",
+        "links": {
+            "healthz": "/healthz",
+            "readyz": "/readyz",
+            "projects": "POST /v1/projects",
+        }
+    }))
+}
+
 pub async fn readyz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     state
         .store

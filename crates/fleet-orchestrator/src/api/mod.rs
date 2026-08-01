@@ -15,11 +15,13 @@ use tower_http::trace::TraceLayer;
 use handlers::{
     admin_tick, cancel_run, create_project, fixture_run, get_config, get_project, get_task, healthz,
     list_runs, list_tasks, list_workers, post_heartbeat, post_status, readyz, resume_task,
+    root_index,
 };
 
 /// Core routes (no CORS). Safe to nest/fallback into fleet-server.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(root_index))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/projects", post(create_project))

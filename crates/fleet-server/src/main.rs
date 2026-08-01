@@ -14,7 +14,8 @@ mod state;
 use std::net::SocketAddr;
 
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_auth::validate_cookie_policy;
@@ -84,8 +85,9 @@ fn build_router() -> Router<AppState> {
 }
 
 /// Browser-friendly landing for `GET /` (was empty 404).
-async fn root_index() -> Json<Value> {
-    Json(json!({
+/// Returns HTML when the client prefers it (browsers); JSON otherwise (curl/API).
+async fn root_index(headers: HeaderMap) -> Response {
+    let body = json!({
         "service": "fleet-server",
         "status": "ok",
         "message": "Agent Fleet unified API",
@@ -101,7 +103,52 @@ async fn root_index() -> Json<Value> {
             "workspaces": "/api/workspaces",
             "orchestrator": "/v1/*",
         }
-    }))
+    });
+
+    let accept = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if accept.contains("text/html") {
+        let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+        Html(format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Fleet API</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem;
+           background: #f4f6fa; color: #1a1d26; line-height: 1.5; }}
+    h1 {{ font-size: 1.35rem; margin: 0 0 0.35rem; }}
+    p {{ color: #5a6270; margin: 0 0 1rem; }}
+    a {{ color: #2563eb; }}
+    ul {{ padding-left: 1.2rem; }}
+    pre {{ background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 10px;
+          overflow: auto; font-size: 0.82rem; }}
+    .ok {{ color: #0d7a4f; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <h1>Agent Fleet API</h1>
+  <p class="ok">status: ok</p>
+  <p>Unified backend — auth, workspaces, and orchestrator control plane.</p>
+  <ul>
+    <li><a href="/health">/health</a> — liveness + DB</li>
+    <li><a href="/healthz">/healthz</a> — orchestrator health</li>
+    <li><a href="/api">/api</a> — route index (JSON)</li>
+    <li><a href="http://localhost:3030">UI</a> — fleet-ui (run separately)</li>
+  </ul>
+  <pre>{pretty}</pre>
+</body>
+</html>"#
+        ))
+        .into_response()
+    } else {
+        (StatusCode::OK, Json(body)).into_response()
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
