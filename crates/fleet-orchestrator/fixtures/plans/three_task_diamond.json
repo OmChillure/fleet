@@ -1,0 +1,48 @@
+{
+  "plan": {
+    "plan_id": "77777777-7777-4777-8777-777777777777",
+    "project_id": "00000000-0000-0000-0000-000000000000",
+    "run_id": "88888888-8888-4888-8888-888888888888",
+    "version": 1,
+    "status": "accepted",
+    "source": "fixture",
+    "tasks": [
+      {
+        "plan_task_id": "root",
+        "title": "Root",
+        "depends_on": [],
+        "worker_profile": "coding",
+        "priority": 100,
+        "max_retries": 0
+      },
+      {
+        "plan_task_id": "left",
+        "title": "Left branch",
+        "depends_on": ["root"],
+        "worker_profile": "coding",
+        "priority": 50,
+        "max_retries": 0
+      },
+      {
+        "plan_task_id": "right",
+        "title": "Right branch",
+        "depends_on": ["root"],
+        "worker_profile": "coding",
+        "priority": 50,
+        "max_retries": 0
+      },
+      {
+        "plan_task_id": "join",
+        "title": "Join",
+        "depends_on": ["left", "right"],
+        "worker_profile": "coding",
+        "priority": 10,
+        "max_retries": 0
+      }
+    ],
+    "policy": {
+      "on_task_fail": "fail_run",
+      "auto_sync_external": false
+    }
+  }
+}

@@ -66,4 +66,9 @@ orch-integration:
       done
       pg_isready -h postgres -p 5432 -U fleet -d fleet
   script:
-    - cargo test -p fleet-orchestrator --locked --test store_integration --test tick_integration --test api_integration
+    # PR9 matrix: store + tick + HTTP API + e2e DoD scenarios
+    - cargo test -p fleet-orchestrator --locked
+        --test store_integration
+        --test tick_integration
+        --test api_integration
+        --test e2e_matrix

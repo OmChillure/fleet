@@ -1,0 +1,25 @@
+{
+  "plan": {
+    "plan_id": "33333333-3333-4333-8333-333333333333",
+    "project_id": "00000000-0000-0000-0000-000000000000",
+    "run_id": "44444444-4444-4444-8444-444444444444",
+    "version": 1,
+    "status": "accepted",
+    "source": "fixture",
+    "tasks": [
+      {
+        "plan_task_id": "t1",
+        "title": "Flaky task (retry once)",
+        "depends_on": [],
+        "worker_profile": "coding",
+        "priority": 100,
+        "max_retries": 1,
+        "timeout_s": 3600
+      }
+    ],
+    "policy": {
+      "on_task_fail": "fail_run",
+      "auto_sync_external": false
+    }
+  }
+}
