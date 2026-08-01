@@ -77,8 +77,14 @@ fn redact_db_target(database_url: &str) -> String {
 }
 
 /// Apply embedded migrations from this crate (`migrations/`).
+///
+/// `ignore_missing`: other crates (e.g. fleet-orchestrator) may share the same
+/// `_sqlx_migrations` table with additional version rows.
 pub async fn migrate(pool: &PgPool) -> DbResult<()> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
+        .run(pool)
+        .await?;
     Ok(())
 }
 
