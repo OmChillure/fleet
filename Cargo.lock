@@ -1339,6 +1339,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-extra",
  "dotenvy",
  "fleet-auth",
  "fleet-db",
@@ -1349,6 +1350,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
