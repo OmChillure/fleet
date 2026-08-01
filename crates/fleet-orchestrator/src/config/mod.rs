@@ -58,6 +58,61 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Embed in fleet-server: reuse its DATABASE_URL and bind as public orch URL.
+    pub fn from_env_for_server(database_url: &str, bind_addr: &str) -> Result<Self, ConfigError> {
+        // Prefer explicit ORCHESTRATOR_DATABASE_URL when isolating schemas/DBs.
+        let database_url = env::var("ORCHESTRATOR_DATABASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| database_url.to_string());
+
+        // Temporarily set DATABASE_URL for from_env path fields that read env.
+        // Safer: build structurally.
+        // Cookie/workspace fleet routes do not need ADMIN_TOKEN. Optional bearer
+        // is only for /v1 automation when set.
+        let admin_token = env::var("ADMIN_TOKEN").unwrap_or_default();
+        let auth_mode = match env_or("ORCH_AUTH_MODE", "token").as_str() {
+            "token" => AuthMode::Token,
+            "none" => AuthMode::None,
+            other => {
+                return Err(ConfigError::Message(format!(
+                    "invalid ORCH_AUTH_MODE {other:?}"
+                )));
+            }
+        };
+        let data_dir_raw = env_or("DATA_DIR", "./data");
+        let data_dir = std::fs::canonicalize(&data_dir_raw).or_else(|_| {
+            let p = PathBuf::from(&data_dir_raw);
+            let _ = std::fs::create_dir_all(&p);
+            std::fs::canonicalize(&p).or_else(|_| env::current_dir().map(|c| c.join(&data_dir_raw)))
+        }).map_err(|e| ConfigError::Message(format!("DATA_DIR: {e}")))?;
+
+        let tick_interval = duration_secs("TICK_INTERVAL_S", 5);
+        Ok(Self {
+            database_url,
+            admin_token,
+            auth_mode,
+            http_addr: bind_addr.to_string(),
+            data_dir,
+            tick_interval,
+            max_agents: int_env("MAX_AGENTS", 3),
+            heartbeat_stale: duration_secs("HEARTBEAT_STALE_S", 60),
+            spawn_timeout: duration_secs("SPAWN_TIMEOUT_S", 30),
+            kill_grace: duration_secs("KILL_GRACE_S", 15),
+            default_task_timeout: duration_secs("DEFAULT_TASK_TIMEOUT_S", 3600),
+            default_max_retries: int_env("DEFAULT_MAX_RETRIES", 2),
+            retry_backoff: duration_secs("RETRY_BACKOFF_S", 10),
+            on_task_fail: env_or("ON_TASK_FAIL", "fail_run"),
+            auto_sync_external: bool_env("AUTO_SYNC_EXTERNAL", false),
+            sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
+            stub_duration: duration_secs("STUB_DURATION_S", 3),
+            lock_wait_timeout: tick_interval,
+            log_level: env_or("LOG_LEVEL", "info"),
+            leadership_mode: "single_process".into(),
+            project_filter: env::var("PROJECT_ID").ok().filter(|s| !s.trim().is_empty()),
+        })
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         let auth_mode = match env_or("AUTH_MODE", "token").as_str() {
             "token" => AuthMode::Token,
@@ -72,15 +127,12 @@ impl Config {
             return Err(ConfigError::Message("DATABASE_URL is required".into()));
         }
 
+        // ADMIN_TOKEN is optional: when unset, /v1 admin bearer routes reject;
+        // cookie/workspace fleet routes do not use it.
         let admin_token = env::var("ADMIN_TOKEN").unwrap_or_default();
         let http_addr = env_or("HTTP_ADDR", ":8080");
 
         match auth_mode {
-            AuthMode::Token if admin_token.trim().is_empty() => {
-                return Err(ConfigError::Message(
-                    "ADMIN_TOKEN is required when AUTH_MODE=token".into(),
-                ));
-            }
             AuthMode::None if !is_loopback_addr(&http_addr) => {
                 return Err(ConfigError::Message(format!(
                     "AUTH_MODE=none requires loopback HTTP_ADDR, got {http_addr:?}"
@@ -234,14 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn requires_admin_token_in_token_mode() {
+    fn admin_token_optional_in_token_mode() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
         unsafe { env::set_var("DATABASE_URL", "postgres://x") };
         unsafe { env::set_var("AUTH_MODE", "token") };
         unsafe { env::set_var("DATA_DIR", dir.path()) };
-        assert!(Config::from_env().is_err());
+        let cfg = Config::from_env().expect("ADMIN_TOKEN is optional");
+        assert!(cfg.admin_token.is_empty());
+        assert_eq!(cfg.auth_mode, AuthMode::Token);
     }
 
     #[test]

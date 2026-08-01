@@ -1,0 +1,69 @@
+# Agent Fleet CI
+stages:
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+  # Keep in sync with lockfile (home/icu need rustc ≥ 1.88)
+  RUST_IMAGE: rust:1.88-bookworm
+  POSTGRES_DB: fleet
+  POSTGRES_USER: fleet
+  POSTGRES_PASSWORD: fleet
+  DATABASE_URL: "postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable"
+  ADMIN_TOKEN: "ci-admin-token"
+  JWT_SECRET: "ci-jwt-secret-at-least-32-characters-long"
+  DATA_DIR: "/tmp/fleet-data"
+  STUB_DURATION_S: "0"
+
+.rust_base:
+  image: rust:1.88-bookworm
+  before_script:
+    - rustc --version && cargo --version
+    - apt-get update -qq
+    - apt-get install -y -qq pkg-config libssl-dev >/dev/null
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - target/
+      - .cargo/registry/
+      - .cargo/git/
+
+unit:
+  extends: .rust_base
+  stage: test
+  script:
+    - cargo test -p fleet-orchestrator --lib --locked
+    - cargo test -p agent-fleet-contracts --lib --locked || true
+
+orch-integration:
+  extends: .rust_base
+  stage: test
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    # Service container env (create user/db)
+    POSTGRES_DB: fleet
+    POSTGRES_USER: fleet
+    POSTGRES_PASSWORD: fleet
+    FF_NETWORK_PER_BUILD: "true"
+  before_script:
+    - rustc --version && cargo --version
+    - apt-get update -qq
+    - apt-get install -y -qq pkg-config libssl-dev postgresql-client >/dev/null
+    # Wait for Postgres TCP + auth (pg_isready needs client package)
+    - |
+      echo "waiting for postgres…"
+      for i in $(seq 1 60); do
+        if pg_isready -h postgres -p 5432 -U fleet -d fleet; then
+          echo "postgres ready"
+          break
+        fi
+        sleep 1
+      done
+      pg_isready -h postgres -p 5432 -U fleet -d fleet
+  script:
+    - cargo test -p fleet-orchestrator --locked --test store_integration --test tick_integration --test api_integration

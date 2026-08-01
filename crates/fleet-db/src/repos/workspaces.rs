@@ -141,3 +141,24 @@ pub async fn create_owned(
     tx.commit().await.map_err(DbError::from)?;
     Ok(ws)
 }
+
+
+/// Role for user in workspace, if a member.
+pub async fn user_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Option<String>> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT role FROM workspace_members
+        WHERE workspace_id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(row)
+}

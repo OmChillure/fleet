@@ -542,3 +542,208 @@ pub struct SpawnAssignment {
     pub worker_token: String,
 }
 
+
+impl Store {
+    pub async fn get_project(&self, project_id: Uuid) -> Result<Option<super::ProjectRow>> {
+        sqlx::query_as::<_, super::ProjectRow>(
+            r#"SELECT id, name, created_at FROM projects WHERE id = $1"#,
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn get_run(&self, project_id: Uuid, run_id: Uuid) -> Result<Option<super::WorkRunRow>> {
+        sqlx::query_as::<_, super::WorkRunRow>(
+            r#"
+            SELECT id, project_id, status, source, cancel_requested_at,
+                   orchestration_owned_at, first_spawn_at, terminal_at,
+                   created_at, updated_at
+            FROM work_runs
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(run_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_runs(&self, project_id: Uuid) -> Result<Vec<super::WorkRunRow>> {
+        sqlx::query_as::<_, super::WorkRunRow>(
+            r#"
+            SELECT id, project_id, status, source, cancel_requested_at,
+                   orchestration_owned_at, first_spawn_at, terminal_at,
+                   created_at, updated_at
+            FROM work_runs
+            WHERE project_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_tasks(
+        &self,
+        project_id: Uuid,
+        run_id: Option<Uuid>,
+        status: Option<&str>,
+    ) -> Result<Vec<super::BoardTaskRow>> {
+        // Simple filter in SQL with optional binds via dynamic approach
+        let tasks = sqlx::query_as::<_, super::BoardTaskRow>(
+            r#"
+            SELECT id, project_id, run_id, plan_id, plan_task_id, title, summary, spec_md,
+                   status, depends_on, priority, worker_profile, acceptance, external_ref,
+                   timeout_s, max_retries, attempt, claimed_session_id, last_report_seq,
+                   progress_pct, block_reason, hitl_notes, hitl_artifacts,
+                   hitl_resume_requested_at, hitl_notified_at, hitl_resolved_at,
+                   failure_reason, artifacts, retry_not_before,
+                   assigned_at, started_at, terminal_at, created_at, updated_at
+            FROM board_tasks
+            WHERE project_id = $1
+              AND ($2::uuid IS NULL OR run_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY priority DESC, created_at ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(run_id)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(tasks)
+    }
+
+    pub async fn get_task(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<super::BoardTaskRow>> {
+        sqlx::query_as::<_, super::BoardTaskRow>(
+            r#"
+            SELECT id, project_id, run_id, plan_id, plan_task_id, title, summary, spec_md,
+                   status, depends_on, priority, worker_profile, acceptance, external_ref,
+                   timeout_s, max_retries, attempt, claimed_session_id, last_report_seq,
+                   progress_pct, block_reason, hitl_notes, hitl_artifacts,
+                   hitl_resume_requested_at, hitl_notified_at, hitl_resolved_at,
+                   failure_reason, artifacts, retry_not_before,
+                   assigned_at, started_at, terminal_at, created_at, updated_at
+            FROM board_tasks
+            WHERE id = $1 AND project_id = $2
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// HITL resume intent only (Model A). Returns false if task not blocked.
+    pub async fn request_hitl_resume(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+        message: &str,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET hitl_notes = $3,
+                hitl_resume_requested_at = now(),
+                updated_at = now()
+            WHERE id = $1 AND project_id = $2 AND status = 'blocked'
+            "#,
+        )
+        .bind(task_id)
+        .bind(project_id)
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    pub async fn list_sessions_for_project(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<WorkerSessionRow>> {
+        sqlx::query_as::<_, WorkerSessionRow>(
+            r#"
+            SELECT id, project_id, run_id, board_task_id, attempt, status,
+                   runtime_backend, runtime_handle, worker_token_hash, worker_profile,
+                   last_heartbeat_at, progress_pct, exit_reason, kill_grace_deadline,
+                   work_dir, started_at, exited_at, created_at
+            FROM worker_sessions
+            WHERE project_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn authenticate_worker_session(
+        &self,
+        session_id: Uuid,
+        token: &str,
+    ) -> Result<Option<WorkerSessionRow>> {
+        let Some(s) = self.get_session(session_id).await? else {
+            return Ok(None);
+        };
+        if crate::store::verify_worker_token(token, &s.worker_token_hash) {
+            Ok(Some(s))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+
+impl Store {
+    /// Create project with a fixed id if missing (workspace_id == project_id mapping).
+    pub async fn ensure_project(
+        &self,
+        project_id: Uuid,
+        name: &str,
+        max_agents: i32,
+    ) -> Result<super::ProjectRow> {
+        if let Some(p) = self.get_project(project_id).await? {
+            return Ok(p);
+        }
+        let mut tx = self.pool.begin().await?;
+        let project = sqlx::query_as::<_, super::ProjectRow>(
+            r#"
+            INSERT INTO projects (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id, name, created_at
+            "#,
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO project_configs (project_id, max_agents)
+            VALUES ($1, $2)
+            ON CONFLICT (project_id) DO NOTHING
+            "#,
+        )
+        .bind(project_id)
+        .bind(max_agents)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(project)
+    }
+}

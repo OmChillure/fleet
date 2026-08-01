@@ -3,6 +3,7 @@
 //! Pure-logic control plane after a `WorkPlan` is accepted.
 //! Stack: Rust + PostgreSQL 16 + abstract `SandboxRuntime`.
 
+pub mod api;
 pub mod config;
 pub mod domain;
 pub mod notify;

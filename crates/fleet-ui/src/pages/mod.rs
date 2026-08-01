@@ -17,6 +17,7 @@
 pub mod agents;
 pub mod auth;
 pub mod dashboard;
+pub mod fleet;
 pub mod home;
 pub mod sandboxes;
 pub mod sessions;
