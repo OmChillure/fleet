@@ -68,22 +68,18 @@ impl Config {
 
         // Temporarily set DATABASE_URL for from_env path fields that read env.
         // Safer: build structurally.
-        let auth_mode = match env_or("AUTH_MODE", "token").as_str() {
+        // Cookie/workspace fleet routes do not need ADMIN_TOKEN. Optional bearer
+        // is only for /v1 automation when set.
+        let admin_token = env::var("ADMIN_TOKEN").unwrap_or_default();
+        let auth_mode = match env_or("ORCH_AUTH_MODE", "token").as_str() {
             "token" => AuthMode::Token,
             "none" => AuthMode::None,
             other => {
-                return Err(ConfigError::Message(format!("invalid AUTH_MODE {other:?}")));
+                return Err(ConfigError::Message(format!(
+                    "invalid ORCH_AUTH_MODE {other:?}"
+                )));
             }
         };
-        let admin_token = env::var("ADMIN_TOKEN").unwrap_or_else(|_| {
-            // Local play default; override in production.
-            "dev-admin-token-change-me".into()
-        });
-        if auth_mode == AuthMode::Token && admin_token.trim().is_empty() {
-            return Err(ConfigError::Message(
-                "ADMIN_TOKEN is required when AUTH_MODE=token".into(),
-            ));
-        }
         let data_dir_raw = env_or("DATA_DIR", "./data");
         let data_dir = std::fs::canonicalize(&data_dir_raw).or_else(|_| {
             let p = PathBuf::from(&data_dir_raw);
@@ -131,15 +127,12 @@ impl Config {
             return Err(ConfigError::Message("DATABASE_URL is required".into()));
         }
 
+        // ADMIN_TOKEN is optional: when unset, /v1 admin bearer routes reject;
+        // cookie/workspace fleet routes do not use it.
         let admin_token = env::var("ADMIN_TOKEN").unwrap_or_default();
         let http_addr = env_or("HTTP_ADDR", ":8080");
 
         match auth_mode {
-            AuthMode::Token if admin_token.trim().is_empty() => {
-                return Err(ConfigError::Message(
-                    "ADMIN_TOKEN is required when AUTH_MODE=token".into(),
-                ));
-            }
             AuthMode::None if !is_loopback_addr(&http_addr) => {
                 return Err(ConfigError::Message(format!(
                     "AUTH_MODE=none requires loopback HTTP_ADDR, got {http_addr:?}"
@@ -293,14 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn requires_admin_token_in_token_mode() {
+    fn admin_token_optional_in_token_mode() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
         unsafe { env::set_var("DATABASE_URL", "postgres://x") };
         unsafe { env::set_var("AUTH_MODE", "token") };
         unsafe { env::set_var("DATA_DIR", dir.path()) };
-        assert!(Config::from_env().is_err());
+        let cfg = Config::from_env().expect("ADMIN_TOKEN is optional");
+        assert!(cfg.admin_token.is_empty());
+        assert_eq!(cfg.auth_mode, AuthMode::Token);
     }
 
     #[test]

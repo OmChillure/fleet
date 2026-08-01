@@ -9,11 +9,11 @@
 ```bash
 docker compose up -d postgres
 
-# .env
+# .env (minimum)
 # DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
 # JWT_SECRET=…(≥32 chars)
-# ADMIN_TOKEN=dev-admin-token-change-me   # still used for /v1 admin/automation
 # DATA_DIR=/tmp/fleet-orch-data
+# ADMIN_TOKEN is optional (only for /v1 scripts)
 
 cargo run -p fleet-server          # :8080
 dx serve --package fleet-ui --port 3030
@@ -23,6 +23,6 @@ dx serve --package fleet-ui --port 3030
 2. Sidebar → **Fleet**  
 3. **Start 2-task run** → **Run tick** until board columns show Done  
 
-Cookie auth on `/api/workspaces/{id}/fleet/*`. No admin token in the UI.
+Cookie auth on `/api/workspaces/{id}/fleet/*`. **No ADMIN_TOKEN required.**
 
-Admin bearer `/v1/*` remains for scripts (`./scripts/demo-orch.sh`).
+Optional: set `ADMIN_TOKEN` to enable `/v1/*` bearer automation (`./scripts/demo-orch.sh`).

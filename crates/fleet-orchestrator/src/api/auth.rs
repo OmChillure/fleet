@@ -17,6 +17,15 @@ impl FromRequestParts<AppState> for AdminAuth {
         if state.auth_mode == AuthMode::None {
             return Ok(AdminAuth);
         }
+        // No ADMIN_TOKEN configured → /v1 admin automation is disabled.
+        // Use cookie-authenticated /api/workspaces/{id}/fleet/* instead.
+        if state.admin_token.trim().is_empty() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "admin automation disabled (set ADMIN_TOKEN to enable /v1 bearer routes)"
+                    .into(),
+            ));
+        }
         let header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
