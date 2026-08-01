@@ -60,8 +60,29 @@ set -a && source .env && set +a
 cargo run
 ```
 
-**PR5a–c landed:** full reconcile loop with stub workers (inbox, spawn, stuck/kill/retry, cancel drain, orphan reap, rollup).  
-**Next:** PR6 HTTP API (projects, fixture plan, workers, cancel, admin/tick).
+**Landed:** PR5a–c tick, PR6 HTTP API, PR9 fixtures + E2E matrix + demo.  
+**Next (optional / polish):** PR7 process sandbox · PR8 metrics/webhook notify · PR10 external board sync wiring.
+
+## Fixtures & demo (PR9)
+
+Plan JSON under `fixtures/plans/`:
+
+| File | Scenario |
+|------|----------|
+| `two_task_chain.json` | Happy dependency chain |
+| `single_task_retry.json` | Fail → retry budget |
+| `single_task_hitl.json` | Blocked + HITL resume |
+| `three_task_diamond.json` | Fan-out / join graph |
+
+```bash
+# Integration + E2E matrix (needs Postgres)
+export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
+cargo test -p fleet-orchestrator --test e2e_matrix --locked
+
+# Scripted demo against a running orch (ADMIN_TOKEN + /v1)
+cargo run -p fleet-orchestrator   # HTTP_ADDR=127.0.0.1:8081
+ADMIN_TOKEN=dev-admin-token-change-me SCENARIO=all ./scripts/demo-orch.sh
+```
 
 ## HTTP API (PR6)
 
