@@ -192,9 +192,12 @@ pub fn Integrations(workspace_id: String) -> Element {
             }
 
             if loading() {
+                // Skeleton cards matching the real integration card layout.
                 div {
-                    class: "flex flex-1 items-center justify-center rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-20",
-                    p { class: "text-sm text-[var(--app-muted)]", "Loading integrations…" }
+                    class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
+                    for i in 0..6 {
+                        IntegrationSkeletonCard { key: "{i}" }
+                    }
                 }
             } else if let Some(err) = error() {
                 div {
@@ -202,14 +205,11 @@ pub fn Integrations(workspace_id: String) -> Element {
                     "{err}"
                 }
             } else if filtered.is_empty() {
-                div {
-                    class: "flex flex-1 items-center justify-center rounded-2xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-16",
-                    p { class: "text-sm text-[var(--app-muted)]",
-                        if q.is_empty() {
-                            "No integrations available."
-                        } else {
-                            "No integrations match your search."
-                        }
+                p { class: "text-sm text-[var(--app-muted)]",
+                    if q.is_empty() {
+                        "No integrations available."
+                    } else {
+                        "No integrations match your search."
                     }
                 }
             } else {
@@ -396,6 +396,33 @@ pub fn Integrations(workspace_id: String) -> Element {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Placeholder card that mirrors the real integration card geometry while loading.
+#[component]
+fn IntegrationSkeletonCard() -> Element {
+    rsx! {
+        article {
+            class: "flex min-h-[7.5rem] flex-col rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+            div { class: "flex items-start gap-3",
+                // Logo placeholder
+                div {
+                    class: "h-10 w-10 shrink-0 animate-pulse rounded-xl bg-[var(--app-bg-hover)]"
+                }
+                div { class: "min-w-0 flex-1 space-y-2 pt-0.5",
+                    div { class: "h-3.5 w-24 animate-pulse rounded bg-[var(--app-bg-hover)]" }
+                    div { class: "h-2.5 w-16 animate-pulse rounded bg-[var(--app-bg-hover)]" }
+                }
+                // Action button placeholder
+                div { class: "h-7 w-[5.5rem] shrink-0 animate-pulse rounded-lg bg-[var(--app-bg-hover)]" }
+            }
+            // Description lines
+            div { class: "mt-3 space-y-1.5",
+                div { class: "h-2.5 w-full animate-pulse rounded bg-[var(--app-bg-hover)]" }
+                div { class: "h-2.5 w-4/5 max-w-[85%] animate-pulse rounded bg-[var(--app-bg-hover)]" }
             }
         }
     }
