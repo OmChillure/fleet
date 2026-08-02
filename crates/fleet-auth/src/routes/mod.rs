@@ -1,4 +1,4 @@
-mod auth;
+pub mod auth;
 mod workspaces;
 
 pub use auth::require_user;

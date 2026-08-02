@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::theme_toggle::ThemeToggle;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, WorkspacePublic, create_workspace, list_workspaces,
 };
@@ -53,7 +54,7 @@ pub fn Sidebar() -> Element {
 
     rsx! {
         aside {
-            class: "flex h-full w-56 shrink-0 flex-col border-r border-[var(--app-border)] bg-[var(--app-bg)]",
+            class: "flex h-full w-56 shrink-0 flex-col border-r border-[var(--app-border)] bg-[var(--app-sidebar)]",
             div { class: "flex h-12 items-center gap-2 border-b border-[var(--app-border)] px-3",
                 Link {
                     class: "flex items-center gap-2 font-semibold tracking-tight text-[var(--app-fg)]",
@@ -224,17 +225,23 @@ pub fn Sidebar() -> Element {
                     label: "Sandboxes",
                 }
                 SidebarLink {
+                    to: Route::Integrations { workspace_id: workspace_id.clone() },
+                    label: "Integrations",
+                }
+                SidebarLink {
                     to: Route::Settings { workspace_id: workspace_id.clone() },
                     label: "Settings",
                 }
             }
 
-            div { class: "border-t border-[var(--app-border)] p-2 text-xs text-[var(--app-muted)]",
+            div {
+                class: "flex items-center gap-1 border-t border-[var(--app-border)] p-2 text-xs text-[var(--app-muted)]",
                 Link {
-                    class: "block rounded-md px-2 py-1.5 transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+                    class: "min-w-0 flex-1 rounded-md px-2 py-1.5 transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
                     to: Route::Home {},
                     "← Back to landing"
                 }
+                ThemeToggle {}
             }
         }
     }

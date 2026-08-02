@@ -8,7 +8,7 @@ pub fn Settings(workspace_id: String) -> Element {
     rsx! {
         EmptyPage {
             title: "Settings",
-            description: "Workspace, integrations, and preferences.",
+            description: "Workspace preferences and account settings.",
         }
     }
 }

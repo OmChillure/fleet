@@ -1,0 +1,17 @@
+{
+  "name": "fleet-ui",
+  "version": "1.0.0",
+  "description": "Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app shell.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "tailwindcss": "^4.3.3"
+  }
+}

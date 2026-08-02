@@ -22,8 +22,9 @@ Related component folders (stubs for deeper specs):
 | Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
 
 **Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
-(auth + workspaces) over `fleet-db` (Postgres). UI on `:3030` talks to the API
-with cookie credentials. Orchestrator / sandboxes are design-only.
+(auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
+(Postgres). UI on `:3030` talks to the API with cookie credentials.
+Orchestrator / sandboxes / OAuth connect flows are design-only.
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

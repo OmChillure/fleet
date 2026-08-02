@@ -11,6 +11,7 @@ Rust workspace (see root `Cargo.toml`).
 | --- | --- | --- |
 | [`fleet-server`](crates/fleet-server/) | `crates/fleet-server` | **Unified API** — `cargo run` entrypoint |
 | [`fleet-auth`](crates/fleet-auth/) | `crates/fleet-auth` | Auth + workspaces library (mounted by server) |
+| [`fleet-integrations`](crates/fleet-integrations/) | `crates/fleet-integrations` | Integrations catalog (GitHub, Jira, Slack, …) |
 | [`fleet-db`](crates/fleet-db/) | `crates/fleet-db` | Postgres — migrations, pool, models, repos |
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
@@ -63,6 +64,10 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/auth/me` | User + workspaces (ensures default) |
 | `GET` | `/api/workspaces` | List memberships (ensures default) |
 | `POST` | `/api/workspaces` | Create workspace `{ "name": "…" }` |
+| `GET` | `/api/workspaces/{id}/integrations` | Catalog + OAuth connection state |
+| `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
+| `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → store tokens |
+| `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -73,6 +78,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/sessions` | Sessions |
 | `/{workspace_id}/agents` | Agents |
 | `/{workspace_id}/sandboxes` | Sandboxes |
+| `/{workspace_id}/integrations` | Integrations |
 | `/{workspace_id}/settings` | Settings |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),

@@ -1,6 +1,6 @@
 //! Unified Agent Fleet HTTP API.
 //!
-//! Auth + workspaces + orchestrator control plane on one process.
+//! Auth + workspaces + integrations + orchestrator control plane on one process.
 
 mod config;
 mod fleet_routes;
@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new(
-                "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info,fleet_orchestrator=info",
+                "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_integrations=info,fleet_server=info,fleet_orchestrator=info",
             )
         }))
         .init();
@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         auth: config.auth.clone(),
+        integrations: config.integrations.clone(),
         orch: orch.clone(),
     };
 
@@ -63,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = config.bind;
     tracing::info!(
         %addr,
-        "fleet-server listening (auth + workspaces + fleet + orchestrator)"
+        "fleet-server listening (auth + workspaces + integrations + fleet + orchestrator)"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -76,6 +77,9 @@ fn build_router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/api", get(api_index))
         .merge(fleet_auth::router::<AppState>())
+        // Integrations catalog (GitHub, Jira, Slack, …)
+        .merge(fleet_integrations::router::<AppState>())
+        // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
 }
 
@@ -94,6 +98,7 @@ async fn root_index(headers: HeaderMap) -> Response {
         "apis": {
             "auth": "/api/auth/*",
             "workspaces": "/api/workspaces",
+            "integrations": "/api/workspaces/{workspace_id}/integrations/*",
             "fleet": "/api/workspaces/{workspace_id}/fleet/*",
             "orchestrator_admin": "/v1/*",
         }
@@ -137,7 +142,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "integrations", "fleet", "orchestrator"],
     }))
 }
 
@@ -153,6 +158,12 @@ async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+            },
+            "integrations": {
+                "list": "GET /api/workspaces/{workspace_id}/integrations",
+                "oauth_start": "GET /api/workspaces/{workspace_id}/integrations/{provider}/oauth/start",
+                "oauth_callback": "GET /api/integrations/oauth/callback/{provider}",
+                "disconnect": "DELETE /api/workspaces/{workspace_id}/integrations/{provider}",
             },
             "fleet": {
                 "project": "GET /api/workspaces/{workspace_id}/fleet",

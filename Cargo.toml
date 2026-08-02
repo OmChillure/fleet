@@ -4,6 +4,7 @@ members = [
     "crates/agent-fleet-contracts",
     "crates/fleet-db",
     "crates/fleet-auth",
+    "crates/fleet-integrations",
     "crates/fleet-server",
     "crates/fleet-ui",
     "crates/fleet-orchestrator",
@@ -42,11 +43,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 cookie = "0.18"
 time = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 async-trait = "0.1"
 subtle = "2.6"
 tempfile = "3"
 fleet-db = { path = "crates/fleet-db" }
 fleet-auth = { path = "crates/fleet-auth" }
+fleet-integrations = { path = "crates/fleet-integrations" }
 fleet-server = { path = "crates/fleet-server" }
 fleet-orchestrator = { path = "crates/fleet-orchestrator" }

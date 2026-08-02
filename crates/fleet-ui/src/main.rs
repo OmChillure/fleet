@@ -15,6 +15,7 @@ use pages::auth::{Login, Signup};
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
+use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
 use pages::sessions::Sessions;
 use pages::settings::Settings;
@@ -30,9 +31,11 @@ pub enum Route {
         Login {},
         #[route("/signup")]
         Signup {},
-    // App shell: `/{workspace_id}/dashboard` etc.
-    // `end_layout` must hang on the next variant (not trail the enum).
     #[end_layout]
+    // OAuth popup only — no shell, no navbar. Closes after signaling parent.
+    #[route("/oauth/done")]
+    OAuthDone {},
+    // App shell: `/{workspace_id}/dashboard` etc.
     #[layout(AppShell)]
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },
@@ -44,6 +47,8 @@ pub enum Route {
         Agents { workspace_id: String },
         #[route("/:workspace_id/sandboxes")]
         Sandboxes { workspace_id: String },
+        #[route("/:workspace_id/integrations")]
+        Integrations { workspace_id: String },
         #[route("/:workspace_id/settings")]
         Settings { workspace_id: String },
 }
@@ -57,6 +62,7 @@ impl Route {
             | Route::Sessions { workspace_id }
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
+            | Route::Integrations { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,
         }

@@ -1,15 +1,29 @@
 //! Browser client for fleet-server auth + workspaces (cookies via credentials: include).
+//!
+//! Dev: call same-origin `/api/*` so `dx serve` can proxy to the backend and cookies
+//! stay first-party (reload-safe). Production: set `FLEET_AUTH_URL` at build time.
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
-/// Backend origin. Frontend: `localhost:3030`, backend: `localhost:8080`.
-/// Override at build time: `FLEET_AUTH_URL=https://api.example.com dx serve …`
+/// API origin for browser requests.
+///
+/// Priority:
+/// 1. `FLEET_AUTH_URL` compile-time override (production split deploy)
+/// 2. Browser page origin (dev + same-origin proxy via `Dioxus.toml`)
+/// 3. `http://localhost:8080` (non-wasm / fallback)
 pub fn auth_base_url() -> String {
-    option_env!("FLEET_AUTH_URL")
-        .unwrap_or("http://localhost:8080")
-        .to_string()
+    if let Some(url) = option_env!("FLEET_AUTH_URL") {
+        return url.trim_end_matches('/').to_string();
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(origin) = web_sys::window().and_then(|w| w.location().origin().ok()) {
+            return origin;
+        }
+    }
+    "http://localhost:8080".to_string()
 }
 
 fn api_url(path: &str) -> String {
@@ -71,6 +85,8 @@ pub struct CreateWorkspaceBody {
 
 #[derive(Debug, Clone)]
 pub enum AuthError {
+    /// 401 — no session / expired access and refresh failed.
+    Unauthorized(String),
     Message(String),
     Network(String),
 }
@@ -78,8 +94,12 @@ pub enum AuthError {
 impl AuthError {
     pub fn message(&self) -> String {
         match self {
-            AuthError::Message(m) | AuthError::Network(m) => m.clone(),
+            AuthError::Unauthorized(m) | AuthError::Message(m) | AuthError::Network(m) => m.clone(),
         }
+    }
+
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, AuthError::Unauthorized(_))
     }
 }
 
@@ -87,7 +107,7 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-/// Attach credentials so httpOnly auth cookies are sent/stored cross-origin.
+/// Attach credentials so httpOnly auth cookies are sent/stored.
 #[allow(unused_mut)]
 fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     #[cfg(target_arch = "wasm32")]
@@ -110,6 +130,17 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
         serde_json::from_str(&text).map_err(|e| {
             AuthError::Network(format!("invalid success response: {e} ({text})"))
         })
+    } else if status.as_u16() == 401 {
+        let msg = serde_json::from_str::<ErrorBody>(&text)
+            .map(|b| b.error)
+            .unwrap_or_else(|_| {
+                if text.is_empty() {
+                    "not authenticated".into()
+                } else {
+                    text
+                }
+            });
+        Err(AuthError::Unauthorized(msg))
     } else {
         let msg = serde_json::from_str::<ErrorBody>(&text)
             .map(|b| b.error)
@@ -121,6 +152,62 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
                 }
             });
         Err(AuthError::Message(msg))
+    }
+}
+
+/// Rotate access (+ refresh) cookies using `fleet_refresh`.
+pub async fn refresh_session() -> Result<AuthResponse, AuthError> {
+    let res = with_credentials(client().post(api_url("/api/auth/refresh")))
+        .send()
+        .await
+        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    parse_json_or_error(res).await
+}
+
+/// GET with credentials; on 401 try one silent refresh then retry once.
+async fn authorized_get(path: &str) -> Result<reqwest::Response, AuthError> {
+    let first = with_credentials(client().get(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+
+    // Access JWT missing/expired — refresh cookie may still be valid (7d).
+    match refresh_session().await {
+        Ok(_) => with_credentials(client().get(api_url(path)))
+            .send()
+            .await
+            .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}"))),
+        Err(AuthError::Unauthorized(m)) => Err(AuthError::Unauthorized(m)),
+        Err(AuthError::Message(m)) => Err(AuthError::Unauthorized(m)),
+        Err(e) => Err(e),
+    }
+}
+
+async fn authorized_post_json<B: Serialize + ?Sized>(
+    path: &str,
+    body: &B,
+) -> Result<reqwest::Response, AuthError> {
+    let first = with_credentials(client().post(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+
+    match refresh_session().await {
+        Ok(_) => with_credentials(client().post(api_url(path)).json(body))
+            .send()
+            .await
+            .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}"))),
+        Err(AuthError::Unauthorized(m)) => Err(AuthError::Unauthorized(m)),
+        Err(AuthError::Message(m)) => Err(AuthError::Unauthorized(m)),
+        Err(e) => Err(e),
     }
 }
 
@@ -140,6 +227,7 @@ pub async fn login(body: LoginBody) -> Result<AuthResponse, AuthError> {
     parse_json_or_error(res).await
 }
 
+/// Current user + workspaces. Silently refreshes if the short-lived access cookie expired.
 pub async fn me() -> Result<(UserPublic, Vec<WorkspacePublic>), AuthError> {
     #[derive(Deserialize)]
     struct MeResponse {
@@ -147,10 +235,7 @@ pub async fn me() -> Result<(UserPublic, Vec<WorkspacePublic>), AuthError> {
         #[serde(default)]
         workspaces: Vec<WorkspacePublic>,
     }
-    let res = with_credentials(client().get(api_url("/api/auth/me")))
-        .send()
-        .await
-        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    let res = authorized_get("/api/auth/me").await?;
     let body: MeResponse = parse_json_or_error(res).await?;
     Ok((body.user, body.workspaces))
 }
@@ -160,10 +245,7 @@ pub async fn list_workspaces() -> Result<Vec<WorkspacePublic>, AuthError> {
     struct ListResponse {
         workspaces: Vec<WorkspacePublic>,
     }
-    let res = with_credentials(client().get(api_url("/api/workspaces")))
-        .send()
-        .await
-        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    let res = authorized_get("/api/workspaces").await?;
     let body: ListResponse = parse_json_or_error(res).await?;
     Ok(body.workspaces)
 }
@@ -173,10 +255,7 @@ pub async fn create_workspace(body: CreateWorkspaceBody) -> Result<WorkspacePubl
     struct CreateResponse {
         workspace: WorkspacePublic,
     }
-    let res = with_credentials(client().post(api_url("/api/workspaces")).json(&body))
-        .send()
-        .await
-        .map_err(|e| AuthError::Network(format!("could not reach auth service: {e}")))?;
+    let res = authorized_post_json("/api/workspaces", &body).await?;
     let body: CreateResponse = parse_json_or_error(res).await?;
     Ok(body.workspace)
 }
