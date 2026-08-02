@@ -82,19 +82,30 @@ impl IntegrationsConfig {
         )
     }
 
-    /// After success/error, land on the integrations page.
+    /// After success/error, land on the integrations page (legacy / full page).
     pub fn ui_integrations_url(&self, workspace_id: &str, query: &str) -> String {
-        let q = if query.is_empty() {
-            String::new()
-        } else if query.starts_with('?') {
-            query.to_string()
-        } else {
-            format!("?{query}")
-        };
+        let q = format_query(query);
         format!(
             "{}/{}/integrations{}",
             self.ui_public_base, workspace_id, q
         )
+    }
+
+    /// Minimal popup page after OAuth — signals the original tab and closes.
+    /// Does **not** reopen the full app UI in the auth tab.
+    pub fn ui_oauth_done_url(&self, query: &str) -> String {
+        let q = format_query(query);
+        format!("{}/oauth/done{}", self.ui_public_base, q)
+    }
+}
+
+fn format_query(query: &str) -> String {
+    if query.is_empty() {
+        String::new()
+    } else if query.starts_with('?') {
+        query.to_string()
+    } else {
+        format!("?{query}")
     }
 }
 

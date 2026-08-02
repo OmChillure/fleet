@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::pages::auth::api::auth_base_url;
+use crate::pages::auth::api::{auth_base_url, refresh_session};
 
 fn api_url(path: &str) -> String {
     format!(
@@ -25,6 +25,41 @@ fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder
         req = req.fetch_credentials_include();
     }
     req
+}
+
+/// GET with credentials; silent refresh once on 401.
+async fn authorized_get(path: &str) -> Result<reqwest::Response, IntegrationsError> {
+    let first = with_credentials(client().get(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session()
+        .await
+        .map_err(|e| IntegrationsError::Message(e.message()))?;
+    with_credentials(client().get(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
+}
+
+async fn authorized_delete(path: &str) -> Result<reqwest::Response, IntegrationsError> {
+    let first = with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session()
+        .await
+        .map_err(|e| IntegrationsError::Message(e.message()))?;
+    with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -117,15 +152,12 @@ pub async fn list_integrations(
     workspace_id: &str,
 ) -> Result<Vec<Integration>, IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations");
-    let res = with_credentials(client().get(api_url(&path)))
-        .send()
-        .await
-        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    let res = authorized_get(&path).await?;
     let body: IntegrationListResponse = parse_json_or_error(res).await?;
     Ok(body.integrations)
 }
 
-/// Absolute URL for full-page OAuth navigation (cookies sent to API origin).
+/// Absolute URL for full-page OAuth navigation (same-origin in dev via proxy).
 pub fn oauth_start_url(workspace_id: &str, provider: &str) -> String {
     api_url(&format!(
         "/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"
@@ -138,10 +170,7 @@ pub async fn disconnect_integration(
     provider: &str,
 ) -> Result<(), IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations/{provider}");
-    let res = with_credentials(client().delete(api_url(&path)))
-        .send()
-        .await
-        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    let res = authorized_delete(&path).await?;
     if res.status().is_success() {
         Ok(())
     } else {

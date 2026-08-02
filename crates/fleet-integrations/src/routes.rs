@@ -2,8 +2,8 @@
 
 use axum::Json;
 use axum::extract::{FromRef, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use axum_extra::extract::CookieJar;
@@ -153,27 +153,170 @@ struct OAuthCallbackQuery {
     error_description: Option<String>,
 }
 
-/// Provider redirects here. Exchange code, store tokens, bounce to UI.
+/// Provider redirects here. Exchange code, store tokens, then:
+/// 1) notify + focus the original Agent Fleet tab
+/// 2) close this auth tab
+/// Never loads the full SPA here.
 async fn oauth_callback(
     State(state): State<IntegrationsState>,
     Path(provider): Path<String>,
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Response {
+    let ui_origin = state.config.ui_public_base.clone();
     match oauth_callback_inner(&state, &provider, q).await {
-        Ok(redirect_url) => redirect_see_other(&redirect_url),
+        Ok(provider_id) => oauth_popup_close_html(&ui_origin, Some(&provider_id), None),
         Err((workspace_hint, msg)) => {
             tracing::warn!(provider = %provider, error = %msg, "oauth callback failed");
-            let ws = workspace_hint.unwrap_or_else(|| "unknown".into());
-            let url = state.config.ui_integrations_url(
-                &ws,
-                &format!(
-                    "error={}",
-                    urlencoding_component(&msg)
-                ),
-            );
-            redirect_see_other(&url)
+            let _ = workspace_hint;
+            oauth_popup_close_html(&ui_origin, None, Some(&msg))
         }
     }
+}
+
+/// Auth-tab only: tell opener auth finished, focus it, close this tab.
+fn oauth_popup_close_html(
+    ui_origin: &str,
+    connected: Option<&str>,
+    error: Option<&str>,
+) -> Response {
+    let ui_origin_js = json_escape(ui_origin.trim_end_matches('/'));
+    let (ok_js, provider_js, error_js, title, body) = if let Some(p) = connected {
+        (
+            "true",
+            json_escape(p),
+            String::new(),
+            "Connected",
+            format!("{p} connected"),
+        )
+    } else {
+        let err = error.unwrap_or("authorization failed");
+        (
+            "false",
+            String::new(),
+            json_escape(err),
+            "Connection failed",
+            format!("Could not connect: {err}"),
+        )
+    };
+
+    // Instant page: no Fleet UI. Focus original tab → close auth tab.
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    html,body{{margin:0;min-height:100%;background:#0a0a0a;color:#e5e5e5;
+      font:15px/1.4 system-ui,-apple-system,sans-serif}}
+    main{{min-height:100vh;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:10px;padding:24px;text-align:center}}
+    p{{margin:0;color:#a3a3a3;max-width:22rem}}
+    button{{margin-top:12px;cursor:pointer;border:1px solid #404040;background:#171717;
+      color:#f5f5f5;border-radius:8px;padding:10px 16px;font:inherit}}
+  </style>
+</head>
+<body>
+<main>
+  <div id="msg" style="font-weight:600;font-size:1.05rem">{body_esc}</div>
+  <p id="hint">Returning to Agent Fleet…</p>
+  <button type="button" id="closeBtn" hidden>Close this tab</button>
+</main>
+<script>
+(function () {{
+  var UI = "{ui_origin_js}";
+  var payload = {{
+    source: "fleet-oauth",
+    ok: {ok_js},
+    provider: "{provider_js}",
+    error: "{error_js}"
+  }};
+
+  function notifyOriginal() {{
+    try {{
+      if (window.opener && !window.opener.closed) {{
+        try {{ window.opener.postMessage(payload, UI); }} catch (e) {{}}
+        try {{ window.opener.postMessage(payload, "*"); }} catch (e) {{}}
+        try {{ window.opener.focus(); }} catch (e) {{}}
+        return true;
+      }}
+    }} catch (e) {{}}
+    return false;
+  }}
+
+  function closeAuthTab() {{
+    try {{ window.close(); }} catch (e) {{}}
+    // Some browsers ignore close(); blank + close again
+    try {{ window.open("", "_self"); window.close(); }} catch (e) {{}}
+  }}
+
+  var hasOpener = notifyOriginal();
+  closeAuthTab();
+  setTimeout(closeAuthTab, 50);
+  setTimeout(closeAuthTab, 200);
+  setTimeout(closeAuthTab, 500);
+
+  // If still open, show manual close (do NOT load the Fleet app here).
+  setTimeout(function () {{
+    if (window.closed) return;
+    var hint = document.getElementById("hint");
+    var btn = document.getElementById("closeBtn");
+    if (hint) {{
+      hint.textContent = hasOpener
+        ? "You can close this tab and continue in Agent Fleet."
+        : "Authorization finished. Close this tab and go back to Agent Fleet.";
+    }}
+    if (btn) {{
+      btn.hidden = false;
+      btn.onclick = closeAuthTab;
+    }}
+  }}, 600);
+}})();
+</script>
+</body>
+</html>"#,
+        title = title,
+        body_esc = html_escape(&body),
+        ui_origin_js = ui_origin_js,
+        ok_js = ok_js,
+        provider_js = provider_js,
+        error_js = error_js,
+    );
+
+    let mut res = Html(html).into_response();
+    *res.status_mut() = StatusCode::OK;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    // Keep window.opener so we can focus the original tab and close this one.
+    res.headers_mut().insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("unsafe-none"),
+    );
+    res
+}
+
+fn json_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            '<' => "\\u003c".chars().collect(), // avoid </script>
+            c => vec![c],
+        })
+        .collect()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 async fn oauth_callback_inner(
@@ -261,10 +404,7 @@ async fn oauth_callback_inner(
         "oauth connected"
     );
 
-    Ok(state.config.ui_integrations_url(
-        &claims.workspace_id,
-        &format!("connected={provider}"),
-    ))
+    Ok(provider)
 }
 
 /// `DELETE /api/workspaces/:id/integrations/:provider`
@@ -300,33 +440,4 @@ async fn disconnect_integration(
     }))
 }
 
-fn redirect_see_other(url: &str) -> Response {
-    match HeaderValue::from_str(url) {
-        Ok(loc) => {
-            let mut res = StatusCode::SEE_OTHER.into_response();
-            res.headers_mut().insert(header::LOCATION, loc);
-            res
-        }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid redirect URL",
-        )
-            .into_response(),
-    }
-}
 
-fn urlencoding_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push_str(&format!("{b:02X}"));
-            }
-        }
-    }
-    out
-}

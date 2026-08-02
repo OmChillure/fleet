@@ -7,7 +7,7 @@ Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app sh
 | Stack | [Dioxus](https://dioxuslabs.com/) 0.7 (web) + Tailwind CSS v4 |
 | Design doc | [`docs/components/ui/README.md`](../../docs/components/ui/README.md) |
 | Workspace crate | `fleet-ui` |
-| API base (default) | `http://localhost:8080` (`pages/auth/api.rs`) |
+| API base (default) | **Same origin** `/api/*` via `Dioxus.toml` proxy → `:8080` |
 
 ---
 
@@ -16,15 +16,15 @@ Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app sh
 ```bash
 # Terminal 1 — backend (workspace root)
 cargo run
-# → http://localhost:8080
+# → http://127.0.0.1:8080
 
-# Terminal 2 — UI
+# Terminal 2 — UI (proxies /api → backend; cookies stay first-party)
 # Requires: dioxus-cli 0.7.x matching dioxus = 0.7.3
 dx serve --package fleet-ui --port 3030
 # → http://localhost:3030
 ```
 
-Open **`http://localhost:3030`** (same hostname you use for cookies/CORS).
+Open **`http://localhost:3030`** (prefer `localhost`, not `127.0.0.1`, for cookie consistency).
 
 ```bash
 cargo check -p fleet-ui
@@ -34,13 +34,15 @@ dx build --package fleet-ui
 ### Auth flow
 
 1. `/signup` → `POST /api/auth/signup` (creates account + default workspace) → `/login`
-2. `/login` → `POST /api/auth/login` (httpOnly cookies) → `/{workspace_id}/dashboard`
-3. `AppShell` calls `GET /api/auth/me`; on failure → redirect `/login`
-4. Sidebar loads `GET /api/workspaces`; can `POST /api/workspaces` to create more
+2. `/login` → `POST /api/auth/login` (httpOnly `fleet_access` + `fleet_refresh`) → dashboard
+3. `AppShell` calls `GET /api/auth/me`; if access JWT expired, silent `POST /api/auth/refresh` then retry
+4. Only true 401 after refresh fails → redirect `/login` (network errors show Retry)
+5. Sidebar loads `GET /api/workspaces`; can `POST /api/workspaces` to create more
 
-API client: `src/pages/auth/api.rs` (credentials included for cross-origin cookies).
+API client: `src/pages/auth/api.rs` (`credentials: include`). Dev uses same-origin
+`/api` (see `[[web.proxy]]` in `Dioxus.toml`).
 
-Override API origin at build time:
+Override API origin at build time (split deploy / no proxy):
 
 ```bash
 FLEET_AUTH_URL=https://api.example.com dx serve --package fleet-ui --port 3030

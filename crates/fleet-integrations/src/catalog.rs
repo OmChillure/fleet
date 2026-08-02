@@ -7,6 +7,7 @@ use crate::models::{
 /// Static catalog (connection + oauth_configured filled in routes).
 pub fn catalog() -> Vec<IntegrationView> {
     vec![
+        // --- Available (OAuth implemented) ---
         IntegrationView {
             id: "github".into(),
             name: "GitHub".into(),
@@ -40,7 +41,7 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "slack".into(),
             name: "Slack".into(),
-            description: "Add Fleet to Slack for human-in-the-loop approvals and session updates.".into(),
+            description: "Add Fleet to Slack for human in the loop approvals and session updates.".into(),
             category: IntegrationCategory::Hitl,
             category_label: "HITL & chat".into(),
             availability: IntegrationAvailability::Available,
@@ -67,10 +68,11 @@ pub fn catalog() -> Vec<IntegrationView> {
             connected: false,
             connection: None,
         },
+        // --- Coming soon ---
         IntegrationView {
             id: "gitlab".into(),
             name: "GitLab".into(),
-            description: "OAuth connect for merge requests and pipelines — coming soon.".into(),
+            description: "OAuth connect for merge requests and pipelines. Coming soon.".into(),
             category: IntegrationCategory::CodeVersioning,
             category_label: "Source control".into(),
             availability: IntegrationAvailability::ComingSoon,
@@ -83,14 +85,134 @@ pub fn catalog() -> Vec<IntegrationView> {
             connection: None,
         },
         IntegrationView {
+            id: "bitbucket".into(),
+            name: "Bitbucket".into(),
+            description: "Connect Bitbucket Cloud for PRs and pipelines. Coming soon.".into(),
+            category: IntegrationCategory::CodeVersioning,
+            category_label: "Source control".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "bitbucket".into(),
+            docs_url: Some("https://developer.atlassian.com/cloud/bitbucket/oauth-2/".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
             id: "teams".into(),
             name: "Microsoft Teams".into(),
-            description: "OAuth connect for approvals in Microsoft 365 — coming soon.".into(),
+            description: "OAuth connect for approvals and session updates in Microsoft 365. Coming soon.".into(),
             category: IntegrationCategory::Notifications,
             category_label: "Notifications".into(),
             availability: IntegrationAvailability::ComingSoon,
             icon: "teams".into(),
             docs_url: Some("https://learn.microsoft.com/en-us/microsoftteams/platform/".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "discord".into(),
+            name: "Discord".into(),
+            description: "Bot and OAuth for HITL approvals and alerts in Discord servers. Coming soon.".into(),
+            category: IntegrationCategory::Hitl,
+            category_label: "HITL & chat".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "discord".into(),
+            docs_url: Some("https://discord.com/developers/docs/topics/oauth2".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "figma".into(),
+            name: "Figma".into(),
+            description: "Read design files and comments so agents can implement from Figma. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Design".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "figma".into(),
+            docs_url: Some("https://www.figma.com/developers/api#oauth2".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "notion".into(),
+            name: "Notion".into(),
+            description: "Sync specs and wiki pages for agent context. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Docs".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "notion".into(),
+            docs_url: Some("https://developers.notion.com/docs/authorization".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "confluence".into(),
+            name: "Confluence".into(),
+            description: "Pull Confluence pages as agent context and publish status. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Docs".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "confluence".into(),
+            docs_url: Some("https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "asana".into(),
+            name: "Asana".into(),
+            description: "Connect Asana projects so agents can pick up tasks. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Tasks".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "asana".into(),
+            docs_url: Some("https://developers.asana.com/docs/oauth".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "trello".into(),
+            name: "Trello".into(),
+            description: "Boards and cards for lightweight task control. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Tasks".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "trello".into(),
+            docs_url: Some("https://developer.atlassian.com/cloud/trello/guides/rest-api/authorization/".into()),
+            auth_method: AuthMethod::Oauth,
+            oauth_configured: false,
+            oauth_start_path: None,
+            connected: false,
+            connection: None,
+        },
+        IntegrationView {
+            id: "google_drive".into(),
+            name: "Google Drive".into(),
+            description: "Read docs and assets from Drive for agent context. Coming soon.".into(),
+            category: IntegrationCategory::TaskControl,
+            category_label: "Docs".into(),
+            availability: IntegrationAvailability::ComingSoon,
+            icon: "google_drive".into(),
+            docs_url: Some("https://developers.google.com/identity/protocols/oauth2".into()),
             auth_method: AuthMethod::Oauth,
             oauth_configured: false,
             oauth_start_path: None,
@@ -120,12 +242,26 @@ mod tests {
         assert_eq!(ids.len(), list.len());
         assert!(ids.contains("github"));
         assert!(ids.contains("slack"));
+        assert!(ids.contains("figma"));
+        assert!(ids.contains("teams"));
+        assert!(ids.contains("notion"));
     }
 
     #[test]
     fn oauth_only() {
         for i in catalog() {
             assert_eq!(i.auth_method, AuthMethod::Oauth);
+        }
+    }
+
+    #[test]
+    fn no_em_dash_in_copy() {
+        for i in catalog() {
+            assert!(
+                !i.description.contains('—') && !i.description.contains('–'),
+                "{} description still has a dash",
+                i.id
+            );
         }
     }
 }

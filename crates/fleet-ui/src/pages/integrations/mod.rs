@@ -1,6 +1,9 @@
-//! Integrations feature (`/integrations`).
+//! Integrations feature (`/integrations` + `/oauth/done` popup).
 
 mod api;
+mod logos;
+mod oauth_done;
 mod page;
 
+pub use oauth_done::OAuthDone;
 pub use page::Integrations;

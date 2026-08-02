@@ -14,7 +14,7 @@ use pages::agents::Agents;
 use pages::auth::{Login, Signup};
 use pages::dashboard::Dashboard;
 use pages::home::Home;
-use pages::integrations::Integrations;
+use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
 use pages::sessions::Sessions;
 use pages::settings::Settings;
@@ -30,9 +30,11 @@ pub enum Route {
         Login {},
         #[route("/signup")]
         Signup {},
-    // App shell: `/{workspace_id}/dashboard` etc.
-    // `end_layout` must hang on the next variant (not trail the enum).
     #[end_layout]
+    // OAuth popup only — no shell, no navbar. Closes after signaling parent.
+    #[route("/oauth/done")]
+    OAuthDone {},
+    // App shell: `/{workspace_id}/dashboard` etc.
     #[layout(AppShell)]
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },

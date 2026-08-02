@@ -1,44 +1,116 @@
-//! Connect platforms via OAuth (GitHub, Slack, Jira, Linear) — no PAT paste.
+//! Integrations — card grid; OAuth opens in a new tab with button spinner.
 
 use dioxus::prelude::*;
 
 use super::api::{
     Integration, disconnect_integration, list_integrations, oauth_start_url,
 };
+use super::logos::IntegrationLogo;
+
+/// How long we poll for a completed OAuth before giving up (~3 min).
+const OAUTH_POLL_ATTEMPTS: u32 = 90;
+const OAUTH_POLL_MS: u32 = 1500;
+
+/// Result from the auth tab (`postMessage`). Written **only** from JS listeners
+/// (outside the Dioxus runtime). Read from async tasks started with `spawn`.
+#[derive(Clone, Debug)]
+struct OauthBridgeMsg {
+    ok: bool,
+    provider: String,
+    error: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+mod oauth_bridge {
+    use super::OauthBridgeMsg;
+    use std::cell::RefCell;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::prelude::*;
+
+    thread_local! {
+        static PENDING: RefCell<Option<OauthBridgeMsg>> = const { RefCell::new(None) };
+        static LISTENER_INSTALLED: RefCell<bool> = const { RefCell::new(false) };
+    }
+
+    pub fn take() -> Option<OauthBridgeMsg> {
+        PENDING.with(|p| p.borrow_mut().take())
+    }
+
+    /// Install window `message` listener once. Never calls Dioxus APIs.
+    pub fn ensure_listener() {
+        LISTENER_INSTALLED.with(|flag| {
+            if *flag.borrow() {
+                return;
+            }
+            *flag.borrow_mut() = true;
+
+            let handler = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+                let data = event.data();
+                let source = js_sys::Reflect::get(&data, &JsValue::from_str("source"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                if source != "fleet-oauth" {
+                    return;
+                }
+                let ok = js_sys::Reflect::get(&data, &JsValue::from_str("ok"))
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let provider = js_sys::Reflect::get(&data, &JsValue::from_str("provider"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                let error = js_sys::Reflect::get(&data, &JsValue::from_str("error"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+
+                PENDING.with(|p| {
+                    *p.borrow_mut() = Some(OauthBridgeMsg {
+                        ok,
+                        provider,
+                        error,
+                    });
+                });
+            }) as Box<dyn FnMut(_)>);
+
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "message",
+                    handler.as_ref().unchecked_ref(),
+                );
+                // Leak listener for the lifetime of the page (SPA).
+                handler.forget();
+            }
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod oauth_bridge {
+    use super::OauthBridgeMsg;
+    pub fn take() -> Option<OauthBridgeMsg> {
+        None
+    }
+    pub fn ensure_listener() {}
+}
 
 #[component]
 pub fn Integrations(workspace_id: String) -> Element {
     let mut items = use_signal(|| Vec::<Integration>::new());
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| Option::<String>::None);
+    // Provider currently connecting (OAuth tab open) — shows spinner on Connect.
+    let mut connecting_provider = use_signal(|| Option::<String>::None);
     let mut busy_provider = use_signal(|| Option::<String>::None);
     let mut banner = use_signal(|| Option::<(bool, String)>::None);
+    let mut query = use_signal(|| String::new());
 
-    // OAuth callback lands here with ?connected=github or ?error=…
+    // Safe: only installs a JS listener that writes to thread_local (no signals).
     use_effect(move || {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(search) = window.location().search() {
-                    let q = search.trim_start_matches('?');
-                    for pair in q.split('&') {
-                        if let Some((k, v)) = pair.split_once('=') {
-                            if k == "connected" && !v.is_empty() {
-                                banner.set(Some((
-                                    true,
-                                    format!("{} connected. Agents can use it via the control plane.", url_decode(v)),
-                                )));
-                            } else if k == "error" && !v.is_empty() {
-                                banner.set(Some((
-                                    false,
-                                    format!("Could not connect: {}", url_decode(v)),
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        oauth_bridge::ensure_listener();
     });
 
     let workspace_id_load = workspace_id.clone();
@@ -59,23 +131,61 @@ pub fn Integrations(workspace_id: String) -> Element {
         });
     });
 
+    let q = query().trim().to_lowercase();
+    let filtered: Vec<Integration> = items()
+        .into_iter()
+        .filter(|i| {
+            if q.is_empty() {
+                return true;
+            }
+            i.name.to_lowercase().contains(&q)
+                || i.description.to_lowercase().contains(&q)
+                || i.category_label.to_lowercase().contains(&q)
+                || i.id.to_lowercase().contains(&q)
+        })
+        .collect();
+
     rsx! {
-        div { class: "flex h-full min-h-[50vh] w-full flex-col",
-            div { class: "mb-6",
-                h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]",
+        div { class: "flex h-full w-full flex-col",
+            div { class: "mb-5",
+                h1 { class: "m-0 text-2xl font-semibold tracking-tight text-[var(--app-fg)]",
                     "Integrations"
                 }
-                p { class: "mt-1 max-w-2xl text-sm text-[var(--app-muted)]",
-                    "Connect GitHub, Slack, and other tools with OAuth — the same way as any normal web app. Tokens stay on the server so AI can use them later; they never go into sandboxes."
+                p { class: "mt-1 text-sm text-[var(--app-muted)]",
+                    "Connect tools with OAuth. Tokens stay on the server, never in sandboxes."
+                }
+            }
+
+            div { class: "relative mb-4",
+                div {
+                    class: "pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-[var(--app-muted)]",
+                    svg {
+                        class: "h-4 w-4",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        circle { cx: "11", cy: "11", r: "7" }
+                        path { d: "M21 21l-4.3-4.3" }
+                    }
+                }
+                input {
+                    class: "w-full rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-2.5 pl-10 pr-3 text-sm text-[var(--app-fg)] outline-none placeholder:text-[var(--app-muted)] focus:border-neutral-500",
+                    r#type: "search",
+                    placeholder: "Search integrations…",
+                    value: "{query}",
+                    oninput: move |e| query.set(e.value()),
                 }
             }
 
             if let Some((ok, msg)) = banner() {
                 div {
                     class: if ok {
-                        "mb-4 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
+                        "mb-4 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
                     } else {
-                        "mb-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+                        "mb-4 rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-300"
                     },
                     "{msg}"
                 }
@@ -83,18 +193,29 @@ pub fn Integrations(workspace_id: String) -> Element {
 
             if loading() {
                 div {
-                    class: "flex flex-1 items-center justify-center rounded-xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-16",
+                    class: "flex flex-1 items-center justify-center rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-20",
                     p { class: "text-sm text-[var(--app-muted)]", "Loading integrations…" }
                 }
             } else if let Some(err) = error() {
                 div {
-                    class: "rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300",
+                    class: "rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-300",
                     "{err}"
+                }
+            } else if filtered.is_empty() {
+                div {
+                    class: "flex flex-1 items-center justify-center rounded-2xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-16",
+                    p { class: "text-sm text-[var(--app-muted)]",
+                        if q.is_empty() {
+                            "No integrations available."
+                        } else {
+                            "No integrations match your search."
+                        }
+                    }
                 }
             } else {
                 div {
-                    class: "grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3",
-                    for integ in items() {
+                    class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
+                    for integ in filtered {
                         {
                             let integ_disconnect = integ.clone();
                             let ws_disconnect = workspace_id.clone();
@@ -102,142 +223,133 @@ pub fn Integrations(workspace_id: String) -> Element {
                             let available = integ.availability == "available";
                             let connected = integ.connected;
                             let configured = integ.oauth_configured;
+                            let is_connecting =
+                                connecting_provider().as_deref() == Some(integ.id.as_str());
                             let is_busy = busy_provider().as_deref() == Some(integ.id.as_str());
-                            let monogram = integ
-                                .name
-                                .chars()
-                                .next()
-                                .map(|c| c.to_uppercase().to_string())
-                                .unwrap_or_else(|| "?".into());
                             let account = integ
                                 .connection
                                 .as_ref()
                                 .and_then(|c| c.account_label.clone())
                                 .unwrap_or_default();
 
-                            let status_label = if connected {
-                                "Connected"
+                            let subtitle = if connected && !account.is_empty() {
+                                account.clone()
+                            } else if is_connecting {
+                                "Connecting…".to_string()
                             } else if !available {
-                                "Coming soon"
+                                "Coming soon".to_string()
                             } else if !configured {
-                                "Not configured"
+                                "Not configured".to_string()
                             } else {
-                                "Not connected"
+                                integ.category_label.clone()
                             };
-                            let status_class = if connected {
-                                "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30"
-                            } else if !available {
-                                "bg-amber-500/10 text-amber-400/90 ring-1 ring-amber-500/25"
-                            } else if !configured {
-                                "bg-orange-500/10 text-orange-300 ring-1 ring-orange-500/25"
+
+                            let status_dot = if connected {
+                                "bg-emerald-400"
+                            } else if is_connecting {
+                                "bg-amber-400 animate-pulse"
+                            } else if available && configured {
+                                "bg-neutral-500"
                             } else {
-                                "bg-[var(--app-bg-hover)] text-[var(--app-muted)] ring-1 ring-[var(--app-border)]"
-                            };
-                            let icon_class = match integ.icon.as_str() {
-                                "github" => "bg-neutral-800 text-white",
-                                "jira" => "bg-blue-600 text-white",
-                                "slack" => "bg-purple-600 text-white",
-                                "linear" => "bg-indigo-600 text-white",
-                                "gitlab" => "bg-orange-600 text-white",
-                                "teams" => "bg-sky-600 text-white",
-                                _ => "bg-[var(--app-accent)] text-[var(--app-bg)]",
+                                "bg-neutral-600"
                             };
 
                             let provider_connect = integ.id.clone();
+                            let provider_name = integ.name.clone();
 
                             rsx! {
                                 article {
                                     key: "{integ.id}",
-                                    class: "flex flex-col rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 transition hover:border-[var(--app-muted)]",
+                                    class: "flex min-h-[7.5rem] flex-col rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 transition hover:border-neutral-600/90 hover:bg-[var(--app-bg-hover)]",
+
                                     div { class: "flex items-start gap-3",
-                                        div {
-                                            class: "flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sm font-bold {icon_class}",
-                                            "{monogram}"
+                                        IntegrationLogo {
+                                            icon: integ.icon.clone(),
+                                            name: integ.name.clone(),
                                         }
                                         div { class: "min-w-0 flex-1",
-                                            div { class: "flex flex-wrap items-center gap-2",
-                                                h2 { class: "m-0 text-base font-semibold text-[var(--app-fg)]",
-                                                    "{integ.name}"
-                                                }
+                                            h2 { class: "m-0 truncate text-[15px] font-semibold tracking-tight text-[var(--app-fg)]",
+                                                "{integ.name}"
+                                            }
+                                            div { class: "mt-0.5 flex items-center gap-1.5 text-xs text-[var(--app-muted)]",
                                                 span {
-                                                    class: "rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide {status_class}",
-                                                    "{status_label}"
+                                                    class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
                                                 }
-                                            }
-                                            p { class: "mt-0.5 text-xs font-medium text-[var(--app-muted)]",
-                                                "{integ.category_label} · OAuth"
-                                            }
-                                            if connected && !account.is_empty() {
-                                                p { class: "mt-1 truncate text-xs text-[var(--app-fg)]",
-                                                    "Account: {account}"
+                                                span { class: "truncate", "{subtitle}" }
+                                                if connected {
+                                                    span { class: "text-emerald-400/90", "· Connected" }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    p { class: "mt-3 flex-1 text-sm leading-relaxed text-[var(--app-muted)]",
-                                        "{integ.description}"
-                                    }
-
-                                    if available && !configured {
-                                        p { class: "mt-2 text-[11px] leading-snug text-orange-300/90",
-                                            "Admin: set {integ.id.to_uppercase()}_CLIENT_ID and {integ.id.to_uppercase()}_CLIENT_SECRET, then restart the API."
-                                        }
-                                    }
-
-                                    div { class: "mt-4 flex flex-wrap items-center gap-2",
                                         if available && configured && !connected {
                                             button {
-                                                class: "rounded-md bg-[var(--app-fg)] px-3 py-1.5 text-xs font-semibold text-[var(--app-bg)] transition hover:opacity-90",
+                                                class: "inline-flex min-w-[5.5rem] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-semibold text-[var(--app-fg)] transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-80",
                                                 r#type: "button",
+                                                disabled: is_connecting,
+                                                title: if is_connecting {
+                                                    "Waiting for authorization in the other tab…"
+                                                } else {
+                                                    "Connect (opens in a new tab)"
+                                                },
                                                 onclick: move |_| {
-                                                    let url = oauth_start_url(&ws_connect, &provider_connect);
+                                                    if connecting_provider().as_deref() == Some(provider_connect.as_str()) {
+                                                        return;
+                                                    }
+                                                    let provider = provider_connect.clone();
+                                                    let ws = ws_connect.clone();
+                                                    let name = provider_name.clone();
+                                                    let url = oauth_start_url(&ws, &provider);
+
                                                     #[cfg(target_arch = "wasm32")]
                                                     {
-                                                        if let Some(window) = web_sys::window() {
-                                                            let _ = window.location().set_href(&url);
+                                                        let opened = open_oauth_tab(&url);
+                                                        if !opened {
+                                                            banner.set(Some((
+                                                                false,
+                                                                "Could not open auth tab. Allow popups for this site, then try again.".into(),
+                                                            )));
+                                                            return;
                                                         }
                                                     }
                                                     #[cfg(not(target_arch = "wasm32"))]
                                                     {
                                                         let _ = url;
                                                     }
+
+                                                    connecting_provider.set(Some(provider.clone()));
+                                                    banner.set(Some((
+                                                        true,
+                                                        format!(
+                                                            "Authorize {name} in the new tab. This page will update when done."
+                                                        ),
+                                                    )));
+
+                                                    // spawn is called from a Dioxus event — runtime is active.
+                                                    spawn(async move {
+                                                        poll_until_connected(
+                                                            &ws,
+                                                            &provider,
+                                                            connecting_provider,
+                                                            items,
+                                                            banner,
+                                                        )
+                                                        .await;
+                                                    });
                                                 },
-                                                "Connect with {integ.name}"
-                                            }
-                                        }
-                                        if available && configured && connected {
-                                            {
-                                                let ws_reconnect = workspace_id.clone();
-                                                let provider_reconnect = integ.id.clone();
-                                                rsx! {
-                                                    button {
-                                                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
-                                                        r#type: "button",
-                                                        onclick: move |_| {
-                                                            let url = oauth_start_url(
-                                                                &ws_reconnect,
-                                                                &provider_reconnect,
-                                                            );
-                                                            #[cfg(target_arch = "wasm32")]
-                                                            {
-                                                                if let Some(window) = web_sys::window() {
-                                                                    let _ = window.location().set_href(&url);
-                                                                }
-                                                            }
-                                                            #[cfg(not(target_arch = "wasm32"))]
-                                                            {
-                                                                let _ = url;
-                                                            }
-                                                        },
-                                                        "Reconnect"
-                                                    }
+                                                if is_connecting {
+                                                    Spinner {}
+                                                    span { "Connecting" }
+                                                } else {
+                                                    span { "Connect" }
                                                 }
                                             }
+                                        } else if available && configured && connected {
                                             button {
-                                                class: "rounded-md px-3 py-1.5 text-xs font-medium text-red-400 transition hover:bg-red-500/10 disabled:opacity-50",
+                                                class: "shrink-0 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/15 disabled:opacity-50",
                                                 r#type: "button",
                                                 disabled: is_busy,
+                                                title: "Disconnect {integ.name}",
                                                 onclick: move |_| {
                                                     let provider = integ_disconnect.id.clone();
                                                     let ws = ws_disconnect.clone();
@@ -248,7 +360,10 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                                 if let Ok(list) = list_integrations(&ws).await {
                                                                     items.set(list);
                                                                 }
-                                                                banner.set(Some((true, format!("{provider} disconnected."))));
+                                                                banner.set(Some((
+                                                                    true,
+                                                                    format!("{provider} disconnected."),
+                                                                )));
                                                             }
                                                             Err(e) => {
                                                                 banner.set(Some((false, e.message())));
@@ -257,26 +372,24 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                         busy_provider.set(None);
                                                     });
                                                 },
-                                                if is_busy { "Working…" } else { "Disconnect" }
+                                                if is_busy {
+                                                    Spinner {}
+                                                } else {
+                                                    span { "Disconnect" }
+                                                }
                                             }
-                                        }
-                                        if !available {
+                                        } else {
                                             button {
-                                                class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-muted)]",
+                                                class: "shrink-0 cursor-not-allowed rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-medium text-[var(--app-muted)] opacity-50",
                                                 r#type: "button",
                                                 disabled: true,
-                                                "Coming soon"
+                                                if !available { "Soon" } else { "Setup" }
                                             }
                                         }
-                                        if let Some(url) = integ.docs_url.clone() {
-                                            a {
-                                                class: "rounded-md px-2 py-1.5 text-xs font-medium text-[var(--app-muted)] transition hover:text-[var(--app-fg)]",
-                                                href: "{url}",
-                                                target: "_blank",
-                                                rel: "noopener noreferrer",
-                                                "Docs ↗"
-                                            }
-                                        }
+                                    }
+
+                                    p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
+                                        "{integ.description}"
                                     }
                                 }
                             }
@@ -288,32 +401,130 @@ pub fn Integrations(workspace_id: String) -> Element {
     }
 }
 
-fn url_decode(s: &str) -> String {
-    // Minimal query-value decode for banners.
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(' ');
-                i += 1;
+#[component]
+fn Spinner() -> Element {
+    rsx! {
+        svg {
+            class: "h-3.5 w-3.5 animate-spin",
+            view_box: "0 0 24 24",
+            fill: "none",
+            "aria-hidden": "true",
+            circle {
+                class: "opacity-25",
+                cx: "12",
+                cy: "12",
+                r: "10",
+                stroke: "currentColor",
+                stroke_width: "4",
             }
-            b'%' if i + 2 < bytes.len() => {
-                let hex = &s[i + 1..i + 3];
-                if let Ok(v) = u8::from_str_radix(hex, 16) {
-                    out.push(v as char);
-                    i += 3;
-                } else {
-                    out.push('%');
-                    i += 1;
-                }
-            }
-            c => {
-                out.push(c as char);
-                i += 1;
+            path {
+                class: "opacity-90",
+                fill: "currentColor",
+                d: "M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z",
             }
         }
     }
-    out
+}
+
+#[cfg(target_arch = "wasm32")]
+fn open_oauth_tab(url: &str) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    // Full new tab (no popup chrome). Named target keeps window.opener so the
+    // auth tab can close itself after OAuth (Chrome's _blank defaults to noopener).
+    match window.open_with_url_and_target(url, "fleet_oauth") {
+        Ok(Some(tab)) => {
+            let _ = tab.focus();
+            true
+        }
+        Ok(None) => false,
+        Err(_) => false,
+    }
+}
+
+async fn poll_until_connected(
+    workspace_id: &str,
+    provider: &str,
+    mut connecting_provider: Signal<Option<String>>,
+    mut items: Signal<Vec<Integration>>,
+    mut banner: Signal<Option<(bool, String)>>,
+) {
+    for _ in 0..OAUTH_POLL_ATTEMPTS {
+        if connecting_provider().as_deref() != Some(provider) {
+            return;
+        }
+
+        // Auth tab postMessage → thread_local (safe). Apply here inside Dioxus runtime.
+        if let Some(msg) = oauth_bridge::take() {
+            if msg.ok {
+                let matches = msg.provider.is_empty()
+                    || msg.provider.eq_ignore_ascii_case(provider);
+                if matches {
+                    // Refresh list until connected or a few tries
+                    for _ in 0..10 {
+                        if let Ok(list) = list_integrations(workspace_id).await {
+                            let done = list.iter().any(|i| i.id == provider && i.connected);
+                            items.set(list);
+                            if done {
+                                connecting_provider.set(None);
+                                banner.set(Some((true, format!("{provider} connected."))));
+                                return;
+                            }
+                        }
+                        sleep_ms(400).await;
+                    }
+                    connecting_provider.set(None);
+                    banner.set(Some((
+                        true,
+                        format!("{provider} authorized. Refresh if status looks stale."),
+                    )));
+                    return;
+                }
+                // Message for a different provider — put back? drop; rare
+            } else {
+                connecting_provider.set(None);
+                let msg_text = if msg.error.is_empty() {
+                    "authorization failed".into()
+                } else {
+                    msg.error
+                };
+                banner.set(Some((false, format!("Could not connect: {msg_text}"))));
+                return;
+            }
+        }
+
+        if let Ok(list) = list_integrations(workspace_id).await {
+            let done = list.iter().any(|i| i.id == provider && i.connected);
+            items.set(list);
+            if done {
+                connecting_provider.set(None);
+                banner.set(Some((true, format!("{provider} connected."))));
+                return;
+            }
+        }
+
+        sleep_ms(OAUTH_POLL_MS).await;
+    }
+
+    if connecting_provider().as_deref() == Some(provider) {
+        connecting_provider.set(None);
+        banner.set(Some((
+            false,
+            format!(
+                "Still waiting for {provider}. Finish authorizing in the other tab, or try Connect again."
+            ),
+        )));
+    }
+}
+
+async fn sleep_ms(ms: u32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        gloo_timers::future::TimeoutFuture::new(ms).await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = ms;
+    }
 }
