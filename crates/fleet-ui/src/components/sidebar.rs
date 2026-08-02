@@ -2,7 +2,6 @@
 
 use dioxus::prelude::*;
 
-use crate::components::theme_toggle::ThemeToggle;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout,
     me,
@@ -44,9 +43,10 @@ pub fn Sidebar() -> Element {
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
         let section = match use_route::<Route>() {
-            Route::Sessions { .. } => Some(NavSection::Chat),
-            Route::Fleet { .. } => Some(NavSection::Chat),
-            Route::Dashboard { .. } | Route::Sandboxes { .. } => Some(NavSection::Monitoring),
+            Route::Chat { .. } | Route::Sessions { .. } => Some(NavSection::Chat),
+            Route::Fleet { .. } | Route::Dashboard { .. } | Route::Sandboxes { .. } => {
+                Some(NavSection::Monitoring)
+            }
             Route::Agents { .. } => Some(NavSection::Agents),
             Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
             _ => None,
@@ -108,15 +108,15 @@ pub fn Sidebar() -> Element {
             // Brand + open/close toggle
             div {
                 class: if is_open {
-                    "flex h-14 items-center gap-1 border-b border-[var(--app-border)] px-3"
+                    "flex h-11 items-center gap-1 border-b border-[var(--app-border)] px-2"
                 } else {
-                    "flex h-14 items-center justify-center border-b border-[var(--app-border)] px-1"
+                    "flex h-11 items-center justify-center border-b border-[var(--app-border)] px-1"
                 },
                 if is_open {
                     Link {
-                        class: "flex min-w-0 flex-1 items-center gap-2.5 font-semibold tracking-tight text-[var(--app-fg)]",
+                        class: "flex min-w-0 flex-1 items-center gap-2 font-semibold tracking-tight text-[var(--app-fg)]",
                         to: Route::Home {},
-                        div { class: "h-7 w-7 shrink-0 rounded-lg bg-[var(--app-accent)]" }
+                        div { class: "h-6 w-6 shrink-0 rounded-md bg-[var(--app-accent)]" }
                         span { class: "truncate text-sm", "Agent Fleet" }
                     }
                 }
@@ -139,9 +139,9 @@ pub fn Sidebar() -> Element {
 
             if is_open {
             // Workspace switcher (no bottom border / separator under create)
-            div { class: "relative p-3",
+            div { class: "relative px-2 pt-2 pb-1",
                 button {
-                    class: "flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-left text-sm font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
+                    class: "flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-2.5 py-1.5 text-left text-sm font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
                     r#type: "button",
                     onclick: move |_| {
                         let next = !open();
@@ -276,7 +276,7 @@ pub fn Sidebar() -> Element {
             }
 
             // Nav sections
-            nav { class: "flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2",
+            nav { class: "flex min-h-0 flex-1 flex-col gap-0 overflow-y-auto px-2 py-0.5",
                 NavAccordion {
                     title: "Chat",
                     expanded: expanded().contains(&NavSection::Chat),
@@ -289,7 +289,7 @@ pub fn Sidebar() -> Element {
                     },
                     icon: rsx! { IconMessage {} },
                     NavSubLink {
-                        to: Route::Fleet { workspace_id: workspace_id.clone() },
+                        to: Route::Chat { workspace_id: workspace_id.clone() },
                         label: "New chat",
                     }
                     NavSubLink {
@@ -415,7 +415,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
     };
 
     rsx! {
-        div { class: "relative mt-auto border-t border-[var(--app-border)] p-2",
+        div { class: "relative mt-auto border-t border-[var(--app-border)] p-1.5",
             // Dropdown panel — opens upward from the footer
             if menu_open() {
                 // Click-away backdrop
@@ -495,32 +495,29 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                 }
             }
 
-            // Trigger row — opens menu upward (no nested buttons)
-            div { class: "flex items-center gap-1",
-                button {
-                    class: "flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1.5 text-left transition hover:bg-[var(--app-bg-hover)]",
-                    r#type: "button",
-                    "aria-expanded": if menu_open() { "true" } else { "false" },
-                    "aria-haspopup": "menu",
-                    onclick: move |_| {
-                        let next = !menu_open();
-                        menu_open.set(next);
-                    },
-                    div {
-                        class: "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--app-bg-elevated)] text-sm font-semibold text-[var(--app-fg)] ring-1 ring-[var(--app-border)]",
-                        "{initial}"
-                    }
-                    div { class: "min-w-0 flex-1",
-                        p { class: "m-0 truncate text-sm font-medium text-[var(--app-fg)]", "{label_primary}" }
-                        if let Some(sec) = label_secondary {
-                            p { class: "m-0 truncate text-xs text-[var(--app-muted)]", "{sec}" }
-                        }
-                    }
-                    span { class: "shrink-0 text-[10px] text-[var(--app-muted)]",
-                        if menu_open() { "▾" } else { "▴" }
+            // Trigger row — opens menu upward
+            button {
+                class: "flex w-full items-center gap-2 rounded-lg p-1.5 text-left transition hover:bg-[var(--app-bg-hover)]",
+                r#type: "button",
+                "aria-expanded": if menu_open() { "true" } else { "false" },
+                "aria-haspopup": "menu",
+                onclick: move |_| {
+                    let next = !menu_open();
+                    menu_open.set(next);
+                },
+                div {
+                    class: "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--app-bg-elevated)] text-sm font-semibold text-[var(--app-fg)] ring-1 ring-[var(--app-border)]",
+                    "{initial}"
+                }
+                div { class: "min-w-0 flex-1",
+                    p { class: "m-0 truncate text-sm font-medium text-[var(--app-fg)]", "{label_primary}" }
+                    if let Some(sec) = label_secondary {
+                        p { class: "m-0 truncate text-xs text-[var(--app-muted)]", "{sec}" }
                     }
                 }
-                ThemeToggle {}
+                span { class: "shrink-0 text-[10px] text-[var(--app-muted)]",
+                    if menu_open() { "▾" } else { "▴" }
+                }
             }
         }
     }
@@ -539,7 +536,7 @@ fn NavAccordion(
     rsx! {
         div { class: "flex flex-col",
             button {
-                class: "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
+                class: "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
                 r#type: "button",
                 onclick: move |e| on_toggle.call(e),
                 span { class: "flex h-4 w-4 shrink-0 items-center justify-center text-[var(--app-muted)]",
@@ -552,7 +549,7 @@ fn NavAccordion(
                 }
             }
             if expanded {
-                div { class: "ml-3 flex flex-col gap-0.5 border-l border-[var(--app-border)] py-0.5 pl-2",
+                div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
                     {children}
                 }
             }
@@ -564,7 +561,7 @@ fn NavAccordion(
 fn NavSubLink(to: Route, label: &'static str) -> Element {
     rsx! {
         Link {
-            class: "block rounded-md px-2.5 py-1.5 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+            class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
             to,
             active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
             "{label}"

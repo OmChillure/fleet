@@ -90,7 +90,7 @@ pub fn AppShell() -> Element {
                 class: "{theme().root_class()} flex h-screen w-full overflow-hidden bg-[var(--app-sidebar)] text-[var(--app-fg)]",
                 Sidebar {}
                 main {
-                    class: "min-h-0 min-w-0 flex-1 overflow-auto bg-[var(--app-bg)] p-4 md:p-5",
+                    class: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-bg)]",
                     Outlet::<crate::Route> {}
                 }
             }

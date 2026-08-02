@@ -6,6 +6,7 @@ use super::api::{
     Integration, disconnect_integration, list_integrations, oauth_start_url,
 };
 use super::logos::IntegrationLogo;
+use crate::components::toast::show_toast;
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -34,10 +35,42 @@ mod oauth_bridge {
     }
 
     pub fn take() -> Option<OauthBridgeMsg> {
-        PENDING.with(|p| p.borrow_mut().take())
+        // Prefer postMessage; also drain localStorage fallback from /oauth/done.
+        if let Some(msg) = PENDING.with(|p| p.borrow_mut().take()) {
+            return Some(msg);
+        }
+        take_from_local_storage()
     }
 
-    /// Install window `message` listener once. Never calls Dioxus APIs.
+    fn take_from_local_storage() -> Option<OauthBridgeMsg> {
+        let window = web_sys::window()?;
+        let storage = window.local_storage().ok().flatten()?;
+        let raw = storage.get_item("fleet_oauth_result").ok().flatten()?;
+        let _ = storage.remove_item("fleet_oauth_result");
+        if let Some(rest) = raw.strip_prefix("connected:") {
+            return Some(OauthBridgeMsg {
+                ok: true,
+                provider: rest.to_string(),
+                error: String::new(),
+            });
+        }
+        if let Some(rest) = raw.strip_prefix("error:") {
+            return Some(OauthBridgeMsg {
+                ok: false,
+                provider: String::new(),
+                error: rest.to_string(),
+            });
+        }
+        None
+    }
+
+    fn push(msg: OauthBridgeMsg) {
+        PENDING.with(|p| {
+            *p.borrow_mut() = Some(msg);
+        });
+    }
+
+    /// Install window `message` + storage listeners once. Never calls Dioxus APIs.
     pub fn ensure_listener() {
         LISTENER_INSTALLED.with(|flag| {
             if *flag.borrow() {
@@ -67,13 +100,37 @@ mod oauth_bridge {
                     .and_then(|v| v.as_string())
                     .unwrap_or_default();
 
-                PENDING.with(|p| {
-                    *p.borrow_mut() = Some(OauthBridgeMsg {
-                        ok,
-                        provider,
-                        error,
-                    });
+                push(OauthBridgeMsg {
+                    ok,
+                    provider,
+                    error,
                 });
+            }) as Box<dyn FnMut(_)>);
+
+            // Cross-tab localStorage writes (oauth_done page) fire StorageEvent here.
+            let storage_handler = Closure::wrap(Box::new(move |event: web_sys::StorageEvent| {
+                let Some(key) = event.key() else {
+                    return;
+                };
+                if key != "fleet_oauth_result" {
+                    return;
+                }
+                let Some(raw) = event.new_value() else {
+                    return;
+                };
+                if let Some(rest) = raw.strip_prefix("connected:") {
+                    push(OauthBridgeMsg {
+                        ok: true,
+                        provider: rest.to_string(),
+                        error: String::new(),
+                    });
+                } else if let Some(rest) = raw.strip_prefix("error:") {
+                    push(OauthBridgeMsg {
+                        ok: false,
+                        provider: String::new(),
+                        error: rest.to_string(),
+                    });
+                }
             }) as Box<dyn FnMut(_)>);
 
             if let Some(window) = web_sys::window() {
@@ -81,8 +138,13 @@ mod oauth_bridge {
                     "message",
                     handler.as_ref().unchecked_ref(),
                 );
-                // Leak listener for the lifetime of the page (SPA).
+                let _ = window.add_event_listener_with_callback(
+                    "storage",
+                    storage_handler.as_ref().unchecked_ref(),
+                );
+                // Leak listeners for the lifetime of the page (SPA).
                 handler.forget();
+                storage_handler.forget();
             }
         });
     }
@@ -105,7 +167,6 @@ pub fn Integrations(workspace_id: String) -> Element {
     // Provider currently connecting (OAuth tab open) — shows spinner on Connect.
     let mut connecting_provider = use_signal(|| Option::<String>::None);
     let mut busy_provider = use_signal(|| Option::<String>::None);
-    let mut banner = use_signal(|| Option::<(bool, String)>::None);
     let mut query = use_signal(|| String::new());
 
     // Safe: only installs a JS listener that writes to thread_local (no signals).
@@ -124,7 +185,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                     error.set(None);
                 }
                 Err(e) => {
-                    error.set(Some(e.message()));
+                    let msg = e.message();
+                    error.set(Some(msg.clone()));
+                    show_toast().error(msg);
                 }
             }
             loading.set(false);
@@ -146,7 +209,7 @@ pub fn Integrations(workspace_id: String) -> Element {
         .collect();
 
     rsx! {
-        div { class: "flex h-full w-full flex-col",
+        div { class: "flex h-full w-full flex-col overflow-auto p-4 md:p-5",
             div { class: "mb-5",
                 h1 { class: "m-0 text-2xl font-semibold tracking-tight text-[var(--app-fg)]",
                     "Integrations"
@@ -177,17 +240,6 @@ pub fn Integrations(workspace_id: String) -> Element {
                     placeholder: "Search integrations…",
                     value: "{query}",
                     oninput: move |e| query.set(e.value()),
-                }
-            }
-
-            if let Some((ok, msg)) = banner() {
-                div {
-                    class: if ok {
-                        "mb-4 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
-                    } else {
-                        "mb-4 rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-                    },
-                    "{msg}"
                 }
             }
 
@@ -305,10 +357,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                     {
                                                         let opened = open_oauth_tab(&url);
                                                         if !opened {
-                                                            banner.set(Some((
-                                                                false,
-                                                                "Could not open auth tab. Allow popups for this site, then try again.".into(),
-                                                            )));
+                                                            show_toast().error(
+                                                                "Could not open auth tab. Allow popups for this site, then try again.",
+                                                            );
                                                             return;
                                                         }
                                                     }
@@ -318,12 +369,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                     }
 
                                                     connecting_provider.set(Some(provider.clone()));
-                                                    banner.set(Some((
-                                                        true,
-                                                        format!(
-                                                            "Authorize {name} in the new tab. This page will update when done."
-                                                        ),
-                                                    )));
+                                                    show_toast().info(format!(
+                                                        "Authorize {name} in the new tab. This page will update when done."
+                                                    ));
 
                                                     // spawn is called from a Dioxus event — runtime is active.
                                                     spawn(async move {
@@ -332,7 +380,6 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                             &provider,
                                                             connecting_provider,
                                                             items,
-                                                            banner,
                                                         )
                                                         .await;
                                                     });
@@ -360,13 +407,12 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                                 if let Ok(list) = list_integrations(&ws).await {
                                                                     items.set(list);
                                                                 }
-                                                                banner.set(Some((
-                                                                    true,
-                                                                    format!("{provider} disconnected."),
-                                                                )));
+                                                                show_toast().success(format!(
+                                                                    "{provider} disconnected."
+                                                                ));
                                                             }
                                                             Err(e) => {
-                                                                banner.set(Some((false, e.message())));
+                                                                show_toast().error(e.message());
                                                             }
                                                         }
                                                         busy_provider.set(None);
@@ -470,45 +516,87 @@ fn open_oauth_tab(url: &str) -> bool {
     }
 }
 
+/// Optimistically flip one provider to connected so the card updates immediately.
+fn mark_connected_locally(mut items: Signal<Vec<Integration>>, provider: &str) {
+    let mut list = items();
+    let mut changed = false;
+    for integ in list.iter_mut() {
+        if integ.id.eq_ignore_ascii_case(provider) {
+            integ.connected = true;
+            changed = true;
+            break;
+        }
+    }
+    if changed {
+        items.set(list);
+    }
+}
+
+async fn refresh_until_connected(
+    workspace_id: &str,
+    provider: &str,
+    mut items: Signal<Vec<Integration>>,
+    attempts: u32,
+    delay_ms: u32,
+) -> bool {
+    for _ in 0..attempts {
+        match list_integrations(workspace_id).await {
+            Ok(list) => {
+                let done = list
+                    .iter()
+                    .any(|i| i.id.eq_ignore_ascii_case(provider) && i.connected);
+                items.set(list);
+                if done {
+                    return true;
+                }
+            }
+            Err(_) => {}
+        }
+        sleep_ms(delay_ms).await;
+    }
+    false
+}
+
 async fn poll_until_connected(
     workspace_id: &str,
     provider: &str,
     mut connecting_provider: Signal<Option<String>>,
     mut items: Signal<Vec<Integration>>,
-    mut banner: Signal<Option<(bool, String)>>,
 ) {
     for _ in 0..OAUTH_POLL_ATTEMPTS {
         if connecting_provider().as_deref() != Some(provider) {
             return;
         }
 
-        // Auth tab postMessage → thread_local (safe). Apply here inside Dioxus runtime.
+        // Auth tab postMessage / localStorage → thread_local (safe).
         if let Some(msg) = oauth_bridge::take() {
             if msg.ok {
                 let matches = msg.provider.is_empty()
                     || msg.provider.eq_ignore_ascii_case(provider);
                 if matches {
-                    // Refresh list until connected or a few tries
-                    for _ in 0..10 {
-                        if let Ok(list) = list_integrations(workspace_id).await {
-                            let done = list.iter().any(|i| i.id == provider && i.connected);
-                            items.set(list);
-                            if done {
-                                connecting_provider.set(None);
-                                banner.set(Some((true, format!("{provider} connected."))));
-                                return;
-                            }
-                        }
-                        sleep_ms(400).await;
-                    }
+                    // Instant UI feedback — don't wait for the next list fetch.
+                    mark_connected_locally(items, provider);
+
+                    // Confirm with server (DB may lag a beat behind the popup).
+                    let confirmed = refresh_until_connected(
+                        workspace_id,
+                        provider,
+                        items,
+                        20,
+                        300,
+                    )
+                    .await;
+
                     connecting_provider.set(None);
-                    banner.set(Some((
-                        true,
-                        format!("{provider} authorized. Refresh if status looks stale."),
-                    )));
+                    if confirmed {
+                        show_toast().success(format!("{provider} connected."));
+                    } else {
+                        // Keep optimistic connected state; list will catch up on next visit.
+                        show_toast().success(format!("{provider} connected."));
+                    }
                     return;
                 }
-                // Message for a different provider — put back? drop; rare
+                // Message for a different provider — ignore.
             } else {
                 connecting_provider.set(None);
                 let msg_text = if msg.error.is_empty() {
@@ -516,17 +604,20 @@ async fn poll_until_connected(
                 } else {
                     msg.error
                 };
-                banner.set(Some((false, format!("Could not connect: {msg_text}"))));
+                show_toast().error(format!("Could not connect: {msg_text}"));
                 return;
             }
         }
 
+        // Background poll even without postMessage (popup closed / opener lost).
         if let Ok(list) = list_integrations(workspace_id).await {
-            let done = list.iter().any(|i| i.id == provider && i.connected);
+            let done = list
+                .iter()
+                .any(|i| i.id.eq_ignore_ascii_case(provider) && i.connected);
             items.set(list);
             if done {
                 connecting_provider.set(None);
-                banner.set(Some((true, format!("{provider} connected."))));
+                show_toast().success(format!("{provider} connected."));
                 return;
             }
         }
@@ -536,12 +627,9 @@ async fn poll_until_connected(
 
     if connecting_provider().as_deref() == Some(provider) {
         connecting_provider.set(None);
-        banner.set(Some((
-            false,
-            format!(
-                "Still waiting for {provider}. Finish authorizing in the other tab, or try Connect again."
-            ),
-        )));
+        show_toast().error(format!(
+            "Still waiting for {provider}. Finish authorizing in the other tab, or try Connect again."
+        ));
     }
 }
 

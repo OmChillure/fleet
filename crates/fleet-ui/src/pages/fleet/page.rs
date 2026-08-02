@@ -128,7 +128,7 @@ pub fn Fleet(workspace_id: String) -> Element {
     let columns = ["Ready", "In progress", "Blocked", "Done", "Failed"];
 
     rsx! {
-        div { class: "mx-auto flex w-full max-w-6xl flex-col gap-4",
+        div { class: "mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-auto p-4 md:p-5",
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Fleet" }

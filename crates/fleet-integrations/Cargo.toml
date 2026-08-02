@@ -12,15 +12,19 @@ name = "fleet_integrations"
 path = "src/lib.rs"
 
 [dependencies]
+aes-gcm = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
 chrono = { workspace = true }
 fleet-auth = { workspace = true }
 fleet-db = { workspace = true }
+hex = { workspace = true }
 jsonwebtoken = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

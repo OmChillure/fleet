@@ -13,6 +13,11 @@ coverage.out
 vendor/
 *.pem
 
-# fleet-ui — npm leftover (not used; dx auto-tailwind)
+# fleet-ui — npm install output (optional local CSS tooling; dx serves assets/)
 crates/fleet-ui/node_modules/
 crates/fleet-ui/package-lock.json
+
+# accidental local ref / temp assets
+*.webp
+!docs/**/*.webp
+crates/fleet-ui/toast-ref.*

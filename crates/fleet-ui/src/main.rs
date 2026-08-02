@@ -10,8 +10,10 @@ use dioxus::prelude::*;
 
 use components::app_shell::AppShell;
 use components::navbar::Navbar;
+use components::toast::ToastProvider;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
+use pages::chat::Chat;
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
@@ -39,6 +41,8 @@ pub enum Route {
     #[layout(AppShell)]
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },
+        #[route("/:workspace_id/chat")]
+        Chat { workspace_id: String },
         #[route("/:workspace_id/fleet")]
         Fleet { workspace_id: String },
         #[route("/:workspace_id/sessions")]
@@ -58,6 +62,7 @@ impl Route {
     pub fn workspace_id(&self) -> Option<&str> {
         match self {
             Route::Dashboard { workspace_id }
+            | Route::Chat { workspace_id }
             | Route::Fleet { workspace_id }
             | Route::Sessions { workspace_id }
             | Route::Agents { workspace_id }
@@ -77,7 +82,9 @@ fn main() {
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
-        Router::<Route> {}
+        ToastProvider {
+            Router::<Route> {}
+        }
     }
 }
 

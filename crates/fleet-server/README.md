@@ -46,7 +46,8 @@ See [`.env.example`](../../.env.example).
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | **required** | Neon / Supabase / local. Neon needs TLS (`?sslmode=require`) and sqlx `tls-rustls-ring` (workspace default) |
-| `JWT_SECRET` | **required** (≥32 chars) | Signs access JWTs |
+| `JWT_SECRET` | **required** (≥32 chars) | Signs access JWTs and OAuth `state` |
+| `INTEGRATIONS_ENCRYPTION_KEY` | falls back to `JWT_SECRET` | AES-256 key for OAuth tokens at rest (`openssl rand -hex 32`) |
 | `JWT_ACCESS_TTL_SECS` | `900` | Access cookie TTL |
 | `JWT_REFRESH_TTL_SECS` | `604800` | Refresh cookie / session TTL |
 | `HOST` | `127.0.0.1` | Bind address (use an IP; `localhost` is not a valid `SocketAddr` host) |
@@ -54,6 +55,8 @@ See [`.env.example`](../../.env.example).
 | `CORS_ORIGINS` | `http://localhost:3030,http://127.0.0.1:3030` | Comma-separated UI origins; credentials enabled |
 | `COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `COOKIE_SAMESITE` | `Lax` | `Strict` / `Lax` / `None` (`None` needs Secure) |
+| `API_PUBLIC_BASE` / `UI_PUBLIC_BASE` | `http://localhost:8080` / `:3030` | OAuth redirect + popup messaging |
+| `{PROVIDER}_CLIENT_ID` / `_SECRET` | unset | Optional per-provider OAuth apps (see `.env.example`) |
 
 ---
 
@@ -61,11 +64,12 @@ See [`.env.example`](../../.env.example).
 
 ```text
 fleet-ui (:3030)
-    │  cookie credentials + CORS
+    │  cookie credentials + CORS / proxy
     ▼
 fleet-server (:8080)
-    ├── fleet-auth  (lib routes)
-    └── fleet-db    → Postgres
+    ├── fleet-auth           (auth + workspaces)
+    ├── fleet-integrations   (OAuth + encrypted tokens)
+    └── fleet-db             → Postgres
 ```
 
 ---
@@ -73,5 +77,6 @@ fleet-server (:8080)
 ## Related
 
 - Auth + workspace API details: [`fleet-auth/README.md`](../fleet-auth/README.md)
+- Integrations OAuth: [`fleet-integrations/README.md`](../fleet-integrations/README.md)
 - DB layer: [`fleet-db/README.md`](../fleet-db/README.md)
-- Component doc: [`docs/components/auth/README.md`](../../docs/components/auth/README.md)
+- Component docs: [`docs/components/auth/`](../../docs/components/auth/), [`docs/components/integrations/`](../../docs/components/integrations/)
