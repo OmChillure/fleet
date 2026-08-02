@@ -83,7 +83,6 @@ crates/fleet-ui/src/
     app_shell.rs          # Auth gate + sidebar + top bar + theme
     navbar.rs             # Marketing navbar
     sidebar.rs            # Workspace dropdown + nav
-    theme_toggle.rs
   pages/
     home/                 # /
     auth/                 # /login, /signup

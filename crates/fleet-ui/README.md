@@ -90,7 +90,6 @@ src/
     app_shell.rs          # Auth gate + sidebar + theme provider
     navbar.rs             # Marketing navbar
     sidebar.rs            # Workspace dropdown + nav links
-    theme_toggle.rs
   pages/
     auth/
       login.rs / signup.rs / layout.rs

@@ -15,7 +15,8 @@ CREATE TABLE integration_connections (
     -- Non-secret metadata (site_url, org, team id, scopes, …)
     config          JSONB NOT NULL DEFAULT '{}'::jsonb,
     -- Secret material (tokens, api keys). Control-plane only; never serialize
-    -- in public API responses. Encrypt-at-rest is a follow-up.
+    -- in public API responses. Written as AES-256-GCM envelopes by
+    -- fleet-integrations (`{ "_enc": "v1", "nonce", "ct" }`).
     credentials     JSONB NOT NULL DEFAULT '{}'::jsonb,
     connected_by    UUID REFERENCES users (id) ON DELETE SET NULL,
     last_error      TEXT,

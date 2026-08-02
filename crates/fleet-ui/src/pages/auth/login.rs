@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::api::{LoginBody, list_workspaces, login as api_login, take_just_registered};
 use super::layout::AuthSplit;
+use crate::components::toast::show_toast;
 use crate::Route;
 
 /// Login — left form, right product panel. Sets JWT cookies via fleet-auth.
@@ -9,17 +10,13 @@ use crate::Route;
 pub fn Login() -> Element {
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
-    let mut error = use_signal(|| Option::<String>::None);
     let mut loading = use_signal(|| false);
-    let mut notice = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
 
-    // Banner after successful signup → login redirect.
+    // Toast after successful signup → login redirect.
     use_effect(move || {
         if take_just_registered() {
-            notice.set(Some(
-                "Account created. Log in with your email and password.".into(),
-            ));
+            show_toast().success("Account created. Log in with your email and password.");
         }
     });
 
@@ -28,13 +25,12 @@ pub fn Login() -> Element {
         if loading() {
             return;
         }
-        error.set(None);
 
         let email_val = email.read().trim().to_string();
         let password_val = password.read().clone();
 
         if email_val.is_empty() || password_val.is_empty() {
-            error.set(Some("Enter email and password.".into()));
+            show_toast().error("Enter email and password.");
             return;
         }
 
@@ -56,25 +52,24 @@ pub fn Login() -> Element {
                             Ok(list) => ws_id = list.into_iter().next().map(|w| w.id),
                             Err(e) => {
                                 loading.set(false);
-                                error.set(Some(e.message()));
+                                show_toast().error(e.message());
                                 return;
                             }
                         }
                     }
                     loading.set(false);
                     if let Some(id) = ws_id {
+                        show_toast().success("Signed in.");
                         navigator.push(Route::Dashboard {
                             workspace_id: id,
                         });
                     } else {
-                        error.set(Some(
-                            "Logged in, but no workspace was found. Try again.".into(),
-                        ));
+                        show_toast().error("Logged in, but no workspace was found. Try again.");
                     }
                 }
                 Err(e) => {
                     loading.set(false);
-                    error.set(Some(e.message()));
+                    show_toast().error(e.message());
                 }
             }
         });
@@ -84,12 +79,6 @@ pub fn Login() -> Element {
         h1 { class: "mb-1.5 text-2xl font-bold tracking-tight text-white", "Welcome back" }
         p { class: "mb-6 text-[0.95rem] text-neutral-400",
             "Sign in to manage your agent fleet."
-        }
-
-        if let Some(msg) = notice() {
-            p { class: "mb-4 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-200",
-                "{msg}"
-            }
         }
 
         form { onsubmit: on_submit, class: "space-y-4",
@@ -118,10 +107,6 @@ pub fn Login() -> Element {
                     value: "{password}",
                     oninput: move |e| password.set(e.value()),
                 }
-            }
-
-            if let Some(msg) = error() {
-                p { class: "text-sm text-red-400", "{msg}" }
             }
 
             button {

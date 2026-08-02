@@ -1,8 +1,9 @@
 //! Workspace integration connection repository.
 //!
 //! Credentials are stored for control-plane use (AI / orchestrator proxy).
-//! List helpers never need to return secret fields — use
-//! [`IntegrationConnectionPublic`] at the API boundary.
+//! Callers that write secrets should pass **already encrypted** envelopes
+//! (see `fleet_integrations::CredentialsKey`). List helpers never need to
+//! return secret fields — use [`IntegrationConnectionPublic`] at the API boundary.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;

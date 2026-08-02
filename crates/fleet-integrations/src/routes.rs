@@ -380,6 +380,18 @@ async fn oauth_callback_inner(
         .await
         .map_err(|e| (Some(claims.workspace_id.clone()), e.to_string()))?;
 
+    // Encrypt tokens before they hit Postgres (AES-256-GCM envelope).
+    let sealed = state
+        .config
+        .credentials_key
+        .encrypt(&tokens.credentials)
+        .map_err(|e| {
+            (
+                Some(claims.workspace_id.clone()),
+                format!("failed to encrypt credentials: {e}"),
+            )
+        })?;
+
     let now = Utc::now();
     integ_repo::upsert(
         &state.db,
@@ -389,7 +401,7 @@ async fn oauth_callback_inner(
             provider: provider.clone(),
             account_label: tokens.account_label,
             config: tokens.config,
-            credentials: tokens.credentials,
+            credentials: sealed,
             connected_by: Some(user_id),
             at: now,
         },

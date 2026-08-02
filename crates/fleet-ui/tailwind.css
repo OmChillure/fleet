@@ -39,6 +39,21 @@
   --app-accent-fg: #ffffff;
 }
 
+/* Toast progress (rust-ui StaticToast-style bar) */
+@keyframes toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.toast-progress {
+  transform-origin: left center;
+  animation: toast-progress 4s linear forwards;
+}
+
 @layer base {
   html {
     @apply antialiased;

@@ -14,6 +14,10 @@ pub fn OAuthDone() -> Element {
         {
             let (connected, err) = parse_query();
             if let Some(window) = web_sys::window() {
+                // 1) postMessage opener (primary) so Integrations updates immediately
+                notify_opener(&window, connected.as_deref(), err.as_deref());
+
+                // 2) localStorage fallback when opener is missing / blocked
                 if let Some(storage) = window.local_storage().ok().flatten() {
                     if let Some(p) = &connected {
                         let _ = storage.set_item("fleet_oauth_result", &format!("connected:{p}"));
@@ -85,6 +89,45 @@ pub fn OAuthDone() -> Element {
             }
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn notify_opener(window: &web_sys::Window, connected: Option<&str>, err: Option<&str>) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    let Ok(opener) = window.opener() else {
+        return;
+    };
+    if opener.is_null() || opener.is_undefined() {
+        return;
+    }
+    let Ok(opener_win) = opener.dyn_into::<web_sys::Window>() else {
+        return;
+    };
+
+    let payload = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &payload,
+        &JsValue::from_str("source"),
+        &JsValue::from_str("fleet-oauth"),
+    );
+    let ok = connected.is_some() && err.is_none();
+    let _ = js_sys::Reflect::set(&payload, &JsValue::from_str("ok"), &JsValue::from_bool(ok));
+    let _ = js_sys::Reflect::set(
+        &payload,
+        &JsValue::from_str("provider"),
+        &JsValue::from_str(connected.unwrap_or("")),
+    );
+    let _ = js_sys::Reflect::set(
+        &payload,
+        &JsValue::from_str("error"),
+        &JsValue::from_str(err.unwrap_or("")),
+    );
+
+    // Match any origin for local dev (3030 UI / 8080 API).
+    let _ = opener_win.post_message(&payload, "*");
+    let _ = opener_win.focus();
 }
 
 #[cfg(target_arch = "wasm32")]

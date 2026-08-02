@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::api::{SignupBody, mark_just_registered, signup as api_signup};
 use super::layout::AuthSplit;
+use crate::components::toast::show_toast;
 use crate::Route;
 
 /// Signup — left form, right panel. On success → `/login?registered=1`.
@@ -10,7 +11,6 @@ pub fn Signup() -> Element {
     let mut display_name = use_signal(|| String::new());
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
-    let mut error = use_signal(|| Option::<String>::None);
     let mut loading = use_signal(|| false);
     let navigator = use_navigator();
 
@@ -19,18 +19,17 @@ pub fn Signup() -> Element {
         if loading() {
             return;
         }
-        error.set(None);
 
         let email_val = email.read().trim().to_string();
         let password_val = password.read().clone();
         let name_val = display_name.read().trim().to_string();
 
         if email_val.is_empty() || password_val.is_empty() {
-            error.set(Some("Email and password are required.".into()));
+            show_toast().error("Email and password are required.");
             return;
         }
         if password_val.len() < 8 {
-            error.set(Some("Password must be at least 8 characters.".into()));
+            show_toast().error("Password must be at least 8 characters.");
             return;
         }
 
@@ -56,7 +55,7 @@ pub fn Signup() -> Element {
                 }
                 Err(e) => {
                     loading.set(false);
-                    error.set(Some(e.message()));
+                    show_toast().error(e.message());
                 }
             }
         });
@@ -107,10 +106,6 @@ pub fn Signup() -> Element {
                     value: "{password}",
                     oninput: move |e| password.set(e.value()),
                 }
-            }
-
-            if let Some(msg) = error() {
-                p { class: "text-sm text-red-400", "{msg}" }
             }
 
             button {
