@@ -8,13 +8,14 @@ pasted into the UI, never secrets inside sandboxes.
 ## Flow
 
 ```text
-UI "Connect with GitHub"
+UI "Connect with GitHub" (new tab)
   → GET /api/workspaces/{ws}/integrations/github/oauth/start  (session cookie)
-  → 302 GitHub authorize
-  → user Approves
+  → 302 provider authorize
+  → user Approves (their account)
   → GET /api/integrations/oauth/callback/github?code&state
-  → exchange code → store credentials
-  → 303 UI /{ws}/integrations?connected=github
+  → exchange code → AES-GCM encrypt → Postgres
+  → popup postMessage(opener) + close
+  → UI marks Connected (optimistic + list poll)
 ```
 
 ## Env (Fleet’s OAuth apps)

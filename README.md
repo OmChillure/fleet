@@ -11,7 +11,7 @@ Rust workspace (see root `Cargo.toml`).
 | --- | --- | --- |
 | [`fleet-server`](crates/fleet-server/) | `crates/fleet-server` | **Unified API** — `cargo run` entrypoint |
 | [`fleet-auth`](crates/fleet-auth/) | `crates/fleet-auth` | Auth + workspaces library (mounted by server) |
-| [`fleet-integrations`](crates/fleet-integrations/) | `crates/fleet-integrations` | Integrations catalog (GitHub, Jira, Slack, …) |
+| [`fleet-integrations`](crates/fleet-integrations/) | `crates/fleet-integrations` | OAuth integrations (GitHub, Slack, Notion, …) + encrypted tokens |
 | [`fleet-db`](crates/fleet-db/) | `crates/fleet-db` | Postgres — migrations, pool, models, repos |
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
@@ -31,8 +31,9 @@ auth works across ports.
 cp .env.example .env
 # Set DATABASE_URL (Neon / Supabase / local Postgres; include ?sslmode=require for Neon)
 # JWT_SECRET must be ≥ 32 characters
+# Optional: INTEGRATIONS_ENCRYPTION_KEY="$(openssl rand -hex 32)" for OAuth token AES key
 
-# Terminal 1 — API (auth, workspaces, health)
+# Terminal 1 — API (auth, workspaces, integrations, health)
 cargo run
 # → http://localhost:8080
 
@@ -52,8 +53,10 @@ dx serve --package fleet-ui --port 3030
    ```
 3. **App shell** requires a live session (`GET /api/auth/me`). Unauthenticated
    visits to app routes redirect to `/login`.
-4. **Sidebar** has a workspace switcher (list + create). Nav links stay under
-   the current workspace id.
+4. **Sidebar** has a workspace switcher (list + create). Nav sections: Chat,
+   Monitoring, Agents, Workspace. Links stay under the current workspace id.
+5. **Toasts** (bottom-right) for success / error across login, signup, and
+   integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -66,7 +69,7 @@ dx serve --package fleet-ui --port 3030
 | `POST` | `/api/workspaces` | Create workspace `{ "name": "…" }` |
 | `GET` | `/api/workspaces/{id}/integrations` | Catalog + OAuth connection state |
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
-| `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → store tokens |
+| `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
 | `GET` | `/health` | Liveness + DB probe |
 
@@ -75,15 +78,18 @@ UI app routes (workspace-scoped):
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/dashboard` | Dashboard |
-| `/{workspace_id}/sessions` | Sessions |
+| `/{workspace_id}/chat` | Chat (composer + messages) |
+| `/{workspace_id}/fleet` | Fleet control plane UI |
+| `/{workspace_id}/sessions` | Sessions / chat history |
 | `/{workspace_id}/agents` | Agents |
 | `/{workspace_id}/sandboxes` | Sandboxes |
-| `/{workspace_id}/integrations` | Integrations |
+| `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Settings |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),
 [`fleet-ui`](crates/fleet-ui/README.md),
+[`fleet-integrations`](crates/fleet-integrations/README.md),
 [`fleet-db`](crates/fleet-db/README.md).
 
 ## Docs
@@ -96,7 +102,8 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | [`docs/architecture/events.md`](docs/architecture/events.md) | Field-level command & event catalogue + JSON serialization |
 | [`docs/architecture/transport-zenoh.md`](docs/architecture/transport-zenoh.md) | Zenoh transport evaluation + key-space |
 | [`docs/architecture/diagrams/`](docs/architecture/diagrams/) | Mermaid diagram sources |
-| [`docs/components/ui/README.md`](docs/components/ui/README.md) | **Web UI** (routes, layouts, theming, status) |
+| [`docs/components/ui/README.md`](docs/components/ui/README.md) | **Web UI** (routes, chat, toasts, theming) |
 | [`docs/components/auth/README.md`](docs/components/auth/README.md) | **Auth + workspaces** API and cookie model |
+| [`docs/components/integrations/README.md`](docs/components/integrations/README.md) | **OAuth integrations** + credential encryption |
 | [`docs/components/`](docs/components/) | Per-component design stubs |
 | [`docs/references/`](docs/references/) | Reference projects and prior vision artifacts |
