@@ -2,6 +2,7 @@ use axum::extract::FromRef;
 use fleet_auth::{AuthConfig, AuthState};
 use fleet_db::PgPool;
 use fleet_integrations::{IntegrationsConfig, IntegrationsState};
+use fleet_orchestrator::api::AppState as OrchState;
 
 /// Unified app state for every API module mounted on fleet-server.
 #[derive(Clone)]
@@ -9,6 +10,8 @@ pub struct AppState {
     pub db: PgPool,
     pub auth: AuthConfig,
     pub integrations: IntegrationsConfig,
+    /// Orchestrator control plane (project store + tick runner).
+    pub orch: OrchState,
 }
 
 impl FromRef<AppState> for AuthState {
@@ -33,5 +36,11 @@ impl FromRef<AppState> for IntegrationsState {
 impl FromRef<AppState> for PgPool {
     fn from_ref(state: &AppState) -> Self {
         state.db.clone()
+    }
+}
+
+impl FromRef<AppState> for OrchState {
+    fn from_ref(state: &AppState) -> Self {
+        state.orch.clone()
     }
 }

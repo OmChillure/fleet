@@ -1,0 +1,67 @@
+%% State machines for WorkRun · WorkPlan · BoardTask · WorkerSession
+stateDiagram-v2
+  direction TB
+
+  state "WorkRun (user-initiated unit of work)" as Run {
+    [*] --> IntentReceived
+    IntentReceived --> SourcesResolved: sources pulled
+    SourcesResolved --> Ingested: normalized work_items
+    Ingested --> Planning: plan job enqueued
+    Planning --> PlanReady: plan draft written
+    PlanReady --> Accepted: auto or human approve
+    PlanReady --> Planning: replan requested
+    PlanReady --> Cancelled: user cancel / reject
+    Accepted --> Active: orchestrator owns run
+    Active --> Completed: all tasks terminal ok
+    Active --> Failed: unrecoverable / policy
+    Active --> Cancelled: user or admin stop
+    Completed --> [*]
+    Failed --> [*]
+    Cancelled --> [*]
+  }
+
+  state "WorkPlan (planning output · handoff)" as Plan {
+    [*] --> Draft
+    Draft --> Ready: planner finished
+    Ready --> Accepted: gate passed
+    Ready --> Superseded: newer version
+    Accepted --> Materializing: orch materializes cards
+    Materializing --> InForce: cards live on board
+    InForce --> Superseded: replan mid-flight
+    Superseded --> [*]
+    InForce --> [*]
+  }
+
+  state "BoardTask (orchestration unit)" as Task {
+    [*] --> Queued
+    Queued --> Ready: deps satisfied
+    Ready --> Assigned: scheduler picks
+    Assigned --> InProgress: worker claims
+    InProgress --> Blocked: needs human input
+    Blocked --> InProgress: input provided
+    InProgress --> RetryWait: worker died / timeout
+    RetryWait --> Ready: retry policy allows
+    InProgress --> DoneSuccess: acceptance met
+    InProgress --> DoneFailed: budget exhausted
+    Queued --> Cancelled
+    Ready --> Cancelled
+    Assigned --> Cancelled
+    InProgress --> Cancelled
+    Blocked --> Cancelled
+    DoneSuccess --> [*]
+    DoneFailed --> [*]
+    Cancelled --> [*]
+  }
+
+  state "WorkerSession (runtime process)" as Worker {
+    [*] --> Spawning
+    Spawning --> Healthy: heartbeat ok
+    Healthy --> Healthy: heartbeat
+    Healthy --> Stuck: heartbeat stale
+    Stuck --> Killing: grace exceeded
+    Healthy --> Exited: worker finished
+    Killing --> Exited: force kill
+    Spawning --> FailedSpawn: cannot start
+    Exited --> [*]
+    FailedSpawn --> [*]
+  }

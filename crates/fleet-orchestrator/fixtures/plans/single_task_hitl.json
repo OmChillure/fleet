@@ -1,0 +1,24 @@
+{
+  "plan": {
+    "plan_id": "55555555-5555-4555-8555-555555555555",
+    "project_id": "00000000-0000-0000-0000-000000000000",
+    "run_id": "66666666-6666-4666-8666-666666666666",
+    "version": 1,
+    "status": "accepted",
+    "source": "fixture",
+    "tasks": [
+      {
+        "plan_task_id": "t1",
+        "title": "Needs human approval",
+        "depends_on": [],
+        "worker_profile": "coding",
+        "priority": 100,
+        "max_retries": 0
+      }
+    ],
+    "policy": {
+      "on_task_fail": "fail_run",
+      "auto_sync_external": false
+    }
+  }
+}

@@ -17,7 +17,6 @@ pub mod state;
 pub use config::AuthConfig;
 pub use cookies::validate_cookie_policy;
 pub use error::{AppError, AppResult};
-pub use routes::auth::require_user;
-pub use routes::router;
+pub use routes::{require_user, router};
 pub use state::AuthState;
 pub use tokens::{ACCESS_COOKIE, REFRESH_COOKIE};

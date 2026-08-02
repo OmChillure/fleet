@@ -1,0 +1,38 @@
+%% Orchestrator pure-logic reconcile tick (every X seconds)
+flowchart TD
+  START([Tick start · project_id]) --> LOAD[Load config · capacity · policies]
+  LOAD --> PLANS[Find PlanAccepted not fully materialized]
+  PLANS --> MAT{New plan tasks?}
+  MAT -->|yes| WRITE[Upsert board cards<br/>wire deps · external_ref]
+  MAT -->|no| BOARD
+  WRITE --> BOARD[Load board snapshot + worker sessions]
+
+  BOARD --> DEPS[Mark Queued→Ready<br/>when dependencies done]
+  DEPS --> CAP[Compute free slots<br/>max_agents − healthy workers]
+
+  CAP --> SPAWN{Ready tasks and free slots?}
+  SPAWN -->|yes| LIFE_SPAWN[Spawn workers · assign tasks]
+  SPAWN -->|no| HB
+  LIFE_SPAWN --> HB[Collect heartbeats]
+
+  HB --> STUCK{Session stuck<br/>or over wall-clock?}
+  STUCK -->|yes| KILL[Kill session · release claim]
+  KILL --> RETRY{Retries left?}
+  RETRY -->|yes| REQUEUE[Task → RetryWait → Ready]
+  RETRY -->|no| FAIL[Task → DoneFailed]
+  STUCK -->|no| PROG
+
+  REQUEUE --> PROG
+  FAIL --> PROG[Apply worker-reported status<br/>Blocked · Done* · progress %]
+
+  PROG --> HITL{Newly blocked?}
+  HITL -->|yes| NOTIFY[Notify project reviewers]
+  HITL -->|no| EXT
+  NOTIFY --> EXT[Map statuses to external board<br/>if project mapped]
+
+  EXT --> RUN[Roll up task states → WorkRun]
+  RUN --> TERM{Run terminal?}
+  TERM -->|yes| CLOSE[CP10 RunTerminal · emit event]
+  TERM -->|no| END
+  CLOSE --> END([Tick end · sleep X s])
+  END --> START

@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Fleet — Planning &amp; Orchestration Design</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6fa;
+      --surface: #ffffff;
+      --text: #1a1d26;
+      --muted: #5a6270;
+      --border: #e2e6ee;
+      --accent: #2563eb;
+      --accent-soft: #eff4ff;
+      --ok: #0d7a4f;
+      --warn: #b45309;
+      --plan: #7c3aed;
+      --orch: #0f766e;
+      --card-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-size: 16px;
+    }
+    header {
+      background: linear-gradient(135deg, #0f766e 0%, #2563eb 55%, #7c3aed 100%);
+      color: #fff;
+      padding: 2.75rem 1.5rem 2.5rem;
+    }
+    header .wrap, main.wrap, footer.wrap {
+      max-width: none;
+      width: 100%;
+      margin: 0;
+      padding-left: 1.5rem;
+      padding-right: 1.5rem;
+    }
+    header h1 {
+      margin: 0 0 0.35rem;
+      font-size: 1.85rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    header .subtitle {
+      margin: 0;
+      opacity: 0.92;
+      font-size: 1.05rem;
+      max-width: none;
+    }
+    header .meta {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .pill {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.16);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    nav.toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    nav.toc strong {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    nav.toc ol {
+      margin: 0;
+      padding-left: 1.2rem;
+      columns: 2;
+      gap: 1.5rem;
+    }
+    nav.toc a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.92rem;
+    }
+    nav.toc a:hover { text-decoration: underline; }
+    main.wrap { padding: 1.75rem 1.5rem 1rem; width: 100%; }
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      padding: 1.5rem 1.65rem;
+      margin-bottom: 1.25rem;
+    }
+    h2 {
+      margin: 0 0 0.85rem;
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    h2 .num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    h3 {
+      margin: 1.25rem 0 0.5rem;
+      font-size: 1rem;
+      font-weight: 650;
+    }
+    p { margin: 0 0 0.85rem; }
+    p.lead { font-size: 1.05rem; color: var(--muted); }
+    ul, ol { margin: 0.35rem 0 0.85rem; padding-left: 1.25rem; }
+    li { margin-bottom: 0.4rem; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      margin: 0.75rem 0;
+    }
+    @media (min-width: 720px) {
+      .split { grid-template-columns: 1fr 1fr; }
+    }
+    .panel {
+      border-radius: 10px;
+      padding: 1.1rem 1.15rem;
+      border: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .panel.plan {
+      border-color: #ddd6fe;
+      background: #f5f3ff;
+    }
+    .panel.orch {
+      border-color: #99f6e4;
+      background: #f0fdfa;
+    }
+    .panel h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .panel.plan h3 { color: var(--plan); }
+    .panel.orch h3 { color: var(--orch); }
+    .panel ul { margin-bottom: 0; }
+    .note {
+      border-left: 3px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 0.75rem 0 0;
+      font-size: 0.92rem;
+      color: #1e3a5f;
+    }
+    .note.warn {
+      border-left-color: var(--warn);
+      background: #fff7ed;
+      color: #7c2d12;
+    }
+    .diagram {
+      background: #fafbfe;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      margin: 0.75rem 0 1rem;
+      overflow-x: auto;
+    }
+    .diagram.large {
+      padding: 2rem 1.5rem 1.5rem;
+      width: 100%;
+      overflow: visible;
+    }
+    /* Initiation flow — HTML cards with sublabels */
+    .flow-hl {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      width: 100%;
+      padding: 0.25rem 0;
+    }
+    .flow-hl .phases {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+    }
+    .flow-hl .phase-tag {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.3rem 0.7rem;
+      border-radius: 999px;
+    }
+    .flow-hl .phase-tag.plan {
+      background: #f5f3ff;
+      color: #5b21b6;
+      border: 1px solid #ddd6fe;
+    }
+    .flow-hl .phase-tag.orch {
+      background: #f0fdfa;
+      color: #115e59;
+      border: 1px solid #99f6e4;
+    }
+    .flow-hl .rail {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      justify-content: center;
+      gap: 0.35rem 0.25rem;
+      width: 100%;
+    }
+    .flow-hl .step {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 0.25rem;
+      min-width: 7.5rem;
+      max-width: 11rem;
+      padding: 0.7rem 0.85rem;
+      background: #fff;
+      border: 2px solid #94a3b8;
+      border-radius: 10px;
+      color: var(--text);
+      line-height: 1.25;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    }
+    .flow-hl .step .title {
+      font-size: 1rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .flow-hl .step .sub {
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--muted);
+      line-height: 1.3;
+    }
+    .flow-hl .step.plan {
+      border-color: #a78bfa;
+      background: #f5f3ff;
+    }
+    .flow-hl .step.plan .title { color: #5b21b6; }
+    .flow-hl .step.orch {
+      border-color: #2dd4bf;
+      background: #f0fdfa;
+    }
+    .flow-hl .step.orch .title { color: #115e59; }
+    .flow-hl .step.done {
+      border-color: #86efac;
+      background: #f0fdf4;
+    }
+    .flow-hl .step.done .title { color: #166534; }
+    .flow-hl .step.gate {
+      border-style: dashed;
+      border-color: #f59e0b;
+      background: #fffbeb;
+    }
+    .flow-hl .step.gate .title { color: #b45309; }
+    .flow-hl .arrow {
+      display: flex;
+      align-items: center;
+      color: #64748b;
+      font-size: 1.25rem;
+      font-weight: 500;
+      padding: 0 0.1rem;
+      user-select: none;
+      align-self: center;
+    }
+    .flow-hl .sources {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.4rem;
+      margin-top: 0.15rem;
+    }
+    .flow-hl .src-pill {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #334155;
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      padding: 0.28rem 0.7rem;
+    }
+    .flow-hl .legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 1rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .flow-hl .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 0.65rem;
+      height: 0.65rem;
+      border-radius: 3px;
+      margin-right: 0.35rem;
+      vertical-align: -1px;
+      border: 1px solid transparent;
+    }
+    .flow-hl .legend .lg-plan::before {
+      background: #f5f3ff;
+      border-color: #a78bfa;
+    }
+    .flow-hl .legend .lg-orch::before {
+      background: #f0fdfa;
+      border-color: #2dd4bf;
+    }
+    .flow-hl .legend .lg-gate::before {
+      background: #fffbeb;
+      border-color: #f59e0b;
+    }
+    .diagram .caption {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0.5rem 0 0;
+      text-align: center;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    table.matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin: 0.5rem 0 0.85rem;
+    }
+    table.matrix th, table.matrix td {
+      border: 1px solid var(--border);
+      padding: 0.55rem 0.7rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    table.matrix th {
+      background: var(--bg);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+    code {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.88em;
+      background: #f0f2f6;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    pre.contract {
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 10px;
+      padding: 1rem 1.15rem;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0.75rem 0 1rem;
+    }
+    .cp {
+      display: inline-block;
+      background: #eff4ff;
+      color: #1d4ed8;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      padding: 0.05rem 0.4rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    footer.wrap {
+      padding: 0 1.5rem 2.5rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+      width: 100%;
+    }
+    @media print {
+      body { background: #fff; }
+      section.card { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Planning &amp; Orchestration</h1>
+      <p class="subtitle">
+        What happens when a user initiates work: integration runs vs docs/ad-hoc,
+        a one-off LLM planning job, a durable handoff plan, and a pure-logic
+        orchestration loop that owns agent lifecycle.
+      </p>
+      <div class="meta">
+        <span class="pill">Design · sandbox orchestration</span>
+        <span class="pill">Planning ≠ Orchestration</span>
+        <span class="pill">State checkpoints CP1–CP10</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <nav class="toc" aria-label="Table of contents">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#principle">Core split</a></li>
+        <li><a href="#units">Work units</a></li>
+        <li><a href="#flow">Initiation flowchart</a></li>
+        <li><a href="#sequence">End-to-end sequence</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#states">State machines</a></li>
+        <li><a href="#reconcile">Orchestrator reconcile tick</a></li>
+        <li><a href="#handoff">Handoff contract</a></li>
+        <li><a href="#checkpoints">Checkpoint table</a></li>
+        <li><a href="#decisions">Design decisions</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 -->
+    <section class="card" id="principle">
+      <h2><span class="num">1</span> Core split</h2>
+      <p class="lead">
+        The product vision already names a <strong>project orchestrator</strong> that owns
+        lifecycle, capacity, and monitoring. Decomposition (“planner breaks into subtasks”)
+        is currently folded into that story. For a sandbox orchestration system we
+        <strong>split them deliberately</strong>.
+      </p>
+
+      <div class="split">
+        <div class="panel plan">
+          <h3>Planning service · LLM · one-off</h3>
+          <ul>
+            <li>Triggered by a <strong>WorkRun</strong> (user intent), not by the tick loop.</li>
+            <li>Reads ingested work items, docs, project goal, persona defaults.</li>
+            <li>Uses inference to decompose, prioritize, attach acceptance criteria, pick worker profiles, declare dependencies.</li>
+            <li>Writes a versioned <strong>WorkPlan</strong> and exits.</li>
+            <li>May re-run only on explicit replan / reject / policy — never every few seconds.</li>
+            <li>Costly, bursty, non-deterministic → isolated job queue.</li>
+          </ul>
+        </div>
+        <div class="panel orch">
+          <h3>Orchestration service · pure logic · continuous</h3>
+          <ul>
+            <li>Operator loop: every <code>X</code> seconds (plus optional events).</li>
+            <li>Looks for <strong>PlanAccepted</strong> runs and ready board tasks.</li>
+            <li>Materializes cards, schedules under max agents, spawns/kills workers.</li>
+            <li>Detects stuck sessions, applies timeouts/retries, updates statuses.</li>
+            <li>Syncs mechanical status maps to external boards.</li>
+            <li>Routes HITL blockers — no LLM required for control decisions.</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="note">
+        <strong>Why this matters:</strong> if the reconciler calls an LLM, every tick becomes
+        expensive and non-reproducible. If planning also spawns agents, you cannot audit
+        “what was the plan?” independently of runtime. The durable <em>WorkPlan</em> is the
+        firewall between intelligence and control.
+      </p>
+    </section>
+
+    <!-- 2 -->
+    <section class="card" id="units">
+      <h2><span class="num">2</span> Work units</h2>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Unit</th>
+            <th>Created by</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>WorkRun</strong></td>
+            <td>User / webhook</td>
+            <td>One initiation: “do all open issues on Jira WEB”, “decompose this spec”, “run this ad-hoc task”.</td>
+          </tr>
+          <tr>
+            <td><strong>WorkItem</strong></td>
+            <td>Ingest (logic)</td>
+            <td>Normalized raw input (Jira issue, doc section, freeform body) before planning.</td>
+          </tr>
+          <tr>
+            <td><strong>WorkPlan</strong></td>
+            <td>Planning service</td>
+            <td>Versioned task graph + policies. Handoff artifact. Immutable once Accepted.</td>
+          </tr>
+          <tr>
+            <td><strong>BoardTask</strong></td>
+            <td>Orchestrator materializer</td>
+            <td>Claimable card on the project board. Workers act on these.</td>
+          </tr>
+          <tr>
+            <td><strong>WorkerSession</strong></td>
+            <td>Lifecycle manager</td>
+            <td>Runtime process (tmux/container/sandbox) executing one assigned task.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3 -->
+    <section class="card" id="flow">
+      <h2><span class="num">3</span> Initiation flowchart</h2>
+      <p>
+        Four entry modes converge on the same checkpoint pipeline. Integration runs pull
+        from the org integration hub; docs and ad-hoc skip external fetch; webhooks create
+        runs automatically when mapped boards change.
+      </p>
+      <div class="diagram large">
+        <div class="flow-hl" role="img" aria-label="Work initiation flow from initiate through plan to orchestrate and done">
+          <div class="phases">
+            <span class="phase-tag plan">Planning · LLM job</span>
+            <span class="phase-tag orch">Orchestration · pure logic</span>
+          </div>
+
+          <div class="rail">
+            <div class="step">
+              <span class="title">Initiate</span>
+              <span class="sub">User starts a work run</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step">
+              <span class="title">Ingest</span>
+              <span class="sub">Pull board issues or load docs</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step plan">
+              <span class="title">Plan</span>
+              <span class="sub">LLM decomposes into tasks</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step gate">
+              <span class="title">Accept</span>
+              <span class="sub">Auto or human approve</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step orch">
+              <span class="title">Materialize</span>
+              <span class="sub">Board cards from plan</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step orch">
+              <span class="title">Schedule</span>
+              <span class="sub">Spawn workers to capacity</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step orch">
+              <span class="title">Reconcile</span>
+              <span class="sub">Heartbeat · kill · sync · HITL</span>
+            </div>
+            <span class="arrow" aria-hidden="true">→</span>
+            <div class="step done">
+              <span class="title">Done</span>
+              <span class="sub">Run complete or failed</span>
+            </div>
+          </div>
+
+          <div class="legend">
+            <span class="lg-plan">Planning (LLM, one-off)</span>
+            <span class="lg-gate">Gate</span>
+            <span class="lg-orch">Orchestration (logic loop)</span>
+          </div>
+        </div>
+        <p class="caption">Source: <code>artifacts/diagrams/task-initiation-flow.mmd</code></p>
+      </div>
+
+      <h3>Integration path specifics</h3>
+      <ul>
+        <li>Org already connected provider credentials; project maps board/project (e.g. Jira <code>WEB</code>).</li>
+        <li>User action: “Run open issues” with a filter (status, label, epic) — or webhook creates a run per new issue / batch window.</li>
+        <li>Ingest stores external keys (<code>WEB-184</code>) on WorkItems; planning may be <em>light</em> (1:1 map issue→task) or <em>heavy</em> (epic decomposition, dependency inference).</li>
+        <li>Orchestration never re-fetches issue text for control decisions; it uses board cards + mechanical status sync.</li>
+      </ul>
+
+      <h3>Document / ad-hoc path specifics</h3>
+      <ul>
+        <li>No external key initially; planning does full decomposition from goal + docs.</li>
+        <li>Same PlanAccepted handoff — orchestration does not care how the plan was born.</li>
+      </ul>
+    </section>
+
+    <!-- 4 -->
+    <section class="card" id="sequence">
+      <h2><span class="num">4</span> End-to-end sequence</h2>
+      <div class="diagram">
+        <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor H as Human
+  participant UI as Web UI
+  participant API as Project API
+  participant INT as Integration hub
+  participant PS as Planning service
+  participant LLM as LLM
+  participant DB as Durable state
+  participant OR as Orchestrator
+  participant W as Worker
+  participant EXT as External board
+
+  H->>UI: Initiate work
+  UI->>API: POST WorkRun
+  API->>DB: CP1 IntentReceived
+  alt Integration run
+    API->>INT: Fetch issues
+    INT->>EXT: List/get issues
+    EXT-->>INT: Payloads
+    INT-->>API: Raw items
+  else Document / ad-hoc
+    API->>DB: Load docs / body
+  end
+  API->>DB: CP2 + CP3 Ingested
+  API->>PS: Enqueue PlanJob
+  API->>DB: CP4 PlanningQueued
+  PS->>DB: Read items + docs + goal
+  PS->>LLM: Decompose / criteria
+  LLM-->>PS: Structured plan
+  PS->>DB: CP5 PlanDraft
+  alt Auto-accept
+    API->>DB: CP6 PlanAccepted
+  else Human gate
+    H->>UI: Approve plan
+    UI->>API: Accept
+    API->>DB: CP6 PlanAccepted
+  end
+  loop Every X seconds
+    OR->>DB: Reconcile tick
+    OR->>DB: Materialize cards
+    OR->>W: Spawn / assign
+    W->>DB: Heartbeat + status
+    OR->>DB: Stuck detect / kill / retry
+    OR->>EXT: Sync statuses
+    OR-->>UI: Dashboard / HITL
+  end
+  W-->>OR: Terminal or blocked
+  OR->>DB: CP10 when run complete
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/planning-handoff-sequence.mmd</code></p>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="card" id="architecture">
+      <h2><span class="num">5</span> Architecture</h2>
+      <p>
+        Planning and orchestration share durable project state but not execution paths.
+        Workers belong only to the orchestration side. Integrations enter through ingest,
+        not through the planner process directly.
+      </p>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TB
+  subgraph UI["Operator surfaces"]
+    WEB[Web UI]
+    CLI[CLI / TUI]
+  end
+
+  subgraph OrgLayer["Organization"]
+    INT[Integration hub]
+  end
+
+  subgraph Project["Project"]
+    GW[API + WebSocket]
+
+    subgraph Durable["Durable state"]
+      RUNS[(WorkRuns)]
+      ITEMS[(WorkItems)]
+      PLANS[(WorkPlans)]
+      BOARD[(Board cards)]
+      WORK[(Worker sessions)]
+      DOCS[(Document tree)]
+      CFG[(Config)]
+    end
+
+    subgraph Planning["Planning · LLM jobs"]
+      PQ[Plan job queue]
+      PW[Planner executor]
+      LLM[LLM inference]
+      PQ --> PW --> LLM
+    end
+
+    subgraph Orchestration["Orchestration · pure logic"]
+      TICK[Reconcile every X s]
+      MAT[Materializer]
+      SCH[Scheduler]
+      LIFE[Lifecycle spawn/kill]
+      STUCK[Stuck detector]
+      SYNC[Board sync]
+      HITL[HITL router]
+      TICK --> MAT & SCH & LIFE & STUCK & SYNC & HITL
+    end
+
+    subgraph Fleet["Worker fleet"]
+      W1[Worker 1]
+      W2[Worker N]
+    end
+  end
+
+  subgraph External["External"]
+    JIRA[Jira / Monday / …]
+    TGT[Repos · systems]
+  end
+
+  WEB & CLI --> GW
+  GW --> RUNS & DOCS & CFG
+  INT --> JIRA
+  INT --> ITEMS
+  GW --> PQ
+  PW --> PLANS
+  PLANS -->|PlanAccepted| TICK
+  MAT --> BOARD
+  SCH & LIFE --> WORK
+  LIFE --> W1 & W2
+  W1 & W2 --> BOARD & TGT
+  SYNC <--> JIRA
+  HITL --> WEB
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/planning-orchestration-architecture.mmd</code></p>
+      </div>
+
+      <p class="note warn">
+        <strong>Sandbox note:</strong> WorkerSessions should run in isolated sandboxes
+        (containers, VMs, or tightly scoped host sessions). The orchestrator owns sandbox
+        lifecycle the same way it owns process lifecycle: create on assign, destroy on
+        terminal/kill, never leave orphans across ticks.
+      </p>
+    </section>
+
+    <!-- 6 -->
+    <section class="card" id="states">
+      <h2><span class="num">6</span> State machines</h2>
+      <p>
+        Four concurrent state machines. Planning mutates WorkRun + WorkPlan only.
+        Orchestration mutates BoardTask + WorkerSession + WorkRun rollup after acceptance.
+      </p>
+      <div class="diagram">
+        <pre class="mermaid">
+stateDiagram-v2
+  direction LR
+
+  state "WorkRun" as Run {
+    [*] --> IntentReceived
+    IntentReceived --> SourcesResolved
+    SourcesResolved --> Ingested
+    Ingested --> Planning
+    Planning --> PlanReady
+    PlanReady --> Accepted
+    PlanReady --> Planning: replan
+    PlanReady --> Cancelled
+    Accepted --> Active
+    Active --> Completed
+    Active --> Failed
+    Active --> Cancelled
+  }
+
+  state "WorkPlan" as Plan {
+    [*] --> Draft
+    Draft --> Ready
+    Ready --> Accepted
+    Ready --> Superseded
+    Accepted --> InForce
+    InForce --> Superseded: replan
+  }
+
+  state "BoardTask" as Task {
+    [*] --> Queued
+    Queued --> Ready: deps ok
+    Ready --> Assigned
+    Assigned --> InProgress
+    InProgress --> Blocked
+    Blocked --> InProgress
+    InProgress --> RetryWait
+    RetryWait --> Ready
+    InProgress --> DoneSuccess
+    InProgress --> DoneFailed
+  }
+
+  state "WorkerSession" as Worker {
+    [*] --> Spawning
+    Spawning --> Healthy
+    Healthy --> Stuck
+    Stuck --> Killing
+    Healthy --> Exited
+    Killing --> Exited
+    Spawning --> FailedSpawn
+  }
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/work-unit-states.mmd</code> (full detail in file)</p>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="card" id="reconcile">
+      <h2><span class="num">7</span> Orchestrator reconcile tick</h2>
+      <p>
+        This is the “operator service” loop: deterministic, idempotent, safe to re-run.
+        Prefer <em>desired state vs observed state</em> reconciliation over fire-and-forget commands.
+      </p>
+      <div class="diagram">
+        <pre class="mermaid">
+flowchart TD
+  START([Tick start]) --> LOAD[Load config + capacity]
+  LOAD --> PLANS[Find accepted plans needing materialize]
+  PLANS --> MAT{New tasks?}
+  MAT -->|yes| WRITE[Upsert board cards]
+  MAT -->|no| BOARD
+  WRITE --> BOARD[Load board + sessions]
+  BOARD --> DEPS[Queued → Ready if deps done]
+  DEPS --> CAP[Free slots = max − healthy]
+  CAP --> SPAWN{Ready + free?}
+  SPAWN -->|yes| LIFE[Spawn sandbox workers]
+  SPAWN -->|no| HB
+  LIFE --> HB[Heartbeats]
+  HB --> STUCK{Stuck / timeout?}
+  STUCK -->|yes| KILL[Kill · release claim]
+  KILL --> RETRY{Retries left?}
+  RETRY -->|yes| REQUEUE[Back to Ready]
+  RETRY -->|no| FAIL[DoneFailed]
+  STUCK -->|no| PROG
+  REQUEUE --> PROG
+  FAIL --> PROG[Apply worker statuses]
+  PROG --> HITL{Blocked?}
+  HITL -->|yes| NOTIFY[Notify reviewers]
+  HITL -->|no| EXT
+  NOTIFY --> EXT[External board sync]
+  EXT --> RUN[Roll up WorkRun]
+  RUN --> END([Sleep X s])
+  END --> START
+        </pre>
+        <p class="caption">Source: <code>artifacts/diagrams/orchestrator-reconcile-loop.mmd</code></p>
+      </div>
+
+      <ul>
+        <li><strong>Idempotent materialize:</strong> plan task id → board card id is stable; re-ticks do not duplicate cards.</li>
+        <li><strong>Capacity:</strong> never spawn above project max agents; prefer highest-priority Ready tasks with deps satisfied.</li>
+        <li><strong>Stuck definition:</strong> no heartbeat for <code>T_stale</code>, or wall-clock &gt; task timeout, or loop budget exceeded (reported by worker).</li>
+        <li><strong>Kill policy:</strong> SIGTERM grace → SIGKILL → mark session exited → apply retry policy on the task.</li>
+        <li><strong>Events optional:</strong> worker completion can wake the loop early; the periodic tick remains the safety net.</li>
+      </ul>
+    </section>
+
+    <!-- 8 -->
+    <section class="card" id="handoff">
+      <h2><span class="num">8</span> Handoff contract</h2>
+      <p>
+        The only object planning must produce for orchestration to proceed:
+      </p>
+      <pre class="contract">WorkPlan {
+  plan_id, project_id, run_id, version,
+  status: draft | ready | accepted | superseded,
+  source: integration | document | adhoc | webhook,
+  created_at, accepted_at?,
+
+  tasks: [{
+    plan_task_id,           // stable within plan version
+    title, summary, spec_md,
+    depends_on: [plan_task_id],
+    worker_profile,         // coding | copy | triage | …
+    acceptance: [criteria],
+    priority, estimated_effort?,
+    external_ref?: { provider, key },  // e.g. jira:WEB-184
+    timeout_s?, max_retries?
+  }],
+
+  policy: {
+    max_agents_override?,   // optional; else project config
+    on_task_fail: leave | fail_run,
+    auto_sync_external: bool
+  }
+}</pre>
+      <p class="note">
+        Once <code>accepted</code>, the plan is immutable. Replanning creates
+        <code>version+1</code> and marks the old plan <code>superseded</code>. The orchestrator
+        decides how to reconcile in-flight tasks (cancel orphans, keep done tasks, etc.)
+        via pure policy — not another LLM call inside the tick.
+      </p>
+    </section>
+
+    <!-- 9 -->
+    <section class="card" id="checkpoints">
+      <h2><span class="num">9</span> State checkpoints</h2>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>CP</th>
+            <th>Name</th>
+            <th>Owner</th>
+            <th>Durable effect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="cp">CP1</span></td>
+            <td>IntentReceived</td>
+            <td>API</td>
+            <td>WorkRun row; source + filter recorded</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP2</span></td>
+            <td>SourcesResolved</td>
+            <td>Ingest logic</td>
+            <td>Raw payloads / doc snapshots stored</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP3</span></td>
+            <td>Ingested</td>
+            <td>Ingest logic</td>
+            <td>WorkItems normalized</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP4</span></td>
+            <td>PlanningQueued</td>
+            <td>API → plan queue</td>
+            <td>PlanJob enqueued</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP5</span></td>
+            <td>PlanDraft</td>
+            <td>Planning service</td>
+            <td>WorkPlan version written</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP6</span></td>
+            <td>PlanAccepted</td>
+            <td>API / gate</td>
+            <td>Plan immutable; handoff legal</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP7</span></td>
+            <td>OrchestrationOwned</td>
+            <td>Orchestrator</td>
+            <td>Run status → Active; orch is leader</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP8</span></td>
+            <td>Materialized</td>
+            <td>Materializer</td>
+            <td>Board cards exist for plan tasks</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP9</span></td>
+            <td>Active</td>
+            <td>Reconcile loop</td>
+            <td>Workers scheduled; heartbeats flowing</td>
+          </tr>
+          <tr>
+            <td><span class="cp">CP10</span></td>
+            <td>RunTerminal</td>
+            <td>Reconcile loop</td>
+            <td>Run completed / failed / cancelled</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Checkpoints are crash-recovery anchors: after restart, the orchestrator resumes from
+        the latest durable CP without re-calling the planner unless the run is still in
+        Planning* states.
+      </p>
+    </section>
+
+    <!-- 10 -->
+    <section class="card" id="decisions">
+      <h2><span class="num">10</span> Design decisions &amp; open edges</h2>
+      <h3>Decided (for this design)</h3>
+      <ul>
+        <li>Planning is a <strong>job</strong>; orchestration is a <strong>control loop</strong>.</li>
+        <li>Handoff is a durable <strong>WorkPlan</strong>, not a side-effect of chat.</li>
+        <li>Integration credentials stay at org; runs and fleets stay at project.</li>
+        <li>Fleet-native board remains primary for agents; external boards sync mechanically.</li>
+        <li>Orchestrator may use events for low latency but must reconcile periodically.</li>
+      </ul>
+      <h3>Still open</h3>
+      <ul>
+        <li>Default auto-accept policy per source (webhook 1:1 map vs heavy doc decompose).</li>
+        <li>Mid-flight replan: cancel in-progress vs let them finish under old plan version.</li>
+        <li>Worker unit: tmux session vs container sandbox vs remote VM — same lifecycle API.</li>
+        <li>Whether light integration mapping skips LLM entirely (pure template plan) for cost.</li>
+        <li>Multi-orchestrator leadership if project is multi-instance (lease / single leader).</li>
+      </ul>
+      <p class="note">
+        Next implementation slice: durable schemas for WorkRun / WorkPlan / BoardTask /
+        WorkerSession, a stub planner that emits plans without LLM, and an orchestrator tick
+        that materializes + fake-spawns + reconciles stuck sessions.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    Agent Fleet · complements <code>product_vision_tarun.html</code> · diagrams under
+    <code>artifacts/diagrams/</code>
+  </footer>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "neutral",
+      securityLevel: "strict",
+      themeVariables: { fontSize: "16px" },
+      flowchart: { curve: "basis", htmlLabels: true, nodeSpacing: 40, rankSpacing: 50, padding: 12 },
+      sequence: { mirrorActors: false }
+    });
+  </script>
+</body>
+</html>

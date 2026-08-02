@@ -13,6 +13,7 @@ use components::navbar::Navbar;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
 use pages::dashboard::Dashboard;
+use pages::fleet::Fleet;
 use pages::home::Home;
 use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
@@ -38,6 +39,8 @@ pub enum Route {
     #[layout(AppShell)]
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },
+        #[route("/:workspace_id/fleet")]
+        Fleet { workspace_id: String },
         #[route("/:workspace_id/sessions")]
         Sessions { workspace_id: String },
         #[route("/:workspace_id/agents")]
@@ -55,6 +58,7 @@ impl Route {
     pub fn workspace_id(&self) -> Option<&str> {
         match self {
             Route::Dashboard { workspace_id }
+            | Route::Fleet { workspace_id }
             | Route::Sessions { workspace_id }
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }

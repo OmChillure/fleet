@@ -14,10 +14,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+axum-extra = { workspace = true }
+uuid = { workspace = true }
 dotenvy = { workspace = true }
 fleet-auth = { workspace = true }
 fleet-db = { workspace = true }
 fleet-integrations = { workspace = true }
+fleet-orchestrator = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

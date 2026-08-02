@@ -1,0 +1,9 @@
+%% Initiation flow — detailed high-level stages
+flowchart LR
+  Initiate["Initiate\nuser starts work run"] --> Ingest["Ingest\nboard / docs / ad-hoc"]
+  Ingest --> Plan["Plan\nLLM decompose"]
+  Plan --> Accept["Accept\nauto or human"]
+  Accept --> Materialize["Materialize\nboard cards"]
+  Materialize --> Schedule["Schedule\nspawn to capacity"]
+  Schedule --> Reconcile["Reconcile\nheartbeat · kill · sync"]
+  Reconcile --> Done["Done\ncomplete or failed"]
