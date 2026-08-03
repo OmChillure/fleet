@@ -47,13 +47,27 @@ pub async fn credentials_for(
 ) -> AppResult<Option<Value>> {
     let raw = fleet_db::repos::integrations::credentials_for(pool, workspace_id, provider)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                %workspace_id,
+                provider,
+                error = %e,
+                "load integration credentials failed"
+            );
+            AppError::internal(e.to_string())
+        })?;
     match raw {
         None => Ok(None),
         Some(stored) => {
-            let plain = key
-                .decrypt(&stored)
-                .map_err(|e| AppError::internal(format!("decrypt credentials: {e}")))?;
+            let plain = key.decrypt(&stored).map_err(|e| {
+                tracing::error!(
+                    %workspace_id,
+                    provider,
+                    error = %e,
+                    "decrypt integration credentials failed"
+                );
+                AppError::internal(format!("decrypt credentials: {e}"))
+            })?;
             Ok(Some(plain))
         }
     }

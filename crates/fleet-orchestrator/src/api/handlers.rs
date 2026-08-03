@@ -13,7 +13,13 @@ use crate::store::StoreError;
 type ApiError = (StatusCode, Json<Value>);
 
 fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
-    (status, Json(json!({ "error": msg.into() })))
+    let msg = msg.into();
+    if status.is_server_error() {
+        tracing::error!(status = status.as_u16(), error = %msg, "orchestrator api error");
+    } else {
+        tracing::warn!(status = status.as_u16(), error = %msg, "orchestrator api error");
+    }
+    (status, Json(json!({ "error": msg })))
 }
 
 fn map_store(e: StoreError) -> ApiError {
@@ -22,7 +28,8 @@ fn map_store(e: StoreError) -> ApiError {
         StoreError::Validation(m) => err(StatusCode::BAD_REQUEST, m),
         StoreError::Conflict(m) => err(StatusCode::CONFLICT, m),
         StoreError::Sqlx(e) => {
-            tracing::error!(error = %e, "store error");
+            // Log the full sqlx detail once; client sees a generic message.
+            tracing::error!(error = %e, "store sqlx error");
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
         }
     }

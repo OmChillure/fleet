@@ -166,8 +166,26 @@ async fn oauth_callback(
     match oauth_callback_inner(&state, &provider, q).await {
         Ok(provider_id) => oauth_popup_close_html(&ui_origin, Some(&provider_id), None),
         Err((workspace_hint, msg)) => {
-            tracing::warn!(provider = %provider, error = %msg, "oauth callback failed");
-            let _ = workspace_hint;
+            // User denials / missing params are expected; everything else is unexpected.
+            let clientish = msg.contains("denied")
+                || msg.contains("missing OAuth")
+                || msg.contains("not a member")
+                || msg.contains("not configured");
+            if clientish {
+                tracing::warn!(
+                    provider = %provider,
+                    workspace = ?workspace_hint,
+                    error = %msg,
+                    "oauth callback rejected"
+                );
+            } else {
+                tracing::error!(
+                    provider = %provider,
+                    workspace = ?workspace_hint,
+                    error = %msg,
+                    "oauth callback failed"
+                );
+            }
             oauth_popup_close_html(&ui_origin, None, Some(&msg))
         }
     }

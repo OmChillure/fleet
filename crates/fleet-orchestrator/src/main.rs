@@ -12,18 +12,39 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     let _ = dotenvy::dotenv();
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Same RUST_LOG switch as fleet-server: info | debug | warn
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
         .json()
         .init();
 
-    let cfg = Config::from_env()?;
-    let state = build_app_state(&cfg).await?;
+    if let Err(err) = run().await {
+        tracing::error!(error = %err, "fleet-orchestrator failed to start");
+        for (i, cause) in err.chain().enumerate().skip(1) {
+            tracing::error!(index = i, cause = %cause, "caused by");
+        }
+        eprintln!("fleet-orchestrator fatal: {err:#}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
+    let cfg = Config::from_env().map_err(|e| {
+        tracing::error!(error = %e, "orchestrator configuration error");
+        e
+    })?;
+    let state = build_app_state(&cfg).await.map_err(|e| {
+        tracing::error!(error = %e, "orchestrator state init failed");
+        e
+    })?;
 
     // Optional background tick loop for all projects is phase 2;
     // operators force ticks via POST /v1/projects/{id}/admin/tick.
@@ -52,8 +73,14 @@ async fn main() -> anyhow::Result<()> {
         "fleet-orchestrator listening"
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        tracing::error!(%addr, error = %e, "failed to bind listen address");
+        e
+    })?;
+    axum::serve(listener, app).await.map_err(|e| {
+        tracing::error!(error = %e, "server exited with error");
+        e
+    })?;
     Ok(())
 }
 

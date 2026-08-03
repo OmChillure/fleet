@@ -68,19 +68,24 @@ impl CredentialsKey {
 
     /// Encrypt plaintext credentials JSON → envelope JSON for storage.
     pub fn encrypt(&self, plaintext: &Value) -> anyhow::Result<Value> {
-        let bytes = serde_json::to_vec(plaintext)
-            .map_err(|e| anyhow::anyhow!("credentials serialize: {e}"))?;
+        let bytes = serde_json::to_vec(plaintext).map_err(|e| {
+            tracing::error!(error = %e, "credentials serialize failed");
+            anyhow::anyhow!("credentials serialize: {e}")
+        })?;
 
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|e| anyhow::anyhow!("aes key init: {e}"))?;
+        let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|e| {
+            tracing::error!(error = %e, "aes key init failed (encrypt)");
+            anyhow::anyhow!("aes key init: {e}")
+        })?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ct = cipher
-            .encrypt(nonce, bytes.as_ref())
-            .map_err(|_| anyhow::anyhow!("credentials encrypt failed"))?;
+        let ct = cipher.encrypt(nonce, bytes.as_ref()).map_err(|_| {
+            tracing::error!("credentials encrypt failed");
+            anyhow::anyhow!("credentials encrypt failed")
+        })?;
 
         Ok(json!({
             "_enc": ENC_MARKER,
@@ -93,35 +98,55 @@ impl CredentialsKey {
     pub fn decrypt(&self, stored: &Value) -> anyhow::Result<Value> {
         if !is_encrypted_envelope(stored) {
             // Pre-encryption rows: return as-is.
+            tracing::debug!("credentials decrypt: legacy plaintext envelope");
             return Ok(stored.clone());
         }
 
         let nonce_hex = stored
             .get("nonce")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("encrypted credentials missing nonce"))?;
+            .ok_or_else(|| {
+                tracing::error!("encrypted credentials missing nonce");
+                anyhow::anyhow!("encrypted credentials missing nonce")
+            })?;
         let ct_hex = stored
             .get("ct")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("encrypted credentials missing ct"))?;
+            .ok_or_else(|| {
+                tracing::error!("encrypted credentials missing ct");
+                anyhow::anyhow!("encrypted credentials missing ct")
+            })?;
 
-        let nonce_bytes = hex::decode(nonce_hex)
-            .map_err(|e| anyhow::anyhow!("credentials nonce hex: {e}"))?;
+        let nonce_bytes = hex::decode(nonce_hex).map_err(|e| {
+            tracing::error!(error = %e, "credentials nonce hex decode failed");
+            anyhow::anyhow!("credentials nonce hex: {e}")
+        })?;
         if nonce_bytes.len() != NONCE_LEN {
+            tracing::error!(len = nonce_bytes.len(), expected = NONCE_LEN, "bad credentials nonce length");
             anyhow::bail!("credentials nonce must be {NONCE_LEN} bytes");
         }
-        let ct = hex::decode(ct_hex).map_err(|e| anyhow::anyhow!("credentials ct hex: {e}"))?;
+        let ct = hex::decode(ct_hex).map_err(|e| {
+            tracing::error!(error = %e, "credentials ct hex decode failed");
+            anyhow::anyhow!("credentials ct hex: {e}")
+        })?;
 
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|e| anyhow::anyhow!("aes key init: {e}"))?;
+        let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|e| {
+            tracing::error!(error = %e, "aes key init failed (decrypt)");
+            anyhow::anyhow!("aes key init: {e}")
+        })?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let plain = cipher
-            .decrypt(nonce, ct.as_ref())
-            .map_err(|_| anyhow::anyhow!("credentials decrypt failed (wrong key or corrupt data)"))?;
+        let plain = cipher.decrypt(nonce, ct.as_ref()).map_err(|_| {
+            tracing::error!(
+                "credentials decrypt failed (wrong INTEGRATIONS_ENCRYPTION_KEY or corrupt data)"
+            );
+            anyhow::anyhow!("credentials decrypt failed (wrong key or corrupt data)")
+        })?;
 
-        serde_json::from_slice(&plain)
-            .map_err(|e| anyhow::anyhow!("credentials plaintext is not JSON: {e}"))
+        serde_json::from_slice(&plain).map_err(|e| {
+            tracing::error!(error = %e, "credentials plaintext is not JSON");
+            anyhow::anyhow!("credentials plaintext is not JSON: {e}")
+        })
     }
 }
 

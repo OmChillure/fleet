@@ -63,8 +63,23 @@ async fn ensure_project(state: &AppState, workspace_id: Uuid, name_hint: &str) -
         .store
         .ensure_project(workspace_id, name_hint, 3)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                %workspace_id,
+                name_hint,
+                error = %e,
+                "ensure_project failed"
+            );
+            AppError::internal(e.to_string())
+        })?;
     Ok(())
+}
+
+/// Map store errors to API errors with full server-side logging.
+fn map_orch_err(context: &str, e: impl std::fmt::Display) -> AppError {
+    let msg = e.to_string();
+    tracing::error!(context, error = %msg, "fleet route store error");
+    AppError::internal(msg)
 }
 
 async fn get_fleet_project(
@@ -80,14 +95,14 @@ async fn get_fleet_project(
         .store
         .get_project(workspace_id)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?
+        .map_err(|e| map_orch_err("get_project", e))?
         .ok_or_else(|| AppError::not_found("project"))?;
     let cfg = state
         .orch
         .store
         .get_project_config(workspace_id)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| map_orch_err("get_project_config", e))?;
     Ok(Json(json!({
         "project_id": project.id,
         "name": project.name,
@@ -167,7 +182,10 @@ async fn post_fixture(
         .store
         .insert_accepted_plan(workspace_id, plan)
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(%workspace_id, error = %e, "insert_accepted_plan failed");
+            AppError::bad_request(e.to_string())
+        })?;
 
     Ok((
         StatusCode::CREATED,
@@ -197,8 +215,10 @@ async fn post_tick(
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("lock") {
+                tracing::warn!(%workspace_id, error = %msg, "tick conflict (lock)");
                 AppError::conflict(msg)
             } else {
+                tracing::error!(%workspace_id, error = %msg, "tick failed");
                 AppError::internal(msg)
             }
         })?;
@@ -233,7 +253,7 @@ async fn get_tasks(
         .store
         .list_tasks(workspace_id, None, None)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| map_orch_err("list_tasks", e))?;
     Ok(Json(json!({
         "tasks": tasks.iter().map(|t| json!({
             "id": t.id,
@@ -262,7 +282,7 @@ async fn get_runs(
         .store
         .list_runs(workspace_id)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| map_orch_err("list_runs", e))?;
     Ok(Json(json!({
         "runs": runs.iter().map(|r| json!({
             "id": r.id,
@@ -294,7 +314,10 @@ async fn post_cancel(
         .store
         .request_cancel(workspace_id, run_id)
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
+            AppError::bad_request(e.to_string())
+        })?;
     Ok(Json(json!({ "run_id": run_id, "cancel_requested": true })))
 }
 

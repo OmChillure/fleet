@@ -77,7 +77,8 @@ pub async fn exchange_code(
     client: &OAuthClientConfig,
     code: &str,
 ) -> AppResult<TokenBundle> {
-    match provider {
+    tracing::debug!(provider = %provider, "oauth token exchange starting");
+    let result = match provider {
         "github" => exchange_github(cfg, client, code).await,
         "slack" => exchange_slack(cfg, client, code).await,
         "linear" => exchange_linear(cfg, client, code).await,
@@ -90,7 +91,16 @@ pub async fn exchange_code(
         _ => Err(AppError::bad_request(format!(
             "OAuth is not supported for {provider}"
         ))),
+    };
+    match &result {
+        Ok(_) => tracing::info!(provider = %provider, "oauth token exchange succeeded"),
+        Err(e) => tracing::error!(
+            provider = %provider,
+            error = %e,
+            "oauth token exchange failed"
+        ),
     }
+    result
 }
 
 async fn exchange_github(

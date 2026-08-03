@@ -146,6 +146,7 @@ pub async fn signup(
     validate_credentials(&body.email, &body.password)?;
     let email = body.email.trim().to_string();
     let email_normalized = normalize_email(&email);
+    tracing::debug!(email = %email_normalized, "signup attempt");
     let password_hash = hash_password(&body.password)?;
     let user_id = Uuid::now_v7();
     let display_name = body
@@ -167,7 +168,7 @@ pub async fn signup(
         &user_repo::NewUser {
             id: user_id,
             email,
-            email_normalized,
+            email_normalized: email_normalized.clone(),
             display_name: display_name.clone(),
             password_hash,
             created_at: now,
@@ -188,6 +189,12 @@ pub async fn signup(
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
     let _ = headers;
+    tracing::info!(
+        user_id = %user_id,
+        email = %email_normalized,
+        workspace_id = %workspace_id,
+        "signup succeeded"
+    );
 
     Ok((
         StatusCode::CREATED,
@@ -212,20 +219,26 @@ pub async fn login(
 ) -> AppResult<Response> {
     validate_credentials(&body.email, &body.password)?;
     let email_normalized = normalize_email(&body.email);
+    tracing::debug!(email = %email_normalized, "login attempt");
 
     let user = user_repo::find_by_email_normalized(&state.db, &email_normalized)
         .await?
-        .ok_or_else(|| AppError::unauthorized("invalid email or password"))?;
+        .ok_or_else(|| {
+            tracing::warn!(email = %email_normalized, "login failed: unknown email");
+            AppError::unauthorized("invalid email or password")
+        })?;
 
     if !user.is_active() {
+        tracing::warn!(user_id = %user.id, "login failed: account inactive");
         return Err(AppError::unauthorized("account is not active"));
     }
 
     if !verify_password(&body.password, &user.password_hash)? {
+        tracing::warn!(user_id = %user.id, email = %email_normalized, "login failed: bad password");
         return Err(AppError::unauthorized("invalid email or password"));
     }
 
-    let (access, refresh, _sid) = create_session_and_tokens(&state, &user, &headers).await?;
+    let (access, refresh, sid) = create_session_and_tokens(&state, &user, &headers).await?;
 
     let default_ws = ensure_default_workspace(
         &state,
@@ -234,6 +247,13 @@ pub async fn login(
         user.display_name.as_deref(),
     )
     .await?;
+
+    tracing::info!(
+        user_id = %user.id,
+        session_id = %sid,
+        workspace_id = %default_ws.id,
+        "login succeeded"
+    );
 
     Ok(auth_json_response(
         &state,

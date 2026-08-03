@@ -81,11 +81,20 @@ fn redact_db_target(database_url: &str) -> String {
 /// `ignore_missing`: other crates (e.g. fleet-orchestrator) may share the same
 /// `_sqlx_migrations` table with additional version rows.
 pub async fn migrate(pool: &PgPool) -> DbResult<()> {
-    sqlx::migrate!("./migrations")
+    match sqlx::migrate!("./migrations")
         .set_ignore_missing(true)
         .run(pool)
-        .await?;
-    Ok(())
+        .await
+    {
+        Ok(()) => {
+            tracing::info!("fleet-db migrations applied successfully");
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "fleet-db migration failed");
+            Err(err.into())
+        }
+    }
 }
 
 /// Connect + migrate in one step (typical service startup).
@@ -97,14 +106,17 @@ pub async fn connect_and_migrate_with(
     database_url: &str,
     cfg: &PoolConfig,
 ) -> DbResult<PgPool> {
-    tracing::info!("connecting to database…");
+    let target = redact_db_target(database_url);
+    tracing::info!(db_target = %target, "connecting to database…");
     let pool = connect_with(database_url, cfg).await?;
+    tracing::info!(db_target = %target, "database connection established");
     tracing::info!("running fleet-db migrations…");
     migrate(&pool).await?;
     Ok(pool)
 }
 
 /// Map sqlx errors with unique-violation → [`DbError::Conflict`].
+/// Logs the failure so query errors are never silent.
 pub fn map_query_err(err: sqlx::Error) -> DbError {
     DbError::from_sqlx(err)
 }
