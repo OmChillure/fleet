@@ -64,6 +64,8 @@ dx serve --package fleet-ui --port 3030
    Monitoring, Agents, Workspace. Links stay under the current workspace id.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
+6. **Chat** uses **local Ollama** (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`).
+   Install [Ollama](https://ollama.com), then `ollama serve && ollama pull llama3.2`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -81,6 +83,8 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
+| `GET` | `/api/workspaces/{id}/chat/status` | Ollama status + local models |
+| `POST` | `/api/workspaces/{id}/chat` | Chat via local Ollama |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -88,7 +92,7 @@ UI app routes (workspace-scoped):
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/dashboard` | Dashboard |
-| `/{workspace_id}/chat` | Chat (composer + messages) |
+| `/{workspace_id}/chat` | Chat (local Ollama models) |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
 | `/{workspace_id}/sessions` | Sessions / chat history |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |

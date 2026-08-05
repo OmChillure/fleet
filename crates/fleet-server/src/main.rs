@@ -2,6 +2,7 @@
 //!
 //! Auth + workspaces + integrations + orchestrator control plane on one process.
 
+mod chat;
 mod config;
 mod fleet_routes;
 mod state;
@@ -95,6 +96,9 @@ async fn run() -> anyhow::Result<()> {
         api_public_base = %config.integrations.api_public_base,
         ui_public_base = %config.integrations.ui_public_base,
         oauth_configured = ?oauth_configured,
+        ollama_enabled = config.ollama.enabled,
+        ollama_base = %config.ollama.base_url,
+        ollama_model = ?config.ollama.default_model,
         "configuration loaded"
     );
 
@@ -120,6 +124,7 @@ async fn run() -> anyhow::Result<()> {
         auth: config.auth.clone(),
         integrations: config.integrations.clone(),
         orch: orch.clone(),
+        ollama: config.ollama.clone(),
     };
 
     // Admin / worker bearer routes remain on orch_router (/v1, /healthz).
@@ -189,6 +194,8 @@ fn build_router() -> Router<AppState> {
         .merge(fleet_auth::router::<AppState>())
         // Integrations catalog (GitHub, Jira, Slack, …)
         .merge(fleet_integrations::router::<AppState>())
+        // Workspace chat → local Ollama
+        .merge(chat::router())
         // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
 }
@@ -299,6 +306,11 @@ async fn api_index() -> Json<Value> {
                 "tasks": "GET /api/workspaces/{workspace_id}/fleet/tasks",
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
                 "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
+            },
+            "chat": {
+                "status": "GET /api/workspaces/{workspace_id}/chat/status",
+                "complete": "POST /api/workspaces/{workspace_id}/chat",
+                "note": "Local Ollama (OLLAMA_BASE_URL, OLLAMA_MODEL)",
             },
             "orchestrator_admin": {
                 "note": "Bearer ADMIN_TOKEN for automation / workers",

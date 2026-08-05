@@ -4,6 +4,8 @@ use fleet_db::PgPool;
 use fleet_integrations::{IntegrationsConfig, IntegrationsState};
 use fleet_orchestrator::api::AppState as OrchState;
 
+use crate::chat::OllamaConfig;
+
 /// Unified app state for every API module mounted on fleet-server.
 #[derive(Clone)]
 pub struct AppState {
@@ -12,6 +14,8 @@ pub struct AppState {
     pub integrations: IntegrationsConfig,
     /// Orchestrator control plane (project store + tick runner).
     pub orch: OrchState,
+    /// Local Ollama for workspace chat.
+    pub ollama: OllamaConfig,
 }
 
 impl FromRef<AppState> for AuthState {

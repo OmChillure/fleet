@@ -1730,6 +1730,7 @@ dependencies = [
  "fleet-db",
  "fleet-integrations",
  "fleet-orchestrator",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

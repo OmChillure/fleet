@@ -5,7 +5,9 @@ use anyhow::Context;
 use fleet_auth::AuthConfig;
 use fleet_integrations::IntegrationsConfig;
 
-/// Full server configuration (bind + CORS + auth + database + integrations OAuth).
+use crate::chat::OllamaConfig;
+
+/// Full server configuration (bind + CORS + auth + database + integrations + Ollama).
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub database_url: String,
@@ -13,6 +15,7 @@ pub struct ServerConfig {
     pub cors_origins: Vec<String>,
     pub auth: AuthConfig,
     pub integrations: IntegrationsConfig,
+    pub ollama: OllamaConfig,
 }
 
 impl ServerConfig {
@@ -45,6 +48,7 @@ impl ServerConfig {
 
         let auth = AuthConfig::from_env()?;
         let integrations = IntegrationsConfig::from_env()?;
+        let ollama = OllamaConfig::from_env();
 
         Ok(Self {
             database_url,
@@ -52,6 +56,7 @@ impl ServerConfig {
             cors_origins,
             auth,
             integrations,
+            ollama,
         })
     }
 }
