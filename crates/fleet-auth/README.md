@@ -33,6 +33,21 @@ DB access goes through [`fleet-db`](../fleet-db/).
 | `GET` | `/api/workspaces` | access cookie | List memberships; ensures a default if none |
 | `POST` | `/api/workspaces` | access cookie | Create workspace; caller is `owner` |
 
+### Personas
+
+Workspace-scoped agent roles (no LLM calls). Membership required.
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/api/workspaces/{id}/personas` | cookie | List (`?status=active\|archived`) |
+| `POST` | `/api/workspaces/{id}/personas` | cookie | Create custom persona |
+| `GET` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Detail |
+| `PATCH` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Update fields |
+| `DELETE` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Soft-archive |
+| `POST` | `/api/workspaces/{id}/personas/seed-starters` | cookie | Idempotent insert of 8 starters |
+
+Design: [`docs/components/personas/plan.html`](../../docs/components/personas/plan.html).
+
 ---
 
 ## Cookies

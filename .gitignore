@@ -1,5 +1,6 @@
 /target
-bin/
+/bin/
+/data/
 data/
 *.exe
 *.test
@@ -21,3 +22,6 @@ crates/fleet-ui/package-lock.json
 *.webp
 !docs/**/*.webp
 crates/fleet-ui/toast-ref.*
+
+# fleet-dev.sh runtime (pids, nohup logs)
+.run/

@@ -100,6 +100,23 @@ pub async fn schedule_and_spawn(
             timeout: Duration::from_secs(timeout_s),
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
+        if let Some(notes) = task.hitl_notes.as_ref() {
+            req.env
+                .insert("FLEET_HITL_NOTES".into(), notes.clone());
+        }
+        // Optional real work payload for fleet-worker (shell command).
+        if let Ok(cmd) = std::env::var("FLEET_WORK_CMD") {
+            if !cmd.trim().is_empty() {
+                req.env.insert("FLEET_WORK_CMD".into(), cmd);
+            }
+        }
+        // Write plan task spec into the session work dir so the worker can read it.
+        if !task.spec_md.is_empty() {
+            let spec_path = req.work_dir.join("spec.md");
+            if let Err(e) = std::fs::write(&spec_path, &task.spec_md) {
+                tracing::warn!(error = %e, path = %spec_path.display(), "failed to write spec.md");
+            }
+        }
 
         match runtime.spawn(req).await {
             Ok(handle) => {

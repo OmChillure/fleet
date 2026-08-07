@@ -35,6 +35,7 @@ async fn app() -> Option<axum::Router> {
         auto_sync_external: false,
         sandbox_backend: "stub".into(),
         stub_duration: Duration::from_millis(0),
+        process_worker_argv: vec!["fleet-worker".into()],
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),

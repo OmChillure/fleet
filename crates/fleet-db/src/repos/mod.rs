@@ -1,6 +1,7 @@
 //! Query helpers / repositories. Services should call these instead of raw SQL.
 
 pub mod integrations;
+pub mod personas;
 pub mod sessions;
 pub mod users;
 pub mod work_claims;

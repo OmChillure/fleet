@@ -1,0 +1,9 @@
+target
+.git
+.run
+data
+**/node_modules
+**/.DS_Store
+*.md
+!development.md
+docs/references

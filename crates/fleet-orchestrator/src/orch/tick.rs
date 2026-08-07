@@ -1,6 +1,8 @@
 //! Full reconcile tick PR5a–c: lock → … → spawn → stuck → cancel → rollup → reap.
+//! PR10: external board sync after status mutations when `auto_sync_external`.
 
 use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkRunStatus};
+use crate::orch::board_sync_step::sync_external_board;
 use crate::orch::cancel::cancel_drain;
 use crate::orch::deps_step::{dep_target_status, plan_dep_updates, QueuedTaskView};
 use crate::orch::inbox::apply_inbox;
@@ -11,6 +13,7 @@ use crate::orch::spawn::schedule_and_spawn;
 use crate::orch::stuck::process_sessions;
 use crate::sandbox::SandboxRuntime;
 use crate::store::Store;
+use crate::sync::{ExternalBoardSync, NoopBoardSync};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +36,8 @@ pub struct TickReport {
     pub retry_promoted: usize,
     pub reaped: usize,
     pub runs_terminated: usize,
+    /// PR10: tasks successfully pushed to ExternalBoardSync this tick.
+    pub external_synced: usize,
 }
 
 #[derive(Debug, Error)]
@@ -46,6 +51,7 @@ pub enum TickError {
 pub struct TickRunner {
     store: Store,
     runtime: Arc<dyn SandboxRuntime>,
+    board_sync: Arc<dyn ExternalBoardSync>,
     data_dir: PathBuf,
     orchestrator_url: String,
 }
@@ -57,15 +63,32 @@ impl TickRunner {
         data_dir: PathBuf,
         orchestrator_url: impl Into<String>,
     ) -> Self {
+        Self::with_board_sync(
+            store,
+            runtime,
+            Arc::new(NoopBoardSync),
+            data_dir,
+            orchestrator_url,
+        )
+    }
+
+    pub fn with_board_sync(
+        store: Store,
+        runtime: Arc<dyn SandboxRuntime>,
+        board_sync: Arc<dyn ExternalBoardSync>,
+        data_dir: PathBuf,
+        orchestrator_url: impl Into<String>,
+    ) -> Self {
         Self {
             store,
             runtime,
+            board_sync,
             data_dir,
             orchestrator_url: orchestrator_url.into(),
         }
     }
 
-    /// Convenience for tests: stub runtime, temp data dir.
+    /// Convenience for tests: stub runtime, temp data dir, noop board sync.
     pub fn with_store_and_runtime(store: Store, runtime: Arc<dyn SandboxRuntime>) -> Self {
         Self::new(
             store,
@@ -260,6 +283,11 @@ impl TickRunner {
         // Step 13 — orphan reap
         snap = self.store.load_board_snapshot(project_id).await?;
         report.reaped = orphan_reap(&self.store, &self.runtime, project_id, &snap).await?;
+
+        // Step 14 — external board sync (PR10), gated by project config
+        snap = self.store.load_board_snapshot(project_id).await?;
+        report.external_synced =
+            sync_external_board(&self.board_sync, &snap, cfg.auto_sync_external).await;
 
         Ok(())
     }

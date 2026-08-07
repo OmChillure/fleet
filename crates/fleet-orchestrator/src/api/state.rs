@@ -1,7 +1,8 @@
 use crate::config::{AuthMode, Config};
 use crate::orch::TickRunner;
-use crate::sandbox::build_runtime;
+use crate::sandbox::{build_runtime, RuntimeBuildOpts};
 use crate::store::{connect, migrate, Store};
+use crate::sync::LogBoardSync;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -21,9 +22,14 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
     let pool = connect(&cfg.database_url).await?;
     migrate(&pool).await?;
     let store = Store::new(pool);
-    let runtime =
-        build_runtime(&cfg.sandbox_backend, cfg.stub_duration).map_err(|e| anyhow::anyhow!(e))?;
     let _ = tokio::fs::create_dir_all(&cfg.data_dir).await;
+    let runtime = build_runtime(&RuntimeBuildOpts {
+        backend: cfg.sandbox_backend.clone(),
+        stub_duration: cfg.stub_duration,
+        data_dir: cfg.data_dir.clone(),
+        worker_argv: cfg.process_worker_argv.clone(),
+    })
+    .map_err(|e| anyhow::anyhow!(e))?;
     let orch_url = if cfg.http_addr.starts_with(':') {
         format!("http://127.0.0.1{}", cfg.http_addr)
     } else if cfg.http_addr.starts_with("http") {
@@ -31,9 +37,12 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
     } else {
         format!("http://{}", cfg.http_addr)
     };
-    let tick = Arc::new(TickRunner::new(
+    // PR10: LogBoardSync adapter; per-project `auto_sync_external` gates tick calls.
+    let board_sync = Arc::new(LogBoardSync);
+    let tick = Arc::new(TickRunner::with_board_sync(
         store.clone(),
         runtime,
+        board_sync,
         cfg.data_dir.clone(),
         orch_url,
     ));

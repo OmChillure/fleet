@@ -1,4 +1,5 @@
 pub mod auth;
+mod personas;
 mod workspaces;
 
 pub use auth::require_user;
@@ -9,8 +10,8 @@ use axum::routing::{get, post};
 
 use crate::state::AuthState;
 
-/// Auth + workspace HTTP routes. `S` is the host app state (`fleet-server::AppState`);
-/// handlers extract [`AuthState`] via [`FromRef`].
+/// Auth + workspace + personas HTTP routes. `S` is the host app state
+/// (`fleet-server::AppState`); handlers extract [`AuthState`] via [`FromRef`].
 pub fn router<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -26,4 +27,5 @@ where
             "/api/workspaces",
             get(workspaces::list_workspaces).post(workspaces::create_workspace),
         )
+        .merge(personas::router::<S>())
 }

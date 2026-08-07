@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Personas — design plan</title>
+  <style>
+    :root {
+      --bg: #f4f6fa; --card: #fff; --text: #1a1d26; --muted: #5c6578;
+      --border: #e2e6ef; --accent: #2563eb; --ok: #15803d; --code: #f0f2f7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.55; padding: 2rem 1.25rem 3rem; }
+    .wrap { max-width: 880px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 0 0 .35rem; letter-spacing: -0.02em; }
+    h2 { font-size: 1.15rem; margin: 1.75rem 0 .6rem; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+    h3 { font-size: 1rem; margin: 1.1rem 0 .4rem; color: var(--muted); }
+    p, li { font-size: .95rem; }
+    .meta { color: var(--muted); font-size: .9rem; margin-bottom: 1.25rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.15rem; margin: .85rem 0; }
+    .badge { display: inline-block; font-size: .75rem; font-weight: 600; padding: .2rem .55rem; border-radius: 999px; background: #dbeafe; color: var(--accent); }
+    .badge-ok { background: #dcfce7; color: var(--ok); }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: .5rem 0; }
+    th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .03em; }
+    code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .86em; background: var(--code); padding: .1em .35em; border-radius: 4px; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 10px; overflow-x: auto; font-size: .82rem; line-height: 1.45; }
+    ul { padding-left: 1.2rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .65rem; }
+    .persona { border: 1px solid var(--border); border-radius: 10px; padding: .75rem; background: #fafbfc; }
+    .persona strong { display: block; margin-bottom: .25rem; }
+    .persona span { font-size: .8rem; color: var(--muted); }
+    footer { margin-top: 2rem; font-size: .85rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Personas — design &amp; implementation plan</h1>
+    <p class="meta">Agent Fleet · 2026-08-04 · Workspace-scoped agent roles (no LLM calls in this slice)</p>
+
+    <div class="card">
+      <span class="badge">PR slice</span>
+      <span class="badge badge-ok">No model backend yet</span>
+      <p style="margin-top:.75rem">
+        Personas are the <strong>configuration surface</strong> for how agents behave:
+        name, role prompt, default worker profile, model preference, tools, budget.
+        This slice ships <strong>schema + API + Agents UI + seed starters</strong>.
+        Wiring a real LLM/ACP driver is a follow-up; <code>fleet-worker</code> still
+        runs shell/artifact work and does not call a model.
+      </p>
+    </div>
+
+    <h2>1. Goals</h2>
+    <ul>
+      <li>CRUD personas per workspace (cookie auth, membership required).</li>
+      <li>Seed 8 starter personas from product vision (+ blank/custom).</li>
+      <li>Replace empty Agents page with a usable catalog + create/edit form.</li>
+      <li>Store fields the orchestrator/driver will need later (<code>worker_profile</code>, <code>role_prompt</code>, <code>model_preference</code>).</li>
+      <li>Document how to run the full stack (docker-compose + <code>development.md</code>).</li>
+    </ul>
+
+    <h2>2. Non-goals (this slice)</h2>
+    <ul>
+      <li>Calling any LLM provider.</li>
+      <li>Auto-assigning personas to board tasks / WorkPlans (later).</li>
+      <li>Org-level shared persona catalog (workspace only).</li>
+      <li>Budget enforcement or tool sandbox policy engines.</li>
+    </ul>
+
+    <h2>3. Data model</h2>
+    <div class="card">
+      <pre>personas
+  id                 UUID PK (app-generated UUIDv7)
+  workspace_id       UUID FK → workspaces
+  slug               TEXT  unique per workspace
+  name               TEXT
+  description        TEXT default ''
+  icon               TEXT default 'bot'   -- ui key: code, sales, ops, …
+  role_prompt        TEXT default ''     -- system / persona instructions
+  worker_profile     TEXT default 'coding'  -- maps to orch plan task field
+  model_preference   TEXT nullable       -- e.g. auto | grok | claude | local
+  temperature        DOUBLE PRECISION nullable
+  max_budget_usd     NUMERIC(12,4) nullable
+  tools              JSONB default '[]'  -- string tags for now
+  is_starter         BOOLEAN default false
+  is_default         BOOLEAN default false
+  status             TEXT  active|archived
+  created_by         UUID nullable FK → users
+  created_at / updated_at / version</pre>
+      <p><code>UNIQUE (workspace_id, slug)</code>. Partial unique optional later for one default per workspace.</p>
+    </div>
+
+    <h2>4. API</h2>
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>GET</code></td><td><code>/api/workspaces/{id}/personas</code></td><td>List active (optional <code>?status=</code>)</td></tr>
+        <tr><td><code>POST</code></td><td><code>/api/workspaces/{id}/personas</code></td><td>Create custom</td></tr>
+        <tr><td><code>GET</code></td><td><code>/api/workspaces/{id}/personas/{persona_id}</code></td><td>Detail</td></tr>
+        <tr><td><code>PATCH</code></td><td><code>/api/workspaces/{id}/personas/{persona_id}</code></td><td>Update fields</td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/api/workspaces/{id}/personas/{persona_id}</code></td><td>Archive (soft) or hard if never used</td></tr>
+        <tr><td><code>POST</code></td><td><code>/api/workspaces/{id}/personas/seed-starters</code></td><td>Idempotent insert missing starters</td></tr>
+      </tbody>
+    </table>
+    <p>Auth: session cookies via existing <code>require_user</code> + workspace membership (same pattern as integrations).</p>
+
+    <h2>5. Starter catalog</h2>
+    <div class="grid">
+      <div class="persona"><strong>Software engineer</strong><span>coding · implement tickets, PRs</span></div>
+      <div class="persona"><strong>Sales</strong><span>ops · outreach, CRM hygiene</span></div>
+      <div class="persona"><strong>Marketing</strong><span>ops · campaigns, copy drafts</span></div>
+      <div class="persona"><strong>Customer support</strong><span>ops · triage, replies</span></div>
+      <div class="persona"><strong>Analyst</strong><span>analysis · data pulls, summaries</span></div>
+      <div class="persona"><strong>DevOps</strong><span>coding · CI, infra, incidents</span></div>
+      <div class="persona"><strong>Product discovery</strong><span>ops · research, specs</span></div>
+      <div class="persona"><strong>Content / docs</strong><span>ops · docs, changelogs</span></div>
+    </div>
+    <p>Defined in Rust as a static catalog; seed copies into the workspace so users can edit freely.</p>
+
+    <h2>6. UI (Agents page)</h2>
+    <ul>
+      <li>Header: “Agents &amp; personas” + <strong>Seed starters</strong> + <strong>New persona</strong>.</li>
+      <li>Card grid: icon, name, description, worker profile chip, model preference.</li>
+      <li>Click card → side panel / inline form for edit (role prompt, tools, budget).</li>
+      <li>Default badge when <code>is_default</code>.</li>
+      <li>Toasts on create/update/seed (existing toast system).</li>
+    </ul>
+
+    <h2>7. Code layout</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Files</th></tr></thead>
+      <tbody>
+        <tr><td>DB</td><td><code>fleet-db/migrations/003_personas.sql</code>, models, repos</td></tr>
+        <tr><td>API</td><td><code>fleet-auth</code> routes (workspace-scoped, cookie auth) or thin <code>personas</code> module mounted by server</td></tr>
+        <tr><td>Catalog</td><td>static starters in auth or db crate</td></tr>
+        <tr><td>UI</td><td><code>fleet-ui/src/pages/agents/{api,page}.rs</code></td></tr>
+        <tr><td>Ops</td><td><code>docker-compose.yml</code>, <code>Dockerfile</code>, <code>development.md</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>8. Docker / local run</h2>
+    <div class="card">
+      <p><strong>Compose services</strong></p>
+      <ul>
+        <li><code>postgres</code> — existing 5433→5432</li>
+        <li><code>api</code> — <code>fleet-server</code> image, depends on healthy postgres</li>
+        <li><code>ui</code> (dev) — optional; Dioxus often runs on host via <code>dx serve</code>; document both paths</li>
+      </ul>
+      <p>Shared <code>.env</code> / compose env for <code>DATABASE_URL</code>, <code>JWT_SECRET</code>, <code>DATA_DIR</code>.</p>
+      <p><code>development.md</code> covers: prerequisites, one-command compose, host UI, personas smoke test, process sandbox, troubleshooting.</p>
+    </div>
+
+    <h2>9. Implementation order</h2>
+    <ol>
+      <li>Migration + models + repo</li>
+      <li>HTTP routes + seed catalog</li>
+      <li>Agents UI</li>
+      <li>Dockerfile + compose + development.md</li>
+      <li>Build / smoke</li>
+    </ol>
+
+    <h2>10. Follow-ups</h2>
+    <ul>
+      <li>Attach <code>persona_id</code> on WorkPlan tasks / fleet “start run”.</li>
+      <li>Driver: load persona → inject <code>role_prompt</code> + model into agent session.</li>
+      <li>Model provider config (SpaceXAI / multi-provider) behind <code>model_preference</code>.</li>
+    </ul>
+
+    <footer>
+      Canonical path in repo: <code>docs/components/personas/plan.html</code>.
+      Open in any browser (light mode).
+    </footer>
+  </div>
+</body>
+</html>

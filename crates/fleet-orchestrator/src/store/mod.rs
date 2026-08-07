@@ -90,6 +90,25 @@ impl Store {
         .ok_or_else(|| StoreError::NotFound(format!("project config {project_id}")))
     }
 
+    /// Enable/disable PR10 external board sync for a project.
+    pub async fn set_auto_sync_external(&self, project_id: Uuid, enabled: bool) -> Result<()> {
+        let r = sqlx::query(
+            r#"
+            UPDATE project_configs
+            SET auto_sync_external = $2, updated_at = now()
+            WHERE project_id = $1
+            "#,
+        )
+        .bind(project_id)
+        .bind(enabled)
+        .execute(&self.pool)
+        .await?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound(format!("project config {project_id}")));
+        }
+        Ok(())
+    }
+
     pub async fn insert_accepted_plan(
         &self,
         project_id: Uuid,

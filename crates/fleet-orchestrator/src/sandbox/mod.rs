@@ -87,10 +87,13 @@ pub fn fleet_worker_env(req: &SpawnRequest, orchestrator_url: &str) -> HashMap<S
     env.insert("FLEET_PROJECT_ID".into(), req.project_id.to_string());
     env.insert("FLEET_RUN_ID".into(), req.run_id.to_string());
     env.insert("FLEET_BOARD_TASK_ID".into(), req.board_task_id.to_string());
+    // Design alias
+    env.insert("FLEET_TASK_ID".into(), req.board_task_id.to_string());
     env.insert("FLEET_PLAN_TASK_ID".into(), req.plan_task_id.clone());
     env.insert("FLEET_WORKER_TOKEN".into(), req.worker_token.clone());
     env.insert("FLEET_WORKER_PROFILE".into(), req.worker_profile.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
+    env.insert("FLEET_API_BASE".into(), orchestrator_url.into());
     env.insert(
         "FLEET_WORK_DIR".into(),
         req.work_dir.display().to_string(),
@@ -211,12 +214,34 @@ impl SandboxRuntime for StubRuntime {
     }
 }
 
+mod process;
+
+pub use process::{build_process_runtime, worker_argv_from_env, ProcessRuntime};
+
+/// Options for [`build_runtime`].
+#[derive(Debug, Clone)]
+pub struct RuntimeBuildOpts {
+    pub backend: String,
+    pub stub_duration: Duration,
+    pub data_dir: PathBuf,
+    /// argv for process backend (program + args). Empty → env `PROCESS_WORKER_BIN` / default.
+    pub worker_argv: Vec<String>,
+}
+
 /// Build runtime from config backend name.
-pub fn build_runtime(backend: &str, stub_duration: Duration) -> Result<Arc<dyn SandboxRuntime>, SandboxError> {
-    match backend {
-        "stub" => Ok(Arc::new(StubRuntime::new(stub_duration))),
+pub fn build_runtime(opts: &RuntimeBuildOpts) -> Result<Arc<dyn SandboxRuntime>, SandboxError> {
+    match opts.backend.as_str() {
+        "stub" => Ok(Arc::new(StubRuntime::new(opts.stub_duration))),
+        "process" => {
+            let argv = if opts.worker_argv.is_empty() {
+                worker_argv_from_env()
+            } else {
+                opts.worker_argv.clone()
+            };
+            Ok(Arc::new(ProcessRuntime::new(&opts.data_dir, argv)?))
+        }
         other => Err(SandboxError::Spawn(format!(
-            "unknown sandbox backend {other:?} (mvp supports stub)"
+            "unknown sandbox backend {other:?} (supports stub|process)"
         ))),
     }
 }
@@ -319,8 +344,16 @@ mod tests {
 
     #[test]
     fn build_runtime_stub() {
-        let rt = build_runtime("stub", Duration::from_secs(1)).unwrap();
+        let opts = RuntimeBuildOpts {
+            backend: "stub".into(),
+            stub_duration: Duration::from_secs(1),
+            data_dir: PathBuf::from("/tmp"),
+            worker_argv: vec![],
+        };
+        let rt = build_runtime(&opts).unwrap();
         assert_eq!(rt.backend_name(), "stub");
-        assert!(build_runtime("docker", Duration::from_secs(1)).is_err());
+        let mut bad = opts.clone();
+        bad.backend = "docker".into();
+        assert!(build_runtime(&bad).is_err());
     }
 }

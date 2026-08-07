@@ -39,6 +39,17 @@ pub async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// OpenAPI 3 document (PR6 follow-up).
+pub async fn openapi_yaml() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/yaml; charset=utf-8",
+        )],
+        include_str!("../../api/openapi.yaml"),
+    )
+}
+
 /// Standalone binary root (when not mounted under fleet-server).
 pub async fn root_index() -> Json<Value> {
     Json(json!({
@@ -48,6 +59,7 @@ pub async fn root_index() -> Json<Value> {
         "links": {
             "healthz": "/healthz",
             "readyz": "/readyz",
+            "openapi": "/openapi.yaml",
             "projects": "POST /v1/projects",
         }
     }))
@@ -454,6 +466,7 @@ pub async fn admin_tick(
         "retry_promoted": report.retry_promoted,
         "reaped": report.reaped,
         "runs_terminated": report.runs_terminated,
+        "external_synced": report.external_synced,
     })))
 }
 

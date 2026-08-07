@@ -45,6 +45,8 @@ pub struct Config {
     pub auto_sync_external: bool,
     pub sandbox_backend: String,
     pub stub_duration: Duration,
+    /// Process backend worker argv (`PROCESS_WORKER_BIN`, whitespace-split).
+    pub process_worker_argv: Vec<String>,
     pub lock_wait_timeout: Duration,
     pub log_level: String,
     pub leadership_mode: String,
@@ -106,6 +108,7 @@ impl Config {
             auto_sync_external: bool_env("AUTO_SYNC_EXTERNAL", false),
             sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
             stub_duration: duration_secs("STUB_DURATION_S", 3),
+            process_worker_argv: process_worker_argv_from_env(),
             lock_wait_timeout: tick_interval,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),
@@ -181,11 +184,19 @@ impl Config {
             auto_sync_external: bool_env("AUTO_SYNC_EXTERNAL", false),
             sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
             stub_duration: duration_secs("STUB_DURATION_S", 3),
+            process_worker_argv: process_worker_argv_from_env(),
             lock_wait_timeout: lock_wait,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),
             project_filter: env::var("PROJECT_ID").ok().filter(|s| !s.trim().is_empty()),
         })
+    }
+}
+
+fn process_worker_argv_from_env() -> Vec<String> {
+    match env::var("PROCESS_WORKER_BIN") {
+        Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|p| p.to_string()).collect(),
+        _ => vec!["fleet-worker".into()],
     }
 }
 

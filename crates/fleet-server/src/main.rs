@@ -261,7 +261,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces", "integrations", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "fleet", "orchestrator"],
     }))
 }
 
@@ -277,6 +277,14 @@ async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+            },
+            "personas": {
+                "list": "GET /api/workspaces/{workspace_id}/personas",
+                "create": "POST /api/workspaces/{workspace_id}/personas",
+                "get": "GET /api/workspaces/{workspace_id}/personas/{persona_id}",
+                "patch": "PATCH /api/workspaces/{workspace_id}/personas/{persona_id}",
+                "delete": "DELETE /api/workspaces/{workspace_id}/personas/{persona_id}",
+                "seed_starters": "POST /api/workspaces/{workspace_id}/personas/seed-starters",
             },
             "integrations": {
                 "list": "GET /api/workspaces/{workspace_id}/integrations",

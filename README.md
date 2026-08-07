@@ -18,10 +18,13 @@ Rust workspace (see root `Cargo.toml`).
 
 ## Local development
 
+Full guide: **[`development.md`](development.md)** (Docker Compose full stack + host overrides).
+
 | Process | Command | URL |
 | --- | --- | --- |
-| Backend | `cargo run` | `http://localhost:8080` |
-| Frontend | `dx serve --package fleet-ui --port 3030` | `http://localhost:3030` |
+| **Full stack** | `docker compose up -d --build` | UI `http://localhost:3030`, API `:8080` |
+| Backend (host) | `cargo run` | `http://localhost:8080` |
+| Frontend (host) | `dx serve --package fleet-ui --port 3030` | `http://localhost:3030` |
 
 Use the **same host** for both (prefer `localhost` in the browser) so cookie
 auth works across ports.
@@ -67,6 +70,9 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/auth/me` | User + workspaces (ensures default) |
 | `GET` | `/api/workspaces` | List memberships (ensures default) |
 | `POST` | `/api/workspaces` | Create workspace `{ "name": "…" }` |
+| `GET` | `/api/workspaces/{id}/personas` | List workspace personas |
+| `POST` | `/api/workspaces/{id}/personas` | Create custom persona |
+| `POST` | `/api/workspaces/{id}/personas/seed-starters` | Idempotent 8 starter personas |
 | `GET` | `/api/workspaces/{id}/integrations` | Catalog + OAuth connection state |
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
@@ -81,7 +87,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/chat` | Chat (composer + messages) |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
 | `/{workspace_id}/sessions` | Sessions / chat history |
-| `/{workspace_id}/agents` | Agents |
+| `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Sandboxes |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Settings |
@@ -103,6 +109,7 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | [`docs/architecture/transport-zenoh.md`](docs/architecture/transport-zenoh.md) | Zenoh transport evaluation + key-space |
 | [`docs/architecture/diagrams/`](docs/architecture/diagrams/) | Mermaid diagram sources |
 | [`docs/components/ui/README.md`](docs/components/ui/README.md) | **Web UI** (routes, chat, toasts, theming) |
+| [`docs/components/personas/`](docs/components/personas/) | **Personas** schema, API, Agents UI ([plan](docs/components/personas/plan.html)) |
 | [`docs/components/auth/README.md`](docs/components/auth/README.md) | **Auth + workspaces** API and cookie model |
 | [`docs/components/integrations/README.md`](docs/components/integrations/README.md) | **OAuth integrations** + credential encryption |
 | [`docs/components/`](docs/components/) | Per-component design stubs |

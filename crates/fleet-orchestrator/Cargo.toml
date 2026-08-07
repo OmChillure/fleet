@@ -11,6 +11,10 @@ default-run = "fleet-orchestrator"
 name = "fleet-orchestrator"
 path = "src/main.rs"
 
+[[bin]]
+name = "fleet-worker"
+path = "src/bin/fleet-worker.rs"
+
 [dependencies]
 uuid = { workspace = true }
 serde = { workspace = true }
@@ -29,6 +33,10 @@ dotenvy = { workspace = true }
 subtle = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }
