@@ -160,8 +160,11 @@ No LLM is called yet; personas store role prompts and model preferences for a fu
 cargo build -p fleet-orchestrator --bin fleet-worker
 export SANDBOX_BACKEND=process
 export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-worker"
+export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
 ```
+
+Then in the UI: **Fleet → Start 2-task run → Run until done**. Sessions appear on Fleet and **Sandboxes**. Artifacts land under `$DATA_DIR/projects/<workspace_id>/sessions/<session_id>/artifacts/`.
 
 In Compose, set on `api`:
 

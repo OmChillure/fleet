@@ -60,11 +60,6 @@ pub async fn schedule_and_spawn(
         if free <= 0 {
             break;
         }
-        let work_dir = data_dir
-            .join("projects")
-            .join(project_id.to_string())
-            .join("sessions");
-        // session id not known yet — temp path; rewritten after assign
         let assignment = store
             .begin_spawn_assignment(
                 task.id,
@@ -72,7 +67,7 @@ pub async fn schedule_and_spawn(
                 task.run_id,
                 &task.worker_profile,
                 runtime.backend_name(),
-                Some(work_dir.to_string_lossy().as_ref()),
+                None,
             )
             .await?;
         let Some(assignment) = assignment else {
@@ -118,6 +113,7 @@ pub async fn schedule_and_spawn(
             }
         }
 
+        let work_dir_str = req.work_dir.to_string_lossy().into_owned();
         match runtime.spawn(req).await {
             Ok(handle) => {
                 store
@@ -126,6 +122,7 @@ pub async fn schedule_and_spawn(
                         task.id,
                         task.run_id,
                         &handle.id,
+                        Some(work_dir_str.as_str()),
                     )
                     .await?;
                 outcome.spawned += 1;

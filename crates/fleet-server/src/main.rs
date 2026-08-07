@@ -298,6 +298,7 @@ async fn api_index() -> Json<Value> {
                 "tick": "POST /api/workspaces/{workspace_id}/fleet/tick",
                 "tasks": "GET /api/workspaces/{workspace_id}/fleet/tasks",
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
+                "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
             },
             "orchestrator_admin": {
                 "note": "Bearer ADMIN_TOKEN for automation / workers",

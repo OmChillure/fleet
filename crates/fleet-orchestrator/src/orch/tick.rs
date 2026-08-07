@@ -88,6 +88,10 @@ impl TickRunner {
         }
     }
 
+    pub fn runtime_backend(&self) -> &'static str {
+        self.runtime.backend_name()
+    }
+
     /// Convenience for tests: stub runtime, temp data dir, noop board sync.
     pub fn with_store_and_runtime(store: Store, runtime: Arc<dyn SandboxRuntime>) -> Self {
         Self::new(

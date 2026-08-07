@@ -129,6 +129,16 @@ pub async fn list_runs(workspace_id: &str) -> Result<Value, FleetError> {
     parse(res).await
 }
 
+pub async fn list_sessions(workspace_id: &str) -> Result<Value, FleetError> {
+    let res = with_credentials(client().get(api_url(&format!(
+        "/api/workspaces/{workspace_id}/fleet/sessions"
+    ))))
+    .send()
+    .await
+    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    parse(res).await
+}
+
 pub async fn cancel_run(workspace_id: &str, run_id: &str) -> Result<Value, FleetError> {
     let res = with_credentials(
         client()

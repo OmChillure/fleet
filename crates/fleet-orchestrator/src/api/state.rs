@@ -30,13 +30,7 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
         worker_argv: cfg.process_worker_argv.clone(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
-    let orch_url = if cfg.http_addr.starts_with(':') {
-        format!("http://127.0.0.1{}", cfg.http_addr)
-    } else if cfg.http_addr.starts_with("http") {
-        cfg.http_addr.clone()
-    } else {
-        format!("http://{}", cfg.http_addr)
-    };
+    let orch_url = crate::config::public_orchestrator_url(&cfg.http_addr);
     // PR10: LogBoardSync adapter; per-project `auto_sync_external` gates tick calls.
     let board_sync = Arc::new(LogBoardSync);
     let tick = Arc::new(TickRunner::with_board_sync(

@@ -39,6 +39,10 @@ pub fn router() -> Router<AppState> {
             get(get_runs),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/sessions",
+            get(get_sessions),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
@@ -108,6 +112,7 @@ async fn get_fleet_project(
         "name": project.name,
         "workspace_id": workspace_id,
         "role": role,
+        "sandbox_backend": state.orch.tick.runtime_backend(),
         "config": {
             "max_agents": cfg.max_agents,
             "sandbox_backend": cfg.sandbox_backend,
@@ -146,11 +151,11 @@ async fn post_fixture(
             PlanTask {
                 plan_task_id: "t1".into(),
                 title: "Root task".into(),
-                summary: String::new(),
-                spec_md: String::new(),
+                summary: "Prepare workspace artifacts for the child task.".into(),
+                spec_md: "# Root task\n\nWrite a short plan artifact, then succeed so `t2` can run.\n".into(),
                 depends_on: vec![],
                 worker_profile: "coding".into(),
-                acceptance: vec![],
+                acceptance: vec!["artifact exists".into()],
                 priority: 100,
                 external_ref: None,
                 timeout_s: Some(3600),
@@ -159,11 +164,11 @@ async fn post_fixture(
             PlanTask {
                 plan_task_id: "t2".into(),
                 title: "Child task".into(),
-                summary: String::new(),
-                spec_md: String::new(),
+                summary: "Consume root output and finish the chain.".into(),
+                spec_md: "# Child task\n\nDepends on `t1`. Produce a final summary artifact.\n".into(),
                 depends_on: vec!["t1".into()],
                 worker_profile: "coding".into(),
-                acceptance: vec![],
+                acceptance: vec!["chain complete".into()],
                 priority: 50,
                 external_ref: None,
                 timeout_s: Some(3600),
@@ -264,8 +269,45 @@ async fn get_tasks(
             "priority": t.priority,
             "attempt": t.attempt,
             "progress_pct": t.progress_pct,
+            "claimed_session_id": t.claimed_session_id,
+            "worker_profile": t.worker_profile,
             "block_reason": t.block_reason,
             "failure_reason": t.failure_reason,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn get_sessions(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let sessions = state
+        .orch
+        .store
+        .list_sessions_for_project(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("list_sessions", e))?;
+    Ok(Json(json!({
+        "sandbox_backend": state.orch.tick.runtime_backend(),
+        "sessions": sessions.iter().map(|s| json!({
+            "id": s.id,
+            "run_id": s.run_id,
+            "board_task_id": s.board_task_id,
+            "attempt": s.attempt,
+            "status": s.status,
+            "runtime_backend": s.runtime_backend,
+            "runtime_handle": s.runtime_handle,
+            "worker_profile": s.worker_profile,
+            "progress_pct": s.progress_pct,
+            "last_heartbeat_at": s.last_heartbeat_at,
+            "exit_reason": s.exit_reason,
+            "work_dir": s.work_dir,
+            "started_at": s.started_at,
+            "exited_at": s.exited_at,
+            "created_at": s.created_at,
         })).collect::<Vec<_>>()
     })))
 }

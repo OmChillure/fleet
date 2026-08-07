@@ -4,8 +4,9 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use super::api::{
-    cancel_run, ensure_fleet, list_runs, list_tasks, run_tick, start_fixture,
+    cancel_run, ensure_fleet, list_runs, list_sessions, list_tasks, run_tick, start_fixture,
 };
+use gloo_timers::future::TimeoutFuture;
 
 #[derive(Clone, PartialEq)]
 struct TaskCard {
@@ -15,6 +16,19 @@ struct TaskCard {
     status: String,
     priority: i64,
     attempt: i64,
+    progress_pct: i64,
+    worker_profile: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct SessionCard {
+    id: String,
+    status: String,
+    runtime_backend: String,
+    progress_pct: i64,
+    worker_profile: String,
+    work_dir: String,
+    exit_reason: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -37,6 +51,11 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                         status: t["status"].as_str().unwrap_or("?").to_string(),
                         priority: t["priority"].as_i64().unwrap_or(0),
                         attempt: t["attempt"].as_i64().unwrap_or(0),
+                        progress_pct: t["progress_pct"].as_i64().unwrap_or(0),
+                        worker_profile: t["worker_profile"]
+                            .as_str()
+                            .unwrap_or("coding")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -61,6 +80,37 @@ fn parse_runs(v: &Value) -> Vec<RunCard> {
         .unwrap_or_default()
 }
 
+fn parse_sessions(v: &Value) -> Vec<SessionCard> {
+    v["sessions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| {
+                    Some(SessionCard {
+                        id: s["id"].as_str()?.to_string(),
+                        status: s["status"].as_str().unwrap_or("?").to_string(),
+                        runtime_backend: s["runtime_backend"]
+                            .as_str()
+                            .unwrap_or("?")
+                            .to_string(),
+                        progress_pct: s["progress_pct"].as_i64().unwrap_or(0),
+                        worker_profile: s["worker_profile"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        work_dir: s["work_dir"].as_str().unwrap_or("").to_string(),
+                        exit_reason: s["exit_reason"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn run_is_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
 fn status_column(status: &str) -> &'static str {
     match status {
         "queued" | "ready" => "Ready",
@@ -74,11 +124,21 @@ fn status_column(status: &str) -> &'static str {
 
 fn status_pill_class(status: &str) -> &'static str {
     match status {
-        "done_success" => "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-        "done_failed" | "cancelled" => "bg-red-500/15 text-red-400 border-red-500/30",
-        "in_progress" | "assigned" => "bg-sky-500/15 text-sky-400 border-sky-500/30",
-        "blocked" | "retry_wait" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
-        "ready" | "queued" => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
+        "done_success" | "completed" | "exited" => {
+            "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+        }
+        "done_failed" | "cancelled" | "failed" => {
+            "bg-red-500/15 text-red-400 border-red-500/30"
+        }
+        "in_progress" | "assigned" | "running" | "active" => {
+            "bg-sky-500/15 text-sky-400 border-sky-500/30"
+        }
+        "blocked" | "retry_wait" | "stuck" => {
+            "bg-amber-500/15 text-amber-400 border-amber-500/30"
+        }
+        "ready" | "queued" => {
+            "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]"
+        }
         _ => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
     }
 }
@@ -87,11 +147,34 @@ fn status_pill_class(status: &str) -> &'static str {
 pub fn Fleet(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading workspace fleet…".to_string());
     let mut project_name = use_signal(|| String::new());
+    let mut sandbox_backend = use_signal(|| "stub".to_string());
     let mut tasks = use_signal(|| Vec::<TaskCard>::new());
     let mut runs = use_signal(|| Vec::<RunCard>::new());
+    let mut sessions = use_signal(|| Vec::<SessionCard>::new());
     let mut last_tick = use_signal(|| String::new());
     let mut busy = use_signal(|| false);
     let mut ready = use_signal(|| false);
+
+    let refresh = {
+        let workspace_id = workspace_id.clone();
+        move || {
+            let ws = workspace_id.clone();
+            spawn(async move {
+                if let Ok(t) = list_tasks(&ws).await {
+                    tasks.set(parse_tasks(&t));
+                }
+                if let Ok(r) = list_runs(&ws).await {
+                    runs.set(parse_runs(&r));
+                }
+                if let Ok(s) = list_sessions(&ws).await {
+                    sessions.set(parse_sessions(&s));
+                    if let Some(b) = s["sandbox_backend"].as_str() {
+                        sandbox_backend.set(b.to_string());
+                    }
+                }
+            });
+        }
+    };
 
     let ws = workspace_id.clone();
     use_effect(move || {
@@ -105,8 +188,12 @@ pub fn Fleet(workspace_id: String) -> Element {
                             .unwrap_or("Workspace fleet")
                             .to_string(),
                     );
+                    if let Some(b) = v["sandbox_backend"].as_str() {
+                        sandbox_backend.set(b.to_string());
+                    }
                     status_line.set(format!(
-                        "Fleet ready · project {}",
+                        "Fleet ready · {} sandbox · project {}",
+                        v["sandbox_backend"].as_str().unwrap_or("stub"),
                         v["project_id"].as_str().unwrap_or(&ws)
                     ));
                     ready.set(true);
@@ -115,6 +202,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                     }
                     if let Ok(r) = list_runs(&ws).await {
                         runs.set(parse_runs(&r));
+                    }
+                    if let Ok(s) = list_sessions(&ws).await {
+                        sessions.set(parse_sessions(&s));
                     }
                 }
                 Err(e) => {
@@ -139,7 +229,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                             "{project_name}"
                         }
                     }
-                    p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "workspace {workspace_id}" }
+                    p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
+                        "workspace {workspace_id} · sandbox {sandbox_backend}"
+                    }
                 }
                 div { class: "flex flex-wrap gap-2",
                     button {
@@ -166,6 +258,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                                     }
                                     if let Ok(r) = list_runs(&ws).await {
                                         runs.set(parse_runs(&r));
+                                    }
+                                    if let Ok(s) = list_sessions(&ws).await {
+                                        sessions.set(parse_sessions(&s));
                                     }
                                     busy.set(false);
                                 });
@@ -203,6 +298,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                                     if let Ok(r) = list_runs(&ws).await {
                                         runs.set(parse_runs(&r));
                                     }
+                                    if let Ok(s) = list_sessions(&ws).await {
+                                        sessions.set(parse_sessions(&s));
+                                    }
                                     busy.set(false);
                                 });
                             }
@@ -210,7 +308,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                         "Run tick"
                     }
                     button {
-                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                        class: "rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
                         disabled: busy() || !ready(),
                         r#type: "button",
                         onclick: {
@@ -219,18 +317,75 @@ pub fn Fleet(workspace_id: String) -> Element {
                                 busy.set(true);
                                 let ws = workspace_id.clone();
                                 spawn(async move {
-                                    match list_tasks(&ws).await {
-                                        Ok(t) => {
-                                            tasks.set(parse_tasks(&t));
-                                            status_line.set("Board refreshed.".into());
+                                    let mut n = 0u32;
+                                    let max = 24u32;
+                                    loop {
+                                        n += 1;
+                                        match run_tick(&ws).await {
+                                            Ok(v) => {
+                                                last_tick.set(
+                                                    serde_json::to_string_pretty(&v)
+                                                        .unwrap_or_default(),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                status_line.set(e.message());
+                                                break;
+                                            }
                                         }
-                                        Err(e) => status_line.set(e.message()),
-                                    }
-                                    if let Ok(r) = list_runs(&ws).await {
-                                        runs.set(parse_runs(&r));
+                                        let runs_v = list_runs(&ws).await.ok();
+                                        let tasks_v = list_tasks(&ws).await.ok();
+                                        let sess_v = list_sessions(&ws).await.ok();
+                                        if let Some(ref r) = runs_v {
+                                            runs.set(parse_runs(r));
+                                        }
+                                        if let Some(ref t) = tasks_v {
+                                            tasks.set(parse_tasks(t));
+                                        }
+                                        if let Some(ref s) = sess_v {
+                                            sessions.set(parse_sessions(s));
+                                        }
+                                        let terminal = runs_v
+                                            .as_ref()
+                                            .and_then(|r| r["runs"].as_array())
+                                            .map(|arr| {
+                                                !arr.is_empty()
+                                                    && arr.iter().all(|x| {
+                                                        run_is_terminal(
+                                                            x["status"].as_str().unwrap_or(""),
+                                                        )
+                                                    })
+                                            })
+                                            .unwrap_or(false);
+                                        if terminal {
+                                            status_line.set(format!(
+                                                "Run finished after {n} tick(s)"
+                                            ));
+                                            break;
+                                        }
+                                        if n >= max {
+                                            status_line.set(format!(
+                                                "Stopped after {max} ticks — press Run tick or refresh"
+                                            ));
+                                            break;
+                                        }
+                                        status_line.set(format!("Orchestrating… tick {n}/{max}"));
+                                        TimeoutFuture::new(400).await;
                                     }
                                     busy.set(false);
                                 });
+                            }
+                        },
+                        "Run until done"
+                    }
+                    button {
+                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                        disabled: busy() || !ready(),
+                        r#type: "button",
+                        onclick: {
+                            move |_| {
+                                refresh();
+                                status_line.set("Board refreshed.".into());
                             }
                         },
                         "Refresh"
@@ -255,6 +410,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                                     }
                                     if let Ok(t) = list_tasks(&ws).await {
                                         tasks.set(parse_tasks(&t));
+                                    }
+                                    if let Ok(s) = list_sessions(&ws).await {
+                                        sessions.set(parse_sessions(&s));
                                     }
                                     busy.set(false);
                                 });
@@ -285,6 +443,45 @@ pub fn Fleet(workspace_id: String) -> Element {
                                 span {
                                     class: "rounded-full border px-2 py-0.5 text-xs font-medium {status_pill_class(&run.status)}",
                                     "{run.status}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Sandboxes / sessions" }
+                if sessions().is_empty() {
+                    p { class: "text-sm text-[var(--app-muted)]",
+                        "No worker sessions yet. Tick a run to spawn a "
+                        "{sandbox_backend}"
+                        " sandbox."
+                    }
+                } else {
+                    div { class: "flex flex-col gap-2",
+                        for s in sessions() {
+                            div {
+                                key: "{s.id}",
+                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
+                                div { class: "min-w-0",
+                                    p { class: "m-0 font-mono text-xs text-[var(--app-muted)]", "{s.id}" }
+                                    p { class: "m-0 text-sm text-[var(--app-fg)]",
+                                        "{s.runtime_backend} · {s.worker_profile}"
+                                    }
+                                    if !s.work_dir.is_empty() {
+                                        p { class: "m-0 truncate font-mono text-[10px] text-[var(--app-muted)]", "{s.work_dir}" }
+                                    }
+                                    if !s.exit_reason.is_empty() {
+                                        p { class: "m-0 text-xs text-red-400", "{s.exit_reason}" }
+                                    }
+                                }
+                                div { class: "flex items-center gap-2",
+                                    span { class: "text-[10px] text-[var(--app-muted)]", "{s.progress_pct}%" }
+                                    span {
+                                        class: "rounded-full border px-2 py-0.5 text-xs font-medium {status_pill_class(&s.status)}",
+                                        "{s.status}"
+                                    }
                                 }
                             }
                         }
@@ -326,6 +523,8 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                     }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "p{t.priority}" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "try {t.attempt}" }
+                                                    span { class: "text-[10px] text-[var(--app-muted)]", "{t.progress_pct}%" }
+                                                    span { class: "text-[10px] text-[var(--app-muted)]", "{t.worker_profile}" }
                                                 }
                                             }
                                         }
@@ -349,8 +548,12 @@ pub fn Fleet(workspace_id: String) -> Element {
             p { class: "text-xs text-[var(--app-muted)]",
                 "Uses your login session (cookies). Project id = workspace id. "
                 "After starting a run, press "
-                strong { "Run tick" }
-                " a few times until the board reaches Done."
+                strong { "Run until done" }
+                " (or tick manually). Process sandbox: set "
+                span { class: "font-mono", "SANDBOX_BACKEND=process" }
+                " and "
+                span { class: "font-mono", "PROCESS_WORKER_BIN" }
+                " to the fleet-worker binary."
             }
         }
     }

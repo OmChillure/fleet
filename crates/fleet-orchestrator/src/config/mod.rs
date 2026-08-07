@@ -200,6 +200,34 @@ fn process_worker_argv_from_env() -> Vec<String> {
     }
 }
 
+/// URL workers use to reach the control plane (`FLEET_ORCHESTRATOR_URL`).
+///
+/// Prefers `ORCHESTRATOR_PUBLIC_URL` or `API_PUBLIC_BASE`. Wildcard binds
+/// (`0.0.0.0`, `[::]`) are rewritten to loopback so spawned processes can connect.
+pub fn public_orchestrator_url(http_addr: &str) -> String {
+    for key in ["ORCHESTRATOR_PUBLIC_URL", "API_PUBLIC_BASE"] {
+        if let Ok(v) = env::var(key) {
+            let v = v.trim().trim_end_matches('/');
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    let raw = if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        http_addr.trim_end_matches('/').to_string()
+    } else if http_addr.starts_with(':') {
+        format!("http://127.0.0.1{}", http_addr)
+    } else {
+        format!("http://{}", http_addr.trim_end_matches('/'))
+    };
+    rewrite_wildcard_bind(&raw)
+}
+
+fn rewrite_wildcard_bind(url: &str) -> String {
+    url.replace("://0.0.0.0:", "://127.0.0.1:")
+        .replace("://[::]:", "://127.0.0.1:")
+}
+
 fn env_or(k: &str, def: &str) -> String {
     env::var(k)
         .ok()
@@ -322,5 +350,36 @@ mod tests {
 
         unsafe { env::set_var("HTTP_ADDR", "127.0.0.1:8080") };
         assert!(Config::from_env().is_ok());
+    }
+
+    #[test]
+    fn public_url_rewrites_wildcard_and_prefers_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+        unsafe { env::remove_var("API_PUBLIC_BASE") };
+        assert_eq!(
+            public_orchestrator_url(":8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            public_orchestrator_url("0.0.0.0:8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            public_orchestrator_url("127.0.0.1:9090"),
+            "http://127.0.0.1:9090"
+        );
+        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080/") };
+        assert_eq!(
+            public_orchestrator_url("0.0.0.0:1"),
+            "http://localhost:8080"
+        );
+        unsafe { env::remove_var("API_PUBLIC_BASE") };
+        unsafe { env::set_var("ORCHESTRATOR_PUBLIC_URL", "http://orch.internal:8081") };
+        assert_eq!(
+            public_orchestrator_url("0.0.0.0:1"),
+            "http://orch.internal:8081"
+        );
+        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
     }
 }

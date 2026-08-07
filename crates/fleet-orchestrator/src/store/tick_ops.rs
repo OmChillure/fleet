@@ -88,12 +88,14 @@ impl Store {
         task_id: Uuid,
         run_id: Uuid,
         runtime_handle: &str,
+        work_dir: Option<&str>,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE worker_sessions
             SET runtime_handle = $2,
+                work_dir = COALESCE($3, work_dir),
                 status = 'healthy',
                 last_heartbeat_at = now(),
                 started_at = COALESCE(started_at, now())
@@ -102,6 +104,7 @@ impl Store {
         )
         .bind(session_id)
         .bind(runtime_handle)
+        .bind(work_dir)
         .execute(&mut *tx)
         .await?;
 
