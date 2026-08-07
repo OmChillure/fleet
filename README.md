@@ -15,10 +15,12 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-db`](crates/fleet-db/) | `crates/fleet-db` | Postgres — migrations, pool, models, repos |
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
+| [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
 
 ## Local development
 
-Full guide: **[`development.md`](development.md)** (Docker Compose full stack + host overrides).
+Full guide: **[`development.md`](development.md)** (Docker Compose full stack + host overrides).  
+Kubernetes: **[`infra/README.md`](infra/README.md)** (kustomize + `fleet-operator`).
 
 | Process | Command | URL |
 | --- | --- | --- |

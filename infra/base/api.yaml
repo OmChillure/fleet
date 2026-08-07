@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-api-data
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-api
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fleet-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-fleet
+        app.kubernetes.io/name: fleet-api
+    spec:
+      containers:
+        - name: api
+          image: agent-fleet-api:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8080"
+            - name: DATA_DIR
+              value: /data
+            - name: SANDBOX_BACKEND
+              value: process
+            - name: PROCESS_WORKER_BIN
+              value: /usr/local/bin/fleet-worker
+            - name: API_PUBLIC_BASE
+              value: http://api.agent-fleet.svc.cluster.local:8080
+            - name: UI_PUBLIC_BASE
+              value: http://ui.agent-fleet.svc.cluster.local:3030
+            - name: CORS_ORIGINS
+              value: http://localhost:3030,http://127.0.0.1:3030
+            - name: COOKIE_SECURE
+              value: "false"
+            - name: COOKIE_SAMESITE
+              value: Lax
+            - name: RUST_LOG
+              value: info,sqlx=warn
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: JWT_SECRET
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fleet-api-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-api
+spec:
+  selector:
+    app.kubernetes.io/name: fleet-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

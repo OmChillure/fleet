@@ -210,6 +210,8 @@ PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
 | `docker-compose.yml` | postgres + api + **ui** |
 | `Dockerfile` | API image |
 | `Dockerfile.ui` | UI image (dx build + nginx) |
+| `Dockerfile.operator` | Kubernetes sandbox operator |
+| `infra/` | Kustomize control plane + FleetSandbox CRD/operator |
 | `deploy/nginx-ui.conf` | SPA + `/api` proxy |
 | `crates/fleet-server` | Unified HTTP API |
 | `crates/fleet-auth` | Auth, workspaces, personas |

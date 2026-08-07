@@ -1,0 +1,19 @@
+# fleet-operator — Kubernetes controller for FleetSandbox CRs
+#
+#   docker build -f Dockerfile.operator -t agent-fleet-operator:local .
+
+FROM rust:1.88-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release -p fleet-operator --locked --bin fleet-operator
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 fleet
+COPY --from=builder /app/target/release/fleet-operator /usr/local/bin/fleet-operator
+USER fleet
+ENV RUST_LOG=info,kube=warn
+ENTRYPOINT ["fleet-operator"]

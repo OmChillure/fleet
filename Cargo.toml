@@ -8,6 +8,7 @@ members = [
     "crates/fleet-server",
     "crates/fleet-ui",
     "crates/fleet-orchestrator",
+    "crates/fleet-operator",
 ]
 # `cargo run` from the workspace root starts the unified API.
 default-members = [

@@ -1,0 +1,34 @@
+# Example worker sandbox. Apply after the control plane + CRD are installed:
+#   kubectl apply -f infra/samples/fleetsandbox.yaml
+#
+# The operator creates Pod `fsb-demo-t1` with default-deny egress except
+# kube-dns + fleet-api:8080. fleet-worker still needs FLEET_WORKER_TOKEN from
+# a real orchestrator spawn — this sample is for exercising the operator.
+apiVersion: fleet.agentfleet.io/v1alpha1
+kind: FleetSandbox
+metadata:
+  name: demo-t1
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+spec:
+  workspaceId: "00000000-0000-0000-0000-000000000001"
+  sessionId: "00000000-0000-0000-0000-0000000000a1"
+  projectId: "00000000-0000-0000-0000-000000000001"
+  runId: "00000000-0000-0000-0000-0000000000b1"
+  boardTaskId: "00000000-0000-0000-0000-0000000000c1"
+  planTaskId: t1
+  workerProfile: coding
+  image: agent-fleet-api:local
+  command: ["fleet-worker"]
+  env:
+    FLEET_WORKER_TOKEN: "replace-with-orchestrator-session-token"
+    FLEET_HEARTBEAT_INTERVAL_S: "2"
+  resources:
+    cpu: "250m"
+    memory: 256Mi
+    ephemeralStorage: 1Gi
+  network:
+    egressMode: none
+    allowlist: []
+  ttlSeconds: 3600
