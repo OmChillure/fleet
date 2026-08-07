@@ -34,9 +34,9 @@ pub async fn orphan_reap(
 
     // Terminal tasks still claiming sessions
     for t in &snap.tasks {
-        if matches!(t.status.as_str(), "done_success" | "done_failed" | "cancelled") {
-            if let Some(sid) = t.claimed_session_id {
-                if let Some(s) = store.get_session(sid).await? {
+        if matches!(t.status.as_str(), "done_success" | "done_failed" | "cancelled")
+            && let Some(sid) = t.claimed_session_id
+                && let Some(s) = store.get_session(sid).await? {
                     if let Some(hid) = s.runtime_handle {
                         let h = RuntimeHandle {
                             backend: s.runtime_backend,
@@ -49,8 +49,6 @@ pub async fn orphan_reap(
                         .await?;
                     destroyed += 1;
                 }
-            }
-        }
     }
     Ok(destroyed)
 }

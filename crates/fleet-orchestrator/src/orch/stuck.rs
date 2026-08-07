@@ -65,8 +65,8 @@ pub async fn process_sessions(
         }
 
         // Runtime exited cleanly (stub finished) while task still running
-        if let Some(ref h) = handle {
-            if let Ok(SandboxState::Exited { code }) = runtime.state(h).await {
+        if let Some(ref h) = handle
+            && let Ok(SandboxState::Exited { code }) = runtime.state(h).await {
                 let cancel = cancel_by_run.get(&session.run_id).copied().unwrap_or(false);
                 if cancel {
                     let _ = runtime.destroy(h).await;
@@ -111,7 +111,6 @@ pub async fn process_sessions(
                     continue;
                 }
             }
-        }
 
         // Spawn hang
         if st == WorkerSessionStatus::Spawning {

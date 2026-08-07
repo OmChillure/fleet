@@ -64,8 +64,17 @@ dx serve --package fleet-ui --port 3030
    Monitoring, Agents, Workspace. Links stay under the current workspace id.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
-6. **Chat** uses **local Ollama** (`OLLAMA_BASE_URL`, default `http://127.0.0.1:11434`).
-   Install [Ollama](https://ollama.com), then `ollama serve && ollama pull llama3.2`.
+6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
+   `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
+   model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
+   The assistant can call **sandbox tools** (multi-agent `launch_agent_plan`, multi-tick until
+   ephemeral stub sandboxes complete and are destroyed) and **integration_query**
+   (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
+7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
+   - `SANDBOX_BACKEND=stub` — fake timer (default)
+   - `process` — real local bash worker in session workdir (runs ```bash fences from task specs)
+   - `docker` — real container (`SANDBOX_DOCKER_IMAGE`, network `none` by default)
+   Workdirs are wiped after exit; OAuth tokens never enter the sandbox.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -83,8 +92,11 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
-| `GET` | `/api/workspaces/{id}/chat/status` | Ollama status + local models |
-| `POST` | `/api/workspaces/{id}/chat` | Chat via local Ollama |
+| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok + Ollama) + model lists |
+| `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
+| `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
+| `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
+| `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -92,9 +104,10 @@ UI app routes (workspace-scoped):
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/dashboard` | Dashboard |
-| `/{workspace_id}/chat` | Chat (local Ollama models) |
+| `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
+| `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
-| `/{workspace_id}/sessions` | Sessions / chat history |
+| `/{workspace_id}/sessions` | Sessions / live worker session detail |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Sandboxes |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |

@@ -66,10 +66,65 @@ OAuth access/refresh tokens are **AES-256-GCM encrypted** before insert into
 - Decrypt only via `credentials_for(pool, workspace_id, provider, &key)`
 - Legacy plaintext rows still decrypt as-is until the user reconnects
 
-## AI later
+## Control-plane API proxy (chat / agents)
+
+Layout under `src/proxy/`:
+
+```text
+proxy/
+  mod.rs           # invoke() — decrypt + dispatch
+  types.rs         # ProxyRequest / ProxyResult
+  sanitize.rs
+  apps/
+    mod.rs         # register providers
+    github/        client + tools/{reads,writes}
+    jira/          client + tools/issues
+    linear/        client + tools/{issues,writes}
+    slack/         client + tools/conversations
+    figma/         client + tools/files
+    notion/        client + tools/pages
+    google_drive/  client + tools/files
+    teams/         client + tools/graph
+    discord/       client + tools/me
+```
+
+**Add a tool:** implement in `apps/<provider>/tools/`, add to that app’s
+`OPERATIONS` + `invoke` match. No change needed in chat if using
+`integration_query`; optional dedicated chat tool for UX.
+
+Tokens are **never** returned to the browser or injected into sandboxes.
+Chat and future agent tool proposals call `fleet_integrations::proxy::invoke`:
 
 ```rust
-use fleet_integrations::{credentials_for, IntegrationsConfig};
-let cfg = IntegrationsConfig::from_env()?;
-let creds = credentials_for(&pool, workspace_id, "github", &cfg.credentials_key).await?;
+use fleet_integrations::proxy::{invoke, ProxyCaller, ProxyRequest};
+
+let result = invoke(
+    &pool,
+    &cfg.credentials_key,
+    ProxyRequest {
+        workspace_id,
+        provider: "github".into(),
+        operation: "list_prs".into(),
+        args: serde_json::json!({ "owner": "acme", "repo": "app" }),
+        caller: ProxyCaller::Chat { user_id },
+    },
+).await;
+// result.data is sanitized (no access_token / refresh_token)
 ```
+
+| Provider | Operations |
+| --- | --- |
+| `github` (read) | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits` |
+| `github` (write) | `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
+| `jira` | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
+| `linear` | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
+| `slack` | `list_channels`, `list_users`, `post_message`, `get_channel_history` |
+| `figma` | `get_me`, `get_file`, `get_file_nodes`, `list_comments`, `list_team_projects`, `get_project_files` |
+| `notion` | `search`, `get_page`, `get_database`, `query_database`, `get_block_children`, `create_page`, `append_blocks` |
+| `google_drive` | `list_files`, `get_file`, `export_file` (readonly) |
+| `teams` | `get_me`, `list_chats`, `list_teams`, `list_channels`, `list_chat_messages`, `send_chat_message`, `send_channel_message` |
+| `discord` | `get_me`, `list_guilds` |
+
+Decrypt path: `credentials_for` → provider HTTP → `sanitize_value` → chat/agent.  
+**Writes run only on the control plane** (chat tools `github_commit_files` / `github_create_pr`).  
+Sandboxes never receive OAuth tokens. Arbitrary HTTP proxy is not allowed.

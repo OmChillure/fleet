@@ -484,8 +484,8 @@ pub struct PendingPlanRow {
 
 #[derive(sqlx::FromRow)]
 struct PlanLockRow {
-    #[allow(dead_code)]
-    id: Uuid,
+    #[sqlx(rename = "id")]
+    _id: Uuid,
     body: serde_json::Value,
     materialized_at: Option<chrono::DateTime<chrono::Utc>>,
     run_id: Uuid,

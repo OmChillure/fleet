@@ -31,7 +31,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 dioxus = "=0.7.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "test-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "test-util", "process", "fs", "io-util"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }

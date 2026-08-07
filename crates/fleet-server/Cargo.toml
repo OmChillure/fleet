@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
+chrono = { workspace = true }
 uuid = { workspace = true }
 dotenvy = { workspace = true }
 fleet-auth = { workspace = true }

@@ -43,7 +43,10 @@ pub fn Sidebar() -> Element {
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
         let section = match use_route::<Route>() {
-            Route::Chat { .. } | Route::Sessions { .. } | Route::SessionDetail { .. } => {
+            Route::Chat { .. }
+            | Route::ChatThread { .. }
+            | Route::Sessions { .. }
+            | Route::SessionDetail { .. } => {
                 Some(NavSection::Chat)
             }
             Route::Fleet { .. } | Route::Dashboard { .. } | Route::Sandboxes { .. } => {

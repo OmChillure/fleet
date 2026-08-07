@@ -1,5 +1,9 @@
 use super::status::WorkerSessionStatus;
 
+/// Hard ceiling for concurrent sandboxes on one host (no k8s).
+/// 1000s of *tasks* can queue; only this many workers run at once.
+pub const MAX_PROJECT_AGENTS: i32 = 256;
+
 pub fn free_slots(max_agents: i32, in_use: i32) -> i32 {
     let max = max_agents.max(0);
     (max - in_use).max(0)

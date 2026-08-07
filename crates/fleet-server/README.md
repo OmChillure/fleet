@@ -33,11 +33,17 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`POST` `/api/workspaces` | [`fleet-auth`](../fleet-auth/) |
 | `/api/workspaces/{id}/integrations…` | [`fleet-integrations`](../fleet-integrations/) — OAuth connect platforms for AI |
 | `/api/integrations/oauth/callback/{provider}` | OAuth callbacks (GitHub, Slack, …) |
-| `GET /api/workspaces/{id}/chat/status` | Local Ollama reachability + installed models |
-| `POST /api/workspaces/{id}/chat` | Chat completion via Ollama (`/api/chat`) |
+| `GET /api/workspaces/{id}/chat/status` | Providers: Grok (xAI) + Ollama + model lists |
+| `POST /api/workspaces/{id}/chat` | Chat via Grok or Ollama + tools (multi-agent, integration proxy) |
+| `GET /api/workspaces/{id}/fleet/workers` | Sandboxes = worker sessions (stub backend MVP) |
+| `GET/POST …/fleet/*` | Cookie fleet control plane (tick, fixture, tasks, runs) |
 
-Future domain crates (orchestrator, sandboxes, …) merge into the same process
-the same way — one port, one `cargo run`.
+Chat tools (same process as orchestrator):
+
+- **Fleet:** `list_*`, `launch_agent_task` (single), `launch_agent_plan` (multi-task fan-out + multi-tick)
+- **Integrations:** `list_integrations`, `get_integration`, `integration_query` (all OAuth apps: GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord)
+- Sandboxes are ephemeral (stub): spawn → complete → destroy → wipe workdir
+- Tokens decrypt only on the control plane; never injected into sandbox env
 
 ---
 
@@ -61,8 +67,16 @@ See [`.env.example`](../../.env.example).
 | `{PROVIDER}_CLIENT_ID` / `_SECRET` | unset | Optional per-provider OAuth apps (see `.env.example`) |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama for workspace chat |
 | `OLLAMA_MODEL` | unset (first installed) | Default model name, e.g. `llama3.2` |
-| `OLLAMA_TIMEOUT_SECS` | `120` | Chat request timeout |
-| `OLLAMA_ENABLED` | `true` | Set `false` to disable chat routes |
+| `OLLAMA_TIMEOUT_SECS` | `120` | Chat request timeout (tool loops share this) |
+| `OLLAMA_ENABLED` | `true` | Set `false` to disable Ollama provider |
+| `GROK_ENABLED` | `true` | Set `false` to disable Grok |
+| `GROK_AUTH_PATH` | `~/.grok/auth.json` | Grok CLI session (`grok login`) |
+| `XAI_API_KEY` | unset | Optional fallback if no CLI session |
+| `SANDBOX_BACKEND` | `stub` | `stub` \| `process` (local bash) \| `docker` (container) |
+| `FLEET_MAX_AGENTS` | `16` | Concurrent local sandboxes (hard max 256). Extra plan tasks queue |
+| `TICK_INTERVAL_S` | `5` | Background ticker interval for queued work |
+| `SANDBOX_DOCKER_IMAGE` | `alpine:3.20` | Image when `SANDBOX_BACKEND=docker` |
+| `SANDBOX_DOCKER_NETWORK` | `none` | Docker network (`none` = no internet) |
 
 ---
 
@@ -75,7 +89,9 @@ fleet-ui (:3030)
 fleet-server (:8080)
     ├── fleet-auth           (auth + workspaces)
     ├── fleet-integrations   (OAuth + encrypted tokens)
-    ├── chat                 (workspace chat → local Ollama)
+    ├── chat                 (workspace chat → local Ollama + fleet tools)
+    ├── fleet routes         (cookie BFF → orchestrator store/tick)
+    ├── fleet-orchestrator   (plans, ticks, StubRuntime sandboxes)
     └── fleet-db             → Postgres
                       ▲
                Ollama :11434

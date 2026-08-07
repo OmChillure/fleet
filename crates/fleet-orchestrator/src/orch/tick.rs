@@ -295,6 +295,29 @@ impl TickRunner {
         report.external_synced =
             sync_external_board(&self.board_sync, &snap, cfg.auto_sync_external).await;
 
+        // Step 15 — wipe workdirs for finished sessions
+        cleanup_terminal_session_dirs(&self.data_dir, project_id, &snap).await;
+
         Ok(())
+    }
+}
+
+async fn cleanup_terminal_session_dirs(
+    data_dir: &std::path::Path,
+    project_id: Uuid,
+    snap: &crate::store::BoardSnapshot,
+) {
+    for session in &snap.sessions {
+        if !matches!(session.status.as_str(), "exited" | "failed_spawn") {
+            continue;
+        }
+        let path = data_dir
+            .join("projects")
+            .join(project_id.to_string())
+            .join("sessions")
+            .join(session.id.to_string());
+        if path.exists() {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        }
     }
 }

@@ -33,7 +33,9 @@ pub fn authorize_url(
         ),
         "slack" => format!(
             "https://slack.com/oauth/v2/authorize?client_id={client_id}&scope={scope}&redirect_uri={redirect_enc}&state={state_enc}",
-            scope = urlencoding("chat:write,channels:read,users:read"),
+            scope = urlencoding(
+                "chat:write,channels:read,channels:history,groups:read,groups:history,users:read,im:read,im:write,mpim:read"
+            ),
         ),
         "linear" => format!(
             "https://linear.app/oauth/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}&prompt=consent",

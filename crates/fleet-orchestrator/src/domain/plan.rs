@@ -2,8 +2,8 @@ use super::status::WorkPlanStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const MAX_TASKS_PER_PLAN: usize = 500;
-pub const MAX_PLAN_BODY_BYTES: usize = 256 * 1024;
+pub const MAX_TASKS_PER_PLAN: usize = 1000;
+pub const MAX_PLAN_BODY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SPEC_MD_BYTES: usize = 64 * 1024;
 pub const MAX_DEPENDENCY_FAN_IN: usize = 32;
 

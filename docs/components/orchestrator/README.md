@@ -2,6 +2,8 @@
 
 Session control plane: accepts integration inputs, commands the Sandbox Manager, drives Drivers, evaluates tool permissions, proxies MCP/secrets, and persists traces.
 
+Local multi-agent (Hermes-style queue, no k8s): [`MULTI_AGENT.md`](./MULTI_AGENT.md).
+
 This folder will hold the component-level design. Until then, the system-wide
 architecture and event catalogue live in:
 
