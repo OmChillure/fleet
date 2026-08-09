@@ -43,11 +43,9 @@ unit:
   extends: .rust_base
   stage: test
   script:
-    - cargo test -p fleet-orchestrator --lib --locked
-    - cargo test -p agent-fleet-contracts --lib --locked || true
-    - cargo test -p fleet-driver --locked
+    - cargo test --workspace --lib --exclude fleet-ui --locked
     - cargo test -p fleet-sandbox-driver --locked
-    - cargo test -p fleet-operator --lib --locked
+    - cargo test -p fleet-server --locked --lib
 
 orch-integration:
   extends: .rust_base
@@ -83,3 +81,6 @@ orch-integration:
         --test tick_integration
         --test api_integration
         --test e2e_matrix
+        --test process_sandbox
+    - cargo test -p fleet-auth --locked --tests
+    - cargo test -p fleet-server --locked --tests

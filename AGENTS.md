@@ -12,3 +12,5 @@ Before you commit: check whether the install script needs updating (new deps,
 flags, OS/kind/lab behavior) and whether any tests must be added. No
 regressions — run the relevant suite (`run-full-suite.sh` / cargo / lab
 unittests) and do not leave install or CI worse than you found it.
+
+How tests are organized and run: `docs/testing.md`.

@@ -77,19 +77,20 @@ build:
 build-release:
     cargo build --release
 
-# Run unit tests that do not need Postgres.
+# Unit tests (no Postgres). fleet-ui is Dioxus/WASM — excluded.
 test:
-    cargo test -p fleet-orchestrator --lib
-    cargo test -p agent-fleet-contracts --lib
-    cargo test -p fleet-driver
+    cargo test --workspace --lib --exclude fleet-ui --locked
 
-# Run orchestrator integration tests (requires `just db-up` + `.env.local`).
+# Integration tests that need Postgres (`just db-up` + `.env.local` / DATABASE_URL).
 test-integration: _require-env db-up
     cargo test -p fleet-orchestrator --locked \
       --test store_integration \
       --test tick_integration \
       --test api_integration \
-      --test e2e_matrix
+      --test e2e_matrix \
+      --test process_sandbox
+    cargo test -p fleet-auth --locked --tests
+    cargo test -p fleet-server --locked --tests
 
 # cargo check the whole workspace.
 check:
