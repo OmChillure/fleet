@@ -1,5 +1,14 @@
 # Agent notes
 
+## Parallelism
+
+Use parallelism and subagents as much as possible while it is still
+efficient and effective. Fan out independent reads, edits, and test
+runs. Do not serialize work that does not depend on itself. Do not
+spawn so many children that they collide on the same files or drown
+the result in merge cost. Prefer a few sharp parallel tracks over one
+long queue.
+
 ## Install
 
 Install is one command, no arguments:

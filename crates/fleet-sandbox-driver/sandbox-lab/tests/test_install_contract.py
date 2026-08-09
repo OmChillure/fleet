@@ -104,6 +104,9 @@ class InstallContractTests(unittest.TestCase):
         self.assertIn("./scripts/human-test.sh", body)
         self.assertIn("peer", body.lower())
         self.assertIn("record", body.lower())
+        # Agents must keep using parallelism/subagents when efficient.
+        self.assertIn("parallelism", body.lower())
+        self.assertIn("subagents", body.lower())
         # Keep committed notes repo-relative (no machine home / checkout path).
         self.assertNotIn("/code/", body)
         self.assertNotIn("/home/", body)
