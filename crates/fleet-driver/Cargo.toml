@@ -1,0 +1,32 @@
+[package]
+name = "fleet-driver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Process worker: drive a coding agent over ACP and report to the orchestrator"
+readme = "README.md"
+
+[[bin]]
+name = "fleet-driver"
+path = "src/main.rs"
+
+[[bin]]
+name = "mock-acp-agent"
+path = "src/bin/mock_acp_agent.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

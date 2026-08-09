@@ -1,0 +1,137 @@
+//! fleet-driver binary talks heartbeat/status to a fake orch (no Postgres).
+
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::Value;
+use tempfile::tempdir;
+use tokio::net::TcpListener;
+use tokio::process::Command;
+
+#[derive(Clone, Default)]
+struct Rec {
+    statuses: Vec<(i32, String, Option<String>)>,
+    heartbeats: Vec<i32>,
+}
+
+#[derive(Deserialize)]
+struct HeartbeatBody {
+    seq: i32,
+}
+
+#[derive(Deserialize)]
+struct StatusBody {
+    seq: i32,
+    status: String,
+    reason: Option<String>,
+}
+
+async fn heartbeat(
+    State(rec): State<Arc<Mutex<Rec>>>,
+    Json(body): Json<HeartbeatBody>,
+) -> StatusCode {
+    rec.lock().unwrap().heartbeats.push(body.seq);
+    StatusCode::ACCEPTED
+}
+
+async fn status(State(rec): State<Arc<Mutex<Rec>>>, Json(body): Json<StatusBody>) -> StatusCode {
+    rec.lock()
+        .unwrap()
+        .statuses
+        .push((body.seq, body.status, body.reason));
+    StatusCode::ACCEPTED
+}
+
+#[tokio::test]
+async fn driver_binary_completes_mock_turn() {
+    let rec = Arc::new(Mutex::new(Rec::default()));
+    let app = Router::new()
+        .route(
+            "/v1/projects/{project_id}/workers/{session_id}/heartbeat",
+            post(heartbeat),
+        )
+        .route(
+            "/v1/projects/{project_id}/workers/{session_id}/status",
+            post(status),
+        )
+        .with_state(rec.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("spec.md"), "Say hello via mock agent.").unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_fleet-driver");
+    let mock = env!("CARGO_BIN_EXE_mock-acp-agent");
+    let project = uuid_like();
+    let session = uuid_like();
+    let task = uuid_like();
+
+    let mut child = Command::new(driver)
+        .env("FLEET_ORCHESTRATOR_URL", format!("http://{addr}"))
+        .env("FLEET_PROJECT_ID", &project)
+        .env("FLEET_SESSION_ID", &session)
+        .env("FLEET_BOARD_TASK_ID", &task)
+        .env("FLEET_WORKER_TOKEN", "tok")
+        .env("FLEET_WORK_DIR", dir.path())
+        .env("FLEET_HARNESS", "mock")
+        .env("FLEET_MOCK_ACP_BIN", mock)
+        .env("FLEET_TASK_TIMEOUT_S", "15")
+        .env("FLEET_HEARTBEAT_INTERVAL_S", "30")
+        .env("RUST_LOG", "warn")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn fleet-driver");
+
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("driver timed out")
+        .expect("wait");
+    assert!(status.success(), "driver exit {status}");
+
+    let transcript = std::fs::read_to_string(dir.path().join("artifacts/transcript.md")).unwrap();
+    assert!(transcript.contains("hello from mock agent"), "{transcript}");
+    let result: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["harness"], "mock");
+
+    let rec = rec.lock().unwrap();
+    assert!(
+        rec.statuses.iter().any(|(_, s, _)| s == "running"),
+        "statuses={:?}",
+        rec.statuses
+    );
+    assert!(
+        rec.statuses.iter().any(|(_, s, _)| s == "success"),
+        "statuses={:?}",
+        rec.statuses
+    );
+}
+
+fn uuid_like() -> String {
+    // Not a real UUID; orch fake server does not parse ids.
+    format!("{:032x}", rand_u128())
+}
+
+fn rand_u128() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(1);
+    t ^ (std::process::id() as u128) << 64
+}
