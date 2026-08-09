@@ -7,6 +7,7 @@
 //! - **local**: clone (and optional commands) inside the harness process
 //!   (unit tests / single-container fallback).
 
+use crate::handshake;
 use crate::job::Job;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,12 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// Volume provision is single-flight per driver process (handshake files).
+static PROVISION_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct Provisioned {
     pub work_dir: PathBuf,
@@ -30,6 +35,8 @@ pub struct Provisioned {
 struct FleetRequest {
     job_id: String,
     action: String,
+    #[serde(default)]
+    req_id: String,
     repo_url: String,
     git_ref: String,
     work_dir: String,
@@ -39,6 +46,8 @@ struct FleetRequest {
     /// Named tools written into the job tree for fleet-wsexec allowlist.
     #[serde(default)]
     tools: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hmac: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +109,12 @@ pub fn provision(job: &Job) -> Result<Provisioned> {
     let mode = provision_mode();
     match mode.as_str() {
         "local" => provision_local(job, &repo_url, &git_ref, &work_dir),
-        _ => provision_via_workspace_agent(job, &repo_url, &git_ref, &work_dir),
+        _ => {
+            let _guard = PROVISION_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            provision_via_workspace_agent(job, &repo_url, &git_ref, &work_dir)
+        }
     }
 }
 
@@ -150,13 +164,11 @@ fn provision_via_workspace_agent(
                 .unwrap_or(900)
         });
 
-    // Clear previous result
-    let _ = fs::remove_file(fleet.join("result.json"));
-    let _ = fs::remove_file(fleet.join("status.json"));
-
+    let req_id = uuid::Uuid::new_v4().to_string();
     let req = FleetRequest {
         job_id: job.job_id.clone(),
         action: "provision".into(),
+        req_id: req_id.clone(),
         repo_url: repo_url.to_string(),
         git_ref: git_ref.to_string(),
         work_dir: work_dir.display().to_string(),
@@ -164,13 +176,17 @@ fn provision_via_workspace_agent(
         smoke_commands: smoke,
         env: setup_env,
         tools: tools_json,
+        hmac: None,
     };
-    let req_path = fleet.join("request.json");
-    let tmp = fleet.join("request.json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&req)?)?;
-    fs::rename(&tmp, &req_path).context("write request.json")?;
-    info!(path = %req_path.display(), "provision request written for workspace agent");
+    let mut value = serde_json::to_value(&req)?;
+    value = handshake::sign_value(value)?;
+    let req_path = fleet.join(format!("request-{req_id}.json"));
+    let tmp = fleet.join(format!("request-{req_id}.json.tmp"));
+    fs::write(&tmp, serde_json::to_string(&value)?)?;
+    fs::rename(&tmp, &req_path).context("write signed provision request")?;
+    info!(path = %req_path.display(), %req_id, "provision request written for workspace agent");
 
+    let result_path = fleet.join(format!("result-{req_id}.json"));
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut last_phase = String::new();
     loop {
@@ -191,13 +207,13 @@ fn provision_via_workspace_agent(
                 }
             }
         }
-        if fleet.join("result.json").is_file() {
+        if result_path.is_file() {
             break;
         }
         std::thread::sleep(Duration::from_millis(400));
     }
 
-    let raw = fs::read_to_string(fleet.join("result.json")).context("read result.json")?;
+    let raw = fs::read_to_string(&result_path).context("read provision result")?;
     let result: FleetResult = serde_json::from_str(&raw).context("parse result.json")?;
     if !result.ok {
         bail!(
@@ -224,27 +240,16 @@ fn wait_for_workspace_agent(fleet: &Path, max: Duration) -> Result<()> {
     let start = Instant::now();
     let marker = fleet.join("agent.alive");
     while start.elapsed() < max {
-        // Prefer explicit alive marker from workspace agent
         if marker.is_file() {
-            let probe = fleet.join(".driver_probe");
-            if fs::write(&probe, b"ok").is_ok() {
-                info!("workspace agent alive; .fleet writable");
-                return Ok(());
-            }
-        }
-        if fleet.is_dir() {
-            let probe = fleet.join(".driver_probe");
-            if fs::write(&probe, b"ok").is_ok() {
-                info!("shared volume .fleet is writable");
-                return Ok(());
-            }
+            info!("workspace agent alive");
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
     bail!(
-        "workspace agent not ready within {:?} (cannot write {}); is the workspace service running?",
+        "workspace agent not ready within {:?} (missing {}); is the workspace service running?",
         max,
-        fleet.display()
+        marker.display()
     )
 }
 

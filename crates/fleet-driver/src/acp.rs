@@ -62,8 +62,10 @@ pub async fn run_session(
     cmd.env("PATH", &path);
     cmd.env("FLEET_WORK_DIR", work_dir.display().to_string());
     cmd.env("FLEET_DIR", crate::provision::fleet_dir().display().to_string());
+    // Harness must not inherit the volume handshake secret (same container).
+    cmd.env_remove("FLEET_HANDSHAKE_SECRET");
     for (k, v) in &env_map {
-        if k.starts_with("_FLEET_") {
+        if k.starts_with("_FLEET_") || k == "FLEET_HANDSHAKE_SECRET" {
             continue;
         }
         cmd.env(k, v);
@@ -150,8 +152,8 @@ pub async fn run_session(
             json!({
                 "protocolVersion": 1,
                 "clientCapabilities": {
-                    "fs": { "readTextFile": true, "writeTextFile": true },
-                    "terminal": true,
+                    "fs": { "readTextFile": false, "writeTextFile": false },
+                    "terminal": false,
                     "session": { "configOptions": { "boolean": {} } }
                 },
                 "clientInfo": {
@@ -444,37 +446,10 @@ async fn handle_agent_request(
         let hay = permission_haystack(msg, method);
         let allowed = permission_allowed(auto_approve, allow, &hay);
         if allowed {
-            let option_id = msg
-                .pointer("/params/options/0/optionId")
-                .or_else(|| msg.pointer("/params/options/0/option_id"))
-                .or_else(|| msg.pointer("/params/options/0/id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("allow-once");
-            // Prefer allow-always / allow options when present
-            let option_id = msg
-                .pointer("/params/options")
-                .and_then(|o| o.as_array())
-                .and_then(|arr| {
-                    arr.iter().find_map(|o| {
-                        let id = o
-                            .get("optionId")
-                            .or_else(|| o.get("option_id"))
-                            .or_else(|| o.get("id"))
-                            .and_then(|v| v.as_str())?;
-                        let name = o
-                            .get("name")
-                            .or_else(|| o.get("label"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_ascii_lowercase();
-                        if id.contains("allow") || name.contains("allow") {
-                            Some(id)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or(option_id);
+            let option_id = pick_permission_option(
+                msg.pointer("/params/options"),
+                auto_approve,
+            );
             tracing::debug!(
                 %method,
                 %option_id,
@@ -491,7 +466,22 @@ async fn handle_agent_request(
             json!({ "outcome": { "outcome": "cancelled" } })
         }
     } else {
-        json!({})
+        // Do not advertise unimplemented FS/terminal then auto-succeed them.
+        let err = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("method not implemented: {method}")
+            }
+        });
+        if let Ok(line) = serde_json::to_string(&err) {
+            let mut s = stdin.lock().await;
+            let _ = s.write_all(line.as_bytes()).await;
+            let _ = s.write_all(b"\n").await;
+            let _ = s.flush().await;
+        }
+        return;
     };
     let resp = json!({ "jsonrpc": "2.0", "id": id, "result": result });
     if let Ok(line) = serde_json::to_string(&resp) {
@@ -500,6 +490,62 @@ async fn handle_agent_request(
         let _ = s.write_all(b"\n").await;
         let _ = s.flush().await;
     }
+}
+
+/// Prefer once-only allow. Never select allow-always unless `auto_approve`.
+pub(crate) fn pick_permission_option(options: Option<&Value>, auto_approve: bool) -> String {
+    let arr = match options.and_then(|o| o.as_array()) {
+        Some(a) => a,
+        None => return "allow-once".into(),
+    };
+    let ids: Vec<(&str, String)> = arr
+        .iter()
+        .filter_map(|o| {
+            let id = o
+                .get("optionId")
+                .or_else(|| o.get("option_id"))
+                .or_else(|| o.get("id"))
+                .and_then(|v| v.as_str())?;
+            let name = o
+                .get("name")
+                .or_else(|| o.get("label"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            Some((id, name))
+        })
+        .collect();
+
+    let is_always = |id: &str, name: &str| {
+        let id_l = id.to_ascii_lowercase();
+        id_l.contains("always") || name.contains("always") || id_l.contains("session")
+    };
+    let is_once = |id: &str, name: &str| {
+        let id_l = id.to_ascii_lowercase();
+        id_l.contains("once") || name.contains("once") || id_l == "allow" || id_l == "approve"
+    };
+    let is_allow = |id: &str, name: &str| {
+        let id_l = id.to_ascii_lowercase();
+        (id_l.contains("allow") || name.contains("allow") || id_l.contains("approve"))
+            && !id_l.contains("deny")
+            && !name.contains("deny")
+    };
+
+    if let Some((id, _)) = ids.iter().find(|(id, name)| is_once(id, name)) {
+        return (*id).to_string();
+    }
+    if auto_approve {
+        if let Some((id, _)) = ids.iter().find(|(id, name)| is_always(id, name)) {
+            return (*id).to_string();
+        }
+    }
+    if let Some((id, _)) = ids
+        .iter()
+        .find(|(id, name)| is_allow(id, name) && !is_always(id, name))
+    {
+        return (*id).to_string();
+    }
+    "allow-once".into()
 }
 
 pub(crate) fn pick_auth_method(init: &Value) -> Option<String> {
@@ -719,14 +765,34 @@ mod tests {
         assert!(permission_allowed(false, &["*".into()], "anything"));
         assert!(permission_allowed(
             false,
-            &["bash".into(), "read".into()],
-            "tool bash run"
+            &["fleet-wsexec".into(), "read".into()],
+            "tool fleet-wsexec django_check"
         ));
         assert!(!permission_allowed(
             false,
             &["read".into()],
-            "tool bash run"
+            "tool fleet-wsexec django_check"
         ));
         assert!(permission_allowed(true, &[], "denied otherwise"));
+    }
+
+    #[test]
+    fn pick_permission_prefers_once_never_always() {
+        let opts = json!([
+            {"optionId": "allow-always", "name": "Allow always"},
+            {"optionId": "allow-once", "name": "Allow once"},
+            {"optionId": "reject", "name": "Reject"}
+        ]);
+        assert_eq!(pick_permission_option(Some(&opts), false), "allow-once");
+        assert_eq!(pick_permission_option(Some(&opts), true), "allow-once");
+        let only_always = json!([{"optionId": "allow_always", "name": "Always"}]);
+        assert_eq!(
+            pick_permission_option(Some(&only_always), false),
+            "allow-once"
+        );
+        assert_eq!(
+            pick_permission_option(Some(&only_always), true),
+            "allow_always"
+        );
     }
 }

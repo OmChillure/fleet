@@ -28,8 +28,12 @@ fn invoices_job_is_default_deny_with_named_tools() {
     assert!(allow_s.iter().any(|a| a.contains("app/")), "{allow_s:?}");
     assert!(allow_s.iter().any(|a| a.contains("tests/")), "{allow_s:?}");
     assert!(
-        allow_s.iter().any(|a| a.contains("fleet-wsexec") || *a == "bash"),
-        "need tool/shell allow for fleet-wsexec: {allow_s:?}"
+        allow_s.iter().any(|a| a.contains("fleet-wsexec")),
+        "need fleet-wsexec on allowlist: {allow_s:?}"
+    );
+    assert!(
+        !allow_s.iter().any(|a| *a == "bash" || *a == "sh"),
+        "bash/sh must not be on permission_allow: {allow_s:?}"
     );
     let tools = &j["project_setup"]["tools"];
     assert!(tools.get("django_check").is_some());

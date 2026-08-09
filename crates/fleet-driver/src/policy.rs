@@ -2,7 +2,7 @@
 //! Kept free of Redis/Docker I/O so unit tests can drive real shipped logic.
 
 use crate::job::{ProjectSetup, WorkspaceTool};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -74,7 +74,47 @@ pub fn resolve_named_tool<'a>(
             bail!("tool {name:?} argv rejected: {a:?}");
         }
     }
+    validate_tool_bin(&tool.argv[0])
+        .with_context(|| format!("tool {name:?} argv[0] not allowlisted"))?;
     Ok(tool)
+}
+
+/// Basenames permitted as named-tool argv[0]. No bash/sh/curl/wget/sudo.
+pub fn validate_tool_bin(argv0: &str) -> Result<()> {
+    let base = Path::new(argv0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv0);
+    const ALLOW: &[&str] = &[
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "npm",
+        "npx",
+        "node",
+        "pytest",
+        "cargo",
+        "go",
+        "make",
+        "uv",
+        "poetry",
+        "django-admin",
+        "git",
+        "ls",
+        "cat",
+        "echo",
+        "true",
+        "false",
+        "test",
+        "mkdir",
+        "cp",
+        "touch",
+    ];
+    if ALLOW.contains(&base) {
+        return Ok(());
+    }
+    bail!("argv[0] {argv0:?} (basename {base:?}) is not an allowlisted tool binary");
 }
 
 /// Build tools map JSON value from project_setup (for protocol + files).
@@ -103,12 +143,11 @@ pub fn raw_exec_from_env() -> bool {
 /// - `auto_approve` → allow all (lab only; dangerous)
 /// - empty allowlist → deny
 /// - `"*"` → allow everything
+/// - unrestricted shell (`bash`, `/bin/sh`, …) is **denied** unless `"*"`
+///   (path prefixes do not apply to shell; use `fleet-wsexec` only)
 /// - path-like entries (contain `/` or `\`, e.g. `app/`, `tests/`) gate **file
-///   mutations** (write/edit/create): the haystack must contain one of those
-///   prefixes (so the agent cannot edit arbitrary project files just because
-///   a bare `write` token is allowlisted)
-/// - other entries match as case-insensitive substrings (tools: `bash`,
-///   `fleet-wsexec`, `read`, …)
+///   mutations** (write/edit/create)
+/// - other entries match as case-insensitive substrings (`fleet-wsexec`, `read`)
 pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) -> bool {
     if auto_approve {
         return true;
@@ -121,6 +160,10 @@ pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) 
         return true;
     }
 
+    if looks_like_unrestricted_shell(&hay) {
+        return false;
+    }
+
     let path_allows: Vec<String> = allow
         .iter()
         .map(|a| a.trim().to_ascii_lowercase())
@@ -129,7 +172,12 @@ pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) 
     let token_allows: Vec<String> = allow
         .iter()
         .map(|a| a.trim().to_ascii_lowercase())
-        .filter(|a| !a.is_empty() && !a.contains('/') && !a.contains('\\'))
+        .filter(|a| {
+            !a.is_empty()
+                && !a.contains('/')
+                && !a.contains('\\')
+                && !matches!(a.as_str(), "bash" | "sh" | "zsh" | "dash" | "shell")
+        })
         .collect();
 
     let is_file_mutation = [
@@ -145,12 +193,18 @@ pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) 
     .any(|k| hay.contains(k));
 
     if is_file_mutation && !path_allows.is_empty() {
-        // Edits only where a project folder prefix appears in the request.
         return path_allows.iter().any(|p| hay.contains(p));
     }
 
     token_allows.iter().any(|t| hay.contains(t))
         || path_allows.iter().any(|p| hay.contains(p))
+}
+
+fn looks_like_unrestricted_shell(hay: &str) -> bool {
+    hay.contains("bash")
+        || hay.contains("/bin/sh")
+        || hay.contains("/bin/zsh")
+        || hay.contains("busybox")
 }
 
 #[cfg(test)]
@@ -252,13 +306,13 @@ mod tests {
         assert!(permission_allowed(false, &["*".into()], "anything"));
         assert!(permission_allowed(
             false,
-            &["bash".into(), "read".into()],
-            "tool bash run"
+            &["fleet-wsexec".into(), "read".into()],
+            "tool fleet-wsexec django_check"
         ));
         assert!(!permission_allowed(
             false,
             &["read".into()],
-            "tool bash run"
+            "tool fleet-wsexec django_check"
         ));
         assert!(permission_allowed(true, &[], "denied otherwise"));
     }
@@ -269,7 +323,6 @@ mod tests {
             "app/".into(),
             "tests/".into(),
             "fleet-wsexec".into(),
-            "bash".into(),
             "read".into(),
             "write".into(),
         ];
@@ -290,13 +343,41 @@ mod tests {
             &allow,
             "request_permission write path=/workspace/jobs/j/repo/settings.py"
         ));
-        // tools/shell still allowed by token
         assert!(permission_allowed(
             false,
             &allow,
-            "bash fleet-wsexec django_check"
+            "fleet-wsexec django_check"
         ));
         assert!(permission_allowed(false, &allow, "read FLEET_TOOLS.md"));
+    }
+
+    #[test]
+    fn bash_in_allowlist_cannot_write_outside_paths() {
+        let allow = vec![
+            "app/".into(),
+            "tests/".into(),
+            "fleet-wsexec".into(),
+            "bash".into(),
+        ];
+        assert!(!permission_allowed(
+            false,
+            &allow,
+            "request_permission bash -c 'echo x > settings.py'"
+        ));
+        assert!(!permission_allowed(
+            false,
+            &allow,
+            "tool bash run invoices/models/animal.py"
+        ));
+    }
+
+    #[test]
+    fn validate_tool_bin_rejects_curl_and_bash() {
+        assert!(validate_tool_bin("python").is_ok());
+        assert!(validate_tool_bin("/usr/bin/python3").is_ok());
+        assert!(validate_tool_bin("bash").is_err());
+        assert!(validate_tool_bin("curl").is_err());
+        assert!(validate_tool_bin("wget").is_err());
     }
 
     #[test]

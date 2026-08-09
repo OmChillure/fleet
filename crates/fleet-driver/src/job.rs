@@ -28,8 +28,8 @@ pub struct Job {
     pub auto_approve: bool,
     /// Permission / tool allowlist. Empty = deny all (unless auto_approve).
     /// Use `"*"` to allow everything. Path-like entries (`app/`, `tests/`)
-    /// restrict file writes/edits; other tokens match as substrings (`bash`,
-    /// `fleet-wsexec`, `read`, …).
+    /// restrict file writes/edits; other tokens match as substrings
+    /// (`fleet-wsexec`, `read`, …). Bare `bash`/`sh` is always denied.
     #[serde(default)]
     pub permission_allow: Vec<String>,
 

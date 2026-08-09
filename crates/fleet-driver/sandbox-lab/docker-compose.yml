@@ -28,6 +28,7 @@ services:
       FLEET_DIR: /workspace/.fleet
       FLEET_UID: "1000"
       FLEET_GID: "1000"
+      FLEET_HANDSHAKE_SECRET: ${FLEET_HANDSHAKE_SECRET:-dev-lab-handshake-not-for-prod}
       PYTHONUNBUFFERED: "1"
     restart: "no"
 
@@ -50,6 +51,7 @@ services:
       FLEET_RESULTS_QUEUE: ${FLEET_RESULTS_QUEUE:-fleet:results}
       FLEET_PROVISION_MODE: ${FLEET_PROVISION_MODE:-volume}
       FLEET_DIR: /workspace/.fleet
+      FLEET_HANDSHAKE_SECRET: ${FLEET_HANDSHAKE_SECRET:-dev-lab-handshake-not-for-prod}
       HARNESS: ${HARNESS:-opencode}
       MODEL: ${MODEL:-}
       OPENCODE_PROVIDER_ID: ${OPENCODE_PROVIDER_ID:-}

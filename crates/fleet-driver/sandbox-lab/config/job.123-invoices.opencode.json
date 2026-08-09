@@ -11,7 +11,6 @@
     "app/",
     "tests/",
     "fleet-wsexec",
-    "bash",
     "read"
   ],
   "project_setup": {

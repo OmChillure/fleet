@@ -2,6 +2,7 @@
 
 mod acp;
 mod bus;
+mod handshake;
 mod harness;
 mod job;
 mod opencode_config;
@@ -158,7 +159,26 @@ async fn handle_job(job: Job) -> JobResult {
     };
 
     let outcome = async {
-        let harness = harness::resolve_harness(&job)?;
+        // Provision + provider probe are sync / blocking HTTP — keep them off the
+        // Tokio worker (Daniel: spawn_blocking, not std::thread::sleep on runtime).
+        let job_sync = job.clone();
+        let (harness, job, prov, mut env_map) = tokio::task::spawn_blocking(move || {
+            let harness = harness::resolve_harness(&job_sync)?;
+            let mut job = job_sync;
+            if job.work_dir.is_none() {
+                job.work_dir = Some(
+                    policy::resolve_work_dir(&job.job_id, None)
+                        .display()
+                        .to_string(),
+                );
+            }
+            let prov = provision::provision(&job).context("provision")?;
+            let env_map = harness::harness_env(&job, &harness.name, &prov.work_dir)?;
+            Ok::<_, anyhow::Error>((harness, job, prov, env_map))
+        })
+        .await
+        .context("provision/setup join")??;
+
         result.harness = Some(harness.name.clone());
         result.harness_command = Some({
             let mut c = vec![harness.command.clone()];
@@ -167,18 +187,6 @@ async fn handle_job(job: Job) -> JobResult {
         });
         info!(harness = %harness.name, command = ?result.harness_command, "resolved harness");
 
-        // Per-job isolation: default work root under /workspace/jobs/{job_id}/repo
-        let mut job = job;
-        if job.work_dir.is_none() {
-            job.work_dir = Some(
-                policy::resolve_work_dir(&job.job_id, None)
-                    .display()
-                    .to_string(),
-            );
-        }
-
-        // Project env (clone/deps) on workspace side; harness config after.
-        let prov = provision::provision(&job).context("provision")?;
         result.repo_url = Some(prov.repo_url.clone());
         result.git_ref = Some(prov.git_ref.clone());
         result.work_dir = Some(prov.work_dir.display().to_string());
@@ -190,8 +198,6 @@ async fn handle_job(job: Job) -> JobResult {
                 .display()
                 .to_string(),
         }));
-
-        let mut env_map = harness::harness_env(&job, &harness.name, &prov.work_dir)?;
         if let Some(probe) = env_map.remove("_FLEET_PROVIDER_PROBE") {
             if let Ok(v) = serde_json::from_str(&probe) {
                 result.provider_probe = Some(v);

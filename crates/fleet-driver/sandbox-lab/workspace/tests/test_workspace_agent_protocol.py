@@ -27,6 +27,7 @@ def load_agent(fleet_dir: Path, jobs_root: Path):
     os.environ["FLEET_DIR"] = str(fleet_dir)
     os.environ["FLEET_JOBS_ROOT"] = str(jobs_root)
     os.environ["FLEET_ALLOW_RAW_EXEC"] = "0"
+    os.environ["FLEET_HANDSHAKE_SECRET"] = "protocol-test-secret"
     # Unique module name per load so env is re-read if needed
     name = f"workspace_agent_under_test_{jobs_root.name}"
     # Clear cached module if reloading
@@ -67,6 +68,15 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             json.dumps(tools, indent=2) + "\n", encoding="utf-8"
         )
         self.agent = load_agent(self.fleet, self.jobs)
+
+    def sign(self, req: dict) -> dict:
+        body = {k: v for k, v in req.items() if k != "hmac"}
+        raw = self.agent.canonical_json(body).encode()
+        secret = self.agent.handshake_secret().encode()
+        import hmac as hm
+        import hashlib
+        body["hmac"] = hm.new(secret, raw, hashlib.sha256).hexdigest()
+        return body
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -155,7 +165,7 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             "tool": "echo_ok",
             "cwd": str(self.cwd),
         }
-        self.agent.handle_request(req)
+        self.agent.handle_request(self.sign(req))
         rpath = self.fleet / "result-t1.json"
         self.assertTrue(rpath.is_file(), rpath)
         body = json.loads(rpath.read_text(encoding="utf-8"))
@@ -170,10 +180,49 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             "tool": "nope",
             "cwd": str(self.cwd),
         }
-        self.agent.handle_request(req)
+        self.agent.handle_request(self.sign(req))
         body = json.loads((self.fleet / "result-t-bad.json").read_text(encoding="utf-8"))
         self.assertFalse(body["ok"])
         self.assertIn("not allowlisted", body.get("error") or body.get("stderr") or "")
+
+    def test_unsigned_request_rejected(self):
+        req = {
+            "job_id": self.job_id,
+            "action": "tool",
+            "req_id": "unsigned",
+            "tool": "echo_ok",
+            "cwd": str(self.cwd),
+        }
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-unsigned.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"])
+        self.assertIn("hmac", (body.get("error") or "").lower())
+
+    def test_git_ref_rejects_shell_metachar(self):
+        with self.assertRaises(ValueError):
+            self.agent.validate_git_arg("git_ref", 'main"; curl evil')
+        with self.assertRaises(ValueError):
+            self.agent.validate_git_arg("git_ref", "-evil")
+
+    def test_mutated_tools_file_ignored_after_register(self):
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "echo_ok": {"argv": ["echo", "from-memory"], "description": ""}
+        }
+        (self.cwd / ".fleet-tools.json").write_text(
+            json.dumps({"echo_ok": {"argv": ["echo", "from-file"]}}),
+            encoding="utf-8",
+        )
+        result = self.agent.handle_tool(
+            {"job_id": self.job_id, "tool": "echo_ok", "cwd": str(self.cwd)}
+        )
+        self.assertIn("from-memory", result["stdout"])
+        self.assertNotIn("from-file", result["stdout"])
+
+    def test_curl_and_bash_argv_rejected(self):
+        with self.assertRaises(ValueError):
+            self.agent.validate_tool_bin("curl")
+        with self.assertRaises(ValueError):
+            self.agent.validate_tool_bin("bash")
 
 
 if __name__ == "__main__":
