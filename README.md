@@ -107,9 +107,10 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
 | `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
-| `/{workspace_id}/sessions` | Sessions / live worker session detail |
+| `/{workspace_id}/sessions` | Chat history (list / open / delete) |
+| `/{workspace_id}/sessions/{session_id}` | Live worker session stream |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
-| `/{workspace_id}/sandboxes` | Sandboxes |
+| `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Settings |
 

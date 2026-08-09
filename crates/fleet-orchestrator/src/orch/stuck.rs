@@ -79,7 +79,7 @@ pub async fn process_sessions(
                     out.killed += 1;
                     continue;
                 }
-                if code == Some(0) {
+                if code.unwrap_or(0) == 0 {
                     let _ = runtime.destroy(h).await;
                     store
                         .apply_task_terminal(

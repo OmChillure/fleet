@@ -1,6 +1,7 @@
 /target
 **/target/
 /bin/
+bin/
 /data/
 data/
 **/*.rs.bk
@@ -21,6 +22,7 @@ vendor/
 .skills-data/
 
 # fleet-ui — npm leftover (dx serves assets/; optional local CSS tooling)
+# fleet-ui — npm install output (optional local CSS tooling; dx serves assets/)
 crates/fleet-ui/node_modules/
 crates/fleet-ui/package-lock.json
 

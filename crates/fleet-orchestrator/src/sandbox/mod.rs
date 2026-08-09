@@ -1,14 +1,14 @@
-//! Sandbox runtime adapter (PR4).
+//! Sandbox runtime: `stub` | `process` | `docker` (`SANDBOX_BACKEND`).
+//! Only `FLEET_*` env + task files enter sandboxes — no OAuth tokens.
 //!
-//! Abstract process/container backend so the reconcile tick never depends on a
-//! specific isolation technology. MVP ships `StubRuntime`. Process uses the
-//! fleet-worker binary; `docker` is Om's local container backend.
+//! `process` is main's fleet-worker. `local`/`shell` is Om's `bash fleet_worker.sh`.
 
 mod docker;
 pub(crate) mod git_isolate;
 mod worker_script;
 
 pub use docker::{docker_runtime, DockerRuntime};
+pub use worker_script::{extract_bash_blocks, materialize_workspace};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -227,8 +227,10 @@ impl SandboxRuntime for StubRuntime {
 }
 
 mod process;
+mod process_om;
 
 pub use process::{build_process_runtime, worker_argv_from_env, ProcessRuntime};
+pub use process_om::process_runtime;
 
 /// Options for [`build_runtime`].
 #[derive(Debug, Clone)]
@@ -244,7 +246,7 @@ pub struct RuntimeBuildOpts {
 pub fn build_runtime(opts: &RuntimeBuildOpts) -> Result<Arc<dyn SandboxRuntime>, SandboxError> {
     match opts.backend.as_str() {
         "stub" => Ok(Arc::new(StubRuntime::new(opts.stub_duration))),
-        "process" | "local" | "shell" => {
+        "process" => {
             let argv = if opts.worker_argv.is_empty() {
                 worker_argv_from_env()
             } else {
@@ -252,9 +254,10 @@ pub fn build_runtime(opts: &RuntimeBuildOpts) -> Result<Arc<dyn SandboxRuntime>,
             };
             Ok(Arc::new(ProcessRuntime::new(&opts.data_dir, argv)?))
         }
+        "local" | "shell" => Ok(process_runtime()),
         "docker" | "container" => Ok(docker_runtime()),
         other => Err(SandboxError::Spawn(format!(
-            "unknown sandbox backend {other:?} (supports stub|process|docker)"
+            "unknown sandbox backend {other:?} (supports stub|process|local|docker)"
         ))),
     }
 }
@@ -371,6 +374,9 @@ mod tests {
         let mut docker = opts.clone();
         docker.backend = "docker".into();
         assert_eq!(build_runtime(&docker).unwrap().backend_name(), "docker");
+        let mut local = opts.clone();
+        local.backend = "local".into();
+        assert_eq!(build_runtime(&local).unwrap().backend_name(), "process");
         let mut bad = opts.clone();
         bad.backend = "k8s".into();
         assert!(build_runtime(&bad).is_err());

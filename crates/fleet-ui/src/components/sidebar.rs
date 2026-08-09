@@ -299,7 +299,7 @@ pub fn Sidebar() -> Element {
                     }
                     NavSubLink {
                         to: Route::Sessions { workspace_id: workspace_id.clone() },
-                        label: "Live sessions",
+                        label: "Chat history",
                     }
                 }
 
