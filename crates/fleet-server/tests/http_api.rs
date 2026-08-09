@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Once;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -39,26 +38,14 @@ fn unique_email() -> String {
     format!("srv.{}@example.test", Uuid::new_v4())
 }
 
-fn set_env(key: &str, val: &str) {
-    // Safety: tests set process env once before any config/app is built.
-    unsafe { std::env::set_var(key, val) };
-}
-
-fn install_test_env() {
-    static ONCE: Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        set_env("SANDBOX_BACKEND", "stub");
-        set_env("STUB_DURATION_S", "0");
-        set_env("COOKIE_SECURE", "false");
-        set_env("ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-        let jwt_ok = std::env::var("JWT_SECRET")
-            .ok()
-            .filter(|s| s.len() >= 32)
-            .is_some();
-        if !jwt_ok {
-            set_env("JWT_SECRET", TEST_JWT_SECRET);
-        }
-    });
+fn test_auth_config() -> AuthConfig {
+    AuthConfig {
+        jwt_secret: TEST_JWT_SECRET.into(),
+        access_ttl: Duration::from_secs(900),
+        refresh_ttl: Duration::from_secs(604_800),
+        cookie_secure: false,
+        cookie_samesite: cookie::SameSite::Lax,
+    }
 }
 
 fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
@@ -80,7 +67,6 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
 }
 
 async fn app() -> axum::Router {
-    install_test_env();
     let database_url = require_database_url();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -112,7 +98,7 @@ async fn app() -> axum::Router {
         project_filter: None,
     };
 
-    let auth = AuthConfig::from_env().expect("AuthConfig::from_env");
+    let auth = test_auth_config();
     let jwt_secret = auth.jwt_secret.clone();
     let config = ServerConfig {
         database_url: database_url.clone(),

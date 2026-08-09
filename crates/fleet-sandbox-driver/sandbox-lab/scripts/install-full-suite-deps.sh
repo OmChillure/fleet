@@ -47,7 +47,9 @@
 #   ENABLE_LMSTUDIO_PROXY      TCP :1234 → :11434 so LM Studio job URLs work
 #   ENABLE_GITSSH              local git+ssh container :2222 (tiny)
 #   ENABLE_BROWSER_E2E         pip playwright + Chromium under <repo>/.tmp/ms-playwright
-#                              (headless UI e2e in run-full-suite.sh)
+#                              + Linux OS libs (`playwright install-deps chromium`).
+#                              Headless UI e2e in run-full-suite.sh. Default on
+#                              only for PROFILE=full (kind publishes :3030/:8080).
 # FORCE_REBUILD=1              rebuild docker tags even if they exist
 # OLLAMA_MODEL                 default llama3.2:1b (small). Do not pull 70B on
 #                              minimal hosts.
@@ -220,7 +222,7 @@ case "${PROFILE}" in
     set_default ENABLE_OLLAMA 1
     set_default ENABLE_LMSTUDIO_PROXY 1
     set_default ENABLE_GITSSH 1
-    set_default ENABLE_BROWSER_E2E 1
+    set_default ENABLE_BROWSER_E2E 0
     ;;
   minimal)
     set_default ENABLE_SANDBOX_LAB 1
@@ -574,7 +576,27 @@ if [[ "${ENABLE_BROWSER_E2E}" == "1" ]]; then
     echo "ERROR: python3 cannot import playwright (pip install playwright)" >&2
     exit 1
   fi
+  # Headless Chromium needs OS libs (nss, atk, gtk, gbm, asound, …) that
+  # `playwright install chromium` does not install.
+  if [[ "${OS_FAMILY}" == linux && "$(id -u)" -eq 0 ]]; then
+    echo "==> playwright OS libraries (install-deps chromium)"
+    USER_SITE="$(as_user python3 -c 'import site; print(site.getusersitepackages())')"
+    if ! PYTHONPATH="${USER_SITE}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m playwright install-deps chromium; then
+      echo "ERROR: playwright install-deps chromium failed." >&2
+      echo "       Headless Chromium needs nss, atk, gtk, gbm, asound, and related libs." >&2
+      exit 1
+    fi
+  elif [[ "${OS_FAMILY}" == linux ]]; then
+    echo "WARN: not root; skipping playwright install-deps. Chromium may fail without nss/atk/gbm/asound." >&2
+  fi
   as_user_sh "PLAYWRIGHT_BROWSERS_PATH='${PW_BROWSERS}' python3 -m playwright install chromium"
+  echo "==> playwright chromium headless smoke"
+  if ! as_user_sh "PLAYWRIGHT_BROWSERS_PATH='${PW_BROWSERS}' python3 -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()'"; then
+    echo "ERROR: playwright chromium headless launch failed." >&2
+    echo "       Missing OS libraries (nss, atk, gtk, gbm, asound, …) or browser files under ${PW_BROWSERS}." >&2
+    echo "       Re-run this script as root with ENABLE_BROWSER_E2E=1." >&2
+    exit 1
+  fi
 fi
 
 # --- ollama -----------------------------------------------------------------

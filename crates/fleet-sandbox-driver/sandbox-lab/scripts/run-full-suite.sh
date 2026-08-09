@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
 # Run the fleet-sandbox-driver suite (does not install packages).
 # Prereq: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh once.
+# Reads repo-root .env (PROFILE / ENABLE_* / SKIP_*). Browser e2e runs only when
+# ENABLE_BROWSER_E2E=1 (install default: PROFILE=full only).
 set -euo pipefail
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "${LAB}/../../.." && pwd)"
 SCRIPTS="${LAB}/scripts"
+ROOT_ENV="${REPO}/.env"
 FLEET_TMP="${FLEET_TMP:-${REPO}/.tmp}"
 export FLEET_TMP
 mkdir -p "${FLEET_TMP}"
 cd "${REPO}"
+
+if [[ -f "${ROOT_ENV}" ]]; then
+  echo "==> loading ${ROOT_ENV}"
+  set -a
+  # shellcheck disable=SC1090
+  . "${ROOT_ENV}"
+  set +a
+fi
 
 SKIP_LLM="${SKIP_LLM:-0}"
 SKIP_COMPOSE="${SKIP_COMPOSE:-0}"
 SKIP_KIND="${SKIP_KIND:-0}"
 SKIP_ORCH="${SKIP_ORCH:-0}"
 SKIP_BROWSER="${SKIP_BROWSER:-0}"
+ENABLE_BROWSER_E2E="${ENABLE_BROWSER_E2E:-0}"
 FAIL=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAIL=1; }
@@ -93,16 +105,6 @@ if [[ "${SKIP_ORCH}" != "1" ]]; then
   fi
 fi
 
-if [[ "${SKIP_BROWSER}" != "1" ]]; then
-  echo "==== headless browser e2e (needs :3030 UI + :8080 API) ===="
-  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${FLEET_TMP}/ms-playwright}"
-  if python3 "${REPO}/tests/browser/test_app_e2e.py" -q; then
-    pass browser-e2e
-  else
-    fail browser-e2e
-  fi
-fi
-
 if [[ "${SKIP_KIND}" != "1" ]]; then
   echo "==== kind smoke (skips inside unittest if no cluster) ===="
   if python3 "${LAB}/tests/test_kind_smoke.py" -q; then
@@ -110,6 +112,21 @@ if [[ "${SKIP_KIND}" != "1" ]]; then
   else
     fail kind-smoke
   fi
+fi
+
+# After kind so PROFILE=full extraPortMappings (:3030/:8080) are up first.
+if [[ "${ENABLE_BROWSER_E2E}" == "1" && "${SKIP_BROWSER}" != "1" ]]; then
+  echo "==== headless browser e2e (needs :3030 UI + :8080 API) ===="
+  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${FLEET_TMP}/ms-playwright}"
+  if python3 "${REPO}/tests/browser/test_app_e2e.py" -q; then
+    pass browser-e2e
+  else
+    fail browser-e2e
+  fi
+elif [[ "${ENABLE_BROWSER_E2E}" == "1" ]]; then
+  echo "==== browser e2e skipped (SKIP_BROWSER=1) ===="
+else
+  echo "==== browser e2e skipped (ENABLE_BROWSER_E2E!=1) ===="
 fi
 
 if [[ "${SKIP_LLM}" != "1" ]]; then

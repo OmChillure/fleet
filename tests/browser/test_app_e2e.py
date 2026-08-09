@@ -2,7 +2,7 @@
 """Headless Chromium e2e against the live UI (:3030) + API (:8080).
 
 Install: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
-  (ENABLE_BROWSER_E2E=1 in repo-root .env; PROFILE=full/lab default it on).
+  (ENABLE_BROWSER_E2E=1 in repo-root .env; PROFILE=full defaults it on).
 
 Does not skip when the stack is down — fail so the suite cannot go green blind.
 """
@@ -51,7 +51,7 @@ def _require_playwright():
         raise RuntimeError(
             "playwright is not installed. Run "
             "crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh "
-            "(ENABLE_BROWSER_E2E=1)."
+            "with ENABLE_BROWSER_E2E=1 (also installs Chromium OS libraries)."
         ) from e
     return sync_playwright
 
@@ -67,8 +67,10 @@ class BrowserE2ETests(unittest.TestCase):
         except Exception as e:
             cls._pw.stop()
             raise RuntimeError(
-                f"Chromium launch failed ({e}). Re-run install-full-suite-deps.sh "
-                "so playwright chromium lands under .tmp/ms-playwright."
+                f"Chromium launch failed ({e}). Need OS libraries "
+                "(nss, atk, gtk, gbm, asound, …) and a browser under "
+                ".tmp/ms-playwright. Re-run install-full-suite-deps.sh as root "
+                "with ENABLE_BROWSER_E2E=1 (`python3 -m playwright install-deps chromium`)."
             ) from e
         cls._context = cls._browser.new_context(
             base_url=UI,

@@ -1731,6 +1731,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "chrono",
+ "cookie",
  "dotenvy",
  "fleet-auth",
  "fleet-db",

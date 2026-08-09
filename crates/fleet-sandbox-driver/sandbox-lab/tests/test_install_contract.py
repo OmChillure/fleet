@@ -58,12 +58,38 @@ class InstallContractTests(unittest.TestCase):
         self.assertNotIn("/tmp/kind", text)
         self.assertIn('staged="${TMP_ROOT}/${name}.$$"', text)
 
-    def test_full_suite_runs_browser_e2e(self):
+    def test_browser_e2e_default_full_only(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertRegex(
+            text,
+            r"full\)\s*(?:set_default ENABLE_[A-Z_]+\s+[01]\s*)*?set_default ENABLE_BROWSER_E2E 1",
+            "PROFILE=full should default ENABLE_BROWSER_E2E=1",
+        )
+        self.assertRegex(
+            text,
+            r"lab\)\s*(?:set_default ENABLE_[A-Z_]+\s+[01]\s*)*?set_default ENABLE_BROWSER_E2E 0",
+            "PROFILE=lab is compose-only; do not default browser e2e on",
+        )
+        self.assertRegex(
+            text,
+            r"minimal\)\s*(?:set_default ENABLE_[A-Z_]+\s+[01]\s*)*?set_default ENABLE_BROWSER_E2E 0",
+            "PROFILE=minimal should default ENABLE_BROWSER_E2E=0",
+        )
+
+    def test_playwright_installs_os_deps(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("playwright install-deps chromium", text)
+        self.assertIn("chromium.launch(headless=True)", text)
+
+    def test_full_suite_gates_browser_e2e(self):
         suite = LAB / "scripts" / "run-full-suite.sh"
         text = suite.read_text(encoding="utf-8")
         self.assertIn("tests/browser/test_app_e2e.py", text)
-        self.assertIn("SKIP_BROWSER", text)
+        self.assertIn("ENABLE_BROWSER_E2E", text)
+        self.assertIn('ROOT_ENV="${REPO}/.env"', text)
+        self.assertIn('. "${ROOT_ENV}"', text)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH", text)
+        self.assertIn('ENABLE_BROWSER_E2E}" == "1"', text)
 
     def test_agents_md_points_at_script(self):
         agents = REPO / "AGENTS.md"
@@ -71,6 +97,8 @@ class InstallContractTests(unittest.TestCase):
         body = agents.read_text(encoding="utf-8")
         self.assertIn("crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh", body)
         self.assertIn(".env", body)
+        self.assertIn(".gitlab-ci.yml", body)
+        self.assertIn("no runner", body.lower())
         # Keep committed notes repo-relative (no machine home / checkout path).
         self.assertNotIn("/code/", body)
         self.assertNotIn("/home/", body)

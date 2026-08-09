@@ -78,8 +78,10 @@ build-release:
     cargo build --release
 
 # Unit tests (no Postgres). fleet-ui is Dioxus/WASM — excluded.
+# fleet-driver ACP/worker tests live in crates/fleet-driver/tests/ (not --lib).
 test:
     cargo test --workspace --lib --exclude fleet-ui --locked
+    cargo test -p fleet-driver --locked
 
 # Integration tests that need Postgres (`just db-up` + `.env.local` / DATABASE_URL).
 test-integration: _require-env db-up
