@@ -41,4 +41,24 @@ cargo run -p fleet-server
 
 Each spawned session writes `spec.md` plus `artifacts/result.json` under `DATA_DIR/projects/<workspace>/sessions/<session>/`.
 
+### ACP driver (mock / Grok Build)
+
+`fleet-worker` does not speak ACP. Point the process backend at `fleet-driver` to run a coding agent (mock in CI, Grok Build on a laptop):
+
+```bash
+cargo build -p fleet-driver --bins
+export SANDBOX_BACKEND=process
+export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
+export FLEET_HARNESS=mock
+# Grok Build (host CLI auth):
+# export PATH="$HOME/.grok/bin:$PATH"
+# export FLEET_HARNESS=grok
+# export FLEET_REASONING_EFFORT=low
+# export FLEET_MODEL=v9
+export API_PUBLIC_BASE=http://127.0.0.1:8080
+cargo run -p fleet-server
+```
+
+Sessions write `spec.md`, `task.json`, `prompt.md`, plus `artifacts/transcript.md` and `artifacts/result.json`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
+
 Optional: set `ADMIN_TOKEN` to enable `/v1/*` bearer automation (`./scripts/demo-orch.sh`).

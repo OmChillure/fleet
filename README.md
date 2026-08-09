@@ -16,7 +16,8 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
 | [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
-| [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | In-sandbox ACP harness driver (lab; see crate README) |
+| [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | Process worker: ACP (mock/grok) + orch heartbeat/status |
+| [`fleet-sandbox-driver`](crates/fleet-sandbox-driver/) | `crates/fleet-sandbox-driver` | In-sandbox driver: per-task compose, volume provision, multi-harness ACP |
 
 ## Local development
 
@@ -29,7 +30,7 @@ Kubernetes: **[`infra/README.md`](infra/README.md)** (kustomize + `fleet-operato
 | Backend (host) | `cargo run` | `http://localhost:8080` |
 | Frontend (host) | `dx serve --package fleet-ui --port 3030` | `http://localhost:3030` |
 
-Use the **same host** for both web processes (prefer `localhost` in the browser) so cookie
+Use the **same host** for both (prefer `localhost` in the browser) so cookie
 auth works across ports.
 
 ```bash
@@ -100,7 +101,8 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-ui`](crates/fleet-ui/README.md),
 [`fleet-integrations`](crates/fleet-integrations/README.md),
 [`fleet-db`](crates/fleet-db/README.md),
-[`fleet-driver`](crates/fleet-driver/README.md).
+[`fleet-driver`](crates/fleet-driver/README.md),
+[`fleet-sandbox-driver`](crates/fleet-sandbox-driver/README.md).
 
 ## Docs
 
@@ -108,7 +110,7 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | --- | --- |
 | [`docs/product_vision.md`](docs/product_vision.md) | Product vision and team notes |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | **Orchestration architecture** (layers, components, sequences) |
-| [`docs/architecture/sandbox-workspace.md`](docs/architecture/sandbox-workspace.md) | **Sandbox: harness vs workspace** (driver lab topology) |
+| [`docs/architecture/sandbox-workspace.md`](docs/architecture/sandbox-workspace.md) | **Sandbox: harness vs workspace** (compose prototype) |
 | [`docs/architecture/events-overview.md`](docs/architecture/events-overview.md) | Typical events outline (lifecycle + domains) |
 | [`docs/architecture/events.md`](docs/architecture/events.md) | Field-level command & event catalogue + JSON serialization |
 | [`docs/architecture/transport-zenoh.md`](docs/architecture/transport-zenoh.md) | Zenoh transport evaluation + key-space |

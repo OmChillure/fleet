@@ -3,4 +3,4 @@
 mod api;
 mod page;
 
-pub use page::Sessions;
+pub use page::{SessionDetail, Sessions};

@@ -40,7 +40,7 @@ services:
   driver:
     build:
       context: ../../..
-      dockerfile: crates/fleet-driver/sandbox-lab/driver/Dockerfile
+      dockerfile: crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile
       args:
         BASE_IMAGE: ${DRIVER_BASE_IMAGE:-agent-fleet-opencode:alpine}
     depends_on:

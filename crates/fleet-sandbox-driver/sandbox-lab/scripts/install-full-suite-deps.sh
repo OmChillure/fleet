@@ -2,7 +2,7 @@
 # =============================================================================
 # Agent Fleet — host install (ONLY source of truth for install)
 # =============================================================================
-# Path: crates/fleet-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+# Path: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
 # Does NOT run tests. Re-run is safe (skips existing image tags unless FORCE_REBUILD=1).
 #
 # An agent reading this file should:
@@ -13,7 +13,7 @@
 #   4) Not invent a second install doc — this file is the doc.
 #
 # Command (same everywhere — no flags, no PROFILE= prefix):
-#   /abs/path/to/crates/fleet-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+#   /abs/path/to/crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
 # Linux elevates itself with sudo. macOS/Git Bash run as the current user
 # (Homebrew must not be root; script uses SUDO_USER / $USER for brew).
 # Windows: WSL2 Ubuntu (preferred) or Git Bash + Docker Desktop. Not cmd/PS.
@@ -320,7 +320,7 @@ done < <(printf '%s\n' \
   "${REPO}/Dockerfile" \
   "${REPO}/Dockerfile.ui" \
   "${REPO}/Dockerfile.operator" \
-  "${REPO}/crates/fleet-driver/sandbox-lab/driver/Dockerfile")
+  "${REPO}/crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile")
 if [[ "${mismatch}" -ne 0 ]]; then
   echo "       align FROM rust:<ver> / ARG RUST_VERSION with workspace rust-version," >&2
   echo "       or set RUST_TOOLCHAIN= / RUST_IMAGE=" >&2
@@ -835,8 +835,8 @@ if [[ "${ENABLE_LAB}" == "1" ]]; then
     export DRIVER_BASE_IMAGE=agent-fleet-opencode:alpine
     dc build workspace
     dc build --pull=false driver
-    docker tag "$(basename "${LAB}")-workspace" agent-fleet-lab-workspace:local 2>/dev/null || true
-    docker tag "$(basename "${LAB}")-driver" agent-fleet-lab-driver:local 2>/dev/null || true
+    docker tag "$(basename "${LAB}")-workspace" agent-fleet-sandbox-workspace:local 2>/dev/null || true
+    docker tag "$(basename "${LAB}")-driver" agent-fleet-sandbox-driver:local 2>/dev/null || true
   )
   echo "==> host Postgres on :5433"
   (
@@ -927,7 +927,7 @@ echo "    rustc ${RUST_TOOLCHAIN}  tmp ${TMP_ROOT}  env ${ENV_FILE}"
 echo
 echo "Do not run tests here. As ${REAL_USER}:"
 echo "  source ~/.cargo/env   # if rustup is new"
-echo "  ./crates/fleet-driver/sandbox-lab/scripts/run-full-suite.sh"
+echo "  ./crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh"
 [[ "${ENABLE_FULL_IMAGES}" == "1" ]] && echo "  DATABASE_URL=postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable cargo test -p fleet-orchestrator"
 [[ "${ENABLE_KIND}" == "1" ]] && echo "  kubectl -n agent-fleet get pods"
 echo

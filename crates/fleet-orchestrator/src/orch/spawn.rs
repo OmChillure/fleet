@@ -1,7 +1,7 @@
 //! Step 6–7 capacity schedule + spawn protocol.
 
-use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
-use crate::sandbox::{fleet_worker_env, SandboxRuntime, SpawnRequest};
+use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
+use crate::sandbox::{SandboxRuntime, SpawnRequest, fleet_worker_env};
 use crate::store::{BoardSnapshot, Store};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -95,22 +95,26 @@ pub async fn schedule_and_spawn(
             timeout: Duration::from_secs(timeout_s),
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
+        req.env
+            .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
+        super::session_context::pass_through_driver_env(&mut req.env);
         if let Some(notes) = task.hitl_notes.as_ref() {
-            req.env
-                .insert("FLEET_HITL_NOTES".into(), notes.clone());
+            req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
         }
         // Optional real work payload for fleet-worker (shell command).
-        if let Ok(cmd) = std::env::var("FLEET_WORK_CMD") {
-            if !cmd.trim().is_empty() {
-                req.env.insert("FLEET_WORK_CMD".into(), cmd);
-            }
+        if let Ok(cmd) = std::env::var("FLEET_WORK_CMD")
+            && !cmd.trim().is_empty()
+        {
+            req.env.insert("FLEET_WORK_CMD".into(), cmd);
         }
-        // Write plan task spec into the session work dir so the worker can read it.
-        if !task.spec_md.is_empty() {
-            let spec_path = req.work_dir.join("spec.md");
-            if let Err(e) = std::fs::write(&spec_path, &task.spec_md) {
-                tracing::warn!(error = %e, path = %spec_path.display(), "failed to write spec.md");
-            }
+        if let Err(e) =
+            super::session_context::write_session_context(&req.work_dir, task, timeout_s)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %req.work_dir.display(),
+                "failed to write session task context"
+            );
         }
 
         let work_dir_str = req.work_dir.to_string_lossy().into_owned();
@@ -130,9 +134,7 @@ pub async fn schedule_and_spawn(
             }
             Err(e) => {
                 tracing::warn!(error = %e, task_id = %task.id, "spawn failed");
-                store
-                    .complete_spawn_failure(assignment.session_id)
-                    .await?;
+                store.complete_spawn_failure(assignment.session_id).await?;
                 // retry policy on task
                 apply_retry_after_failure(
                     store,
@@ -159,7 +161,7 @@ pub async fn apply_retry_after_failure(
     cancel_requested: bool,
     exit_reason: crate::domain::ExitReason,
 ) -> Result<(), TickError> {
-    use crate::domain::{should_retry, BoardTaskStatus, RetryAction};
+    use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
 
     // load approximate status as in_progress for policy
     let decision = should_retry(

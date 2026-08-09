@@ -43,6 +43,10 @@ pub fn router() -> Router<AppState> {
             get(get_sessions),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}",
+            get(get_session_detail),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
@@ -310,6 +314,92 @@ async fn get_sessions(
             "created_at": s.created_at,
         })).collect::<Vec<_>>()
     })))
+}
+
+async fn get_session_detail(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, session_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let session = state
+        .orch
+        .store
+        .get_session(session_id)
+        .await
+        .map_err(|e| map_orch_err("get_session", e))?
+        .ok_or_else(|| AppError::not_found("session"))?;
+    if session.project_id != workspace_id {
+        return Err(AppError::not_found("session"));
+    }
+    let work_dir = session.work_dir.clone().unwrap_or_default();
+    let live = read_live_events(&work_dir, 500);
+    let transcript = read_capped_file(
+        std::path::Path::new(&work_dir).join("artifacts/transcript.md"),
+        80_000,
+    );
+    let prompt = read_capped_file(std::path::Path::new(&work_dir).join("prompt.md"), 16_000);
+    let result = std::fs::read_to_string(
+        std::path::Path::new(&work_dir).join("artifacts/result.json"),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    Ok(Json(json!({
+        "session": {
+            "id": session.id,
+            "run_id": session.run_id,
+            "board_task_id": session.board_task_id,
+            "attempt": session.attempt,
+            "status": session.status,
+            "runtime_backend": session.runtime_backend,
+            "worker_profile": session.worker_profile,
+            "progress_pct": session.progress_pct,
+            "last_heartbeat_at": session.last_heartbeat_at,
+            "exit_reason": session.exit_reason,
+            "work_dir": session.work_dir,
+            "started_at": session.started_at,
+            "exited_at": session.exited_at,
+        },
+        "prompt": prompt,
+        "live": live,
+        "transcript": transcript,
+        "result": result,
+    })))
+}
+
+fn read_capped_file(path: impl AsRef<std::path::Path>, max: usize) -> String {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    if s.len() <= max {
+        return s;
+    }
+    s.chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn read_live_events(work_dir: &str, max: usize) -> Vec<Value> {
+    if work_dir.is_empty() {
+        return vec![];
+    }
+    let path = std::path::Path::new(work_dir).join("live.jsonl");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let mut lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() > max {
+        lines = lines.split_off(lines.len() - max);
+    }
+    lines
+        .into_iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 async fn get_runs(

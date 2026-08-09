@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
-    "crates/fleet-driver",
     "crates/fleet-db",
     "crates/fleet-auth",
     "crates/fleet-integrations",
@@ -10,6 +9,8 @@ members = [
     "crates/fleet-ui",
     "crates/fleet-orchestrator",
     "crates/fleet-operator",
+    "crates/fleet-driver",
+    "crates/fleet-sandbox-driver",
 ]
 # `cargo run` from the workspace root starts the unified API.
 default-members = [

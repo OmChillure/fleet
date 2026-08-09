@@ -2,7 +2,7 @@
 # Spawns: codex-acp  (stdio ACP)
 # Auth:   OPENAI_API_KEY (or Codex login volume)
 #
-# Build (from crates/fleet-driver/agents or via ./build.sh):
+# Build (from crates/fleet-sandbox-driver/agents or via ./build.sh):
 #   docker build -t agent-fleet-base:alpine -f base/Dockerfile base
 #   docker build -t agent-fleet-codex:alpine -f codex/Dockerfile codex
 ARG BASE_IMAGE=agent-fleet-base:alpine

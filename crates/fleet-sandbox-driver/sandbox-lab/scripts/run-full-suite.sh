@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the fleet-driver test suite (does not install packages).
-# Prereq: crates/fleet-driver/sandbox-lab/scripts/install-full-suite-deps.sh once.
+# Prereq: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh once.
 set -euo pipefail
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +19,14 @@ FAIL=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAIL=1; }
 
-echo "==== cargo test -p fleet-driver ===="
+echo "==== cargo test -p fleet-sandbox-driver ===="
+if cargo test -p fleet-sandbox-driver --offline; then
+  pass cargo-sandbox-driver
+else
+  fail cargo-sandbox-driver
+fi
+
+echo "==== cargo test -p fleet-driver (process worker) ===="
 if cargo test -p fleet-driver --offline; then
   pass cargo-driver
 else

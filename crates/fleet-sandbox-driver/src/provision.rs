@@ -89,7 +89,9 @@ pub fn provision(job: &Job) -> Result<Provisioned> {
         } else {
             info!(key = %k, value = %v, "env_public set");
         }
-        std::env::set_var(k, v);
+        unsafe {
+            std::env::set_var(k, v);
+        }
     }
 
     let git_ref = if job.git_ref.is_empty() {

@@ -12,8 +12,8 @@ Related:
 
 - Layers and components: [`README.md`](./README.md)
 - Commands/events: [`events.md`](./events.md), [`events-overview.md`](./events-overview.md)
-- Lab driver (current prototype): [`crates/fleet-driver/`](../../crates/fleet-driver/) ([`sandbox-lab/`](../../crates/fleet-driver/sandbox-lab/), [`agents/`](../../crates/fleet-driver/agents/))
-- Crate README: [`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md)
+- Sandbox driver (current prototype): [`crates/fleet-sandbox-driver/`](../../crates/fleet-sandbox-driver/) ([`sandbox-lab/`](../../crates/fleet-sandbox-driver/sandbox-lab/), [`agents/`](../../crates/fleet-sandbox-driver/agents/))
+- Process worker: [`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md)
 - Contracts: `ProvisionWorkspace` in `crates/agent-fleet-contracts`
 
 ---
@@ -280,9 +280,9 @@ existing CI entrypoint) over hard-coding commands in the orchestrator.
 
 ---
 
-## 7. Lab prototype vs target
+## 7. Sandbox prototype vs target
 
-| | **Lab today** (`crates/fleet-driver`) | **Target** |
+| | **Sandbox today** (`crates/fleet-sandbox-driver`) | **Target** |
 | --- | --- | --- |
 | Sandbox unit | **One Compose project per task** (`fleet-task-<id>`) | One pod/VM per task (Sandbox Manager) |
 | Containers | redis + workspace + driver (harness base image) | Same pattern in k8s pod |
@@ -294,7 +294,7 @@ existing CI entrypoint) over hard-coding commands in the orchestrator.
 | Sample validation | dual invoices jobs (OpenCode + Pi) + minimal-node | Broader project matrix |
 | Git branches | **Not** created by driver (fresh clone of `git_ref`) | Orchestrator / VCS integration |
 
-Lab path implemented:
+Sandbox path implemented:
 
 1. **Per-task sandbox:** `COMPOSE_PROJECT_NAME=fleet-task-<id>` → isolated redis + workspace + volume + driver. Torn down after run (`KEEP_SANDBOX=1` to keep).  
 2. Driver writes provision request; workspace agent clones + runs `project_setup` under **`/workspace/jobs/{job_id}/repo`** on **that** volume.  
@@ -383,9 +383,9 @@ Harness (stable image)
 
 ```bash
 # once: harness images (opencode, pi, …)
-./crates/fleet-driver/agents/build.sh
+./crates/fleet-sandbox-driver/agents/build.sh
 
-cd crates/fleet-driver/sandbox-lab
+cd crates/fleet-sandbox-driver/sandbox-lab
 cp -n .env.example .env
 # OPENCODE_BASE_URL / MODEL / OPENCODE_API_KEY / SSH_KEY_HOST_PATH
 # (must reach LM Studio from inside the driver container)
@@ -410,12 +410,12 @@ What each run does (**one task = one sandbox**):
 
 | Job | Harness | Agent task | Edit allowlist | Required tools |
 | --- | --- | --- | --- | --- |
-| [`job.123-invoices.opencode.json`](../../crates/fleet-driver/sandbox-lab/config/job.123-invoices.opencode.json) | opencode | `app/fleet_marker.py` + smoke unit test | `app/`, `tests/` | check → migrate → `django_test_fleet` (→ full `django_test` optional) |
-| [`job.123-invoices.pi.json`](../../crates/fleet-driver/sandbox-lab/config/job.123-invoices.pi.json) | pi | `Animal.notes` field + migration + test | `invoices/`, `tests/` | makemigrations → migrate → check → `django_test_fleet` (→ full suite optional) |
+| [`job.123-invoices.opencode.json`](../../crates/fleet-sandbox-driver/sandbox-lab/config/job.123-invoices.opencode.json) | opencode | `app/fleet_marker.py` + smoke unit test | `app/`, `tests/` | check → migrate → `django_test_fleet` (→ full `django_test` optional) |
+| [`job.123-invoices.pi.json`](../../crates/fleet-sandbox-driver/sandbox-lab/config/job.123-invoices.pi.json) | pi | `Animal.notes` field + migration + test | `invoices/`, `tests/` | makemigrations → migrate → check → `django_test_fleet` (→ full suite optional) |
 
 Full suite timeout/fail is OK to report (stretch). Git **branches are not** created; each task is a fresh clone of `git_ref` into its sandbox volume.
 
-Non-Django shape: [`job.minimal-node.json`](../../crates/fleet-driver/sandbox-lab/config/job.minimal-node.json).
+Non-Django shape: [`job.minimal-node.json`](../../crates/fleet-sandbox-driver/sandbox-lab/config/job.minimal-node.json).
 
 ### Policy defaults (production-minded lab)
 
@@ -428,6 +428,6 @@ Non-Django shape: [`job.minimal-node.json`](../../crates/fleet-driver/sandbox-la
 | Raw workspace shell | off | `FLEET_ALLOW_RAW_EXEC=1` debug only |
 | Project commands | named tools | `fleet-wsexec <name>` → fixed argv in workspace |
 
-Driver policy: `crates/fleet-driver/src/policy.rs`.  
-Harness registry + Pi models.json: `harness.rs`, `pi_config.rs`, `opencode_config.rs`.  
-Images: `crates/fleet-driver/agents/`.
+Driver policy: `crates/fleet-sandbox-driver/src/policy.rs`.  
+Harness registry + Pi models.json: `crates/fleet-sandbox-driver/src/{harness,pi_config,opencode_config}.rs`.  
+Images: `crates/fleet-sandbox-driver/agents/`.

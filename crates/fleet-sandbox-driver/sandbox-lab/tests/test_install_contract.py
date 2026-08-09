@@ -55,7 +55,7 @@ class InstallContractTests(unittest.TestCase):
         agents = REPO / "AGENTS.md"
         self.assertTrue(agents.is_file())
         body = agents.read_text(encoding="utf-8")
-        self.assertIn("crates/fleet-driver/sandbox-lab/scripts/install-full-suite-deps.sh", body)
+        self.assertIn("crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh", body)
         self.assertIn(".env", body)
         # Keep committed notes repo-relative (no machine home / checkout path).
         self.assertNotIn("/code/", body)

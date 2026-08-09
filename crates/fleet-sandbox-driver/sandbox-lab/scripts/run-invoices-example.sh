@@ -47,7 +47,7 @@ fi
 if [[ "$VERBOSE" == "1" ]]; then
   export RUST_LOG="${RUST_LOG:-info}"
 else
-  export RUST_LOG="${RUST_LOG:-warn,fleet_driver=info}"
+  export RUST_LOG="${RUST_LOG:-warn,fleet_sandbox_driver=info}"
 fi
 
 # Harness base image must exist locally (compose will otherwise try docker.io and fail)

@@ -1,4 +1,4 @@
-# Sandbox lab — per-task driver + Redis + harness (ACP)
+# Sandbox compose rig — per-task driver + Redis + harness (ACP)
 
 ```
   host                         per-task sandbox (compose project)
@@ -9,7 +9,7 @@
 ```
 
 **Rule:** one task → one Compose project → one volume → one workspace.  
-Do not share `/workspace` across tasks. Driver code lives in `crates/fleet-driver/`.
+Do not share `/workspace` across tasks. Driver: [`crates/fleet-sandbox-driver`](../../) (`fleet-sandbox-driver`).
 
 Architecture: [`docs/architecture/sandbox-workspace.md`](../../../docs/architecture/sandbox-workspace.md)
 
@@ -115,8 +115,8 @@ Agent uses: `fleet-wsexec django_check` (workspace runs fixed argv only).
 ## Layout
 
 ```
-crates/fleet-driver/           # everything driver-related
-  src/                         # Rust binary (policy, provision, ACP)
+crates/fleet-sandbox-driver/
+  src/                         # fleet-sandbox-driver (Redis + volume + multi-harness ACP)
   agents/                      # harness images (opencode/pi/codex/grok)
   sandbox-lab/
     docker-compose.yml         # per-task: redis + workspace + driver

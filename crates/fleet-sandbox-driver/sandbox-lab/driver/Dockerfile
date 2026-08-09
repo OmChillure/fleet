@@ -1,6 +1,6 @@
 # Multi-stage: musl-linked Rust driver + OpenCode Alpine runtime.
 # Build from repo root:
-#   docker build -f crates/fleet-driver/sandbox-lab/driver/Dockerfile -t agent-fleet-sandbox-lab-driver .
+#   docker build -f crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile -t agent-fleet-sandbox-lab-driver .
 
 ARG BASE_IMAGE=agent-fleet-opencode:alpine
 ARG RUST_VERSION=1.88
@@ -20,9 +20,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN RUST_TARGET="$(cat /tmp/rust-target)" \
-    && cargo build -p fleet-driver --release --target "${RUST_TARGET}" \
-    && strip "target/${RUST_TARGET}/release/fleet-driver" \
-    && cp "target/${RUST_TARGET}/release/fleet-driver" /fleet-driver
+    && cargo build -p fleet-sandbox-driver --release --target "${RUST_TARGET}" --bin fleet-sandbox-driver \
+    && strip "target/${RUST_TARGET}/release/fleet-sandbox-driver" \
+    && cp "target/${RUST_TARGET}/release/fleet-sandbox-driver" /fleet-sandbox-driver
 
 FROM ${BASE_IMAGE}
 USER root
@@ -30,9 +30,9 @@ RUN apk add --no-cache openssh-client git \
     && mkdir -p /opt/fleet-driver /workspace /home/fleet/.ssh /home/fleet/.config/opencode \
     && chown -R fleet:fleet /opt/fleet-driver /workspace /home/fleet
 
-COPY --from=builder /fleet-driver /usr/local/bin/fleet-driver
-COPY crates/fleet-driver/sandbox-lab/config/examples /opt/fleet-driver/examples
-RUN chmod 755 /usr/local/bin/fleet-driver \
+COPY --from=builder /fleet-sandbox-driver /usr/local/bin/fleet-sandbox-driver
+COPY crates/fleet-sandbox-driver/sandbox-lab/config/examples /opt/fleet-driver/examples
+RUN chmod 755 /usr/local/bin/fleet-sandbox-driver \
     && chown -R fleet:fleet /home/fleet
 
 USER fleet
@@ -43,5 +43,5 @@ ENV HOME=/home/fleet \
     XDG_DATA_HOME=/home/fleet/.local/share \
     RUST_LOG=info
 
-ENTRYPOINT ["fleet-driver"]
+ENTRYPOINT ["fleet-sandbox-driver"]
 CMD []

@@ -2,7 +2,7 @@
 
 Install is one command, no arguments:
 
-`crates/fleet-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
+`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
 
 Read that script for OS/RAM/disk/`PROFILE`/`ENABLE_*`. Persist those in the
 repo-root `.env` (same file as DATABASE_URL / JWT / OAuth). Do not invent a

@@ -34,7 +34,10 @@ pub fn init_from_env() {
             *g = Some(s);
         }
     }
-    std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+    // SAFETY: called once at process start, before any threads spawn the harness.
+    unsafe {
+        std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+    }
     lock_down_proc();
 }
 
@@ -150,7 +153,9 @@ mod tests {
     #[test]
     fn sign_and_verify_roundtrip() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
-        std::env::set_var("FLEET_HANDSHAKE_SECRET", "unit-test-secret");
+        unsafe {
+            std::env::set_var("FLEET_HANDSHAKE_SECRET", "unit-test-secret");
+        }
         let signed = sign_value(json!({
             "action": "provision",
             "job_id": "j1",
@@ -161,14 +166,18 @@ mod tests {
         let mut bad = signed.clone();
         bad["hmac"] = json!("00");
         assert!(verify_value(&bad).is_err());
-        std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        unsafe {
+            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        }
     }
 
     #[test]
     fn init_from_env_strips_environ_keeps_secret() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
         let prev = stored_secret();
-        std::env::set_var("FLEET_HANDSHAKE_SECRET", "init-secret");
+        unsafe {
+            std::env::set_var("FLEET_HANDSHAKE_SECRET", "init-secret");
+        }
         init_from_env();
         assert!(
             std::env::var("FLEET_HANDSHAKE_SECRET").is_err(),
@@ -181,6 +190,8 @@ mod tests {
         if let Ok(mut g) = SECRET.lock() {
             *g = prev;
         }
-        std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        unsafe {
+            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        }
     }
 }

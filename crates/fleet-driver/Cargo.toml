@@ -1,31 +1,32 @@
 [package]
 name = "fleet-driver"
 version = "0.1.0"
-edition = "2021"
-description = "In-sandbox driver: provision workspace + run harness over ACP (fleet-driver)"
-license = "Apache-2.0"
-rust-version = "1.85"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Process worker: drive a coding agent over ACP and report to the orchestrator"
+readme = "README.md"
 
 [[bin]]
 name = "fleet-driver"
 path = "src/main.rs"
 
-[dependencies]
-anyhow = "1"
-chrono = { version = "0.4", features = ["serde", "clock"] }
-clap = { version = "4", features = ["derive", "env"] }
-hex = "0.4"
-hmac = "0.12"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-which = "6"
+[[bin]]
+name = "mock-acp-agent"
+path = "src/bin/mock_acp_agent.rs"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

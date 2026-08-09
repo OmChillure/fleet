@@ -22,12 +22,12 @@ Requires Docker (OrbStack / Docker Desktop / engine). From **repo root**:
 
 ```bash
 # all images (from repo root)
-./crates/fleet-driver/agents/build.sh
+./crates/fleet-sandbox-driver/agents/build.sh
 
 # or from this directory
-cd crates/fleet-driver/agents && ./build.sh
+cd crates/fleet-sandbox-driver/agents && ./build.sh
 
-# or stepwise (cwd = crates/fleet-driver/agents)
+# or stepwise (cwd = crates/fleet-sandbox-driver/agents)
 docker build -t agent-fleet-base:alpine     -f base/Dockerfile     base
 docker build -t agent-fleet-codex:alpine    -f codex/Dockerfile    codex
 docker build -t agent-fleet-opencode:alpine -f opencode/Dockerfile opencode
@@ -38,7 +38,7 @@ docker build -t agent-fleet-pi:alpine       -f pi/Dockerfile       pi
 Pin versions with build-args:
 
 ```bash
-# cwd = crates/fleet-driver/agents
+# cwd = crates/fleet-sandbox-driver/agents
 docker build -t agent-fleet-codex:alpine \
   --build-arg CODEX_ACP_VERSION=1.1.7 \
   -f codex/Dockerfile codex
@@ -122,7 +122,7 @@ docker run --rm --entrypoint grok      agent-fleet-grok:alpine --version
 ## Layout
 
 ```
-crates/fleet-driver/agents/
+crates/fleet-sandbox-driver/agents/
   README.md
   build.sh
   base/Dockerfile

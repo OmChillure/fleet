@@ -1,150 +1,101 @@
 # fleet-driver
 
-In-sandbox driver: provision a **workspace**, run a coding **harness over ACP**, report on Redis.
+Process worker that **drives a coding agent over ACP** and reports to the
+orchestrator using the existing `FLEET_*` / heartbeat / status contract.
 
-**Everything driver-related is in this crate** — binary, harness images, lab compose, jobs, scripts.  
-Architecture: [`docs/architecture/sandbox-workspace.md`](../../docs/architecture/sandbox-workspace.md).
+Drop-in for `PROCESS_WORKER_BIN` when `SANDBOX_BACKEND=process`.
+Does **not** use Docker Compose or Redis.
+
+| Harness | How | Tokens |
+| --- | --- | --- |
+| **`mock`** (default) | `mock-acp-agent` stdio ACP | none — CI / demos |
+| **`grok`** | `grok agent --no-leader [--always-approve] stdio` | Grok Build (`grok login` / `~/.grok/auth.json`) |
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `src/` | `fleet-driver` binary (provision, policy, ACP client, OpenCode/Pi config) |
-| `tests/` | Cargo fixture tests (job JSON under `sandbox-lab/config`) |
-| `agents/` | Alpine harness images: base, opencode, pi, codex, grok + `build.sh` |
-| `sandbox-lab/` | Per-task compose lab: redis, workspace agent, driver image, jobs, scripts |
+| `src/main.rs` | Worker loop (HTTP + ACP) |
+| `src/acp.rs` | JSON-RPC ACP client (newline JSON; auto-detects `Content-Length`) |
+| `src/bin/mock_acp_agent.rs` | Fake ACP agent for tests |
+| `src/harness.rs` | `mock` / `grok` argv |
+| `src/prompt.rs` | `prompt.md` / `spec.md` / `task.json` → prompt |
 
-## Isolation model
-
-**One task = one sandbox:**
-
-- unique Compose project (`fleet-task-<id>`)
-- **own Docker volume** (`…_sandbox-workspace`) — tasks never share `/workspace`
-- own workspace container + redis (no host redis port; talk via `compose exec`)
-- own driver run (harness image via `DRIVER_BASE_IMAGE`)
-
-Torn down after the script finishes (`KEEP_SANDBOX=1` to keep).  
-Git **branches are not** created here — branching / PR is orchestrator-side later.
-
-```
-task A → fleet-task-aaa + volume A + workspace A + driver(opencode)
-task B → fleet-task-bbb + volume B + workspace B + driver(pi)
-```
-
-## Install
-
-See [`sandbox-lab/scripts/install-full-suite-deps.sh`](sandbox-lab/scripts/install-full-suite-deps.sh) (only install doc).
-
-## Quick tests (no LLM)
+## Tests (no LLM)
 
 ```bash
-# from repo root
 cargo test -p fleet-driver
-
-# from crates/fleet-driver
-./sandbox-lab/scripts/run-protocol-tests.sh ../../.tmp/protocol.log
-
-# optional Docker protocol (no LLM)
-cd sandbox-lab && ./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
+# live Grok Build (uses tokens; needs grok login):
+FLEET_GROK_ACP_E2E=1 cargo test -p fleet-driver grok_tiny_prompt_over_acp -- --nocapture
 ```
 
-## Harness images
+## Run with the orchestrator
 
 ```bash
-# from repo root
-./crates/fleet-driver/agents/build.sh
-# or: cd crates/fleet-driver/agents && ./build.sh
+cargo build -p fleet-driver --bins
+export SANDBOX_BACKEND=process
+export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
+export FLEET_HARNESS=mock          # or grok
+# export FLEET_MODEL=…             # grok -m
+# export FLEET_TASK_TIMEOUT_S=600
+cargo run -p fleet-server
 ```
 
-| Image | Entry | Notes |
+Then Fleet UI → Start run → Run until done. Artifacts:
+
+```
+$DATA_DIR/projects/<id>/sessions/<session>/artifacts/
+  transcript.md
+  result.json
+```
+
+`mock-acp-agent` is resolved next to `fleet-driver` (same `target/debug/`), or set
+`FLEET_MOCK_ACP_BIN`.
+
+On spawn the orchestrator writes `spec.md`, `task.json`, and `prompt.md` into the
+session dir, and injects `FLEET_TASK_TIMEOUT_S` (board timeout) plus any
+`FLEET_HARNESS` / `FLEET_MODEL` / `FLEET_AUTO_APPROVE` set on the orch process.
+
+### Grok Build
+
+Verified against `grok agent stdio` (NDJSON ACP): `initialize` → `authenticate`
+(`cached_token` from `~/.grok/auth.json`) → `session/new` → `session/prompt` →
+`session/close`. The driver does **not** change `HOME`, so host CLI login and
+config apply. `--no-leader` avoids attaching to a TUI leader process.
+
+```bash
+export FLEET_HARNESS=grok
+export FLEET_AUTO_APPROVE=1                 # default
+# export FLEET_MODEL=v9                     # grok agent -m
+# export FLEET_REASONING_EFFORT=low         # or medium / high
+# export FLEET_GROK_BIN=$HOME/.grok/bin/grok
+# export FLEET_GROK_DEBUG=1                 # work_dir/grok-acp.debug.log
+# export PATH="$HOME/.grok/bin:$PATH"
+```
+
+Process sandbox uses your user `~/.grok` (including MCP servers in
+`config.toml`). Isolate later via Docker/k8s if that is too much host coupling.
+
+## Env
+
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `agent-fleet-opencode:alpine` | `opencode acp` | default lab driver base |
-| `agent-fleet-pi:alpine` | `pi-acp` | [pi.dev](https://pi.dev) + local models via `~/.pi/agent/models.json` |
-| `agent-fleet-codex:alpine` | `codex-acp` | |
-| `agent-fleet-grok:alpine` | `grok agent stdio` | |
+| `FLEET_*` | (required) | Same as `fleet-worker` (session, token, API URL, work dir) |
+| `FLEET_HARNESS` | `mock` | `mock` \| `grok` |
+| `FLEET_MODEL` | unset | `grok agent -m` (else Grok config default) |
+| `FLEET_REASONING_EFFORT` | unset | `grok agent --reasoning-effort` |
+| `FLEET_GROK_BIN` | `~/.grok/bin/grok` or `PATH` | Grok CLI |
+| `FLEET_GROK_DEBUG` | `0` | Write `grok-acp.debug.log` in the work dir |
+| `FLEET_TASK_TIMEOUT_S` | `3600` | ACP wall clock |
+| `FLEET_HEARTBEAT_INTERVAL_S` | `2` | Must stay `<` orch `heartbeat_stale_s` |
+| `FLEET_AUTO_APPROVE` | `1` | ACP permission requests |
 
-Lab sets `DRIVER_BASE_IMAGE` automatically for pi jobs.
+`initialize` advertises `clientCapabilities.terminal = true`. The driver implements `terminal/create|output|wait_for_exit|kill|release` so Grok can run shell commands. Returning `{}` for those methods fails with `failed to deserialize response`.
+| `FLEET_HARNESS_CMD` | unset | Full argv override |
+| `FLEET_MOCK_ACP_BIN` | sibling / PATH | Mock agent binary |
 
-## Invoices e2e
+Keep using `fleet-worker` for orchestrator fixture tests that must not speak ACP.
 
-Needs Docker + OpenAI-compatible API (e.g. LM Studio).
-
-### Env (`sandbox-lab/.env`)
-
-```bash
-cp -n sandbox-lab/.env.example sandbox-lab/.env
-```
-
-Working sample:
-
-```bash
-OPENCODE_PROVIDER_ID=lmstudio
-OPENCODE_BASE_URL=http://host.docker.internal:1234/v1
-OPENCODE_API_KEY=lm-studio
-MODEL=lmstudio/google/gemma-4-e4b
-SSH_KEY_HOST_PATH=../../../.tmp/ssh/id_ed25519
-```
-
-| Var | Required | Notes |
-| --- | --- | --- |
-| `OPENCODE_BASE_URL` | yes | Reachable **from the driver container** (LAN IP or `host.docker.internal`, not host `127.0.0.1`) |
-| `MODEL` | yes | `provider_id/model_id` (same for OpenCode and Pi) |
-| `OPENCODE_API_KEY` | yes | Dummy OK for many local servers |
-| `SSH_KEY_HOST_PATH` | yes | Mounted into driver (placeholder fine for HTTPS clone) |
-
-### Jobs
-
-| Job file | Harness | Task | Tools (required → optional) | Edit allowlist |
-| --- | --- | --- | --- | --- |
-| `config/job.123-invoices.opencode.json` | opencode | `app/fleet_marker.py` + `tests/test_fleet_smoke.py` | check → migrate → `django_test_fleet` → `django_test` | `app/`, `tests/` |
-| `config/job.123-invoices.pi.json` | pi | `Animal.notes` field + migration + test | makemigrations → migrate → check → `django_test_fleet` → `django_test` | `invoices/`, `tests/` |
-| `config/job.123-invoices.json` | opencode | alias of the marker job | same as opencode | `app/`, `tests/` |
-
-- `auto_approve=false`, **no** `permission_allow: "*"`
-- Path-like allow entries gate **file writes**; `fleet-wsexec` / `read` for tools (bare `bash`/`sh` is denied)
-- Full suite timeout/fail is OK to report (stretch)
-
-### Run
-
-```bash
-cd sandbox-lab   # or from repo: crates/fleet-driver/sandbox-lab
-
-# quiet by default
-./scripts/run-invoices-example.sh config/job.123-invoices.opencode.json
-./scripts/run-invoices-example.sh config/job.123-invoices.pi.json
-
-# both sandboxes sequential (same MODEL)
-./scripts/run-invoices-dual.sh
-```
-
-| Flag | Effect |
-| --- | --- |
-| `VERBOSE=1` | Docker + full driver logs |
-| `FULL_TRANSCRIPT=1` | Full model transcript (default ~1200 chars) |
-| `TRANSCRIPT_CHARS=N` | Truncation length |
-| `KEEP_SANDBOX=1` | Skip teardown (inspect volume) |
-| `DRIVER_BASE_IMAGE=…` | Override harness base image |
-
-Example output (quiet):
-
-```text
-task  job=…  harness=opencode  model=lmstudio/…  project=fleet-task-…
-driver…
-  INFO … provision complete …
-  INFO … ACP prompt complete …
-  INFO … published result …
-result
-  ok=true  harness=opencode  model=…
-  elapsed=…s  stop=end_turn
-  tools=django_check, django_migrate, …
-  files: app/fleet_marker.py, tests/test_fleet_smoke.py, …
-  --- transcript ---
-  …
-done
-```
-
-## Policy notes
-
-- Default-deny ACP permissions; substring allowlist + **path-gated writes** (`policy.rs`)
-- Workspace tools: fixed argv in `.fleet-tools.json` only (`fleet-wsexec <name>`)
-- Job workdir: `/workspace/jobs/{job_id}/repo` under the **task’s** volume
+In-sandbox Compose isolation (OpenCode/Pi/volume handshake) is
+[`crates/fleet-sandbox-driver`](../fleet-sandbox-driver/). Do not point
+`PROCESS_WORKER_BIN` at `fleet-sandbox-driver`.

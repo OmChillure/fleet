@@ -2,7 +2,7 @@
 # Spawns: pi-acp  (bridges ACP ↔ pi --mode rpc)
 # Local models: ~/.pi/agent/models.json (written by fleet-driver from job.provider)
 #
-# Build (from crates/fleet-driver/agents or via ./build.sh):
+# Build (from crates/fleet-sandbox-driver/agents or via ./build.sh):
 #   docker build -t agent-fleet-base:alpine -f base/Dockerfile base
 #   docker build -t agent-fleet-pi:alpine -f pi/Dockerfile pi
 ARG BASE_IMAGE=agent-fleet-base:alpine

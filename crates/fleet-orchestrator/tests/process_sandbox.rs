@@ -145,7 +145,10 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert_eq!(last_status, "completed", "run did not complete via process worker");
+    assert_eq!(
+        last_status, "completed",
+        "run did not complete via process worker"
+    );
 
     let tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT plan_task_id, status FROM board_tasks WHERE run_id = $1 ORDER BY plan_task_id",
@@ -169,14 +172,20 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
     assert!(
         sessions.iter().any(|s| s.runtime_backend == "process"),
         "expected a process session, got {:?}",
-        sessions.iter().map(|s| &s.runtime_backend).collect::<Vec<_>>()
+        sessions
+            .iter()
+            .map(|s| &s.runtime_backend)
+            .collect::<Vec<_>>()
     );
 
     let mut found_artifact = false;
     let mut diag = Vec::new();
     for s in &sessions {
         let Some(dir) = s.work_dir.as_ref() else {
-            diag.push(format!("session {} has no work_dir status={}", s.id, s.status));
+            diag.push(format!(
+                "session {} has no work_dir status={}",
+                s.id, s.status
+            ));
             continue;
         };
         let root = PathBuf::from(dir);
@@ -194,6 +203,23 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
             assert!(body["spec_md_present"].as_bool().unwrap_or(false));
             found_artifact = true;
         }
+        let task_json = root.join("task.json");
+        assert!(
+            task_json.is_file(),
+            "missing task.json in {}\n{}",
+            root.display(),
+            diag.join("\n")
+        );
+        let tj: Value =
+            serde_json::from_str(&std::fs::read_to_string(&task_json).unwrap()).unwrap();
+        assert!(!tj["title"].as_str().unwrap_or("").is_empty());
+        assert!(tj["timeout_s"].as_u64().unwrap_or(0) >= 1);
+        let prompt = std::fs::read_to_string(root.join("prompt.md")).unwrap_or_default();
+        assert!(
+            prompt.contains('#') || !prompt.is_empty(),
+            "prompt.md empty in {}",
+            root.display()
+        );
     }
     assert!(
         found_artifact,

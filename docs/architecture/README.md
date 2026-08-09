@@ -26,10 +26,10 @@ Related component folders (stubs for deeper specs):
 (Postgres). UI on `:3030` talks to the API with cookie credentials.
 Orchestrator tick + process sandbox (`fleet-worker`) and the Kubernetes
 `FleetSandbox` operator are on `main`. OAuth connect is live.
-**Driver lab:** [`crates/fleet-driver`](../../crates/fleet-driver/) runs
-OpenCode/Pi over ACP in a per-task compose sandbox (see
-[`sandbox-workspace.md`](./sandbox-workspace.md)); it is not yet the
-orchestrator `PROCESS_WORKER_BIN` / CRD entrypoint.
+**Sandbox driver:** [`crates/fleet-sandbox-driver`](../../crates/fleet-sandbox-driver/)
+runs OpenCode/Pi over ACP in a per-task compose sandbox (see
+[`sandbox-workspace.md`](./sandbox-workspace.md)). Not `PROCESS_WORKER_BIN`
+(that is [`crates/fleet-driver`](../../crates/fleet-driver/)).
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 
@@ -178,10 +178,10 @@ flowchart TB
   to Orchestrator). Does **not** hold long-lived secrets; external credentials
   are injected only on proxied requests by the Orchestrator.
 
-**Lab today** (`crates/fleet-driver`): one Compose project + volume per task;
+**Sandbox today** (`crates/fleet-sandbox-driver`): one Compose project + volume per task;
 harnesses **opencode** and **pi** (plus images for codex/grok); dual 123-invoices
 jobs. Details: [`sandbox-workspace.md`](./sandbox-workspace.md),
-[`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md).
+[`crates/fleet-sandbox-driver/README.md`](../../crates/fleet-sandbox-driver/README.md).
 
 #### Integrations
 
