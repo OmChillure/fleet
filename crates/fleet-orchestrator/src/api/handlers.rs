@@ -272,7 +272,6 @@ pub async fn list_runs(
 
 #[derive(Debug, Deserialize)]
 pub struct CancelBody {
-    #[allow(dead_code)]
     pub reason: Option<String>,
 }
 
@@ -282,13 +281,19 @@ pub async fn cancel_run(
     Path((project_id, run_id)): Path<(Uuid, Uuid)>,
     body: Option<Json<CancelBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = body;
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .filter(|s| !s.trim().is_empty());
     state
         .store
         .request_cancel(project_id, run_id)
         .await
         .map_err(map_store)?;
-    Ok(Json(json!({ "run_id": run_id, "cancel_requested": true })))
+    Ok(Json(json!({
+        "run_id": run_id,
+        "cancel_requested": true,
+        "reason": reason,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

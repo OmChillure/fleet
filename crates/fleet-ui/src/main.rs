@@ -13,7 +13,7 @@ use components::navbar::Navbar;
 use components::toast::ToastProvider;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
-use pages::chat::Chat;
+use pages::chat::{Chat, ChatThread};
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
@@ -43,6 +43,8 @@ pub enum Route {
         Dashboard { workspace_id: String },
         #[route("/:workspace_id/chat")]
         Chat { workspace_id: String },
+        #[route("/:workspace_id/chat/:conversation_id")]
+        ChatThread { workspace_id: String, conversation_id: String },
         #[route("/:workspace_id/fleet")]
         Fleet { workspace_id: String },
         #[route("/:workspace_id/sessions/:session_id")]
@@ -65,6 +67,7 @@ impl Route {
         match self {
             Route::Dashboard { workspace_id }
             | Route::Chat { workspace_id }
+            | Route::ChatThread { workspace_id, .. }
             | Route::Fleet { workspace_id }
             | Route::Sessions { workspace_id }
             | Route::SessionDetail { workspace_id, .. }

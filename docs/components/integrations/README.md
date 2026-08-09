@@ -96,8 +96,19 @@ Callback to register on every provider:
 | Decrypt | Only via `credentials_for(..., &cfg.credentials_key)` on the control plane |
 | Sandboxes | Must not receive raw tokens (product rule) |
 | OAuth CSRF | Signed short-lived `state` JWT (`typ: oauth_state`) |
+| Live APIs | `fleet_integrations::proxy::invoke` — allowlisted ops for all OAuth apps; sanitized results only |
 
 Legacy plaintext rows still load until the user reconnects.
+
+### Chat proxy tools
+
+| Tool | Behavior |
+| --- | --- |
+| `integration_query` | Control-plane decrypt → provider API → sanitized JSON (no secrets) |
+| `launch_agent_plan` | Multi-task fan-out; optional `context_from` embeds proxy results into task specs |
+| `launch_agent_task` | Single task + multi-tick; sandboxes destroyed after exit |
+
+Ops (all via `integration_query`): GitHub read/write; Jira issues + transitions; Linear issues; Slack channels/messages; Figma files; Notion pages/DBs; Drive list/export; Teams chat/channel send; Discord identity + guilds. Coming soon (no OAuth): GitLab, Bitbucket, Confluence, Asana, Trello.
 
 ---
 

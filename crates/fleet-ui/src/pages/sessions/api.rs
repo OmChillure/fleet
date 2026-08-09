@@ -1,6 +1,6 @@
 //! Cookie-auth session list + live detail.
 
-pub use crate::pages::fleet::api::{FleetError, list_sessions};
+pub use crate::pages::fleet::api::FleetError;
 
 use serde_json::Value;
 

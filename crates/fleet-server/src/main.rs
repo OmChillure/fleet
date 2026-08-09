@@ -2,8 +2,11 @@
 //!
 //! Auth + workspaces + integrations + orchestrator control plane on one process.
 
+mod chat;
+mod chat_tools;
 mod config;
 mod fleet_routes;
+mod grok;
 mod state;
 
 use std::net::SocketAddr;
@@ -95,6 +98,12 @@ async fn run() -> anyhow::Result<()> {
         api_public_base = %config.integrations.api_public_base,
         ui_public_base = %config.integrations.ui_public_base,
         oauth_configured = ?oauth_configured,
+        ollama_enabled = config.ollama.enabled,
+        ollama_base = %config.ollama.base_url,
+        ollama_model = ?config.ollama.default_model,
+        grok_enabled = config.grok.enabled,
+        grok_auth = %config.grok.auth_path.display(),
+        grok_api_key_fallback = config.grok.api_key.is_some(),
         "configuration loaded"
     );
 
@@ -115,11 +124,41 @@ async fn run() -> anyhow::Result<()> {
     })?;
     tracing::info!("orchestrator state ready");
 
+    // Local drain loop: queue thousands of tasks, run FLEET_MAX_AGENTS at a time (no k8s).
+    {
+        let orch_bg = orch.clone();
+        let interval = orch_cfg.tick_interval;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match orch_bg.store.list_open_project_ids().await {
+                    Ok(ids) if ids.is_empty() => {}
+                    Ok(ids) => {
+                        for id in ids {
+                            if let Err(e) = orch_bg.tick.tick_project(id).await {
+                                tracing::debug!(project_id = %id, error = %e, "background tick");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "background tick: list open projects failed");
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            tick_interval_s = interval.as_secs(),
+            "background fleet ticker started (local sandbox queue)"
+        );
+    }
+
     let state = AppState {
         db,
         auth: config.auth.clone(),
         integrations: config.integrations.clone(),
         orch: orch.clone(),
+        ollama: config.ollama.clone(),
+        grok: config.grok.clone(),
     };
 
     // Admin / worker bearer routes remain on orch_router (/v1, /healthz).
@@ -189,6 +228,8 @@ fn build_router() -> Router<AppState> {
         .merge(fleet_auth::router::<AppState>())
         // Integrations catalog (GitHub, Jira, Slack, …)
         .merge(fleet_integrations::router::<AppState>())
+        // Workspace chat → Grok (xAI) + Ollama
+        .merge(chat::router())
         // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
 }
@@ -299,6 +340,14 @@ async fn api_index() -> Json<Value> {
                 "tasks": "GET /api/workspaces/{workspace_id}/fleet/tasks",
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
                 "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
+                "workers": "GET /api/workspaces/{workspace_id}/fleet/workers",
+            },
+            "chat": {
+                "status": "GET /api/workspaces/{workspace_id}/chat/status",
+                "conversations": "GET|POST /api/workspaces/{workspace_id}/chat/conversations",
+                "conversation": "GET|DELETE /api/workspaces/{workspace_id}/chat/conversations/{id}",
+                "complete": "POST /api/workspaces/{workspace_id}/chat",
+                "note": "Grok CLI + Ollama; persisted history; fleet + integration tools",
             },
             "orchestrator_admin": {
                 "note": "Bearer ADMIN_TOKEN for automation / workers",

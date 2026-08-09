@@ -1,5 +1,8 @@
-//! Chat feature (`/chat`) — workspace AI chat.
+//! Chat feature (`/chat`) — workspace AI chat (Grok / Ollama) with saved history.
 
+mod api;
+mod markdown;
 mod page;
 
-pub use page::Chat;
+pub use api::{delete_conversation, list_conversations, ConversationSummary};
+pub use page::{Chat, ChatThread};

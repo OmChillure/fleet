@@ -1,94 +1,152 @@
-use dioxus::prelude::*;
-use serde_json::Value;
+//! Chat history — saved conversations for this workspace.
 
-use super::api::{get_session_detail, list_sessions};
+use dioxus::prelude::*;
+
+use crate::components::toast::show_toast;
+use crate::pages::chat::{delete_conversation, list_conversations, ConversationSummary};
 use crate::Route;
+
+use super::api::get_session_detail;
 use gloo_timers::future::TimeoutFuture;
 
-#[derive(Clone, PartialEq)]
-struct SessionRow {
-    id: String,
-    status: String,
-    backend: String,
-    profile: String,
-    progress: i64,
-    exit_reason: String,
-}
-
-fn parse_list(v: &Value) -> Vec<SessionRow> {
-    v["sessions"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| {
-                    Some(SessionRow {
-                        id: s["id"].as_str()?.to_string(),
-                        status: s["status"].as_str().unwrap_or("?").to_string(),
-                        backend: s["runtime_backend"].as_str().unwrap_or("?").to_string(),
-                        profile: s["worker_profile"].as_str().unwrap_or("").to_string(),
-                        progress: s["progress_pct"].as_i64().unwrap_or(0),
-                        exit_reason: s["exit_reason"].as_str().unwrap_or("").to_string(),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 #[component]
 pub fn Sessions(workspace_id: String) -> Element {
-    let mut rows = use_signal(|| Vec::<SessionRow>::new());
+    let mut conversations = use_signal(|| Vec::<ConversationSummary>::new());
+    let mut loading = use_signal(|| true);
     let mut error = use_signal(|| Option::<String>::None);
+    let navigator = use_navigator();
 
-    {
-        let ws = workspace_id.clone();
-        use_effect(move || {
-            let ws = ws.clone();
-            spawn(async move {
-                match list_sessions(&ws).await {
-                    Ok(v) => {
-                        rows.set(parse_list(&v));
-                        error.set(None);
-                    }
-                    Err(e) => error.set(Some(e.message())),
+    let ws = workspace_id.clone();
+    let mut bootstrapped = use_signal(|| false);
+    use_effect(move || {
+        if bootstrapped() {
+            return;
+        }
+        bootstrapped.set(true);
+        loading.set(true);
+        let ws = ws.clone();
+        spawn(async move {
+            match list_conversations(&ws).await {
+                Ok(list) => {
+                    conversations.set(list);
+                    error.set(None);
                 }
-            });
-        });
-    }
-
-    rsx! {
-        div { class: "mx-auto flex h-full w-full max-w-5xl flex-col gap-4 overflow-auto p-4 md:p-5",
-            div {
-                h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Live sessions" }
-                p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Agent turns for this workspace. Open a session to watch the live stream."
+                Err(e) => {
+                    error.set(Some(e.message()));
                 }
             }
-            if let Some(err) = error() {
-                p { class: "text-sm text-red-400", "{err}" }
-            } else if rows().is_empty() {
-                p { class: "text-sm text-[var(--app-muted)]",
-                    "No sessions yet. Start a run on Fleet and tick until a worker spawns."
+            loading.set(false);
+        });
+    });
+
+    rsx! {
+        div { class: "flex h-full min-h-0 w-full flex-col px-4 py-6 md:px-8",
+            div { class: "mb-6 flex flex-wrap items-center justify-between gap-3",
+                div {
+                    h1 { class: "m-0 text-xl font-semibold text-[var(--app-fg)]",
+                        "Chat history"
+                    }
+                    p { class: "m-0 mt-1 text-sm text-[var(--app-muted)]",
+                        "Saved conversations for this workspace. Open one to continue."
+                    }
+                }
+                Link {
+                    to: Route::Chat { workspace_id: workspace_id.clone() },
+                    class: "inline-flex items-center rounded-xl bg-[var(--app-fg)] px-3.5 py-2 text-sm font-medium text-[var(--app-bg)] transition hover:opacity-90",
+                    "New chat"
+                }
+            }
+
+            if loading() {
+                p { class: "text-sm text-[var(--app-muted)]", "Loading…" }
+            } else if let Some(err) = error() {
+                div { class: "rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100",
+                    "{err}"
+                }
+            } else if conversations().is_empty() {
+                div {
+                    class: "flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-[var(--app-border)] px-6 py-16 text-center",
+                    p { class: "m-0 text-sm text-[var(--app-muted)]",
+                        "No saved chats yet. Start a conversation and it will appear here."
+                    }
+                    Link {
+                        to: Route::Chat { workspace_id: workspace_id.clone() },
+                        class: "text-sm font-medium text-[var(--app-fg)] underline-offset-2 hover:underline",
+                        "Go to Chat"
+                    }
                 }
             } else {
-                div { class: "flex flex-col gap-2",
-                    for s in rows() {
-                        Link {
-                            key: "{s.id}",
-                            to: Route::SessionDetail {
-                                workspace_id: workspace_id.clone(),
-                                session_id: s.id.clone(),
-                            },
-                            class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 transition hover:border-[var(--app-accent)]",
-                            div { class: "flex flex-wrap items-center justify-between gap-2",
-                                p { class: "m-0 font-medium text-[var(--app-fg)]",
-                                    "{s.backend} · {s.profile}"
+                ul { class: "m-0 flex list-none flex-col gap-2 p-0",
+                    for conv in conversations() {
+                        li {
+                            key: "{conv.id}",
+                            class: "group flex items-stretch gap-2 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] transition hover:border-[var(--app-fg)]/20",
+                            button {
+                                class: "min-w-0 flex-1 cursor-pointer border-0 bg-transparent px-4 py-3 text-left",
+                                r#type: "button",
+                                onclick: {
+                                    let ws = workspace_id.clone();
+                                    let id = conv.id.clone();
+                                    move |_| {
+                                        navigator.push(Route::ChatThread {
+                                            workspace_id: ws.clone(),
+                                            conversation_id: id.clone(),
+                                        });
+                                    }
+                                },
+                                div { class: "flex items-start justify-between gap-2",
+                                    h2 { class: "m-0 truncate text-sm font-semibold text-[var(--app-fg)]",
+                                        "{conv.title}"
+                                    }
+                                    span { class: "shrink-0 text-[10px] text-[var(--app-muted)]",
+                                        "{conv.message_count} msgs"
+                                    }
                                 }
-                                span { class: "text-xs text-[var(--app-muted)]", "{s.status} · {s.progress}%" }
+                                if let Some(preview) = &conv.preview {
+                                    p { class: "m-0 mt-1 line-clamp-2 text-xs text-[var(--app-muted)]",
+                                        "{preview}"
+                                    }
+                                }
+                                div { class: "mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--app-muted)]",
+                                    if let Some(p) = &conv.provider {
+                                        span { class: "rounded bg-[var(--app-bg)] px-1.5 py-0.5",
+                                            "{p}"
+                                        }
+                                    }
+                                    if let Some(m) = &conv.model {
+                                        span { class: "rounded bg-[var(--app-bg)] px-1.5 py-0.5 font-mono",
+                                            "{m}"
+                                        }
+                                    }
+                                    span { "{conv.updated_at}" }
+                                }
                             }
-                            p { class: "m-0 mt-1 font-mono text-xs text-[var(--app-muted)]", "{s.id}" }
-                            if !s.exit_reason.is_empty() {
-                                p { class: "m-0 mt-1 text-sm text-red-400", "{s.exit_reason}" }
+                            button {
+                                class: "shrink-0 self-center px-3 py-2 text-xs text-red-300/80 opacity-0 transition group-hover:opacity-100 hover:text-red-200",
+                                r#type: "button",
+                                title: "Delete conversation",
+                                onclick: {
+                                    let ws = workspace_id.clone();
+                                    let id = conv.id.clone();
+                                    move |_| {
+                                        let ws = ws.clone();
+                                        let id = id.clone();
+                                        spawn(async move {
+                                            match delete_conversation(&ws, &id).await {
+                                                Ok(()) => {
+                                                    // Reload list
+                                                    match list_conversations(&ws).await {
+                                                        Ok(list) => conversations.set(list),
+                                                        Err(e) => show_toast().error(e.message()),
+                                                    }
+                                                }
+                                                Err(e) => show_toast().error(e.message()),
+                                            }
+                                        });
+                                    }
+                                },
+                                "Delete"
                             }
                         }
                     }
@@ -136,10 +194,19 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                             if buf.trim().is_empty() {
                                 buf = v["transcript"].as_str().unwrap_or("").to_string();
                             }
-                            live.set(buf);
+                            if !buf.trim().is_empty() {
+                                live.set(buf);
+                            }
                             error.set(None);
                             let st = v["session"]["status"].as_str().unwrap_or("");
-                            if matches!(st, "exited" | "failed" | "cancelled") {
+                            if matches!(
+                                st,
+                                "exited"
+                                    | "failed"
+                                    | "cancelled"
+                                    | "failed_spawn"
+                                    | "killing"
+                            ) {
                                 running.set(false);
                                 break;
                             }

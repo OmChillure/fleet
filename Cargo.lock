@@ -1634,6 +1634,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-extra",
+ "base64",
  "chrono",
  "fleet-auth",
  "fleet-db",
@@ -1725,11 +1726,13 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-extra",
+ "chrono",
  "dotenvy",
  "fleet-auth",
  "fleet-db",
  "fleet-integrations",
  "fleet-orchestrator",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -1746,6 +1749,7 @@ dependencies = [
  "dioxus",
  "gloo-timers",
  "js-sys",
+ "pulldown-cmark",
  "reqwest",
  "serde",
  "serde_json",
@@ -3383,6 +3387,24 @@ dependencies = [
  "idna",
  "psl-types",
 ]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quinn"

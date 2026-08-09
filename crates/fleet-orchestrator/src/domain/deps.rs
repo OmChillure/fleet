@@ -23,18 +23,14 @@ pub fn evaluate_dependencies(dep_statuses: &[BoardTaskStatus]) -> DepDecision {
             failure_reason: None,
         };
     }
-    if dep_statuses
-        .iter()
-        .any(|s| *s == BoardTaskStatus::DoneFailed)
+    if dep_statuses.contains(&BoardTaskStatus::DoneFailed)
     {
         return DepDecision {
             action: DepAction::Fail,
             failure_reason: Some(FAILURE_DEPENDENCY_FAILED),
         };
     }
-    if dep_statuses
-        .iter()
-        .any(|s| *s == BoardTaskStatus::Cancelled)
+    if dep_statuses.contains(&BoardTaskStatus::Cancelled)
     {
         return DepDecision {
             action: DepAction::Cancel,

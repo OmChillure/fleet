@@ -44,13 +44,9 @@ pub fn rollup_run(input: &RunRollupInput) -> RollupAction {
     }
 
     let any_failed = input
-        .task_statuses
-        .iter()
-        .any(|s| *s == BoardTaskStatus::DoneFailed);
+        .task_statuses.contains(&BoardTaskStatus::DoneFailed);
     let any_cancelled = input
-        .task_statuses
-        .iter()
-        .any(|s| *s == BoardTaskStatus::Cancelled);
+        .task_statuses.contains(&BoardTaskStatus::Cancelled);
     let all_success = input
         .task_statuses
         .iter()

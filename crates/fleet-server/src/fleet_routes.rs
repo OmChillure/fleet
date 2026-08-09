@@ -51,6 +51,10 @@ pub fn router() -> Router<AppState> {
             get(get_session_detail),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/workers",
+            get(get_workers),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
@@ -193,32 +197,33 @@ async fn patch_fleet_config(
 
 #[derive(Debug, Deserialize)]
 pub struct FixtureRequest {
-    /// Optional; default is two-task chain.
+    /// `chain` (default) or `diamond`.
     #[serde(default)]
-    #[allow(dead_code)]
     pub kind: Option<String>,
 }
 
-async fn post_fixture(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Path(workspace_id): Path<Uuid>,
-    Json(_body): Json<FixtureRequest>,
-) -> AppResult<(StatusCode, Json<Value>)> {
-    let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
-    ensure_project(&state, workspace_id, &name).await?;
-
-    let run_id = Uuid::new_v4();
-    let plan_id = Uuid::new_v4();
-    let plan = WorkPlanBody {
-        plan_id,
-        project_id: workspace_id,
-        run_id,
-        version: 1,
-        status: WorkPlanStatus::Accepted,
-        source: "ui".into(),
-        tasks: vec![
+fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
+    let coding = |id: &str, title: &str, deps: Vec<&str>, priority: i32| PlanTask {
+        plan_task_id: id.into(),
+        title: title.into(),
+        summary: String::new(),
+        spec_md: String::new(),
+        depends_on: deps.into_iter().map(str::to_string).collect(),
+        worker_profile: "coding".into(),
+        acceptance: vec![],
+        priority,
+        external_ref: None,
+        timeout_s: Some(3600),
+        max_retries: Some(1),
+    };
+    match kind {
+        "diamond" => vec![
+            coding("root", "Root", vec![], 100),
+            coding("left", "Left branch", vec!["root"], 50),
+            coding("right", "Right branch", vec!["root"], 50),
+            coding("join", "Join", vec!["left", "right"], 10),
+        ],
+        _ => vec![
             PlanTask {
                 plan_task_id: "t1".into(),
                 title: "Root task".into(),
@@ -246,6 +251,35 @@ async fn post_fixture(
                 max_retries: None,
             },
         ],
+    }
+}
+
+async fn post_fixture(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<FixtureRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let (user, _) = require_member(&state, &jar, workspace_id).await?;
+    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
+    ensure_project(&state, workspace_id, &name).await?;
+
+    let kind = body
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("chain");
+    let run_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let plan = WorkPlanBody {
+        plan_id,
+        project_id: workspace_id,
+        run_id,
+        version: 1,
+        status: WorkPlanStatus::Accepted,
+        source: "ui".into(),
+        tasks: fixture_tasks(kind),
         policy: PlanPolicy {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
@@ -270,6 +304,7 @@ async fn post_fixture(
             "plan_id": plan_row.id,
             "status": run.status,
             "project_id": workspace_id,
+            "kind": kind,
         })),
     ))
 }
@@ -492,9 +527,50 @@ async fn get_runs(
     })))
 }
 
+/// Worker sessions exposed as "sandboxes" for product language (stub backend = session).
+async fn get_workers(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let sessions = state
+        .orch
+        .store
+        .list_sessions_for_project(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("list_sessions_for_project", e))?;
+    let cfg = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+    Ok(Json(json!({
+        "sandbox_backend": cfg.sandbox_backend,
+        "sandboxes": sessions.iter().map(|s| json!({
+            "id": s.id,
+            "run_id": s.run_id,
+            "board_task_id": s.board_task_id,
+            "attempt": s.attempt,
+            "status": s.status,
+            "runtime_backend": s.runtime_backend,
+            "runtime_handle": s.runtime_handle,
+            "worker_profile": s.worker_profile,
+            "progress_pct": s.progress_pct,
+            "work_dir": s.work_dir,
+            "last_heartbeat_at": s.last_heartbeat_at,
+            "started_at": s.started_at,
+            "exited_at": s.exited_at,
+            "exit_reason": s.exit_reason,
+            "created_at": s.created_at,
+        })).collect::<Vec<_>>()
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CancelBody {
-    #[allow(dead_code)]
     pub reason: Option<String>,
 }
 
@@ -505,7 +581,9 @@ async fn post_cancel(
     body: Option<Json<CancelBody>>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
-    let _ = body;
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .filter(|s| !s.trim().is_empty());
     state
         .orch
         .store
@@ -515,7 +593,11 @@ async fn post_cancel(
             tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
             AppError::bad_request(e.to_string())
         })?;
-    Ok(Json(json!({ "run_id": run_id, "cancel_requested": true })))
+    Ok(Json(json!({
+        "run_id": run_id,
+        "cancel_requested": true,
+        "reason": reason,
+    })))
 }
 
 trait AuthFromApp {

@@ -37,8 +37,8 @@ impl DbError {
     }
 
     pub fn from_sqlx(err: sqlx::Error) -> Self {
-        if let sqlx::Error::Database(ref db) = err {
-            if db.code().as_deref() == Some("23505") {
+        if let sqlx::Error::Database(ref db) = err
+            && db.code().as_deref() == Some("23505") {
                 tracing::debug!(
                     detail = %db.message(),
                     constraint = ?db.constraint(),
@@ -46,7 +46,6 @@ impl DbError {
                 );
                 return DbError::Conflict("unique constraint violated".into());
             }
-        }
         DbError::Sqlx(err)
     }
 }

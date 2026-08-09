@@ -82,6 +82,32 @@ pub async fn schedule_and_spawn(
             .join(assignment.session_id.to_string());
         let _ = tokio::fs::create_dir_all(&session_work).await;
 
+        // Vibe/Hermes pattern: optional isolated git checkout per worker.
+        if let Ok(src) = std::env::var("FLEET_GIT_SOURCE") {
+            let src = src.trim().to_string();
+            if !src.is_empty() {
+                let project_dir = data_dir.join("projects").join(project_id.to_string());
+                match crate::sandbox::git_isolate::attach_worktree(
+                    &project_dir,
+                    &session_work,
+                    &src,
+                )
+                .await
+                {
+                    Ok(repo) => tracing::info!(
+                        session_id = %assignment.session_id,
+                        repo = %repo.display(),
+                        "git worktree attached"
+                    ),
+                    Err(e) => tracing::warn!(
+                        session_id = %assignment.session_id,
+                        error = %e,
+                        "git worktree skipped (sandbox still runs)"
+                    ),
+                }
+            }
+        }
+
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
         let mut req = SpawnRequest {
             session_id: assignment.session_id,
@@ -94,6 +120,10 @@ pub async fn schedule_and_spawn(
             work_dir: session_work,
             env: HashMap::new(),
             timeout: Duration::from_secs(timeout_s),
+            task_title: Some(task.title.clone()),
+            task_summary: Some(task.summary.clone()),
+            // Full spec (may include integration context markdown + ```bash fences).
+            task_spec: Some(task.spec_md.clone()),
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env

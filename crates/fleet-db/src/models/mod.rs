@@ -1,4 +1,5 @@
 mod audit;
+mod chat;
 mod integration;
 mod persona;
 mod session;
@@ -7,6 +8,7 @@ mod work_claim;
 mod workspace;
 
 pub use audit::*;
+pub use chat::*;
 pub use integration::*;
 pub use persona::*;
 pub use session::*;
