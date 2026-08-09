@@ -6,6 +6,7 @@ mod common;
 use axum::http::StatusCode;
 use fleet_auth::{ACCESS_COOKIE, REFRESH_COOKIE};
 use serde_json::json;
+use uuid::Uuid;
 
 use common::*;
 
@@ -16,10 +17,11 @@ async fn signup_201_no_session_cookies() {
     let out = signup(&app, &email, TEST_PASSWORD).await;
 
     assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
-    let message = out.body["message"].as_str().unwrap_or("");
-    assert!(
-        message.contains("log in"),
-        "expected message to mention log in, got {message:?}"
+    assert_eq!(
+        out.body["message"].as_str(),
+        Some("account created — please log in"),
+        "{}",
+        out.body
     );
     assert_eq!(out.body["default_workspace"]["role"], "owner");
     assert!(
@@ -27,6 +29,13 @@ async fn signup_201_no_session_cookies() {
         "signup must not set {ACCESS_COOKIE}: {:?}",
         out.set_cookies()
     );
+    assert!(
+        out.cookie(REFRESH_COOKIE).is_none(),
+        "signup must not set {REFRESH_COOKIE}: {:?}",
+        out.set_cookies()
+    );
+    let me = call(&app, "GET", "/api/auth/me", None, None).await;
+    assert_eq!(me.status, StatusCode::UNAUTHORIZED, "signup is not a login");
 }
 
 #[tokio::test]
@@ -34,6 +43,7 @@ async fn signup_rejects_bad_email() {
     let app = app().await;
     let out = signup(&app, "not-an-email", TEST_PASSWORD).await;
     assert_eq!(out.status, StatusCode::BAD_REQUEST, "{}", out.body);
+    assert_eq!(out.error(), "valid email is required");
 }
 
 #[tokio::test]
@@ -41,6 +51,19 @@ async fn signup_rejects_short_password() {
     let app = app().await;
     let out = signup(&app, &unique_email(), "short").await;
     assert_eq!(out.status, StatusCode::BAD_REQUEST, "{}", out.body);
+    assert!(
+        out.error().contains("8"),
+        "short password error should mention 8 characters, got {:?}",
+        out.error()
+    );
+
+    let exactly_eight = signup(&app, &unique_email(), "12345678").await;
+    assert_eq!(
+        exactly_eight.status,
+        StatusCode::CREATED,
+        "password of length 8 must be accepted: {}",
+        exactly_eight.body
+    );
 }
 
 #[tokio::test]
@@ -60,6 +83,23 @@ async fn signup_duplicate_email_409() {
 
     let second = signup(&app, &email, TEST_PASSWORD).await;
     assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+    assert_eq!(
+        second.error(),
+        "an account with this email already exists",
+        "{}",
+        second.body
+    );
+
+    let mixed = format!("Auth.DUP.{}@Example.TEST", Uuid::new_v4());
+    let first_mixed = signup(&app, &mixed, TEST_PASSWORD).await;
+    assert_eq!(first_mixed.status, StatusCode::CREATED, "{}", first_mixed.body);
+    let again_lower = signup(&app, &mixed.to_ascii_lowercase(), TEST_PASSWORD).await;
+    assert_eq!(
+        again_lower.status,
+        StatusCode::CONFLICT,
+        "email uniqueness is case-insensitive: {}",
+        again_lower.body
+    );
 }
 
 #[tokio::test]
@@ -71,6 +111,7 @@ async fn login_sets_httponly_cookies_and_workspace() {
 
     let (out, jar) = login(&app, &email, TEST_PASSWORD).await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    assert_eq!(out.body["message"].as_str(), Some("logged in"));
     assert_eq!(out.body["default_workspace"]["role"], "owner");
 
     let access = out
@@ -79,16 +120,15 @@ async fn login_sets_httponly_cookies_and_workspace() {
     let refresh = out
         .cookie(REFRESH_COOKIE)
         .unwrap_or_else(|| panic!("missing {REFRESH_COOKIE} Set-Cookie"));
-    assert!(
-        access.is_httponly(),
-        "{ACCESS_COOKIE} should be HttpOnly: {}",
-        access.raw
-    );
-    assert!(
-        refresh.is_httponly(),
-        "{REFRESH_COOKIE} should be HttpOnly: {}",
-        refresh.raw
-    );
+    for c in [&access, &refresh] {
+        assert!(c.is_httponly(), "{} should be HttpOnly: {}", c.name, c.raw);
+        assert_eq!(c.path(), Some("/"), "{} Path must be /: {}", c.name, c.raw);
+        assert!(
+            !c.is_secure(),
+            "COOKIE_SECURE=false must not set Secure: {}",
+            c.raw
+        );
+    }
     assert!(jar.access().is_some());
     assert!(jar.refresh().is_some());
 }
@@ -305,4 +345,151 @@ async fn other_user_forbidden_on_personas() {
     let uri = format!("/api/workspaces/{ws_id}/personas");
     let out = call(&app, "GET", &uri, Some(&b_jar), None).await;
     assert_eq!(out.status, StatusCode::FORBIDDEN, "{}", out.body);
+    assert!(
+        out.error().contains("not a member"),
+        "forbidden should say not a member, got {:?}",
+        out.error()
+    );
+}
+
+#[tokio::test]
+async fn unauthenticated_cookie_routes_are_401() {
+    let app = app().await;
+    for (method, uri) in [
+        ("GET", "/api/auth/me"),
+        ("GET", "/api/workspaces"),
+        ("POST", "/api/workspaces"),
+    ] {
+        let out = call(&app, method, uri, None, Some(json!({ "name": "x" }))).await;
+        assert_eq!(
+            out.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}: {}",
+            out.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn refresh_without_cookie_is_401() {
+    let app = app().await;
+    let out = call(&app, "POST", "/api/auth/refresh", None, None).await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
+    assert_eq!(out.error(), "missing refresh token");
+}
+
+#[tokio::test]
+async fn logout_clears_cookies_and_blocks_refresh() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
+
+    let out = call(&app, "POST", "/api/auth/logout", Some(&jar), None).await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    assert_eq!(out.body["message"].as_str(), Some("logged out"));
+
+    let access = out
+        .cookie(ACCESS_COOKIE)
+        .expect("logout must send access Set-Cookie");
+    let refresh = out
+        .cookie(REFRESH_COOKIE)
+        .expect("logout must send refresh Set-Cookie");
+    assert_eq!(
+        access.max_age(),
+        Some(0),
+        "logout must expire access cookie: {}",
+        access.raw
+    );
+    assert_eq!(
+        refresh.max_age(),
+        Some(0),
+        "logout must expire refresh cookie: {}",
+        refresh.raw
+    );
+
+    let refresh_after = call(&app, "POST", "/api/auth/refresh", Some(&jar), None).await;
+    assert_eq!(
+        refresh_after.status,
+        StatusCode::UNAUTHORIZED,
+        "revoked refresh must not rotate: {}",
+        refresh_after.body
+    );
+}
+
+#[tokio::test]
+async fn login_is_case_insensitive_on_email() {
+    let app = app().await;
+    let local = format!("Case.{}", Uuid::new_v4());
+    let email = format!("{local}@Example.TEST");
+    let created = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let (out, jar) = login(&app, &email.to_ascii_lowercase(), TEST_PASSWORD).await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    assert!(jar.access().is_some());
+}
+
+#[tokio::test]
+async fn signup_display_name_sets_workspace_name() {
+    let app = app().await;
+    let email = unique_email();
+    let out = signup_with(&app, &email, TEST_PASSWORD, Some("Ada Lovelace")).await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+    assert_eq!(
+        out.body["default_workspace"]["name"].as_str(),
+        Some("Ada Lovelace's workspace"),
+        "{}",
+        out.body
+    );
+}
+
+#[tokio::test]
+async fn inactive_user_cannot_login() {
+    let app = app().await;
+    let email = unique_email();
+    let created = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let pool = connect_and_migrate().await;
+    let n = sqlx::query("UPDATE users SET status = 'disabled' WHERE email_normalized = $1")
+        .bind(email.to_ascii_lowercase())
+        .execute(&pool)
+        .await
+        .expect("deactivate user");
+    assert_eq!(n.rows_affected(), 1, "expected one user row updated");
+
+    let (out, _) = login(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
+    assert_eq!(out.error(), "account is not active");
+}
+
+#[tokio::test]
+async fn create_workspace_then_list_includes_both() {
+    let app = app().await;
+    let (_email, jar, login_out) = signup_and_login(&app).await;
+    let first_id = login_out.body["default_workspace"]["id"]
+        .as_str()
+        .expect("default workspace")
+        .to_string();
+
+    let created = call(
+        &app,
+        "POST",
+        "/api/workspaces",
+        Some(&jar),
+        Some(json!({ "name": "Second" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let second_id = created.body["workspace"]["id"].as_str().unwrap();
+
+    let listed = call(&app, "GET", "/api/workspaces", Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids: Vec<&str> = listed.body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["id"].as_str())
+        .collect();
+    assert!(ids.contains(&first_id.as_str()), "{ids:?}");
+    assert!(ids.contains(&second_id), "{ids:?}");
 }

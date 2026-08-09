@@ -128,4 +128,49 @@ mod tests {
         let err = verify_oauth_state(secret, &tampered).unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(_)));
     }
+
+    #[test]
+    fn access_token_typ_cannot_be_used_as_oauth_state() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct AccessShaped {
+            sub: String,
+            workspace_id: String,
+            provider: String,
+            nonce: String,
+            exp: i64,
+            iat: i64,
+            typ: String,
+        }
+
+        let secret = "oauth-state-test-secret";
+        let now = chrono::Utc::now().timestamp();
+        let token = encode(
+            &Header::default(),
+            &AccessShaped {
+                sub: Uuid::now_v7().to_string(),
+                workspace_id: Uuid::now_v7().to_string(),
+                provider: "github".into(),
+                nonce: "n".into(),
+                exp: now + 600,
+                iat: now,
+                typ: "access".into(),
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+
+        let err = verify_oauth_state(secret, &token).unwrap_err();
+        match err {
+            AppError::Unauthorized(msg) => {
+                assert!(
+                    msg.contains("type") || msg.contains("invalid"),
+                    "expected type rejection, got {msg}"
+                );
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
 }

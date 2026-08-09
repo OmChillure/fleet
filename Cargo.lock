@@ -1590,6 +1590,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror 2.0.19",
  "time",
  "tokio",

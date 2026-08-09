@@ -111,7 +111,9 @@ pub async fn root_index(headers: HeaderMap) -> Response {
         "apis": {
             "auth": "/api/auth/*",
             "workspaces": "/api/workspaces",
+            "personas": "/api/workspaces/{workspace_id}/personas/*",
             "integrations": "/api/workspaces/{workspace_id}/integrations/*",
+            "chat": "/api/workspaces/{workspace_id}/chat/*",
             "fleet": "/api/workspaces/{workspace_id}/fleet/*",
             "orchestrator_admin": "/v1/*",
         }
@@ -164,7 +166,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
-        "apis": ["auth", "workspaces", "personas", "integrations", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "fleet", "orchestrator"],
     }))
 }
 

@@ -85,6 +85,30 @@ impl ParsedSetCookie {
             .split(';')
             .any(|part| part.trim().eq_ignore_ascii_case("HttpOnly"))
     }
+
+    pub fn path(&self) -> Option<&str> {
+        self.raw.split(';').find_map(|part| {
+            let p = part.trim();
+            p.split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Path"))
+                .map(|(_, v)| v)
+        })
+    }
+
+    pub fn max_age(&self) -> Option<i64> {
+        self.raw.split(';').find_map(|part| {
+            let p = part.trim();
+            p.split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Max-Age"))
+                .and_then(|(_, v)| v.parse().ok())
+        })
+    }
+
+    pub fn is_secure(&self) -> bool {
+        self.raw
+            .split(';')
+            .any(|part| part.trim().eq_ignore_ascii_case("Secure"))
+    }
 }
 
 pub fn parse_set_cookies(headers: &HeaderMap) -> Vec<ParsedSetCookie> {
@@ -216,14 +240,20 @@ pub async fn call(
 }
 
 pub async fn signup(app: &axum::Router, email: &str, password: &str) -> HttpOut {
-    call(
-        app,
-        "POST",
-        "/api/auth/signup",
-        None,
-        Some(json!({ "email": email, "password": password })),
-    )
-    .await
+    signup_with(app, email, password, None).await
+}
+
+pub async fn signup_with(
+    app: &axum::Router,
+    email: &str,
+    password: &str,
+    display_name: Option<&str>,
+) -> HttpOut {
+    let mut body = json!({ "email": email, "password": password });
+    if let Some(name) = display_name {
+        body["display_name"] = json!(name);
+    }
+    call(app, "POST", "/api/auth/signup", None, Some(body)).await
 }
 
 pub async fn login(app: &axum::Router, email: &str, password: &str) -> (HttpOut, CookieJar) {

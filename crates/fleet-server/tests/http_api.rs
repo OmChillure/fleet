@@ -170,8 +170,15 @@ async fn app() -> axum::Router {
 struct ParsedSetCookie {
     name: String,
     value: String,
-    #[allow(dead_code)]
     raw: String,
+}
+
+impl ParsedSetCookie {
+    fn is_httponly(&self) -> bool {
+        self.raw
+            .split(';')
+            .any(|part| part.trim().eq_ignore_ascii_case("HttpOnly"))
+    }
 }
 
 fn parse_set_cookies(headers: &HeaderMap) -> Vec<ParsedSetCookie> {
@@ -360,6 +367,12 @@ async fn signup_and_login(app: &axum::Router) -> (String, CookieJar, String) {
         "login must set {REFRESH_COOKIE}: {:?}",
         parse_set_cookies(&login_out.headers)
     );
+    let access_c = login_out.cookie(ACCESS_COOKIE).unwrap();
+    assert!(
+        access_c.is_httponly(),
+        "{ACCESS_COOKIE} must be HttpOnly: {}",
+        access_c.raw
+    );
     assert!(jar.access().is_some(), "jar missing {ACCESS_COOKIE}");
     assert!(jar.refresh().is_some(), "jar missing {REFRESH_COOKIE}");
     let ws_id = login_out.body["default_workspace"]["id"]
@@ -414,6 +427,19 @@ async fn health_ok_healthz_ok_api_index_lists_auth_and_fleet() {
     assert_eq!(health.status, StatusCode::OK, "{}", health.body);
     assert_eq!(health.body["status"], "ok");
     assert_eq!(health.body["service"], "fleet-server");
+    assert_eq!(health.body["db"], "up");
+    let apis = health.body["apis"]
+        .as_array()
+        .expect("health.apis")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    for need in ["auth", "workspaces", "personas", "integrations", "chat", "fleet"] {
+        assert!(
+            apis.contains(&need),
+            "health.apis must advertise {need}: {apis:?}"
+        );
+    }
 
     let healthz = call(&app, "GET", "/healthz", None, None).await;
     assert_eq!(healthz.status, StatusCode::OK, "{}", healthz.body);
@@ -429,6 +455,21 @@ async fn health_ok_healthz_ok_api_index_lists_auth_and_fleet() {
     assert!(
         api.body["apis"]["fleet"].is_object(),
         "api index must list fleet: {}",
+        api.body
+    );
+    assert!(
+        api.body["apis"]["chat"].is_object(),
+        "api index must list chat: {}",
+        api.body
+    );
+    assert!(
+        api.body["apis"]["personas"].is_object(),
+        "api index must list personas: {}",
+        api.body
+    );
+    assert!(
+        api.body["apis"]["integrations"].is_object(),
+        "api index must list integrations: {}",
         api.body
     );
 }
@@ -468,6 +509,8 @@ async fn fixture_chain_ticks_until_t1_t2_done_success() {
     )
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    assert_eq!(fx.body["kind"], "chain", "{}", fx.body);
+    assert_eq!(fx.body["project_id"].as_str(), Some(ws.as_str()));
     assert!(fx.body["run_id"].as_str().is_some(), "{}", fx.body);
 
     let tasks = tick_until_tasks_done(&app, &jar, &ws, &["t1", "t2"]).await;
@@ -497,26 +540,36 @@ async fn fixture_diamond_materializes_root_left_right_join() {
     )
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    assert_eq!(fx.body["kind"], "diamond", "{}", fx.body);
 
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
 
     let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
     assert_eq!(tasks.status, StatusCode::OK, "{}", tasks.body);
-    let ids: Vec<String> = tasks.body["tasks"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let list = tasks.body["tasks"].as_array().cloned().unwrap_or_default();
+    let by_id: std::collections::BTreeMap<_, _> = list
         .iter()
-        .filter_map(|t| t["plan_task_id"].as_str().map(str::to_string))
+        .filter_map(|t| {
+            Some((
+                t["plan_task_id"].as_str()?.to_string(),
+                t["status"].as_str()?.to_string(),
+            ))
+        })
         .collect();
     for want in ["root", "left", "right", "join"] {
         assert!(
-            ids.iter().any(|id| id == want),
-            "plan_task_ids missing {want}: {ids:?} body={}",
+            by_id.contains_key(want),
+            "plan_task_ids missing {want}: {by_id:?} body={}",
             tasks.body
         );
     }
+    // Join depends on left+right. One tick cannot honestly finish the join.
+    assert_ne!(
+        by_id.get("join").map(String::as_str),
+        Some("done_success"),
+        "join must not complete before its deps: {by_id:?}"
+    );
 }
 
 // ── 5. cancel run ───────────────────────────────────────────────────────────
@@ -789,6 +842,19 @@ async fn personas_seed_starters_create_patch_archive() {
     let got = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(got.body["status"], "archived");
+
+    let listed = call(&app, "GET", &base, Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids: Vec<&str> = listed.body["personas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&pid.as_str()),
+        "default persona list is active-only; archived {pid} leaked: {ids:?}"
+    );
 }
 
 // ── 9. integrations + oauth ─────────────────────────────────────────────────
@@ -820,6 +886,11 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         .unwrap_or_else(|| panic!("gitlab missing: {}", list.body));
     assert_eq!(github["availability"], "available", "{github}");
     assert_eq!(gitlab["availability"], "coming_soon", "{gitlab}");
+    assert_eq!(
+        github["oauth_start_path"],
+        serde_json::Value::Null,
+        "OAuth start must be omitted when the server has no GitHub client: {github}"
+    );
 
     let start = call(
         &app,
@@ -830,6 +901,56 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
     )
     .await;
     assert_eq!(start.status, StatusCode::BAD_REQUEST, "{}", start.body);
+    assert!(
+        start.body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("not available"),
+        "coming-soon start should say not available: {}",
+        start.body
+    );
+
+    let gh_start = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/integrations/github/oauth/start"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        gh_start.status,
+        StatusCode::BAD_REQUEST,
+        "unconfigured GitHub OAuth must not 302: {}",
+        gh_start.body
+    );
+    let gh_err = gh_start.body["error"].as_str().unwrap_or("").to_ascii_lowercase();
+    assert!(
+        gh_err.contains("not configured") || gh_err.contains("client"),
+        "expected unconfigured OAuth message, got {}",
+        gh_start.body
+    );
+
+    let unknown = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/integrations/notaprovider/oauth/start"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+
+    let disc = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/integrations/github"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(disc.status, StatusCode::NOT_FOUND, "{}", disc.body);
 
     let cb = call(
         &app,
@@ -867,6 +988,70 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
 
     let status = call(&app, "GET", &format!("{chat}/status"), Some(&jar), None).await;
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
+    let providers = status.body["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(providers.contains(&"grok"), "{providers:?}");
+    assert!(providers.contains(&"ollama"), "{providers:?}");
+    let openai = status.body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "openai");
+    if let Some(p) = openai {
+        assert_eq!(p["coming_soon"], true, "{p}");
+        assert_eq!(p["available"], false, "{p}");
+    }
+
+    let empty = call(
+        &app,
+        "POST",
+        &chat,
+        Some(&jar),
+        Some(json!({ "messages": [], "provider": "ollama" })),
+    )
+    .await;
+    assert_eq!(empty.status, StatusCode::BAD_REQUEST, "{}", empty.body);
+
+    let unknown_provider = call(
+        &app,
+        "POST",
+        &chat,
+        Some(&jar),
+        Some(json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "provider": "openai",
+            "model": "gpt-4"
+        })),
+    )
+    .await;
+    assert_eq!(
+        unknown_provider.status,
+        StatusCode::BAD_REQUEST,
+        "unknown provider must not 5xx: {}",
+        unknown_provider.body
+    );
+
+    let grok_off = call(
+        &app,
+        "POST",
+        &chat,
+        Some(&jar),
+        Some(json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "provider": "grok"
+        })),
+    )
+    .await;
+    assert!(
+        grok_off.status.is_client_error(),
+        "disabled grok must be a client error, not {}: {}",
+        grok_off.status,
+        grok_off.body
+    );
 
     let created = call(
         &app,
@@ -973,5 +1158,45 @@ async fn v1_projects_rejects_missing_bearer_and_session_cookie() {
         StatusCode::CREATED,
         "ADMIN_TOKEN bearer should create a project: {}",
         with_admin.body
+    );
+}
+
+#[tokio::test]
+async fn fleet_requires_membership() {
+    let app = app().await;
+    let (_a, a_jar, a_ws) = signup_and_login(&app).await;
+    let (_b, b_jar, _) = signup_and_login(&app).await;
+
+    let anon = call(&app, "GET", &fleet(&a_ws, ""), None, None).await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED, "{}", anon.body);
+
+    let other = call(&app, "GET", &fleet(&a_ws, ""), Some(&b_jar), None).await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN, "{}", other.body);
+
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&a_ws, "/runs/fixture"),
+        Some(&a_jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    let _ = tick_until_tasks_done(&app, &a_jar, &a_ws, &["t1"]).await;
+    let sessions = call(&app, "GET", &fleet(&a_ws, "/sessions"), Some(&a_jar), None).await;
+    let sid = sessions.body["sessions"][0]["id"].as_str().expect("session");
+    let stolen = call(
+        &app,
+        "GET",
+        &fleet(&a_ws, &format!("/sessions/{sid}")),
+        Some(&b_jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        stolen.status,
+        StatusCode::FORBIDDEN,
+        "other member must not read session detail: {}",
+        stolen.body
     );
 }

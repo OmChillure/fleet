@@ -39,3 +39,4 @@ uuid = { workspace = true }
 axum = { workspace = true }
 cookie = { workspace = true }
 fleet-db = { workspace = true }
+sqlx = { workspace = true }
