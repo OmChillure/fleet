@@ -6,6 +6,7 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use fleet_auth::{AppError, AppResult};
@@ -302,16 +303,23 @@ async fn fetch_token_endpoint(issuer: &str) -> Result<String, String> {
 }
 
 fn write_auth_entry(path: &Path, entry_key: &str, entry: &AuthEntry) -> Result<(), String> {
-    let mut map = parse_auth_file(path).unwrap_or_default();
+    static AUTH_WRITE: Mutex<()> = Mutex::new(());
+    let _guard = AUTH_WRITE
+        .lock()
+        .map_err(|_| "auth.json write lock poisoned".to_string())?;
+
+    let mut map = if path.is_file() {
+        parse_auth_file(path)?
+    } else {
+        serde_json::Map::new()
+    };
     let mut val = serde_json::to_value(entry).map_err(|e| e.to_string())?;
-    // Merge flatten extras if they got nested under "extra" — AuthEntry uses flatten so OK.
     if let Some(obj) = val.as_object_mut() {
-        // Remove empty extra object noise if present as nested (shouldn't with flatten).
         obj.remove("extra");
     }
     map.insert(entry_key.to_string(), val);
     let pretty = serde_json::to_string_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
-    // Write with restrictive mode when possible.
+    let tmp = path.with_extension("json.tmp");
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -321,15 +329,21 @@ fn write_auth_entry(path: &Path, entry_key: &str, entry: &AuthEntry) -> Result<(
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
+            .open(&tmp)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         f.write_all(pretty.as_bytes())
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync {}: {e}", tmp.display()))?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
+        std::fs::write(&tmp, pretty).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("rename {} -> {}: {e}", tmp.display(), path.display())
+    })?;
     Ok(())
 }
 
@@ -536,6 +550,16 @@ fn tool_args_value(args: &Value) -> Value {
     }
 }
 
+fn arg_keys_preview(args: &Value) -> String {
+    match args {
+        Value::Object(map) => {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            format!("{} keys", keys.join(","))
+        }
+        other => format!("type={}", other),
+    }
+}
+
 async fn chat_completions(
     cfg: &GrokConfig,
     bearer: &str,
@@ -699,7 +723,12 @@ pub async fn chat_with_tools(
         for call in &msg.tool_calls {
             let name = call.function.name.trim();
             let args = tool_args_value(&call.function.arguments);
-            tracing::info!(round, tool = %name, args = %args, "grok tool call");
+            tracing::info!(
+                round,
+                tool = %name,
+                arg_keys = %arg_keys_preview(&args),
+                "grok tool call"
+            );
             let (result_json, action) =
                 execute_tool(state, workspace_id, user_id, name, &args).await;
             actions.push(action);

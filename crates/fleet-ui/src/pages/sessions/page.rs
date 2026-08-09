@@ -194,10 +194,19 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                             if buf.trim().is_empty() {
                                 buf = v["transcript"].as_str().unwrap_or("").to_string();
                             }
-                            live.set(buf);
+                            if !buf.trim().is_empty() {
+                                live.set(buf);
+                            }
                             error.set(None);
                             let st = v["session"]["status"].as_str().unwrap_or("");
-                            if matches!(st, "exited" | "failed" | "cancelled") {
+                            if matches!(
+                                st,
+                                "exited"
+                                    | "failed"
+                                    | "cancelled"
+                                    | "failed_spawn"
+                                    | "killing"
+                            ) {
                                 running.set(false);
                                 break;
                             }

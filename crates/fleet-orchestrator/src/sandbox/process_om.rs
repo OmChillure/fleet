@@ -59,6 +59,10 @@ impl SandboxRuntime for ProcessRuntime {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .env_clear();
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
 
         // Minimal env + FLEET_* only (no host secrets).
         cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()));
@@ -135,6 +139,10 @@ impl SandboxRuntime for ProcessRuntime {
             return Ok(());
         };
         if let Some(mut child) = e.child.take() {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                let _ = nix_kill(pid, true);
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
@@ -204,14 +212,17 @@ impl SandboxRuntime for ProcessRuntime {
 
 #[cfg(unix)]
 fn nix_kill(pid: u32, kill: bool) -> std::io::Result<()> {
-    let sig = if kill { "-9" } else { "-15" };
-    let status = std::process::Command::new("kill")
-        .args([sig, &pid.to_string()])
-        .status()?;
-    if status.success() {
+    let sig = if kill { libc::SIGKILL } else { libc::SIGTERM };
+    let pg = -(pid as i32);
+    let rc = unsafe { libc::kill(pg, sig) };
+    if rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    let rc2 = unsafe { libc::kill(pid as i32, sig) };
+    if rc2 == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
-        Err(std::io::Error::other("kill failed"))
+        Err(std::io::Error::last_os_error())
     }
 }
 

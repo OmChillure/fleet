@@ -15,10 +15,11 @@ Chat: small plans (≤8 tasks) wait until done in the HTTP turn. Larger plans st
 
 ```bash
 # .env
-SANDBOX_BACKEND=process   # or docker
+SANDBOX_BACKEND=local     # bash fences via fleet_worker.sh; or docker
+# SANDBOX_BACKEND=process # fleet-worker binary (PROCESS_WORKER_BIN), not bash fences
 FLEET_MAX_AGENTS=16
 FLEET_GIT_SOURCE=/path/to/repo   # optional
 TICK_INTERVAL_S=5
 ```
 
-Not yet (needs k8s / E2B / a real harness): 1000 *live* containers, Claude Code/Grok CLI inside the box. Workers still run ```bash``` from the task spec.
+Not yet (needs k8s / E2B / a real harness): 1000 *live* containers, Claude Code/Grok CLI inside the box. `local` / `docker` workers run ```bash``` from the task spec. `process` is the fleet-worker binary.

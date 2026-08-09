@@ -764,13 +764,13 @@ impl Store {
         Ok(project)
     }
 
-    /// Raise (or set) project max_agents capacity. Never lowers below 1.
+    /// Raise project max_agents. Never lowers an existing cap (GREATEST).
     pub async fn set_max_agents(&self, project_id: Uuid, max_agents: i32) -> Result<()> {
         let max = max_agents.clamp(1, crate::domain::MAX_PROJECT_AGENTS);
         sqlx::query(
             r#"
             UPDATE project_configs
-            SET max_agents = $2
+            SET max_agents = GREATEST(max_agents, $2)
             WHERE project_id = $1
             "#,
         )

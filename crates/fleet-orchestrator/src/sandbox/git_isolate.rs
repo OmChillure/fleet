@@ -4,8 +4,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 /// Attach an isolated checkout at `{session_work}/repo`.
 /// Failures are soft — callers should log and continue without git.
@@ -27,7 +29,10 @@ pub async fn attach_worktree(
         .map_err(|e| format!("create project dir: {e}"))?;
 
     let cache = project_dir.join("source.git");
-    ensure_bare_cache(&cache, source).await?;
+    {
+        let _guard = cache_lock().lock().await;
+        ensure_bare_cache(&cache, source).await?;
+    }
 
     let out = Command::new("git")
         .args([
@@ -49,6 +54,33 @@ pub async fn attach_worktree(
         ));
     }
     Ok(dest)
+}
+
+fn cache_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Remove this session's worktree from the per-project bare cache, then prune.
+pub async fn detach_worktree(project_dir: &Path, session_work: &Path) {
+    let dest = session_work.join("repo");
+    let cache = project_dir.join("source.git");
+    if !dest.exists() || !cache.join("HEAD").exists() {
+        return;
+    }
+    let _guard = cache_lock().lock().await;
+    let dest_s = dest.to_string_lossy().into_owned();
+    let cache_s = cache.to_string_lossy().into_owned();
+    let _ = Command::new("git")
+        .args(["-C", &cache_s, "worktree", "remove", "--force", &dest_s])
+        .stdin(Stdio::null())
+        .output()
+        .await;
+    let _ = Command::new("git")
+        .args(["-C", &cache_s, "worktree", "prune"])
+        .stdin(Stdio::null())
+        .output()
+        .await;
 }
 
 async fn ensure_bare_cache(cache: &Path, source: &str) -> Result<(), String> {

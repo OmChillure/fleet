@@ -130,8 +130,8 @@ if [[ -d "$WORK/repo" ]]; then
   cd "$WORK/repo" || exit 91
 fi
 
-echo "running" > .fleet_status
-echo "started_at=$(date -Iseconds 2>/dev/null || date)" > .fleet_meta
+echo "running" > "$WORK/.fleet_status"
+echo "started_at=$(date -Iseconds 2>/dev/null || date)" > "$WORK/.fleet_meta"
 {
   echo "=== fleet worker ==="
   echo "session=${FLEET_SESSION_ID:-}"
@@ -143,17 +143,17 @@ echo "started_at=$(date -Iseconds 2>/dev/null || date)" > .fleet_meta
   echo "pwd=$(pwd)"
   echo "date=$(date -Iseconds 2>/dev/null || date)"
   echo "=== task title ==="
-  head -n 5 task.md 2>/dev/null || true
-} | tee -a stdout.log
+  head -n 5 "$WORK/task.md" 2>/dev/null || true
+} | tee -a "$WORK/stdout.log"
 
 EXIT=0
-if [[ -f commands.sh ]]; then
-  echo "=== running commands.sh ===" | tee -a stdout.log
+if [[ -f "$WORK/commands.sh" ]]; then
+  echo "=== running commands.sh ===" | tee -a "$WORK/stdout.log"
   # shellcheck disable=SC1091
-  bash ./commands.sh >>stdout.log 2>>stderr.log
+  bash "$WORK/commands.sh" >>"$WORK/stdout.log" 2>>"$WORK/stderr.log"
   EXIT=$?
 else
-  echo "=== no commands.sh; default probe ===" | tee -a stdout.log
+  echo "=== no commands.sh; default probe ===" | tee -a "$WORK/stdout.log"
   {
     uname -a 2>/dev/null || true
     command -v bash >/dev/null && bash --version | head -n1
@@ -165,17 +165,17 @@ else
     else
       echo "env_ok: no oauth tokens in sandbox environment"
     fi
-  } >>stdout.log 2>>stderr.log
+  } >>"$WORK/stdout.log" 2>>"$WORK/stderr.log"
 fi
 
-echo "$EXIT" > .fleet_exit
+echo "$EXIT" > "$WORK/.fleet_exit"
 if [[ "$EXIT" -eq 0 ]]; then
-  echo "success" > .fleet_status
+  echo "success" > "$WORK/.fleet_status"
 else
-  echo "failed" > .fleet_status
+  echo "failed" > "$WORK/.fleet_status"
 fi
-echo "finished_at=$(date -Iseconds 2>/dev/null || date)" >> .fleet_meta
-echo "=== done exit=$EXIT ===" | tee -a stdout.log
+echo "finished_at=$(date -Iseconds 2>/dev/null || date)" >> "$WORK/.fleet_meta"
+echo "=== done exit=$EXIT ===" | tee -a "$WORK/stdout.log"
 exit "$EXIT"
 "#;
 
@@ -203,5 +203,12 @@ ls -la
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0].contains("echo hello"));
         assert!(blocks[1].contains("ls -la"));
+    }
+
+    #[test]
+    fn worker_runs_commands_from_work_root() {
+        assert!(WORKER_SH.contains(r#"bash "$WORK/commands.sh""#));
+        assert!(WORKER_SH.contains(r#"head -n 5 "$WORK/task.md""#));
+        assert!(WORKER_SH.contains(r#""$WORK/.fleet_exit""#));
     }
 }

@@ -295,20 +295,27 @@ impl TickRunner {
         report.external_synced =
             sync_external_board(&self.board_sync, &snap, cfg.auto_sync_external).await;
 
-        // Step 15 — wipe workdirs for finished sessions
+        // Step 15 — wipe workdirs after a grace window (SessionDetail/artifacts).
         cleanup_terminal_session_dirs(&self.data_dir, project_id, &snap).await;
 
         Ok(())
     }
 }
 
+const WORKDIR_GRACE: chrono::Duration = chrono::Duration::minutes(15);
+
 async fn cleanup_terminal_session_dirs(
     data_dir: &std::path::Path,
     project_id: Uuid,
     snap: &crate::store::BoardSnapshot,
 ) {
+    let now = chrono::Utc::now();
     for session in &snap.sessions {
         if !matches!(session.status.as_str(), "exited" | "failed_spawn") {
+            continue;
+        }
+        let terminal_at = session.exited_at.unwrap_or(session.created_at);
+        if now.signed_duration_since(terminal_at) < WORKDIR_GRACE {
             continue;
         }
         let path = data_dir
@@ -316,6 +323,8 @@ async fn cleanup_terminal_session_dirs(
             .join(project_id.to_string())
             .join("sessions")
             .join(session.id.to_string());
+        let project_dir = data_dir.join("projects").join(project_id.to_string());
+        crate::sandbox::git_isolate::detach_worktree(&project_dir, &path).await;
         if path.exists() {
             let _ = tokio::fs::remove_dir_all(&path).await;
         }

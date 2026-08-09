@@ -41,8 +41,21 @@ fn strip_secrets(v: &Value) -> Value {
 }
 
 fn is_secret_key(k: &str) -> bool {
-    let lower = k.to_ascii_lowercase();
-    SECRET_KEYS.iter().any(|s| lower == *s || lower.contains(s))
+    let lower = k.to_ascii_lowercase().replace('-', "_");
+    if SECRET_KEYS.iter().any(|s| lower == *s) {
+        return true;
+    }
+    // Suffixes only — `contains("token")` would strip Google Drive nextPageToken.
+    const SUFFIXES: &[&str] = &[
+        "_access_token",
+        "_refresh_token",
+        "_id_token",
+        "_client_secret",
+        "_api_key",
+        "_private_key",
+        "_authorization",
+    ];
+    SUFFIXES.iter().any(|s| lower.ends_with(s))
 }
 
 fn cap_value_size(v: Value, max_bytes: usize) -> Value {
@@ -101,6 +114,19 @@ pub fn contains_secret_keys(v: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn keeps_pagination_tokens() {
+        let raw = json!({
+            "nextPageToken": "abc",
+            "pageToken": "def",
+            "access_token": "nope"
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["nextPageToken"], "abc");
+        assert_eq!(clean["pageToken"], "def");
+        assert!(clean.get("access_token").is_none());
+    }
 
     #[test]
     fn strips_tokens() {

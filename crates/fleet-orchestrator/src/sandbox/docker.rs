@@ -1,6 +1,7 @@
 //! Docker sandbox: one container per session, workdir bind-mounted.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +20,8 @@ struct DockerEntry {
     project_id: Uuid,
     handle: RuntimeHandle,
     container_id: String,
+    work_dir: PathBuf,
+    last_exit: Option<i32>,
     destroyed: bool,
 }
 
@@ -70,7 +73,6 @@ impl SandboxRuntime for DockerRuntime {
             "-d".into(),
             "--name".into(),
             name.clone(),
-            "--rm".into(),
             "-w".into(),
             "/work".into(),
             "-v".into(),
@@ -133,6 +135,8 @@ impl SandboxRuntime for DockerRuntime {
                 project_id: req.project_id,
                 handle: handle.clone(),
                 container_id: container_id.clone(),
+                work_dir: work.clone(),
+                last_exit: None,
                 destroyed: false,
             },
         );
@@ -174,6 +178,9 @@ impl SandboxRuntime for DockerRuntime {
         if e.destroyed {
             return Ok(());
         }
+        if e.last_exit.is_none() {
+            e.last_exit = read_fleet_exit(&e.work_dir);
+        }
         let _ = Command::new("docker")
             .args(["rm", "-f", &e.container_id])
             .output()
@@ -184,16 +191,18 @@ impl SandboxRuntime for DockerRuntime {
     }
 
     async fn state(&self, handle: &RuntimeHandle) -> Result<SandboxState, SandboxError> {
-        let (container_id, destroyed) = {
+        let (container_id, work_dir, destroyed, last_exit) = {
             let g = self.inner.lock().await;
             let e = g
                 .get(&handle.id)
                 .ok_or_else(|| SandboxError::NotFound(handle.id.clone()))?;
-            (e.container_id.clone(), e.destroyed)
+            (
+                e.container_id.clone(),
+                e.work_dir.clone(),
+                e.destroyed,
+                e.last_exit,
+            )
         };
-        if destroyed {
-            return Ok(SandboxState::Exited { code: Some(0) });
-        }
 
         let output = Command::new("docker")
             .args([
@@ -205,24 +214,36 @@ impl SandboxRuntime for DockerRuntime {
             .output()
             .await;
 
-        match output {
+        let resolved = match output {
             Ok(out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 let mut parts = text.split_whitespace();
                 let running = parts.next().unwrap_or("false");
                 let code: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 if running.eq_ignore_ascii_case("true") {
-                    Ok(SandboxState::Running)
+                    SandboxState::Running
                 } else {
-                    Ok(SandboxState::Exited { code: Some(code) })
+                    SandboxState::Exited { code: Some(code) }
                 }
             }
-            Ok(_) => {
-                // Container gone → treat as exited (e.g. --rm cleaned up).
-                Ok(SandboxState::Exited { code: Some(0) })
+            _ => {
+                if let Some(code) = read_fleet_exit(&work_dir).or(last_exit) {
+                    SandboxState::Exited { code: Some(code) }
+                } else if destroyed {
+                    SandboxState::Exited { code: Some(1) }
+                } else {
+                    SandboxState::Unknown
+                }
             }
-            Err(_) => Ok(SandboxState::Unknown),
+        };
+
+        if let SandboxState::Exited { code } = resolved {
+            let mut g = self.inner.lock().await;
+            if let Some(e) = g.get_mut(&handle.id) {
+                e.last_exit = code.or(e.last_exit);
+            }
         }
+        Ok(resolved)
     }
 
     async fn list(&self, project_id: Uuid) -> Result<Vec<RuntimeHandle>, SandboxError> {
@@ -232,6 +253,11 @@ impl SandboxRuntime for DockerRuntime {
             .map(|e| e.handle.clone())
             .collect())
     }
+}
+
+fn read_fleet_exit(work_dir: &std::path::Path) -> Option<i32> {
+    let raw = std::fs::read_to_string(work_dir.join(".fleet_exit")).ok()?;
+    raw.trim().parse().ok()
 }
 
 async fn ensure_docker() -> Result<(), SandboxError> {

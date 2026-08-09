@@ -72,9 +72,10 @@ dx serve --package fleet-ui --port 3030
    (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
    - `SANDBOX_BACKEND=stub` — fake timer (default)
-   - `process` — real local bash worker in session workdir (runs ```bash fences from task specs)
-   - `docker` — real container (`SANDBOX_DOCKER_IMAGE`, network `none` by default)
-   Workdirs are wiped after exit; OAuth tokens never enter the sandbox.
+   - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
+   - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
+   - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
+   Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
 
 | Method | Path | Notes |
 | --- | --- | --- |

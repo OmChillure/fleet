@@ -333,7 +333,7 @@ pub fn system_prompt_with_tools() -> &'static str {
 You have tools for:\n\
 **Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or git credentials in sandbox specs)\n\
 - list_sandboxes / list_tasks / list_runs / get_fleet_status\n\
-- launch_agent_task / launch_agent_plan: local sandboxes (stub/process/docker). Plans up to 1000 tasks; only FLEET_MAX_AGENTS run at once, the rest queue. Use ```bash in specs for commands.\n\
+- launch_agent_task / launch_agent_plan: local sandboxes (stub / local bash fences / docker / process=fleet-worker). Plans up to 1000 tasks; only FLEET_MAX_AGENTS run at once, the rest queue. ```bash fences run when SANDBOX_BACKEND is local or docker.\n\
 **Integrations — CONTROL PLANE only** (tokens decrypt on the server, never in sandboxes)\n\
 - list_integrations / get_integration (shows connected apps + allowlisted ops)\n\
 - integration_query: github, jira, linear, slack, figma, notion, google_drive, teams, discord\n\
@@ -621,17 +621,26 @@ pub fn build_multi_task_plan(
     }
 }
 
-async fn ensure_project(state: &AppState, workspace_id: Uuid, max_agents: i32) -> AppResult<()> {
-    let max = max_agents.clamp(1, chat_max_agents());
+async fn ensure_project(state: &AppState, workspace_id: Uuid) -> AppResult<()> {
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", max)
+        .ensure_project(workspace_id, "workspace fleet", 3)
         .await
         .map_err(|e| {
             tracing::error!(%workspace_id, error = %e, "chat tool ensure_project failed");
             AppError::internal(e.to_string())
         })?;
+    Ok(())
+}
+
+async fn ensure_project_capacity(
+    state: &AppState,
+    workspace_id: Uuid,
+    max_agents: i32,
+) -> AppResult<()> {
+    let max = max_agents.clamp(1, chat_max_agents());
+    ensure_project(state, workspace_id).await?;
     if let Err(e) = state.orch.store.set_max_agents(workspace_id, max).await {
         tracing::warn!(%workspace_id, error = %e, "set_max_agents failed (continuing)");
     }
@@ -855,7 +864,7 @@ async fn tick_until_run_settled(
 }
 
 async fn list_sandboxes(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, ChatAction)> {
-    ensure_project(state, workspace_id, 3).await?;
+    ensure_project(state, workspace_id).await?;
     let sessions = state
         .orch
         .store
@@ -900,7 +909,7 @@ async fn list_tasks(
     workspace_id: Uuid,
     status: Option<&str>,
 ) -> AppResult<(Value, ChatAction)> {
-    ensure_project(state, workspace_id, 3).await?;
+    ensure_project(state, workspace_id).await?;
     let tasks = state
         .orch
         .store
@@ -937,7 +946,7 @@ async fn list_tasks(
 }
 
 async fn list_runs(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, ChatAction)> {
-    ensure_project(state, workspace_id, 3).await?;
+    ensure_project(state, workspace_id).await?;
     let runs = state
         .orch
         .store
@@ -971,7 +980,7 @@ async fn list_runs(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, Ch
 }
 
 async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, ChatAction)> {
-    ensure_project(state, workspace_id, 3).await?;
+    ensure_project(state, workspace_id).await?;
     let runs = state
         .orch
         .store
@@ -1055,7 +1064,7 @@ async fn launch_agent_task(
     args: LaunchArgs,
 ) -> AppResult<(Value, ChatAction)> {
     let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
-    ensure_project(state, workspace_id, max_agents).await?;
+    ensure_project_capacity(state, workspace_id, max_agents).await?;
 
     let profile = args
         .worker_profile
@@ -1094,7 +1103,7 @@ async fn launch_agent_plan(
     args: LaunchPlanArgs,
 ) -> AppResult<(Value, ChatAction)> {
     let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
-    ensure_project(state, workspace_id, max_agents).await?;
+    ensure_project_capacity(state, workspace_id, max_agents).await?;
 
     let ctx = if let Some(ref cf) = args.context_from {
         prefetch_context(state, workspace_id, user_id, cf).await
