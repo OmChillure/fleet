@@ -79,13 +79,16 @@ def log(msg):
     print(f'[workspace-agent] {msg}', flush=True)
 
 
-def write_json(path, obj, mode=0o640):
+def write_json(path, obj, mode=0o664):
+    """Write JSON readable by the driver (uid 1000). Default world-readable
+    result/status files so a uid mismatch after chown still works."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + '.tmp')
     tmp.write_text(json.dumps(obj, indent=2) + '\n', encoding='utf-8')
     tmp.replace(path)
     try:
         os.chmod(path, mode)
+        os.chown(path, 0, FLEET_GID)
     except Exception:
         pass
 
