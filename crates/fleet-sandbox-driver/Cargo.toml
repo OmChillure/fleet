@@ -7,6 +7,10 @@ rust-version.workspace = true
 description = "In-sandbox driver: provision workspace + run harness over ACP (per-task compose)"
 readme = "README.md"
 
+[lib]
+name = "fleet_sandbox_driver"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fleet-sandbox-driver"
 path = "src/main.rs"

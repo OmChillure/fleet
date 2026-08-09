@@ -1,32 +1,17 @@
 //! In-container sandbox driver: provision env, run harness via ACP, report on bus.
 
-mod acp;
-mod bus;
-mod handshake;
-mod harness;
-mod job;
-mod opencode_config;
-mod pi_config;
-mod policy;
-mod provision;
-
 use anyhow::{Context, Result};
-use bus::Bus;
 use chrono::Utc;
 use clap::Parser;
-use job::{Job, JobResult};
+use fleet_sandbox_driver::bus::Bus;
+use fleet_sandbox_driver::job::{Job, JobResult};
+use fleet_sandbox_driver::{
+    acp, handshake, harness, parse_env_bool, policy, provision,
+};
 use serde_json::json;
 use std::time::Instant;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-
-pub(crate) fn parse_env_bool(s: &str) -> Result<bool, String> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" | "" => Ok(false),
-        other => Err(format!("invalid bool {other:?} (use 0/1/true/false)")),
-    }
-}
 
 #[derive(Debug, Parser)]
 #[command(name = "fleet-sandbox-driver", about = "In-sandbox: provision workspace + drive harness over ACP")]
@@ -344,29 +329,4 @@ async fn handle_job(job: Job) -> JobResult {
     result.elapsed_sec = t0.elapsed().as_secs_f64();
     result.finished_at = Utc::now().to_rfc3339();
     result
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::parse_env_bool;
-
-    #[test]
-    fn parse_env_bool_truthy() {
-        for s in ["1", "true", "TRUE", "yes", "on"] {
-            assert_eq!(parse_env_bool(s).unwrap(), true, "{s}");
-        }
-    }
-
-    #[test]
-    fn parse_env_bool_falsy() {
-        for s in ["0", "false", "no", "off", ""] {
-            assert_eq!(parse_env_bool(s).unwrap(), false, "{s}");
-        }
-    }
-
-    #[test]
-    fn parse_env_bool_invalid() {
-        assert!(parse_env_bool("maybe").is_err());
-    }
 }

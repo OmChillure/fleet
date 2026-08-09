@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Agent Fleet unified HTTP API — single cargo run entrypoint"
 
+[lib]
+name = "fleet_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fleet-server"
 path = "src/main.rs"
@@ -29,3 +33,11 @@ tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde_json = { workspace = true }
+uuid = { workspace = true }
