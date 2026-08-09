@@ -17,8 +17,24 @@ Architecture: [`docs/architecture/sandbox-workspace.md`](../../../docs/architect
 
 1. Docker + compose  
 2. Harness images: `./../agents/build.sh` (opencode, pi, …)  
-3. LM Studio / OpenAI-compatible server reachable from containers  
+3. LM Studio / Ollama / other OpenAI-compatible server reachable from containers  
 4. `cp -n .env.example .env` (see sample vars below)
+
+One-shot host install (packages, Ollama bind, model pull, images, dummy SSH key):
+
+```bash
+sudo ./scripts/install-full-suite-deps.sh
+```
+
+Then run tests (no sudo):
+
+```bash
+./scripts/run-full-suite.sh              # cargo + protocol + host e2e + compose + invoices
+SKIP_LLM=1 ./scripts/run-full-suite.sh   # skip OpenCode/Pi LLM jobs
+./scripts/run-host-e2e.py                # agent + fleet-wsexec only
+./scripts/run-compose-tool-integration.sh /tmp/fleet-compose-int.log
+./scripts/run-protocol-tests.sh /tmp/fleet-protocol.log
+```
 
 ## Env sample
 
