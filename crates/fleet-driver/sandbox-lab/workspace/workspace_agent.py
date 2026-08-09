@@ -159,17 +159,8 @@ fleet = Path(os.environ.get("FLEET_DIR") or "/workspace/.fleet")
 if not cwd or not os.path.isdir(cwd):
     print("fleet-wsexec: FLEET_WORK_DIR missing", file=sys.stderr)
     raise SystemExit(2)
-tools_path = Path(cwd) / ".fleet-tools.json"
-if tools_path.is_file():
-    try:
-        listed = json.loads(tools_path.read_text(encoding="utf-8"))
-        if name not in listed:
-            print(f"fleet-wsexec: tool {name!r} not allowlisted", file=sys.stderr)
-            raise SystemExit(2)
-    except SystemExit:
-        raise
-    except Exception:
-        pass
+# Do not consult .fleet-tools.json here — it is tamperable. The agent
+# executes argv from TOOLS_BY_JOB only.
 req_id = f"{int(time.time())}-{os.getpid()}"
 req = {
     "job_id": job_id,
@@ -442,13 +433,10 @@ def handle_request(req):
 
 
 def ensure_shared_permissions():
-    root = Path("/workspace")
-    jobs = Path("/workspace/jobs")
-    root.mkdir(parents=True, exist_ok=True)
-    FLEET.mkdir(parents=True, exist_ok=True)
+    jobs = jobs_root()
     jobs.mkdir(parents=True, exist_ok=True)
+    FLEET.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(root, 0o755)
         os.chmod(jobs, 0o775)
         # Driver (uid 1000) + agent (root) share group 1000; others cannot write.
         os.chown(FLEET, 0, FLEET_GID)
@@ -459,6 +447,13 @@ def ensure_shared_permissions():
         os.chown(jobs, FLEET_UID, FLEET_GID)
     except Exception:
         pass
+    # Optional lab default root — never required when FLEET_JOBS_ROOT is overridden.
+    default_root = Path("/workspace")
+    if default_root.exists():
+        try:
+            os.chmod(default_root, 0o755)
+        except Exception:
+            pass
 
 
 def pick_request():

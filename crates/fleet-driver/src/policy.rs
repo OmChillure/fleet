@@ -6,9 +6,19 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+/// Isolation root (lab default `/workspace/jobs`). Overridable via `FLEET_JOBS_ROOT`.
+pub fn jobs_root() -> PathBuf {
+    std::env::var("FLEET_JOBS_ROOT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/workspace/jobs"))
+}
+
 /// Default per-job source root under the shared volume.
 pub fn default_job_work_dir(job_id: &str) -> PathBuf {
-    PathBuf::from(format!("/workspace/jobs/{job_id}/repo"))
+    jobs_root().join(job_id).join("repo")
 }
 
 /// Resolve work_dir: explicit job field or per-job default.
@@ -48,9 +58,11 @@ pub fn validate_job_cwd(cwd: &Path) -> Result<()> {
         .filter(|c| !matches!(c, Component::CurDir))
         .collect::<PathBuf>();
     let ns = normalized.to_string_lossy();
-    if !ns.starts_with("/workspace/jobs/") {
+    let root = jobs_root();
+    let root_s = root.to_string_lossy().trim_end_matches('/').to_string();
+    if ns != root_s.as_str() && !ns.starts_with(&(root_s.clone() + "/")) {
         bail!(
-            "cwd outside job isolation (must be under /workspace/jobs/): {}",
+            "cwd outside job isolation (must be under {root_s}/): {}",
             cwd.display()
         );
     }
