@@ -21,6 +21,8 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 | Rust integration | `fleet-orchestrator` / `fleet-auth` / `fleet-server` `tests/` | `just test-integration` (needs Postgres via `just db-up`) | **Fail** if `DATABASE_URL` is unset |
 | Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | `skipUnless` only for optional kind / git-ssh |
 | Browser | `tests/browser/test_app_e2e.py` | suite stage when `ENABLE_BROWSER_E2E=1` (needs `:3030` + `:8080`; after kind when `ENABLE_KIND=1`) | Off unless enabled; then **fail** if the stack is down |
+| Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI |
+| MR demo video | `scripts/human-test.sh record` (agent, Playwright `.webm`) | attach to the GitLab MR | Agent records; never commit the file |
 | Live LLM / Grok ACP | `#[ignore]` | `cargo test -p fleet-driver -- --ignored` | Ignored by default |
 
 `fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover it with Playwright.
@@ -34,6 +36,7 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 - Do not use `|| true` around `cargo test`.
 - `SKIP_*` on `run-full-suite.sh` is for operators who cannot run compose/kind/LLM, not a way to hide failures.
 - Do not add GitLab CI or runners back.
+- Human testing and agent-recorded MR demos: [`human-testing.md`](./human-testing.md).
 - Behavior catalog: [`behavior-interactions.md`](./behavior-interactions.md). HTTP/auth/fleet coverage lives in crate integration tests, not a second Python framework.
 
 ## Commands

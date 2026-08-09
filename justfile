@@ -121,6 +121,14 @@ _app: server ui
 # Full local stack: Postgres, then API + UI together.
 dev: _require-env db-up _app
 
+# Launch (if needed) and walk a human through the product. See docs/human-testing.md.
+human-test:
+    ./scripts/human-test.sh
+
+# Agent: record Playwright demo .webm for the GitLab MR (not the human).
+human-test-record *scenes:
+    ./scripts/human-test.sh record {{ scenes }}
+
 # Format Rust sources.
 fmt:
     cargo fmt --all

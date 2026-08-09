@@ -1,0 +1,178 @@
+# Human testing and MR demos
+
+Automated tests (`docs/testing.md`) do not replace a person looking at the
+product, and they do not produce the **demo video** a merge request needs.
+
+Two roles:
+
+| Who | What they do |
+| --- | --- |
+| **Human** (author or reviewer) | Run `./scripts/human-test.sh`. It starts Postgres + API + UI and walks every current surface. Confirm the product still makes sense. |
+| **Agent** (the coding agent on the MR) | Record the demo video. **Do not ask the human to screen-record.** Use `./scripts/human-test.sh record` (Playwright `.webm`). Attach the file to the GitLab MR. Never commit videos. |
+
+Install is still one script with no flags
+(`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`)
+and repo-root `.env`. This page does not install packages.
+
+---
+
+## When this applies
+
+| Change | Human walkthrough | Agent demo video | GitLab MR + peer review |
+| --- | --- | --- | --- |
+| User-visible UI, API behavior, data, install, tests, sandbox/lab | Yes | Yes — scene for the area you touched | **Required** |
+| Operator-only (kind, compose job, workspace agent) | Yes, the relevant step | Yes — `lab` or `kind` scene | **Required** |
+| Small tweak: typo, comment nit, one-line docs wording, import order | No | No | Optional (direct to the target branch is OK) |
+
+If it can break a user, a sandbox, or the next install, it is **not** a small
+tweak. Prefer an MR and a named reviewer even when you could push.
+
+There is **no GitLab runner**. Do not add `.gitlab-ci.yml`. Tests and demos
+run on a developer or agent host.
+
+---
+
+## Humans: launch and walk the product
+
+From the repo root (after install has been run once):
+
+```bash
+./scripts/human-test.sh
+```
+
+That command:
+
+1. Refuses to invent a second install. Missing `cargo` / `docker` / `dx` →
+   run the install script, then come back.
+2. Starts compose Postgres, `fleet-server` (:8080), and `fleet-ui` (:3030)
+   via `./scripts/fleet-dev.sh start` if they are not already up.
+3. Opens the UI when it can (`xdg-open` / `open`).
+4. Pauses on each step below. Press Enter after you have checked the screen.
+
+Subcommands: `launch`, `guide` (no start), `status`, `stop`, `record` (agents).
+
+Use `http://localhost:3030` (not `127.0.0.1`) so cookies match CORS.
+
+Throwaway accounts only: `*@example.test`. Do not type real emails, tokens,
+or customer data. Do not persist OAuth against a personal GitHub in a shared
+DB unless that is the MR.
+
+When you add a user-visible surface, **add a step** to
+`scripts/human-test.sh` and a scene to `tests/browser/record_demo.py` in the
+same change. The walkthrough is allowed to go stale only if the product did.
+
+### Walkthrough (what the script asks)
+
+1. **Landing** `/` — hero, Get started, Log in.
+2. **Signup** — valid account; you land on login, not inside the app.
+3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Dashboard is
+   still a stub (“Fleet overview will live here.”).
+4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
+   redirects to `/login`.
+5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
+   Sandboxes), Agents (All agents, Live sessions), Workspace (Integrations,
+   Settings). Expand collapsed sections.
+6. **Workspace switcher** — list; create a second workspace; switch.
+7. **Settings** — git URL + ref. Empty URL is valid (no clone).
+8. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
+9. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
+   are in `.env`.
+10. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
+    actually up. Otherwise still open the page (empty composer is success).
+11. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
+    backend is `stub` (fine). Board columns move; background ticker may also
+    tick.
+12. **Sandboxes** — same worker sessions as Fleet.
+13. **Chat history** — `/{ws}/sessions` lists **chats**, not workers.
+14. **User menu** — theme Black/White (not persisted), Log out → `/login`.
+15. **This MR** — do the new thing this change added. If the script has no
+    step for it, the change is incomplete.
+
+Logs: `./scripts/fleet-dev.sh logs`. Stop: `./scripts/human-test.sh stop`.
+
+---
+
+## Agents: record the demo video
+
+You record. The human reviews the MR (and may replay the walkthrough).
+
+```bash
+# Start the stack if needed, then film.
+./scripts/human-test.sh record
+# Only the areas this MR touches:
+./scripts/human-test.sh record fleet sandboxes
+./scripts/human-test.sh record --list
+```
+
+Output: `.tmp/demos/<utc>-<scenes>.webm` (gitignored). Playwright Chromium
+must already be installed (`ENABLE_BROWSER_E2E=1` on the install script, or
+`python3 -m playwright install chromium` after the OS deps).
+
+Attach the `.webm` to the GitLab MR (upload / comment). Write one sentence
+in the MR description: what the clip shows. Do **not** `git add` videos.
+
+Constraints:
+
+- Use `*@example.test` accounts created in the recording.
+- Do not show `.env`, JWT, `ADMIN_TOKEN`, OAuth client secrets, or `~/.grok`.
+- Prefer `localhost` in the address bar.
+- Keep it short: one path, the new result, stop. Usually 30–90 seconds.
+- If UI and API are down after `launch`, **fail**. Do not ship a silent skip.
+- Several scenes in one command = one continuous video (better for reviewers).
+
+### Which scene for which code
+
+Pick every scene that your diff can break. When unsure, record `all`.
+
+| You changed | Scene | The video must show |
+| --- | --- | --- |
+| `crates/fleet-ui` home, navbar | `landing` | `/` hero, Get started, Log in |
+| `crates/fleet-auth`, `fleet-db` users/sessions/workspaces | `auth` | signup → login → `/{uuid}/dashboard`; cookies survive reload |
+| `crates/fleet-ui` sidebar, theme, logout | `shell` | expand sections, user menu, theme toggle |
+| `crates/fleet-ui` + `fleet-auth` workspaces | `workspace` | switcher + create workspace |
+| `crates/fleet-server` `/health`, `/`, `/api` | `api` | browser opens API `/health` JSON (`status: ok`, `apis` includes auth/fleet/chat) |
+| `crates/fleet-server` chat, `chat_tools`, `grok` | `chat` | New chat composer + provider/model. Send only if a provider is live |
+| `crates/fleet-db` chats repo | `chat` + `sessions` | new thread appears under Chat history |
+| `crates/fleet-orchestrator` tick, plans, store | `fleet` | Start 2-task run, Run tick, cards change column |
+| `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
+| `crates/fleet-driver`, `fleet-worker`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
+| `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
+| `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
+| `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
+| `crates/fleet-server` + UI settings / git remote | `settings` | repo URL + ref form |
+| `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
+| `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
+| `sandbox-lab/workspace/workspace_agent.py` | `lab` | same |
+| `sandbox-lab/scripts/install-full-suite-deps.sh`, compose, pins | `lab` | install-contract / compose pin output |
+| `crates/fleet-operator`, `infra/`, kind | `kind` | only if a kind cluster is up; otherwise say so in the MR and film `api` against the host API you did start |
+| Docs-only product wording | — | no video |
+| `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |
+
+`all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, agents,
+integrations, settings, sessions (logout at the end of `auth`/`shell` as
+needed). `lab` and `kind` are extra — pass them when that is the MR.
+
+### Adding a scene (required when you add a surface)
+
+1. Add a function to `tests/browser/record_demo.py` and register it in
+   `SCENES`.
+2. Add a matching pause-step in `scripts/human-test.sh`.
+3. Add a row to the table above.
+4. Hit the same locators as `tests/browser/test_app_e2e.py` when the flow
+   already exists there.
+
+Rust units and HTTP oneshots stay in Rust (`docs/testing.md`). This recorder
+is not a second test framework.
+
+---
+
+## Merge request text (copy)
+
+```
+Human testing: ran ./scripts/human-test.sh (or reviewer will).
+Demo: agent-recorded .tmp/demos/<file>.webm attached — shows <scene>.
+Reviewer: @<peer>
+```
+
+Reviewers: watch the clip, then spot-check the walkthrough on the MR branch
+if the change is auth, fleet, install, or data.

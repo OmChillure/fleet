@@ -977,6 +977,8 @@ echo
 echo "Do not run tests here. As ${REAL_USER}:"
 echo "  source ~/.cargo/env   # if rustup is new"
 echo "  ./crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh"
+echo "  ./scripts/human-test.sh          # walk the product (starts API+UI)"
+echo "  ./scripts/human-test.sh record   # agent: MR demo .webm (see docs/human-testing.md)"
 [[ "${ENABLE_FULL_IMAGES}" == "1" ]] && echo "  DATABASE_URL=postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable cargo test -p fleet-orchestrator"
 [[ "${ENABLE_KIND}" == "1" ]] && echo "  kubectl -n agent-fleet get pods"
 echo

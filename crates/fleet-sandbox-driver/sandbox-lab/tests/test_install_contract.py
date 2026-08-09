@@ -99,9 +99,38 @@ class InstallContractTests(unittest.TestCase):
         self.assertIn(".env", body)
         self.assertIn(".gitlab-ci.yml", body)
         self.assertIn("no runner", body.lower())
+        self.assertIn("docs/human-testing.md", body)
+        self.assertIn("./scripts/human-test.sh", body)
+        self.assertIn("peer", body.lower())
+        self.assertIn("record", body.lower())
         # Keep committed notes repo-relative (no machine home / checkout path).
         self.assertNotIn("/code/", body)
         self.assertNotIn("/home/", body)
+
+    def test_human_testing_doc_and_recorder_exist(self):
+        human = REPO / "docs" / "human-testing.md"
+        rec = REPO / "tests" / "browser" / "record_demo.py"
+        script = REPO / "scripts" / "human-test.sh"
+        self.assertTrue(human.is_file(), human)
+        self.assertTrue(rec.is_file(), rec)
+        self.assertTrue(script.is_file(), script)
+        self.assertTrue(script.stat().st_mode & 0o111, "human-test.sh must be executable")
+        rec_text = rec.read_text(encoding="utf-8")
+        for scene in (
+            "landing",
+            "auth",
+            "fleet",
+            "chat",
+            "lab",
+            "integrations",
+        ):
+            self.assertIn(f'"{scene}"', rec_text, scene)
+        body = human.read_text(encoding="utf-8")
+        self.assertIn("agent", body.lower())
+        self.assertIn("record_demo.py", body)
+        self.assertIn("./scripts/human-test.sh", body)
+        r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

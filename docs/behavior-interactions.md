@@ -596,6 +596,8 @@ The UI tick does **not** create CRs today. Kind smoke deploys the control plane;
 | Anyone | `GET /healthz` | Orch liveness. |
 | Anyone | `GET /readyz` | DB ready. |
 | Browser e2e | Playwright Chromium | Landing, unauth redirect, signup/login/dashboard, sidebar pages, `/health`. Gated by `ENABLE_BROWSER_E2E`. |
+| Human walkthrough | `./scripts/human-test.sh` | Starts API+UI and pauses on every current surface. See `docs/human-testing.md`. |
+| MR demo video | Agent runs `./scripts/human-test.sh record` | Playwright `.webm` in `.tmp/demos/` attached to the GitLab MR. Not committed. |
 | Host | `install-full-suite-deps.sh` | Single install. Reads repo-root `.env` (`PROFILE`, `ENABLE_*`). No CLI flags. |
 | Host | `run-full-suite.sh` | Cargo + protocol + host e2e + compose + invoices (+ browser if enabled). `SKIP_LLM=1` skips live LLM jobs (suite still expects protocol/invoices gates). |
 | Host | `publish-job.sh` / `run-invoices-*.sh` | Per-task compose project + volume. |
