@@ -78,6 +78,7 @@ build-release:
     cargo build --release
 
 # Unit tests (no Postgres). fleet-ui is Dioxus/WASM — excluded.
+# fleet-chat-md (extracted from UI) is included in --workspace --lib.
 # fleet-driver ACP/worker tests live in crates/fleet-driver/tests/ (not --lib).
 test:
     cargo test --workspace --lib --exclude fleet-ui --locked
@@ -93,6 +94,7 @@ test-integration: _require-env db-up
       --test process_sandbox
     cargo test -p fleet-auth --locked --tests
     cargo test -p fleet-server --locked --tests
+    cargo test -p fleet-db --locked --tests
 
 # cargo check the whole workspace.
 check:

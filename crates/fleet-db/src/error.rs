@@ -29,9 +29,16 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// True when this error is (or was mapped from) a Postgres unique violation (23505).
+    ///
+    /// [`Self::from_sqlx`] turns 23505 into [`DbError::Conflict`] before callers
+    /// see the raw sqlx code, so matching only `DbError::Sqlx` would always lie
+    /// after `map_query_err`. All `Conflict` variants in this crate currently
+    /// mean uniqueness (generic message or a domain-specific one such as email).
     pub fn is_unique_violation(&self) -> bool {
         match self {
             DbError::Sqlx(sqlx::Error::Database(db)) => db.code().as_deref() == Some("23505"),
+            DbError::Conflict(_) => true,
             _ => false,
         }
     }

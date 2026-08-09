@@ -73,8 +73,10 @@ pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewUser) -> DbR
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| {
-            // from_sqlx turns 23505 into Conflict("unique constraint violated")
-            // before is_unique_violation() can see the sqlx code — check first.
+            // Prefer a domain message over from_sqlx's generic
+            // Conflict("unique constraint violated"). Check 23505 before
+            // map_query_err; is_unique_violation() is still true for either
+            // Conflict form (see DbError::is_unique_violation).
             if let sqlx::Error::Database(ref db) = e
                 && db.code().as_deref() == Some("23505")
             {
