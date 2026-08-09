@@ -18,6 +18,34 @@ Architecture: [`docs/architecture/sandbox-workspace.md`](../../../docs/architect
 **Install (only source of truth):** [`scripts/install-full-suite-deps.sh`](scripts/install-full-suite-deps.sh)  
 Settings live in the repo-root `.env`. No command-line flags.
 
+### One-time: pin compose images
+
+`docker-compose.yml` tags **workspace** and **driver** with stable local names so each
+new `COMPOSE_PROJECT_NAME=fleet-task-…` does **not** force a project-scoped rebuild
+(needed later for orchestrator spawn with `--no-build`).
+
+| Image | Default tag | Built by |
+| --- | --- | --- |
+| Harness bases | `agent-fleet-{opencode,pi,…}:alpine` | `../agents/build.sh` |
+| Workspace | `agent-fleet-sandbox-workspace:local` | `docker compose build workspace` |
+| Driver | `agent-fleet-sandbox-driver:local` | `docker compose build driver` (`DRIVER_BASE_IMAGE`) |
+
+```bash
+# from crates/fleet-sandbox-driver/sandbox-lab/
+../agents/build.sh
+export DRIVER_BASE_IMAGE=agent-fleet-opencode:alpine   # or agent-fleet-pi:alpine
+docker compose build workspace driver
+docker image inspect agent-fleet-sandbox-workspace:local agent-fleet-sandbox-driver:local
+```
+
+Override via env (see `.env.example`): `COMPOSE_SANDBOX_WORKSPACE_IMAGE`,
+`COMPOSE_SANDBOX_DRIVER_IMAGE`. Rebuild the **driver** when `DRIVER_BASE_IMAGE`
+changes. Multi-harness demos can use distinct driver tags
+(e.g. `agent-fleet-sandbox-driver-pi:local`).
+
+Human scripts (`run-invoices-example.sh`) may still call `compose build`;
+compose tags the **pinned** names so later projects reuse them.
+
 Then run tests (no sudo):
 
 ```bash
@@ -39,6 +67,10 @@ OPENCODE_BASE_URL=http://host.docker.internal:1234/v1
 OPENCODE_API_KEY=lm-studio
 MODEL=lmstudio/google/gemma-4-e4b
 SSH_KEY_HOST_PATH=../../../.tmp/ssh/id_ed25519
+# optional:
+# COMPOSE_SANDBOX_WORKSPACE_IMAGE=agent-fleet-sandbox-workspace:local
+# COMPOSE_SANDBOX_DRIVER_IMAGE=agent-fleet-sandbox-driver:local
+# DRIVER_BASE_IMAGE=agent-fleet-opencode:alpine
 ```
 
 ## Working example: 123-invoices

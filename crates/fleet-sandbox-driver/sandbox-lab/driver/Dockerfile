@@ -1,6 +1,10 @@
-# Multi-stage: musl-linked Rust driver + OpenCode Alpine runtime.
-# Build from repo root:
-#   docker build -f crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile -t agent-fleet-sandbox-lab-driver .
+# Multi-stage: musl-linked Rust driver + harness Alpine runtime (BASE_IMAGE).
+# Preferred (pins the compose tag):
+#   cd crates/fleet-sandbox-driver/sandbox-lab && docker compose build driver
+# Or from repo root:
+#   docker build -f crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile \
+#     --build-arg BASE_IMAGE=agent-fleet-opencode:alpine \
+#     -t agent-fleet-sandbox-driver:local .
 
 ARG BASE_IMAGE=agent-fleet-opencode:alpine
 ARG RUST_VERSION=1.88

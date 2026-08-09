@@ -16,3 +16,7 @@ crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
 crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh
 cargo test -p fleet-sandbox-driver
 ```
+
+Compose pins workspace/driver to `agent-fleet-sandbox-{workspace,driver}:local`
+so each `fleet-task-*` project reuses images. See
+[`sandbox-lab/README.md`](sandbox-lab/README.md).
