@@ -1,0 +1,30 @@
+[package]
+name = "fleet-integrations"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Agent Fleet integrations — OAuth connect (GitHub, Slack, …) for workspace AI use"
+
+[lib]
+name = "fleet_integrations"
+path = "src/lib.rs"
+
+[dependencies]
+aes-gcm = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+chrono = { workspace = true }
+fleet-auth = { workspace = true }
+fleet-db = { workspace = true }
+hex = { workspace = true }
+jsonwebtoken = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

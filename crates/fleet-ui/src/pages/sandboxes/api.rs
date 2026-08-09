@@ -1,3 +1,3 @@
-//! Client-side API helpers for sandboxes.
+//! Sandbox/session listing (same control-plane data as Fleet).
 
-#![allow(dead_code)]
+pub use crate::pages::fleet::api::list_sessions;

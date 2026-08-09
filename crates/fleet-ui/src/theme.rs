@@ -17,6 +17,7 @@ impl Theme {
         }
     }
 
+    #[allow(dead_code)] // kept for accessibility / future text labels
     pub fn label(self) -> &'static str {
         match self {
             Theme::Black => "Black",

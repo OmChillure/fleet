@@ -44,23 +44,49 @@ impl AppError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            AppError::BadRequest(_) => "bad_request",
+            AppError::Unauthorized(_) => "unauthorized",
+            AppError::Forbidden(_) => "forbidden",
+            AppError::NotFound(_) => "not_found",
+            AppError::Conflict(_) => "conflict",
+            AppError::Internal(_) => "internal",
+        }
+    }
 }
 
 impl From<DbError> for AppError {
     fn from(err: DbError) -> Self {
         match err {
-            DbError::Conflict(msg) => Self::Conflict(msg),
-            DbError::NotFound(msg) => Self::NotFound(msg),
-            DbError::Connect { ref target, ref source } => {
-                tracing::error!(target = %target, error = %source, "database connect error");
+            DbError::Conflict(msg) => {
+                tracing::warn!(error = %msg, "database conflict");
+                Self::Conflict(msg)
+            }
+            DbError::NotFound(msg) => {
+                tracing::debug!(error = %msg, "database not found");
+                Self::NotFound(msg)
+            }
+            DbError::Connect {
+                ref target,
+                ref source,
+            } => {
+                // Full detail only in logs — client gets a safe message.
+                tracing::error!(
+                    db_target = %target,
+                    error = %source,
+                    "database connect error"
+                );
                 Self::Internal("database unavailable".into())
             }
             DbError::Sqlx(ref e) => {
-                tracing::error!(error = %e, "database error");
+                // sqlx Display includes PG code/message when available.
+                tracing::error!(error = %e, debug = ?e, "database query error");
                 Self::Internal("database error".into())
             }
             DbError::Migrate(ref e) => {
-                tracing::error!(error = %e, "migration error");
+                tracing::error!(error = %e, "database migration error");
                 Self::Internal("database migration error".into())
             }
         }
@@ -69,7 +95,7 @@ impl From<DbError> for AppError {
 
 impl From<jsonwebtoken::errors::Error> for AppError {
     fn from(err: jsonwebtoken::errors::Error) -> Self {
-        tracing::debug!(error = %err, "jwt error");
+        tracing::debug!(error = %err, "jwt decode/validate error");
         Self::Unauthorized("invalid or expired token".into())
     }
 }
@@ -88,6 +114,7 @@ struct ErrorBody {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let kind = self.kind();
         let (status, msg) = match &self {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m.clone()),
@@ -96,6 +123,25 @@ impl IntoResponse for AppError {
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
         };
+
+        // Central log for every API error so nothing fails silently.
+        // 5xx → error, 4xx → warn (both visible under default filters).
+        if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                kind,
+                error = %msg,
+                "api error"
+            );
+        } else {
+            tracing::warn!(
+                status = status.as_u16(),
+                kind,
+                error = %msg,
+                "api error"
+            );
+        }
+
         (status, Json(ErrorBody { error: msg })).into_response()
     }
 }

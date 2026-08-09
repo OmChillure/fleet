@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    kubernetes.io/metadata.name: agent-fleet

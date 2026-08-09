@@ -1,0 +1,21 @@
+flowchart TB
+  subgraph Org["Organization"]
+    INT[Integration hub<br/>credentials · OAuth · webhooks]
+    P1[Project A]
+    P2[Project B]
+  end
+
+  subgraph External["External boards"]
+    JIRA[Jira]
+    MON[Monday.com]
+    LIN[Linear]
+    ASA[Asana]
+    TRE[Trello]
+    AZD[Azure Boards]
+  end
+
+  INT -->|connect once| JIRA & MON & LIN & ASA & TRE & AZD
+  P1 -->|map board / project / workspace| INT
+  P2 -->|map board / project / workspace| INT
+  P1 <-.->|sync cards · status · comments| JIRA
+  P2 <-.->|sync cards · status · comments| MON

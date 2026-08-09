@@ -1,31 +1,39 @@
 use dioxus::prelude::*;
 
 use crate::components::sidebar::Sidebar;
-use crate::components::theme_toggle::ThemeToggle;
-use crate::pages::auth::api::me;
+use crate::pages::auth::api::{AuthError, me};
 use crate::theme::Theme;
 use crate::Route;
 
-/// App chrome for dashboard and related pages: sidebar + top bar + theme.
+/// App chrome for dashboard and related pages: sidebar + content (no top bar).
 ///
-/// Requires a live session cookie. If `/api/auth/me` fails, redirect to login
-/// (the dashboard URL alone is not proof of auth — login JSON can navigate
-/// there even when cookies never stuck).
+/// Requires a live session cookie. Uses silent refresh when the short-lived
+/// access JWT expired but `fleet_refresh` is still valid.
 #[component]
 pub fn AppShell() -> Element {
     let theme = use_signal(|| Theme::Black);
     use_context_provider(|| theme);
 
     let mut auth_state = use_signal(|| AuthGate::Checking);
+    let mut gate_message = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
 
     use_effect(move || {
         spawn(async move {
             match me().await {
-                Ok(_) => auth_state.set(AuthGate::Ok),
-                Err(_) => {
+                Ok(_) => {
+                    gate_message.set(None);
+                    auth_state.set(AuthGate::Ok);
+                }
+                Err(AuthError::Unauthorized(msg)) => {
+                    gate_message.set(Some(msg));
                     auth_state.set(AuthGate::Denied);
                     navigator.replace(Route::Login {});
+                }
+                Err(e) => {
+                    // Network / server blip — do not wipe the session; show retry.
+                    gate_message.set(Some(e.message()));
+                    auth_state.set(AuthGate::Retryable);
                 }
             }
         });
@@ -44,19 +52,46 @@ pub fn AppShell() -> Element {
                 p { class: "text-sm", "Redirecting to login…" }
             }
         },
+        AuthGate::Retryable => rsx! {
+            div {
+                class: "{theme().root_class()} flex h-screen w-full flex-col items-center justify-center gap-3 bg-[var(--app-bg)] text-[var(--app-fg)]",
+                p { class: "text-sm text-[var(--app-muted)]",
+                    "Could not reach the API. Your session may still be valid."
+                }
+                if let Some(msg) = gate_message() {
+                    p { class: "max-w-md px-4 text-center text-xs text-red-400", "{msg}" }
+                }
+                button {
+                    class: "rounded-md bg-[var(--app-fg)] px-4 py-2 text-sm font-semibold text-[var(--app-bg)]",
+                    r#type: "button",
+                    onclick: move |_| {
+                        auth_state.set(AuthGate::Checking);
+                        gate_message.set(None);
+                        spawn(async move {
+                            match me().await {
+                                Ok(_) => auth_state.set(AuthGate::Ok),
+                                Err(AuthError::Unauthorized(_)) => {
+                                    auth_state.set(AuthGate::Denied);
+                                    navigator.replace(Route::Login {});
+                                }
+                                Err(e) => {
+                                    gate_message.set(Some(e.message()));
+                                    auth_state.set(AuthGate::Retryable);
+                                }
+                            }
+                        });
+                    },
+                    "Retry"
+                }
+            }
+        },
         AuthGate::Ok => rsx! {
             div {
-                class: "{theme().root_class()} flex h-screen w-full overflow-hidden bg-[var(--app-bg)] text-[var(--app-fg)]",
+                class: "{theme().root_class()} flex h-screen w-full overflow-hidden bg-[var(--app-sidebar)] text-[var(--app-fg)]",
                 Sidebar {}
-                div { class: "flex min-w-0 flex-1 flex-col",
-                    header {
-                        class: "flex h-12 shrink-0 items-center justify-end border-b border-[var(--app-border)] bg-[var(--app-bg)] px-3",
-                        ThemeToggle {}
-                    }
-                    main {
-                        class: "min-h-0 flex-1 overflow-auto bg-[var(--app-bg)] p-4",
-                        Outlet::<crate::Route> {}
-                    }
+                main {
+                    class: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-bg)]",
+                    Outlet::<crate::Route> {}
                 }
             }
         },
@@ -68,4 +103,5 @@ enum AuthGate {
     Checking,
     Ok,
     Denied,
+    Retryable,
 }

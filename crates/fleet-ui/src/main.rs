@@ -10,10 +10,14 @@ use dioxus::prelude::*;
 
 use components::app_shell::AppShell;
 use components::navbar::Navbar;
+use components::toast::ToastProvider;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
+use pages::chat::Chat;
 use pages::dashboard::Dashboard;
+use pages::fleet::Fleet;
 use pages::home::Home;
+use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
 use pages::sessions::Sessions;
 use pages::settings::Settings;
@@ -29,18 +33,26 @@ pub enum Route {
         Login {},
         #[route("/signup")]
         Signup {},
-    // App shell: `/{workspace_id}/dashboard` etc.
-    // `end_layout` must hang on the next variant (not trail the enum).
     #[end_layout]
+    // OAuth popup only — no shell, no navbar. Closes after signaling parent.
+    #[route("/oauth/done")]
+    OAuthDone {},
+    // App shell: `/{workspace_id}/dashboard` etc.
     #[layout(AppShell)]
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },
+        #[route("/:workspace_id/chat")]
+        Chat { workspace_id: String },
+        #[route("/:workspace_id/fleet")]
+        Fleet { workspace_id: String },
         #[route("/:workspace_id/sessions")]
         Sessions { workspace_id: String },
         #[route("/:workspace_id/agents")]
         Agents { workspace_id: String },
         #[route("/:workspace_id/sandboxes")]
         Sandboxes { workspace_id: String },
+        #[route("/:workspace_id/integrations")]
+        Integrations { workspace_id: String },
         #[route("/:workspace_id/settings")]
         Settings { workspace_id: String },
 }
@@ -50,9 +62,12 @@ impl Route {
     pub fn workspace_id(&self) -> Option<&str> {
         match self {
             Route::Dashboard { workspace_id }
+            | Route::Chat { workspace_id }
+            | Route::Fleet { workspace_id }
             | Route::Sessions { workspace_id }
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
+            | Route::Integrations { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,
         }
@@ -67,7 +82,9 @@ fn main() {
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
-        Router::<Route> {}
+        ToastProvider {
+            Router::<Route> {}
+        }
     }
 }
 

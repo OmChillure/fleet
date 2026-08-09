@@ -1,0 +1,14 @@
+# Optional kind cluster with a default StorageClass (kind standard).
+#   kind create cluster --name agent-fleet --config infra/kind.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: agent-fleet
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30303
+        hostPort: 3030
+        protocol: TCP

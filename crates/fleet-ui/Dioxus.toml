@@ -16,3 +16,8 @@ script = []
 [web.resource.dev]
 style = []
 script = []
+
+# Forward /api/* to fleet-server so cookies are first-party on :3030 (reload-safe).
+# Start the API first: `cargo run` → http://127.0.0.1:8080
+[[web.proxy]]
+backend = "http://127.0.0.1:8080/api/"

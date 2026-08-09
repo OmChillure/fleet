@@ -1,0 +1,84 @@
+%% Architecture: Planning (LLM) vs Orchestration (logic) + state store
+flowchart TB
+  subgraph UI["Operator surfaces"]
+    WEB[Web UI]
+    CLI[CLI / TUI]
+  end
+
+  subgraph OrgLayer["Organization"]
+    INT[Integration hub<br/>OAuth · webhooks · credentials]
+    POL[Policies · quotas]
+  end
+
+  subgraph Project["Project isolation boundary"]
+    subgraph API["Project API / gateway"]
+      GW[REST + WebSocket]
+    end
+
+    subgraph Durable["Durable state · source of truth"]
+      RUNS[(WorkRuns)]
+      ITEMS[(WorkItems ingest cache)]
+      PLANS[(WorkPlans versioned)]
+      BOARD[(Task board cards)]
+      WORK[(Worker sessions)]
+      DOCS[(Document tree)]
+      CFG[(Config · capacity · secrets · goal)]
+      EVT[(Event log / outbox)]
+    end
+
+    subgraph Planning["Planning service · LLM · job-based"]
+      PQ[Plan job queue]
+      PW[Planner executor]
+      LLM[LLM inference]
+      PQ --> PW --> LLM
+      PW -->|writes| PLANS
+      PW -->|reads| ITEMS & DOCS & CFG
+    end
+
+    subgraph Orchestration["Orchestration / operator · pure logic · tick"]
+      TICK[Reconcile loop every X s]
+      MAT[Materializer]
+      SCH[Scheduler / capacity]
+      LIFE[Lifecycle manager<br/>spawn · kill · restart]
+      STUCK[Stuck / timeout detector]
+      SYNC[External board sync]
+      HITL[HITL router]
+      MON[Monitoring aggregator]
+      TICK --> MAT & SCH & LIFE & STUCK & SYNC & HITL & MON
+      MAT --> BOARD
+      SCH & LIFE --> WORK
+      LIFE --> SCH
+    end
+
+    subgraph Fleet["Worker fleet · execution"]
+      W1[Worker 1]
+      W2[Worker 2]
+      WN[Worker N]
+    end
+  end
+
+  subgraph External["External systems"]
+    JIRA[Jira / Monday / …]
+    TGT[Repos · CRM · etc.]
+  end
+
+  WEB & CLI --> GW
+  GW --> RUNS & DOCS & CFG & BOARD
+  INT --> JIRA
+  GW -->|start run / accept plan| RUNS
+  GW -->|enqueue| PQ
+  INT -->|issue payloads| ITEMS
+  GW -->|webhook fan-in| ITEMS
+
+  PLANS -->|PlanAccepted handoff| TICK
+  BOARD --> SCH
+  SCH --> LIFE
+  LIFE --> W1 & W2 & WN
+  W1 & W2 & WN -->|claim · progress · terminal| BOARD
+  W1 & W2 & WN -->|heartbeat · artifacts| WORK & MON
+  W1 & W2 & WN --> TGT
+  SYNC <--> JIRA
+  BOARD -.->|status map| SYNC
+  HITL --> WEB
+  TICK --> EVT
+  MON --> WEB

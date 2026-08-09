@@ -2,34 +2,33 @@ sequenceDiagram
   autonumber
   participant H as Human
   participant UI as Web UI
-  participant Op as Operator service
-  participant W as Worker agent
-  participant S as Shared state
-  participant T as Target repo / system
+  participant Plat as Platform
+  participant Orch as Project orchestrator
+  participant W as Worker
+  participant S as Project state
+  participant T as Target system
 
-  H->>UI: Set global goal, max agents, secrets
-  UI->>Op: Save configuration
-  H->>UI: Publish task specification
-  UI->>Op: Ingest document + link target
-  Op->>Op: Decompose into board cards
-  Op->>W: Spawn worker (tmux session)
+  H->>UI: Select organization + project
+  UI->>Plat: Authorize membership
+  H->>UI: Set project goal, max agents, secrets
+  UI->>Orch: Save project configuration
+  H->>UI: Add document under project tree
+  UI->>Orch: Ingest document + link target
+  Orch->>Orch: Decompose into board cards
+  Orch->>W: Spawn worker in project fleet
   W->>S: Claim task (In progress)
   loop Until done or blocked
-    W->>T: Act (code, email, analysis…)
-    W->>W: Validate / self-check
-    W->>Op: Stream progress (WebSocket)
+    W->>T: Act
+    W->>W: Validate
+    W->>Orch: Stream progress
   end
   alt Success
-    W->>S: Mark Done (succeeded)
-    W->>Op: Artifacts + screenshot
+    W->>S: Done succeeded
+    W->>Orch: Artifacts + screenshot
   else Needs input
-    W->>S: Mark Blocked
-    W->>Op: Request human input
-    Op->>UI: Notify reviewer
-    H->>UI: Provide input
-    UI->>Op: Resume worker
+    W->>S: Blocked
+    Orch->>UI: Notify project reviewer
   else Failure
-    W->>S: Mark Done (failed)
-    W->>Op: Failure report
+    W->>S: Done failed
   end
-  Op->>UI: Dashboard update
+  Orch->>UI: Project dashboard update

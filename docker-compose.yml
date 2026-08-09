@@ -1,0 +1,85 @@
+# Agent Fleet — full stack (Postgres + API + UI)
+#
+#   docker compose up -d --build
+#
+#   API:  http://localhost:8080
+#   UI:   http://localhost:3030   (nginx; /api proxied to API)
+#   DB:   postgres://fleet:fleet@localhost:5433/fleet
+#
+# Open the UI at http://localhost:3030 (prefer localhost for cookies).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+      POSTGRES_DB: fleet
+    ports:
+      - "5433:5432"
+    volumes:
+      - fleet_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agent-fleet-api:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet?sslmode=disable
+      JWT_SECRET: dev-change-me-to-a-long-random-secret-at-least-32-chars
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      # UI is served on :3030 (docker ui service or host dx serve)
+      CORS_ORIGINS: http://localhost:3030,http://127.0.0.1:3030
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: Lax
+      API_PUBLIC_BASE: http://localhost:8080
+      UI_PUBLIC_BASE: http://localhost:3030
+      DATA_DIR: /data
+      SANDBOX_BACKEND: stub
+      # process backend (worker is in the API image):
+      # SANDBOX_BACKEND: process
+      # PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
+      RUST_LOG: info,sqlx=warn,tower_http=info
+      # ADMIN_TOKEN: dev-admin-token-change-me
+    volumes:
+      - fleet_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+      start_period: 40s
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: agent-fleet-ui:local
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3030:3030"
+    # nginx conf hard-codes proxy_pass http://api:8080 — uses compose DNS name "api"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3030/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  fleet_pg:
+  fleet_data:

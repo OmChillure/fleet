@@ -1,0 +1,61 @@
+# nginx in the UI image proxies /api → http://api:8080 (same-namespace DNS).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fleet-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-fleet
+        app.kubernetes.io/name: fleet-ui
+    spec:
+      containers:
+        - name: ui
+          image: agent-fleet-ui:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3030
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-ui
+spec:
+  selector:
+    app.kubernetes.io/name: fleet-ui
+  ports:
+    - name: http
+      port: 3030
+      targetPort: http

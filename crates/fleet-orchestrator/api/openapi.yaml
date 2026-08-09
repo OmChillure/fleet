@@ -1,0 +1,700 @@
+openapi: 3.0.3
+info:
+  title: Fleet Orchestrator Control Plane
+  description: |
+    Project-scoped orchestration HTTP API (PR6).
+
+    **Auth**
+    - Admin routes: `Authorization: Bearer <ADMIN_TOKEN>` when `AUTH_MODE=token`.
+    - Worker routes: `Authorization: Bearer <session worker_token>`.
+    - `AUTH_MODE=none` is dev-only and requires a loopback bind address.
+  version: 0.1.0
+  license:
+    name: Apache-2.0 OR MIT
+
+servers:
+  - url: http://127.0.0.1:8081
+    description: Standalone fleet-orchestrator (typical local)
+  - url: http://127.0.0.1:8080
+    description: Embedded under fleet-server
+
+tags:
+  - name: health
+  - name: projects
+  - name: runs
+  - name: tasks
+  - name: workers
+  - name: admin
+
+paths:
+  /:
+    get:
+      tags: [health]
+      summary: Service index
+      operationId: rootIndex
+      responses:
+        "200":
+          description: Service metadata
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness
+      operationId: healthz
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusOk"
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness (DB reachable)
+      operationId: readyz
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusReady"
+        "503":
+          $ref: "#/components/responses/Error"
+
+  /openapi.yaml:
+    get:
+      tags: [health]
+      summary: OpenAPI document (this spec)
+      operationId: openapiYaml
+      responses:
+        "200":
+          description: OpenAPI 3 YAML
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /v1/projects:
+    post:
+      tags: [projects]
+      summary: Create project
+      operationId: createProject
+      security:
+        - AdminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateProjectResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}:
+    get:
+      tags: [projects]
+      summary: Get project
+      operationId: getProject
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}/config:
+    get:
+      tags: [projects]
+      summary: Get project orchestration config
+      operationId: getProjectConfig
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Config knobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectConfig"
+
+  /v1/projects/{project_id}/runs/fixture:
+    post:
+      tags: [runs]
+      summary: Accept a fixture WorkPlan (ValidatePlan + insert)
+      operationId: fixtureRun
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FixtureRequest"
+      responses:
+        "201":
+          description: Run accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FixtureResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}/runs:
+    get:
+      tags: [runs]
+      summary: List runs for project
+      operationId: listRuns
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RunSummary"
+
+  /v1/projects/{project_id}/runs/{run_id}/cancel:
+    post:
+      tags: [runs]
+      summary: Request cancel (intent; tick drains)
+      operationId: cancelRun
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        "200":
+          description: Cancel requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: string
+                    format: uuid
+                  cancel_requested:
+                    type: boolean
+
+  /v1/projects/{project_id}/tasks:
+    get:
+      tags: [tasks]
+      summary: List board tasks
+      operationId: listTasks
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - name: run_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TaskSummary"
+
+  /v1/projects/{project_id}/tasks/{task_id}:
+    get:
+      tags: [tasks]
+      summary: Get board task detail
+      operationId: getTask
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskDetail"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}/tasks/{task_id}/resume:
+    post:
+      tags: [tasks]
+      summary: HITL resume intent (blocked tasks only)
+      operationId: resumeTask
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+      responses:
+        "200":
+          description: Resume requested
+        "409":
+          description: Task not blocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/projects/{project_id}/workers:
+    get:
+      tags: [workers]
+      summary: List worker sessions
+      operationId: listWorkers
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Workers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WorkerSummary"
+
+  /v1/projects/{project_id}/workers/{session_id}/heartbeat:
+    post:
+      tags: [workers]
+      summary: Append heartbeat report (inbox)
+      operationId: postHeartbeat
+      security:
+        - WorkerBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "202":
+          description: Accepted
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}/workers/{session_id}/status:
+    post:
+      tags: [workers]
+      summary: Append status report (inbox)
+      operationId: postStatus
+      security:
+        - WorkerBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatusRequest"
+      responses:
+        "202":
+          description: Accepted
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /v1/projects/{project_id}/admin/tick:
+    post:
+      tags: [admin]
+      summary: Force reconcile tick (same project lock as loop)
+      operationId: adminTick
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "200":
+          description: Tick report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TickReport"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: Lock wait timeout (overlapping tick)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+components:
+  securitySchemes:
+    AdminBearer:
+      type: http
+      scheme: bearer
+      description: ADMIN_TOKEN (control plane)
+    WorkerBearer:
+      type: http
+      scheme: bearer
+      description: Session worker token (issued at spawn)
+
+  parameters:
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+
+  schemas:
+    StatusOk:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+    StatusReady:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ready
+    ErrorBody:
+      type: object
+      properties:
+        error:
+          type: string
+    CreateProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        max_agents:
+          type: integer
+          minimum: 0
+          default: 3
+    CreateProjectResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        config:
+          type: object
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    ProjectConfig:
+      type: object
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        max_agents:
+          type: integer
+        tick_interval_s:
+          type: integer
+        heartbeat_stale_s:
+          type: integer
+        spawn_timeout_s:
+          type: integer
+        kill_grace_s:
+          type: integer
+        default_task_timeout_s:
+          type: integer
+        default_max_retries:
+          type: integer
+        retry_backoff_s:
+          type: integer
+        on_task_fail:
+          type: string
+        auto_sync_external:
+          type: boolean
+        sandbox_backend:
+          type: string
+    FixtureRequest:
+      type: object
+      required: [plan]
+      properties:
+        plan:
+          type: object
+          description: WorkPlanBody (see schemas/workplan.v1.json)
+    FixtureResponse:
+      type: object
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        plan_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: accepted
+    RunSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        source:
+          type: string
+        cancel_requested_at:
+          type: string
+          format: date-time
+          nullable: true
+        terminal_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    TaskSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        plan_task_id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+        priority:
+          type: integer
+        attempt:
+          type: integer
+        progress_pct:
+          type: integer
+        block_reason:
+          type: string
+          nullable: true
+        failure_reason:
+          type: string
+          nullable: true
+    TaskDetail:
+      allOf:
+        - $ref: "#/components/schemas/TaskSummary"
+        - type: object
+          properties:
+            spec_md:
+              type: string
+            depends_on:
+              type: array
+              items:
+                type: string
+                format: uuid
+            claimed_session_id:
+              type: string
+              format: uuid
+              nullable: true
+            hitl_notes:
+              type: string
+              nullable: true
+            hitl_resume_requested_at:
+              type: string
+              format: date-time
+              nullable: true
+    WorkerSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        board_task_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+          format: uuid
+        attempt:
+          type: integer
+        status:
+          type: string
+        runtime_backend:
+          type: string
+        progress_pct:
+          type: integer
+        last_heartbeat_at:
+          type: string
+          format: date-time
+          nullable: true
+        exit_reason:
+          type: string
+          nullable: true
+    HeartbeatRequest:
+      type: object
+      required: [seq]
+      properties:
+        seq:
+          type: integer
+        progress_pct:
+          type: integer
+          nullable: true
+    StatusRequest:
+      type: object
+      required: [seq, status]
+      properties:
+        seq:
+          type: integer
+        status:
+          type: string
+          description: success|failed|blocked|running
+        reason:
+          type: string
+          nullable: true
+    TickReport:
+      type: object
+      properties:
+        tick_id:
+          type: string
+          format: uuid
+        plans_materialized:
+          type: integer
+        tasks_materialized:
+          type: integer
+        dep_updates:
+          type: integer
+        inbox_applied:
+          type: integer
+        spawned:
+          type: integer
+        spawn_failed:
+          type: integer
+        completed_via_runtime:
+          type: integer
+        killed:
+          type: integer
+        retried:
+          type: integer
+        cancel_tasks:
+          type: integer
+        retry_promoted:
+          type: integer
+        reaped:
+          type: integer
+        runs_terminated:
+          type: integer
+        external_synced:
+          type: integer
+          description: PR10 — tasks pushed to ExternalBoardSync this tick

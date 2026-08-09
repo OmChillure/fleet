@@ -21,13 +21,15 @@ Related component folders (stubs for deeper specs):
 | Web UI | [`docs/components/ui/`](../components/ui/) | Browser app (Dioxus): landing, auth, workspace-scoped shell |
 | Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
 
-**Implemented today:**
-
-| Surface | Status |
-| --- | --- |
-| HTTP API + UI | `fleet-server` `:8080` (`fleet-auth` + workspaces over `fleet-db`); UI `:3030` (cookie credentials) |
-| **Driver lab** | [`crates/fleet-driver`](../../crates/fleet-driver/) — per-task sandbox (compose + volume + workspace + harness), named tools (`fleet-wsexec`), OpenCode + Pi, path-scoped ACP permissions; see [`sandbox-workspace.md`](./sandbox-workspace.md) |
-| Orchestrator / Sandbox Manager | Design-only (lab scripts stand in for SM create/destroy) |
+**Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
+(auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
+(Postgres). UI on `:3030` talks to the API with cookie credentials.
+Orchestrator tick + process sandbox (`fleet-worker`) and the Kubernetes
+`FleetSandbox` operator are on `main`. OAuth connect is live.
+**Driver lab:** [`crates/fleet-driver`](../../crates/fleet-driver/) runs
+OpenCode/Pi over ACP in a per-task compose sandbox (see
+[`sandbox-workspace.md`](./sandbox-workspace.md)); it is not yet the
+orchestrator `PROCESS_WORKER_BIN` / CRD entrypoint.
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

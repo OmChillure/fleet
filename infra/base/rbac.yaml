@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-operator
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-operator
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-operator
+rules:
+  - apiGroups: ["fleet.agentfleet.io"]
+    resources: ["fleetsandboxes", "fleetsandboxes/status", "fleetsandboxes/finalizers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-operator
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fleet-operator
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: agent-fleet

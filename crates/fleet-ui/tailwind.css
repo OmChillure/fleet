@@ -14,27 +14,44 @@
   --color-fleet-accent-hover: #5c9fff;
 }
 
-/* App shell themes — pure black / pure white */
+/* App shell themes — pure black sidebar + soft gray content */
 .theme-black {
-  --app-bg: #000000;
-  --app-bg-elevated: #0a0a0a;
-  --app-bg-hover: #141414;
-  --app-border: #262626;
-  --app-fg: #fafafa;
-  --app-muted: #a3a3a3;
+  --app-sidebar: #000000;
+  --app-bg: #111111;
+  --app-bg-elevated: #1a1a1a;
+  --app-bg-hover: #222222;
+  --app-border: #2a2a2a;
+  --app-fg: #f5f5f5;
+  --app-muted: #9a9a9a;
   --app-accent: #ffffff;
   --app-accent-fg: #000000;
 }
 
 .theme-white {
-  --app-bg: #ffffff;
-  --app-bg-elevated: #f5f5f5;
+  --app-sidebar: #ffffff;
+  --app-bg: #f4f4f5;
+  --app-bg-elevated: #ffffff;
   --app-bg-hover: #ebebeb;
-  --app-border: #e5e5e5;
+  --app-border: #e4e4e7;
   --app-fg: #0a0a0a;
-  --app-muted: #737373;
+  --app-muted: #71717a;
   --app-accent: #000000;
   --app-accent-fg: #ffffff;
+}
+
+/* Toast progress (rust-ui StaticToast-style bar) */
+@keyframes toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.toast-progress {
+  transform-origin: left center;
+  animation: toast-progress 4s linear forwards;
 }
 
 @layer base {
@@ -53,4 +70,69 @@
   button {
     @apply cursor-pointer font-sans;
   }
+}
+
+/* Thin, dark scrollbar (main content + nested scroll areas) */
+.theme-black {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+}
+
+.theme-black * {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+}
+
+.theme-black ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.theme-black ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.theme-black ::-webkit-scrollbar-thumb {
+  background-color: #3a3a3a;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.theme-black ::-webkit-scrollbar-thumb:hover {
+  background-color: #525252;
+}
+
+.theme-black ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.theme-white {
+  scrollbar-width: thin;
+  scrollbar-color: #c4c4c4 transparent;
+}
+
+.theme-white * {
+  scrollbar-width: thin;
+  scrollbar-color: #c4c4c4 transparent;
+}
+
+.theme-white ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.theme-white ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.theme-white ::-webkit-scrollbar-thumb {
+  background-color: #c4c4c4;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.theme-white ::-webkit-scrollbar-thumb:hover {
+  background-color: #a3a3a3;
 }

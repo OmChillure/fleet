@@ -1,48 +1,52 @@
 flowchart TB
-  subgraph Humans["Humans"]
-    OP[Operator / Product owner]
-    HITL[Human-in-the-loop reviewer]
+  subgraph Platform["Platform"]
+    AUTH[Auth / membership]
+    ORGreg[Organization registry]
   end
 
-  subgraph ControlPlane["Operator service — control plane"]
-    API[API + WebSocket gateway]
-    CFG[Configuration manager<br/>max agents · secrets · global goal]
-    SCH[Scheduler / capacity<br/>spin up · scale · tear down]
-    LIFE[Lifecycle manager<br/>tmux / worker processes]
-    MON[Monitoring aggregator]
+  subgraph Org["Organization"]
+    MEM[Members & roles]
+    TPOL[Organization policies · quotas]
+    INT[Board integrations · Jira · Monday · …]
+    PROJS[Projects]
   end
 
-  subgraph DataPlane["Shared state"]
-    BOARD[(Task board store)]
-    DOCS[(Document repository)]
-    MD[Markdown workspaces]
-    SECRETS[(Encrypted secrets<br/>Postgres / SQLite)]
-    MONGO[(Document store<br/>MongoDB optional)]
-  end
+  subgraph Project["Project — isolation boundary for work"]
+    subgraph ControlPlane["Project orchestrator / operator"]
+      API[API + WebSocket gateway]
+      CFG[Configuration manager<br/>max agents · secrets · project goal]
+      SCH[Scheduler / capacity]
+      LIFE[Lifecycle manager]
+      MON[Monitoring aggregator]
+    end
 
-  subgraph Workers["Worker fleet"]
-    W1[Worker agent 1]
-    W2[Worker agent 2]
-    WN[Worker agent N]
+    subgraph DataPlane["Project data"]
+      DOCTREE[(Document tree)]
+      BOARD[(Task board)]
+      MD[Markdown workspaces]
+      SECRETS[(Encrypted secrets)]
+    end
+
+    subgraph Workers["Project worker fleet"]
+      W1[Worker 1]
+      W2[Worker 2]
+      WN[Worker N]
+    end
   end
 
   subgraph Targets["Work targets"]
     REPO[Git repositories]
-    EXT[External systems<br/>email · CRM · analysis]
+    EXT[External systems]
   end
 
-  OP --> API
-  HITL --> API
-  API --> CFG
-  API --> SCH
-  API --> LIFE
-  API --> MON
+  AUTH --> ORGreg
+  ORGreg --> Org
+  MEM --> PROJS
+  PROJS --> Project
+  API --> CFG & SCH & LIFE & MON
   SCH --> LIFE
   LIFE --> W1 & W2 & WN
-  W1 & W2 & WN <--> BOARD
-  W1 & W2 & WN <--> DOCS
-  W1 & W2 & WN <--> MD
+  W1 & W2 & WN <--> DOCTREE & BOARD & MD
   CFG --> SECRETS
   W1 & W2 & WN --> REPO & EXT
-  W1 & W2 & WN -->|status · artifacts · screenshots| MON
-  MON --> API
+  W1 & W2 & WN -->|status · artifacts| MON

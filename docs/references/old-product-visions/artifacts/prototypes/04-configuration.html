@@ -32,14 +32,37 @@
 <div class="shell">
   <nav>
     <div class="logo">⚡ Agent Fleet</div>
+    <div style="background:#1e293b;border-radius:8px;padding:.5rem .65rem;margin-bottom:.75rem;font-size:.78rem">
+      <div style="color:#64748b;font-size:.65rem;text-transform:uppercase">Organization · Acme Corp</div>
+      <div style="font-weight:600;color:#93c5fd;margin-top:.2rem">Project · onboarding-redesign</div>
+    </div>
+    <a href="00-projects.html">Projects</a>
+    <a href="06-org-integrations.html">Integrations</a>
     <a href="01-fleet-dashboard.html">Dashboard</a>
     <a href="02-task-board.html">Task board</a>
     <a href="03-documents.html">Documents</a>
     <a class="active" href="#">Configuration</a>
   </nav>
   <main>
-    <h1>Configuration manager</h1>
-    <p class="sub">Operator service settings · applies to new and (optionally) running workers</p>
+    <h1>Project configuration</h1>
+    <p class="sub">Per-project orchestrator settings · isolated from other projects in this organization</p>
+
+    <div class="card">
+      <h2>Starter persona</h2>
+      <label>Persona template (set at project creation; customizable)</label>
+      <select>
+        <option selected>Software development</option>
+        <option>Sales pipeline</option>
+        <option>Marketing pipeline</option>
+        <option>Customer support</option>
+        <option>Analysis &amp; research</option>
+        <option>DevOps &amp; platform</option>
+        <option>Product discovery</option>
+        <option>Content &amp; documentation</option>
+        <option>Blank / custom</option>
+      </select>
+      <p class="hint">Changing persona later does not wipe docs; it updates suggested defaults for new workers and validation hooks.</p>
+    </div>
 
     <div class="card">
       <h2>Fleet capacity</h2>
@@ -68,8 +91,8 @@
     </div>
 
     <div class="card">
-      <h2>Common goal — global system prompt</h2>
-      <label>System prompt shared by all agents</label>
+      <h2>Project goal — orchestrator system prompt</h2>
+      <label>System prompt for agents in this project only</label>
       <textarea>You are part of Agent Fleet working toward: ship the onboarding redesign.
 Prefer small, reviewable commits. Report blockers early. Capture a screenshot or PDF
 when a UI or document artifact is ready for human verification.</textarea>
@@ -88,7 +111,35 @@ when a UI or document artifact is ready for human verification.</textarea>
       </div>
     </div>
 
-    <button class="btn">Save configuration</button>
+        <div class="card">
+      <h2>External board mapping</h2>
+      <p class="hint" style="margin-top:0">Uses organization-level connections (Jira, Monday.com, …). Choose target board here.</p>
+      <label>Provider</label>
+      <select>
+        <option selected>Jira (org connection)</option>
+        <option>Monday.com (org connection)</option>
+        <option>Linear — not connected at org</option>
+        <option>None — fleet board only</option>
+      </select>
+      <div class="row">
+        <div>
+          <label>External project / board</label>
+          <input value="WEB · Scrum board" />
+        </div>
+        <div>
+          <label>Sync mode</label>
+          <select>
+            <option selected>Bidirectional</option>
+            <option>Fleet → external only</option>
+            <option>External → fleet only</option>
+          </select>
+        </div>
+      </div>
+      <label>Default epic / parent (optional)</label>
+      <input value="ONB-2" />
+    </div>
+
+<button class="btn">Save configuration</button>
   </main>
 </div>
 </body>

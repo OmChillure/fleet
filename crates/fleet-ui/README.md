@@ -1,13 +1,13 @@
 # fleet-ui
 
-Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app shell.
+Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, chat, and app shell.
 
 | | |
 | --- | --- |
 | Stack | [Dioxus](https://dioxuslabs.com/) 0.7 (web) + Tailwind CSS v4 |
 | Design doc | [`docs/components/ui/README.md`](../../docs/components/ui/README.md) |
 | Workspace crate | `fleet-ui` |
-| API base (default) | `http://localhost:8080` (`pages/auth/api.rs`) |
+| API base (default) | **Same origin** `/api/*` via `Dioxus.toml` proxy → `:8080` |
 
 ---
 
@@ -16,31 +16,36 @@ Web UI for [Agent Fleet](../../README.md): landing, auth, workspaces, and app sh
 ```bash
 # Terminal 1 — backend (workspace root)
 cargo run
-# → http://localhost:8080
+# → http://127.0.0.1:8080
 
-# Terminal 2 — UI
+# Terminal 2 — UI (proxies /api → backend; cookies stay first-party)
 # Requires: dioxus-cli 0.7.x matching dioxus = 0.7.3
 dx serve --package fleet-ui --port 3030
 # → http://localhost:3030
 ```
 
-Open **`http://localhost:3030`** (same hostname you use for cookies/CORS).
+Open **`http://localhost:3030`** (prefer `localhost`, not `127.0.0.1`, for cookie consistency).
 
 ```bash
 cargo check -p fleet-ui
 dx build --package fleet-ui
 ```
 
+No project `node_modules` is required for `dx serve` / `dx build` (Tailwind is
+driven by Dioxus from root `tailwind.css` → `assets/tailwind.css`).
+
 ### Auth flow
 
 1. `/signup` → `POST /api/auth/signup` (creates account + default workspace) → `/login`
-2. `/login` → `POST /api/auth/login` (httpOnly cookies) → `/{workspace_id}/dashboard`
-3. `AppShell` calls `GET /api/auth/me`; on failure → redirect `/login`
-4. Sidebar loads `GET /api/workspaces`; can `POST /api/workspaces` to create more
+2. `/login` → `POST /api/auth/login` (httpOnly `fleet_access` + `fleet_refresh`) → dashboard
+3. `AppShell` calls `GET /api/auth/me`; if access JWT expired, silent `POST /api/auth/refresh` then retry
+4. Only true 401 after refresh fails → redirect `/login` (network errors show Retry)
+5. Sidebar loads `GET /api/workspaces`; can `POST /api/workspaces` to create more
 
-API client: `src/pages/auth/api.rs` (credentials included for cross-origin cookies).
+API client: `src/pages/auth/api.rs` (`credentials: include`). Dev uses same-origin
+`/api` (see `[[web.proxy]]` in `Dioxus.toml`).
 
-Override API origin at build time:
+Override API origin at build time (split deploy / no proxy):
 
 ```bash
 FLEET_AUTH_URL=https://api.example.com dx serve --package fleet-ui --port 3030
@@ -50,24 +55,28 @@ FLEET_AUTH_URL=https://api.example.com dx serve --package fleet-ui --port 3030
 
 ## Routes
 
-### Marketing (black landing chrome — no sidebar / theme toggle)
+### Marketing (black landing chrome — no sidebar)
 
 | Path | Feature folder | Notes |
 | --- | --- | --- |
 | `/` | `src/pages/home/` | Pure black monochrome landing |
 | `/login` | `src/pages/auth/login.rs` | Split layout; JWT cookie login |
 | `/signup` | `src/pages/auth/signup.rs` | Split layout; then → login |
+| `/oauth/done` | `src/pages/integrations/oauth_done.rs` | OAuth popup finish (no shell) |
 
-### App shell (sidebar + workspace switcher + B/W theme)
+### App shell (sidebar + workspace switcher)
 
 All app routes are **workspace-scoped**.
 
 | Path | Feature folder | Notes |
 | --- | --- | --- |
 | `/{workspace_id}/dashboard` | `src/pages/dashboard/` | Empty placeholder |
-| `/{workspace_id}/sessions` | `src/pages/sessions/` | Empty placeholder |
+| `/{workspace_id}/chat` | `src/pages/chat/` | Chat UI + bottom composer |
+| `/{workspace_id}/fleet` | `src/pages/fleet/` | Fleet control plane |
+| `/{workspace_id}/sessions` | `src/pages/sessions/` | Chat history placeholder |
 | `/{workspace_id}/agents` | `src/pages/agents/` | Empty placeholder |
 | `/{workspace_id}/sandboxes` | `src/pages/sandboxes/` | Empty placeholder |
+| `/{workspace_id}/integrations` | `src/pages/integrations/` | OAuth catalog + connect |
 | `/{workspace_id}/settings` | `src/pages/settings/` | Empty placeholder |
 
 Routes are defined in `src/main.rs`. Folder names organize code only.
@@ -81,18 +90,21 @@ workspace dropdown).
 
 ```text
 src/
-  main.rs                 # Route enum, MarketingLayout, App
+  main.rs                 # Route enum, MarketingLayout, App + ToastProvider
   theme.rs                # Theme::Black | Theme::White
   components/
     app_shell.rs          # Auth gate + sidebar + theme provider
     navbar.rs             # Marketing navbar
-    sidebar.rs            # Workspace dropdown + nav links
-    theme_toggle.rs
+    sidebar.rs            # Workspace dropdown + nav sections
+    toast.rs              # Global bottom-right toasts (show_toast())
   pages/
     auth/
       login.rs / signup.rs / layout.rs
       api.rs              # login, me, workspaces client
-    dashboard/ sessions/ agents/ sandboxes/ settings/
+    chat/                 # /{ws}/chat
+    dashboard/ fleet/ sessions/ agents/ sandboxes/
+    integrations/         # catalog UI + oauth_done
+    settings/
     home/
     shared/               # EmptyPage, etc.
 tailwind.css              # Tailwind v4 entry (dx auto-detect)
@@ -109,21 +121,49 @@ assets/tailwind.css       # Generated output (served via asset!)
 
 ---
 
-## Layouts & theme
+## Layouts, theme, toasts
 
 | Layout | Used by | Chrome |
 | --- | --- | --- |
 | `MarketingLayout` | `/`, `/login`, `/signup` | Navbar + footer; fixed black |
-| `AppShell` | `/{workspace_id}/*` | Auth gate, sidebar (workspace switcher), theme toggle |
+| `AppShell` | `/{workspace_id}/*` | Auth gate, sidebar, full-height content |
+| `ToastProvider` | Entire app (`main.rs`) | Global toasts (outside theme vars) |
 
-App theme CSS variables: `.theme-black` / `.theme-white` in `tailwind.css`.
-Toggle is top-right on app pages only.
+App theme CSS variables: `.theme-black` / `.theme-white` in `tailwind.css`
+(default black; appearance can still be toggled from the user menu if present).
+
+### Toasts
+
+```rust
+use crate::components::toast::show_toast;
+
+show_toast().info("Authorize Slack in the new tab…");
+show_toast().success("slack connected.");
+show_toast().error("Something failed.");
+```
+
+- Bottom-right, square corners, solid high-contrast colors
+- Auto-dismiss ~4s + **OK** pill
+- Used for auth validation/API errors and integration connect/disconnect
 
 ### Sidebar
 
-- **Workspace dropdown** above Dashboard: switch workspace, create new
-- Nav links rebuild with the current `workspace_id`
+- **Workspace dropdown** above nav: switch workspace, create new
+- Sections: **Chat** (New chat, Chat history), **Monitoring**, **Agents**, **Workspace**
 - Create uses `POST /api/workspaces` then navigates to the new dashboard
+
+### Chat
+
+- Route: `/{workspace_id}/chat` (sidebar **New chat**)
+- Full-height message list + floating bottom composer (Enter to send)
+- Local placeholder replies until a chat API is wired
+
+### Integrations UI
+
+- Catalog from `GET /api/workspaces/{id}/integrations`
+- **Connect** opens OAuth in a new tab; card flips to Connected when auth finishes
+  (postMessage + localStorage + API poll; optimistic UI)
+- Tokens never appear in the browser — only connection metadata
 
 ---
 
@@ -149,12 +189,15 @@ Dioxus 0.7 runs Tailwind when it finds root `tailwind.css` (`dx serve` /
 | Routing + feature folders | Done |
 | Marketing landing (black) | Done |
 | App shell, sidebar, B/W theme | Done |
-| Login + signup UI | Done |
+| Login + signup UI + toasts | Done |
 | Real auth / Postgres (`fleet-auth`) | Done (JWT cookies) |
 | Default workspace on signup/login | Done |
 | Workspace-scoped routes + switcher | Done |
 | App shell session gate | Done |
-| Live fleet / orchestrator data | Not started |
+| Chat page (composer UI) | Done (no backend yet) |
+| Integrations OAuth UI | Done |
+| Global toasts | Done |
+| Live fleet / orchestrator data | Partial (fleet page) |
 
 ---
 
@@ -162,6 +205,7 @@ Dioxus 0.7 runs Tailwind when it finds root `tailwind.css` (`dx serve` /
 
 - Component design: [`docs/components/ui/`](../../docs/components/ui/)
 - Auth design: [`docs/components/auth/`](../../docs/components/auth/)
+- Integrations: [`docs/components/integrations/`](../../docs/components/integrations/)
 - API library: [`crates/fleet-auth/`](../fleet-auth/)
-- Contracts: [`crates/agent-fleet-contracts/`](../agent-fleet-contracts/)
+- Integrations crate: [`crates/fleet-integrations/`](../fleet-integrations/)
 - Architecture: [`docs/architecture/README.md`](../../docs/architecture/README.md)
