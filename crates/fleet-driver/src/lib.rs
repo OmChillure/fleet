@@ -10,3 +10,4 @@ pub mod harness;
 pub mod orch;
 pub mod prompt;
 pub mod report;
+pub mod terminal;

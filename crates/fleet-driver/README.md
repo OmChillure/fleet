@@ -89,6 +89,8 @@ Process sandbox uses your user `~/.grok` (including MCP servers in
 | `FLEET_TASK_TIMEOUT_S` | `3600` | ACP wall clock |
 | `FLEET_HEARTBEAT_INTERVAL_S` | `2` | Must stay `<` orch `heartbeat_stale_s` |
 | `FLEET_AUTO_APPROVE` | `1` | ACP permission requests |
+
+`initialize` advertises `clientCapabilities.terminal = true`. The driver implements `terminal/create|output|wait_for_exit|kill|release` so Grok can run shell commands. Returning `{}` for those methods fails with `failed to deserialize response`.
 | `FLEET_HARNESS_CMD` | unset | Full argv override |
 | `FLEET_MOCK_ACP_BIN` | sibling / PATH | Mock agent binary |
 
