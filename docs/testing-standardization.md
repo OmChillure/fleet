@@ -67,4 +67,5 @@ Before you write a test, pick the row in the table. Then:
 | `fleet-db` had zero tests | `crates/fleet-db/tests/repos_integration.rs` |
 | `fleet-auth` only persona units | password / JWT / cookie / config `#[cfg(test)]` |
 | Server HTTP repeated orch tick matrix | one cookie BFF fixture+tick; orch keeps the matrix |
-| Human/demo scripts unproven | `record_demo.py` films core scenes; lab uses absolute `file://` |
+| Human/demo scripts unproven | films only after `/health.git_sha` matches HEAD; lab uses absolute `file://` |
+| Live `:3030`/`:8080` stolen by Kind | `stack_identity.py` fail-closed; old `.webm`s are not proof |

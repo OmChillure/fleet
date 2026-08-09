@@ -53,6 +53,13 @@ Subcommands: `launch`, `guide` (no start), `status`, `stop`, `record` (agents).
 
 Use `http://localhost:3030` (not `127.0.0.1`) so cookies match CORS.
 
+**Port-up is not this tree.** Kind often binds host `:8080`/`:3030` to old
+`agent-fleet-*:local` images. `human-test.sh` / `record` / browser e2e
+require `GET /health` → `git_sha` == `git rev-parse HEAD` and `apis`
+contains `chat`. Existing `.webm`s filmed on Kind before this check are
+**not** MR proof — discard them. `FLEET_ALLOW_FOREIGN_STACK=1` warns and
+continues (operators only).
+
 Throwaway accounts only: `*@example.test`. Do not type real emails, tokens,
 or customer data. Do not persist OAuth against a personal GitHub in a shared
 DB unless that is the MR.

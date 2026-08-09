@@ -30,6 +30,12 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 
 `ENABLE_BROWSER_E2E` defaults **on** only for `PROFILE=full` (kind publishes UI/API). `lab` and `minimal` default it off.
 
+Live `:3030`/`:8080` is **this tree** only when `/health.git_sha` equals
+`git rev-parse HEAD`. Kind extraPortMappings often own those ports with
+**old** images — port-up is not enough. `tests/browser/stack_identity.py`
+fails closed. `FLEET_ALLOW_FOREIGN_STACK=1` is an operator escape, not a
+way to go green. Kind videos filmed without a matching sha are not proof.
+
 ## Rules
 
 - Rust behavior is tested in Rust. Python tests the Python workspace agent and compose/kind YAML.

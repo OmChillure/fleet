@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import unittest
 import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
 UI = os.environ.get("FLEET_UI_URL", "http://127.0.0.1:3030").rstrip("/")
 API = os.environ.get("FLEET_API_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -33,14 +37,13 @@ def _listening(host: str, port: int) -> bool:
 
 
 def _require_stack() -> None:
-    if not _listening("127.0.0.1", 8080):
-        raise RuntimeError(
-            "API :8080 is not listening. Start fleet-server (just dev / cargo run) "
-            "or kind extraPortMappings, then re-run."
-        )
+    try:
+        require_this_tree(REPO, API)
+    except ForeignStackError as e:
+        raise RuntimeError(str(e)) from e
     if not _listening("127.0.0.1", 3030):
         raise RuntimeError(
-            "UI :3030 is not listening. Start fleet-ui (dx serve / kind) then re-run."
+            "UI :3030 is not listening. Start this tree: ./scripts/human-test.sh launch"
         )
 
 
@@ -139,6 +142,17 @@ class BrowserE2ETests(unittest.TestCase):
             "New chat" in body or "Chat" in body,
             "chat page did not render",
         )
+        self.assertNotIn(
+            "Chat backend not connected yet.",
+            body,
+            "stub chat UI — Kind/old fleet-ui, not this tree",
+        )
+        has_provider = page.locator("select[title='Chat provider']").count() > 0
+        has_offline = "No chat provider ready" in body
+        self.assertTrue(
+            has_provider or has_offline,
+            "new chat chrome missing (provider select or offline hint)",
+        )
 
         hist = page.get_by_role("link", name="Chat history", exact=True)
         if hist.count() == 0:
@@ -176,8 +190,10 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(body.get("service"), "fleet-server")
         self.assertEqual(body.get("status"), "ok")
         apis = body.get("apis") or []
-        for name in ("auth", "workspaces", "fleet"):
+        for name in ("auth", "workspaces", "fleet", "chat"):
             self.assertIn(name, apis, f"health.apis missing {name}: {apis}")
+        sha = body.get("git_sha")
+        self.assertTrue(sha, f"health.git_sha must be this tree: {body}")
 
     def test_06_sidebar_has_fleet_and_integrations(self) -> None:
         base = getattr(type(self), "workspace_url", None)

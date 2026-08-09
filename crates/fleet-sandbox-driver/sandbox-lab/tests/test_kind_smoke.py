@@ -5,10 +5,15 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 import unittest
 from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_REPO / "tests" / "browser"))
+from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
 
 def _kubectl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -84,12 +89,13 @@ class KindSmokeTests(unittest.TestCase):
 
     def test_host_api_health(self):
         try:
-            with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=5) as resp:
-                body = resp.read().decode()
-                self.assertEqual(resp.status, 200)
-                self.assertIn("fleet-server", body)
-        except (urllib.error.URLError, TimeoutError) as e:
-            self.fail(f"host :8080 /health: {e}")
+            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=False)
+        except ForeignStackError as e:
+            self.fail(
+                f"host :8080 is not this tree: {e}. "
+                "Rebuild agent-fleet-api:local with FLEET_GIT_SHA or SKIP_KIND=1. "
+                "FLEET_ALLOW_FOREIGN_STACK=1 skips identity (operator only)."
+            )
 
     def test_host_ui(self):
         try:

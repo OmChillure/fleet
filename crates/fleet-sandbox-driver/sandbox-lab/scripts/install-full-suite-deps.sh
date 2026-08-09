@@ -908,7 +908,9 @@ fi
 
 if [[ "${ENABLE_FULL_IMAGES}" == "1" ]]; then
   echo "==> full-stack images (api + ui + operator) — several minutes each"
-  docker_build_if_needed agent-fleet-api:local -f "${REPO}/Dockerfile" "${REPO}"
+  docker_build_if_needed agent-fleet-api:local \
+    --build-arg "FLEET_GIT_SHA=$(git -C "${REPO}" rev-parse HEAD)" \
+    -f "${REPO}/Dockerfile" "${REPO}"
   docker_build_if_needed agent-fleet-ui:local -f "${REPO}/Dockerfile.ui" "${REPO}"
   docker_build_if_needed agent-fleet-operator:local -f "${REPO}/Dockerfile.operator" "${REPO}"
 fi

@@ -75,27 +75,29 @@ open_browser() {
   fi
 }
 
+require_this_tree() {
+  python3 "${ROOT}/tests/browser/stack_identity.py"
+}
+
 cmd_launch() {
   need_cmd docker
   need_cmd cargo
   need_cmd curl
+  need_cmd python3
   if ! command -v dx >/dev/null 2>&1; then
     err "dx (Dioxus CLI) is not on PATH — UI will not start."
     err "Run ${INSTALL} (or: cargo install dioxus-cli --version 0.7.3 --locked)"
     exit 1
   fi
+  export FLEET_GIT_SHA="${FLEET_GIT_SHA:-$(git -C "${ROOT}" rev-parse HEAD)}"
   log "Starting stack via ./scripts/fleet-dev.sh start"
   "${DEV}" start
-  if ! curl -sf --max-time 3 "${API_URL}/health" >/dev/null; then
-    err "API health failed after start. Logs: ./scripts/fleet-dev.sh logs server"
+  require_this_tree || {
+    err "Launched stack is not this tree. Logs: ./scripts/fleet-dev.sh logs"
     exit 1
-  fi
-  if ! curl -sf -o /dev/null --max-time 3 "${UI_URL}/"; then
-    err "UI did not answer on ${UI_URL}. Logs: ./scripts/fleet-dev.sh logs ui"
-    exit 1
-  fi
+  }
   ok "UI  ${UI_URL}"
-  ok "API ${API_URL}/health"
+  ok "API ${API_URL}/health  git_sha=${FLEET_GIT_SHA}"
 }
 
 pause_step() {
@@ -120,12 +122,8 @@ pause_step() {
 }
 
 cmd_guide() {
-  if ! curl -sf --max-time 2 "${API_URL}/health" >/dev/null; then
-    err "API is down. Run: $0 launch"
-    exit 1
-  fi
-  if ! curl -sf -o /dev/null --max-time 2 "${UI_URL}/"; then
-    err "UI is down. Run: $0 launch"
+  if ! require_this_tree; then
+    err "Live stack is not this tree (or is down). Run: $0 launch"
     exit 1
   fi
 
@@ -204,9 +202,8 @@ cmd_guide() {
 cmd_record() {
   need_cmd python3
   if [[ "${1:-}" != "--list" ]]; then
-    if ! curl -sf --max-time 2 "${API_URL}/health" >/dev/null \
-       || ! curl -sf -o /dev/null --max-time 2 "${UI_URL}/"; then
-      warn "Stack not up — launching first."
+    if ! require_this_tree >/dev/null; then
+      warn "This-tree stack not up — launching first."
       cmd_launch
     fi
   fi
@@ -220,11 +217,10 @@ main() {
   fi
   case "${cmd}" in
     ""|guide-all|walk)
-      if ! curl -sf --max-time 2 "${API_URL}/health" >/dev/null \
-         || ! curl -sf -o /dev/null --max-time 2 "${UI_URL}/"; then
-        cmd_launch
+      if require_this_tree >/dev/null; then
+        ok "Stack already up (this tree)."
       else
-        ok "Stack already up."
+        cmd_launch
       fi
       cmd_guide
       ;;

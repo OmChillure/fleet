@@ -173,16 +173,16 @@ class RecordDemoContractTests(unittest.TestCase):
                 f'scripts/human-test.sh must pause_step "{title}…"',
             )
 
-    def test_require_stack_fails_if_ports_down(self):
+    def test_require_stack_uses_this_tree_identity(self):
         src = REC.read_text(encoding="utf-8")
         self.assertIn("def require_stack", src)
-        self.assertIn("require_stack()", src)
-        # Port checks (UI + API) and fail-closed SystemExit messaging.
-        self.assertIn("8080", src)
-        self.assertIn("3030", src)
-        self.assertIn("SystemExit", src)
-        self.assertRegex(src, r"API\s*:8080\s*is\s*down|:\s*8080\s*is\s*down")
-        self.assertRegex(src, r"UI\s*:3030\s*is\s*down|:\s*3030\s*is\s*down")
+        self.assertIn("require_this_tree", src)
+        self.assertIn("ForeignStackError", src)
+        ident = (REPO / "tests" / "browser" / "stack_identity.py").read_text(encoding="utf-8")
+        self.assertIn("FLEET_GIT_SHA", ident)
+        self.assertIn("git_sha", ident)
+        self.assertIn("extraPortMappings", ident)
+        self.assertIn('"chat"', ident)
         # require_stack must gate recording (called before launch), not only defined.
         self.assertRegex(
             src,

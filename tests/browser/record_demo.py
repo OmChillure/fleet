@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Callable
 from urllib.request import urlopen
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 UI = os.environ.get("FLEET_UI_URL", "http://localhost:3030").rstrip("/")
 API = os.environ.get("FLEET_API_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -47,11 +50,10 @@ def _listening(host: str, port: int) -> bool:
 
 
 def require_stack() -> None:
-    if not _listening("127.0.0.1", 8080):
-        raise SystemExit(
-            "API :8080 is down. Start with ./scripts/human-test.sh launch "
-            "(or ./scripts/fleet-dev.sh start)."
-        )
+    try:
+        require_this_tree(REPO, API)
+    except ForeignStackError as e:
+        raise SystemExit(str(e)) from e
     if not _listening("127.0.0.1", 3030):
         raise SystemExit(
             "UI :3030 is down. Start with ./scripts/human-test.sh launch "
@@ -175,6 +177,8 @@ class Demo:
         body = p.inner_text("body")
         if "fleet-server" not in body and "ok" not in body:
             raise RuntimeError(f"unexpected /health body: {body[:300]}")
+        if "chat" not in body:
+            raise RuntimeError(f"/health missing chat in apis (old server): {body[:400]}")
         p.goto(f"{API}/", wait_until="domcontentloaded")
         pause(p, 1200)
 
@@ -183,8 +187,12 @@ class Demo:
         p = self.page
         p.goto(f"{base}/chat", wait_until="networkidle")
         pause(p, 1200)
+        body = p.inner_text("body")
+        if "Chat backend not connected yet." in body:
+            raise RuntimeError("stub chat UI — not this tree's fleet-ui")
+        # Do not fill a disabled textarea (false-green on stub; fails on new UI offline).
         box = p.locator("textarea")
-        if box.count():
+        if box.count() and box.first.is_enabled():
             box.first.fill("Human-test ping (no send if provider is offline).")
             pause(p, 800)
 

@@ -32,6 +32,8 @@ Protocol (checklist, when to film, which scene maps to which crate):
 - **Humans** run `./scripts/human-test.sh`. It starts Postgres + API (:8080)
   + UI (:3030) if needed and walks every current surface. Use it when you
   do not know the product yet, and again whenever you add a surface.
+- Port-up is not this tree. Live gates require `GET /health` `git_sha` ==
+  `git rev-parse HEAD` (Kind extraPortMappings often steal :8080/:3030).
 - When you add a user-visible or operator-visible path, add a step to
   `scripts/human-test.sh` and a scene to `tests/browser/record_demo.py` in
   the **same** change.

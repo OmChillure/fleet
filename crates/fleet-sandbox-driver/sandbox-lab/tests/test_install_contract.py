@@ -111,7 +111,12 @@ class InstallContractTests(unittest.TestCase):
     def test_human_testing_doc_and_recorder_exist(self):
         human = REPO / "docs" / "human-testing.md"
         rec = REPO / "tests" / "browser" / "record_demo.py"
+        ident = REPO / "tests" / "browser" / "stack_identity.py"
         script = REPO / "scripts" / "human-test.sh"
+        self.assertTrue(ident.is_file(), ident)
+        self.assertIn("FLEET_GIT_SHA", ident.read_text(encoding="utf-8"))
+        self.assertIn("FLEET_GIT_SHA", (REPO / "Dockerfile").read_text(encoding="utf-8"))
+        self.assertIn("FLEET_GIT_SHA", (REPO / "scripts" / "fleet-dev.sh").read_text(encoding="utf-8"))
         std = REPO / "docs" / "testing-standardization.md"
         self.assertTrue(std.is_file(), std)
         self.assertIn("#[cfg(test)]", std.read_text(encoding="utf-8"))
@@ -119,6 +124,7 @@ class InstallContractTests(unittest.TestCase):
         self.assertTrue(rec.is_file(), rec)
         self.assertTrue(script.is_file(), script)
         self.assertTrue(script.stat().st_mode & 0o111, "human-test.sh must be executable")
+        self.assertIn("stack_identity.py", script.read_text(encoding="utf-8"))
         rec_text = rec.read_text(encoding="utf-8")
         for scene in (
             "landing",
