@@ -57,17 +57,18 @@ pub fn compose_prompt(title: &str, summary: &str, spec_md: &str, acceptance: &[S
     out
 }
 
-/// Write `spec.md`, `task.json`, and `prompt.md` for the session work dir.
+/// Write `spec.md`, `task.json`, `prompt.md`, and optional `workspace.json`.
 pub fn write_session_context(
     work_dir: &Path,
     task: &BoardTaskRow,
     timeout_s: u64,
+    repo: Option<&crate::domain::ProjectGitRemote>,
 ) -> std::io::Result<()> {
     if !task.spec_md.is_empty() {
         std::fs::write(work_dir.join("spec.md"), &task.spec_md)?;
     }
     let acceptance = acceptance_from_json(&task.acceptance);
-    let task_json = json!({
+    let mut task_json = json!({
         "title": task.title,
         "summary": task.summary,
         "spec_md": task.spec_md,
@@ -76,6 +77,21 @@ pub fn write_session_context(
         "worker_profile": task.worker_profile,
         "timeout_s": timeout_s,
     });
+    if let Some(repo) = repo {
+        task_json["repo_url"] = json!(repo.url);
+        task_json["git_ref"] = json!(repo.git_ref);
+        let workspace = json!({
+            "repo": {
+                "url": repo.url,
+                "ref": repo.git_ref,
+                "auth_via": "proxy"
+            }
+        });
+        std::fs::write(
+            work_dir.join("workspace.json"),
+            serde_json::to_vec_pretty(&workspace).unwrap_or_else(|_| b"{}".to_vec()),
+        )?;
+    }
     std::fs::write(
         work_dir.join("task.json"),
         serde_json::to_vec_pretty(&task_json).unwrap_or_else(|_| b"{}".to_vec()),
@@ -184,7 +200,7 @@ mod tests {
     fn write_files_roundtrip() {
         let dir = tempdir().unwrap();
         let task = sample_task(json!(["ok"]));
-        write_session_context(dir.path(), &task, 90).unwrap();
+        write_session_context(dir.path(), &task, 90, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("spec.md")).unwrap(),
             "Write hello.txt."
@@ -198,5 +214,29 @@ mod tests {
         let prompt = std::fs::read_to_string(dir.path().join("prompt.md")).unwrap();
         assert!(prompt.contains("# Add marker"));
         assert!(prompt.contains("- ok"));
+        assert!(!dir.path().join("workspace.json").exists());
+    }
+
+    #[test]
+    fn write_files_includes_repo() {
+        let dir = tempdir().unwrap();
+        let task = sample_task(json!(["ok"]));
+        let repo = crate::domain::ProjectGitRemote {
+            url: "https://github.com/acme/app.git".into(),
+            git_ref: "develop".into(),
+        };
+        write_session_context(dir.path(), &task, 90, Some(&repo)).unwrap();
+        let tj: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("task.json")).unwrap())
+                .unwrap();
+        assert_eq!(tj["repo_url"], "https://github.com/acme/app.git");
+        assert_eq!(tj["git_ref"], "develop");
+        let ws: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("workspace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ws["repo"]["url"], "https://github.com/acme/app.git");
+        assert_eq!(ws["repo"]["ref"], "develop");
+        assert_eq!(ws["repo"]["auth_via"], "proxy");
     }
 }

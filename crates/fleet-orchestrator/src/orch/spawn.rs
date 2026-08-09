@@ -25,6 +25,7 @@ pub async fn schedule_and_spawn(
     data_dir: &PathBuf,
     orchestrator_url: &str,
     default_timeout_s: i32,
+    repo: Option<&crate::domain::ProjectGitRemote>,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -98,6 +99,12 @@ pub async fn schedule_and_spawn(
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
+        if let Some(repo) = repo {
+            req.env
+                .insert("FLEET_REPO_URL".into(), repo.url.clone());
+            req.env
+                .insert("FLEET_GIT_REF".into(), repo.git_ref.clone());
+        }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
         }
@@ -108,7 +115,7 @@ pub async fn schedule_and_spawn(
             req.env.insert("FLEET_WORK_CMD".into(), cmd);
         }
         if let Err(e) =
-            super::session_context::write_session_context(&req.work_dir, task, timeout_s)
+            super::session_context::write_session_context(&req.work_dir, task, timeout_s, repo)
         {
             tracing::warn!(
                 error = %e,

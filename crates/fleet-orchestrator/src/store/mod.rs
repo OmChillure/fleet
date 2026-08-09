@@ -79,7 +79,7 @@ impl Store {
             SELECT project_id, max_agents, tick_interval_s, heartbeat_stale_s,
                    spawn_timeout_s, kill_grace_s, default_task_timeout_s,
                    default_max_retries, retry_backoff_s, on_task_fail,
-                   auto_sync_external, sandbox_backend, updated_at
+                   auto_sync_external, sandbox_backend, repo_url, git_ref, updated_at
             FROM project_configs
             WHERE project_id = $1
             "#,
@@ -88,6 +88,34 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| StoreError::NotFound(format!("project config {project_id}")))
+    }
+
+    /// Set or clear the project's single git remote.
+    pub async fn set_project_git_remote(
+        &self,
+        project_id: Uuid,
+        remote: Option<&crate::domain::ProjectGitRemote>,
+    ) -> Result<ProjectConfigRow> {
+        let (url, git_ref) = match remote {
+            Some(r) => (Some(r.url.as_str()), r.git_ref.as_str()),
+            None => (None, "main"),
+        };
+        let r = sqlx::query(
+            r#"
+            UPDATE project_configs
+            SET repo_url = $2, git_ref = $3, updated_at = now()
+            WHERE project_id = $1
+            "#,
+        )
+        .bind(project_id)
+        .bind(url)
+        .bind(git_ref)
+        .execute(&self.pool)
+        .await?;
+        if r.rows_affected() == 0 {
+            return Err(StoreError::NotFound(format!("project config {project_id}")));
+        }
+        self.get_project_config(project_id).await
     }
 
     /// Enable/disable PR10 external board sync for a project.

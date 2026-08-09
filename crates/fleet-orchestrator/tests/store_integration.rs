@@ -76,6 +76,22 @@ async fn create_project_and_materialize_idempotent() {
     let project = store.create_project(&name, 3).await.unwrap();
     let cfg = store.get_project_config(project.id).await.unwrap();
     assert_eq!(cfg.max_agents, 3);
+    assert!(cfg.repo_url.is_none());
+    assert_eq!(cfg.git_ref, "main");
+
+    let remote = fleet_orchestrator::domain::ProjectGitRemote {
+        url: "https://github.com/acme/app.git".into(),
+        git_ref: "develop".into(),
+    };
+    let cfg = store
+        .set_project_git_remote(project.id, Some(&remote))
+        .await
+        .unwrap();
+    assert_eq!(cfg.repo_url.as_deref(), Some("https://github.com/acme/app.git"));
+    assert_eq!(cfg.git_ref, "develop");
+    let cfg = store.set_project_git_remote(project.id, None).await.unwrap();
+    assert!(cfg.repo_url.is_none());
+    assert_eq!(cfg.git_ref, "main");
 
     let body = sample_body(project.id);
     let plan_id = body.plan_id;
