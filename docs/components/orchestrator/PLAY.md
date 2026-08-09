@@ -20,8 +20,11 @@ dx serve --package fleet-ui --port 3030
 ```
 
 1. Signup / login  
-2. Sidebar → **Fleet**  
-3. **Start 2-task run** → **Run until done** (or **Run tick** a few times)  
+2. Sidebar → **Settings** → set the workspace git clone URL (one repo per project) and default ref  
+3. Sidebar → **Fleet**  
+4. **Start 2-task run** → **Run until done** (or **Run tick** a few times)  
+
+If no repo is set, tasks still run; `fleet-driver` skips clone and uses the empty session dir (fine for mock). With a URL, the driver clones into `sessions/<id>/repo` and the agent cwd is that checkout.
 
 Cookie auth on `/api/workspaces/{id}/fleet/*`. **No ADMIN_TOKEN required.**
 
@@ -59,6 +62,6 @@ export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
 ```
 
-Sessions write `spec.md`, `task.json`, `prompt.md`, plus `artifacts/transcript.md` and `artifacts/result.json`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
+Sessions write `spec.md`, `task.json`, `prompt.md`, optional `workspace.json`, plus `artifacts/transcript.md` and `artifacts/result.json`. The cloned tree (if configured) is `repo/`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
 
 Optional: set `ADMIN_TOKEN` to enable `/v1/*` bearer automation (`./scripts/demo-orch.sh`).

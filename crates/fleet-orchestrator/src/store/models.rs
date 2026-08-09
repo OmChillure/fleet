@@ -24,7 +24,48 @@ pub struct ProjectConfigRow {
     pub on_task_fail: String,
     pub auto_sync_external: bool,
     pub sandbox_backend: String,
+    /// Clone URL for the project's single git remote. None = no clone.
+    pub repo_url: Option<String>,
+    /// Branch, tag, or commit checked out after clone. Default `main`.
+    pub git_ref: String,
     pub updated_at: DateTime<Utc>,
+}
+
+impl ProjectConfigRow {
+    pub fn public_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "project_id": self.project_id,
+            "max_agents": self.max_agents,
+            "tick_interval_s": self.tick_interval_s,
+            "heartbeat_stale_s": self.heartbeat_stale_s,
+            "spawn_timeout_s": self.spawn_timeout_s,
+            "kill_grace_s": self.kill_grace_s,
+            "default_task_timeout_s": self.default_task_timeout_s,
+            "default_max_retries": self.default_max_retries,
+            "retry_backoff_s": self.retry_backoff_s,
+            "on_task_fail": self.on_task_fail,
+            "auto_sync_external": self.auto_sync_external,
+            "sandbox_backend": self.sandbox_backend,
+            "repo_url": self.repo_url,
+            "git_ref": self.git_ref,
+        })
+    }
+
+    /// Binding used at spawn time. None when the project has no remote yet.
+    pub fn git_remote(&self) -> Option<crate::domain::ProjectGitRemote> {
+        let url = self.repo_url.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(crate::domain::ProjectGitRemote {
+            url: url.to_string(),
+            git_ref: if self.git_ref.trim().is_empty() {
+                "main".into()
+            } else {
+                self.git_ref.clone()
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]

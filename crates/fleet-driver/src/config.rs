@@ -32,6 +32,9 @@ pub struct DriverConfig {
     pub reasoning_effort: Option<String>,
     /// Write `grok-acp.debug.log` in the work dir.
     pub grok_debug: bool,
+    /// Project git remote (clone URL). None = skip provision clone.
+    pub repo_url: Option<String>,
+    pub git_ref: String,
 }
 
 impl DriverConfig {
@@ -93,6 +96,15 @@ impl DriverConfig {
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             grok_debug: parse_env_bool_default_false(env::var("FLEET_GROK_DEBUG").ok().as_deref()),
+            repo_url: env::var("FLEET_REPO_URL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            git_ref: env::var("FLEET_GIT_REF")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "main".into()),
         })
     }
 }

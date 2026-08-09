@@ -4,7 +4,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use fleet_auth::{require_user, AppError, AppResult, AuthState};
@@ -21,6 +21,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/workspaces/{workspace_id}/fleet",
             get(get_fleet_project),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/config",
+            patch(patch_fleet_config),
         )
         .route(
             "/api/workspaces/{workspace_id}/fleet/runs/fixture",
@@ -120,6 +124,69 @@ async fn get_fleet_project(
         "config": {
             "max_agents": cfg.max_agents,
             "sandbox_backend": cfg.sandbox_backend,
+            "repo_url": cfg.repo_url,
+            "git_ref": cfg.git_ref,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchFleetConfigRequest {
+    pub repo_url: Option<String>,
+    pub git_ref: Option<String>,
+}
+
+async fn patch_fleet_config(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PatchFleetConfigRequest>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let existing = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+    let remote = match body.repo_url {
+        None => match existing.git_remote() {
+            Some(mut r) => {
+                if let Some(rf) = body.git_ref.as_deref() {
+                    r.git_ref = fleet_orchestrator::domain::normalize_git_ref(Some(rf))
+                        .map_err(|e| AppError::bad_request(e.to_string()))?;
+                }
+                Some(r)
+            }
+            None => {
+                if body.git_ref.is_some() {
+                    return Err(AppError::bad_request(
+                        "git_ref requires repo_url on this project",
+                    ));
+                }
+                None
+            }
+        },
+        Some(ref url) => fleet_orchestrator::domain::parse_project_git_remote(
+            Some(url.as_str()),
+            body.git_ref.as_deref().or(Some(existing.git_ref.as_str())),
+        )
+        .map_err(|e| AppError::bad_request(e.to_string()))?,
+    };
+    let cfg = state
+        .orch
+        .store
+        .set_project_git_remote(workspace_id, remote.as_ref())
+        .await
+        .map_err(|e| map_orch_err("set_project_git_remote", e))?;
+    Ok(Json(json!({
+        "project_id": workspace_id,
+        "config": {
+            "max_agents": cfg.max_agents,
+            "sandbox_backend": cfg.sandbox_backend,
+            "repo_url": cfg.repo_url,
+            "git_ref": cfg.git_ref,
         }
     })))
 }
@@ -340,11 +407,9 @@ async fn get_session_detail(
         80_000,
     );
     let prompt = read_capped_file(std::path::Path::new(&work_dir).join("prompt.md"), 16_000);
-    let result = std::fs::read_to_string(
-        std::path::Path::new(&work_dir).join("artifacts/result.json"),
-    )
-    .ok()
-    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let result = std::fs::read_to_string(std::path::Path::new(&work_dir).join("artifacts/result.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     Ok(Json(json!({
         "session": {
             "id": session.id,

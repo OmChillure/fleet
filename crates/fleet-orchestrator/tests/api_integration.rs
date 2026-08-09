@@ -107,6 +107,41 @@ async fn fixture_and_tick_happy_path() {
     .await;
     assert_eq!(st, StatusCode::CREATED, "{proj}");
     let pid = proj["id"].as_str().unwrap().to_string();
+    assert_eq!(proj["config"]["git_ref"], "main");
+    assert!(proj["config"]["repo_url"].is_null());
+
+    let (st, cfg) = json_req(
+        app.clone(),
+        "PATCH",
+        &format!("/v1/projects/{pid}/config"),
+        Some(token),
+        Some(json!({"repo_url": "https://github.com/acme/app.git", "git_ref": "develop"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{cfg}");
+    assert_eq!(cfg["repo_url"], "https://github.com/acme/app.git");
+    assert_eq!(cfg["git_ref"], "develop");
+
+    let (st, cfg) = json_req(
+        app.clone(),
+        "GET",
+        &format!("/v1/projects/{pid}/config"),
+        Some(token),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{cfg}");
+    assert_eq!(cfg["repo_url"], "https://github.com/acme/app.git");
+
+    let (st, bad) = json_req(
+        app.clone(),
+        "PATCH",
+        &format!("/v1/projects/{pid}/config"),
+        Some(token),
+        Some(json!({"repo_url": "not a url"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
 
     let run_id = Uuid::new_v4();
     let plan_id = Uuid::new_v4();
