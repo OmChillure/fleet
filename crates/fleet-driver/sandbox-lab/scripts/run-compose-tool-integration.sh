@@ -49,16 +49,24 @@ JSON
   echo "=== named tool request (known) ==="
   dc exec -T workspace bash -lc "
     python3 - <<'PY'
-import json, time
+import hashlib, hmac, json, os, time
 from pathlib import Path
+
+def sign(req):
+    secret = os.environ.get("FLEET_HANDSHAKE_SECRET") or ""
+    body = {k: v for k, v in req.items() if k != "hmac"}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return body
+
 fleet = Path('/workspace/.fleet')
-req = {
+req = sign({
   'job_id': '$JOB_ID',
   'action': 'tool',
   'req_id': '$REQ_ID',
   'tool': 'read_marker',
   'cwd': '$CWD',
-}
+})
 (fleet / 'request-$REQ_ID.json').write_text(json.dumps(req))
 res = fleet / 'result-$REQ_ID.json'
 for _ in range(100):
@@ -79,16 +87,24 @@ PY
   REQ_ID2="int-bad"
   dc exec -T workspace bash -lc "
     python3 - <<'PY'
-import json, time
+import hashlib, hmac, json, os, time
 from pathlib import Path
+
+def sign(req):
+    secret = os.environ.get("FLEET_HANDSHAKE_SECRET") or ""
+    body = {k: v for k, v in req.items() if k != "hmac"}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return body
+
 fleet = Path('/workspace/.fleet')
-req = {
+req = sign({
   'job_id': '$JOB_ID',
   'action': 'tool',
   'req_id': '$REQ_ID2',
   'tool': 'not_a_tool',
   'cwd': '$CWD',
-}
+})
 (fleet / 'request-$REQ_ID2.json').write_text(json.dumps(req))
 res = fleet / 'result-$REQ_ID2.json'
 for _ in range(100):
@@ -110,20 +126,28 @@ PY
   REQ_ID3="int-out"
   dc exec -T workspace bash -lc "
     python3 - <<'PY'
-import json, time
+import hashlib, hmac, json, os, time
 from pathlib import Path
+
+def sign(req):
+    secret = os.environ.get("FLEET_HANDSHAKE_SECRET") or ""
+    body = {k: v for k, v in req.items() if k != "hmac"}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return body
+
 fleet = Path('/workspace/.fleet')
 # plant tools outside jobs
 evil = Path('/tmp/evil-tools')
 evil.mkdir(exist_ok=True)
 (evil / '.fleet-tools.json').write_text(json.dumps({'x': {'argv': ['echo', 'no']}}))
-req = {
+req = sign({
   'job_id': '$JOB_ID',
   'action': 'tool',
   'req_id': '$REQ_ID3',
   'tool': 'x',
   'cwd': str(evil),
-}
+})
 (fleet / 'request-$REQ_ID3.json').write_text(json.dumps(req))
 res = fleet / 'result-$REQ_ID3.json'
 for _ in range(100):

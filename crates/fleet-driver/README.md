@@ -95,7 +95,7 @@ SSH_KEY_HOST_PATH=/tmp/fleet-lab-ssh/id_ed25519
 | `config/job.123-invoices.json` | opencode | alias of the marker job | same as opencode | `app/`, `tests/` |
 
 - `auto_approve=false`, **no** `permission_allow: "*"`
-- Path-like allow entries gate **file writes**; `fleet-wsexec` / `bash` / `read` for tools
+- Path-like allow entries gate **file writes**; `fleet-wsexec` / `read` for tools (bare `bash`/`sh` is denied)
 - Full suite timeout/fail is OK to report (stretch)
 
 ### Run

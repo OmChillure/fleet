@@ -376,8 +376,8 @@ Harness (stable image)
 - `auto_approve` defaults to **false**.
 - `permission_allow` is an explicit allowlist (no `"*"` in production-minded samples).
 - **Path-like entries** (`app/`, `tests/`, `invoices/`) **gate file mutations** (write/edit/create): the permission haystack must contain a matching prefix.
-- Other tokens match as substrings (`bash`, `fleet-wsexec`, `read`, …).
-- Prefer named workspace tools over free `bash`.
+- Other tokens match as substrings (`fleet-wsexec`, `read`, …). Bare `bash`/`sh` is denied unless `"*"`.
+- Prefer named workspace tools (`fleet-wsexec`); no free shell.
 
 ### Working lab example: 123-invoices
 

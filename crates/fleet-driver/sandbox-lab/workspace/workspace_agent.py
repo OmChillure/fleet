@@ -142,48 +142,68 @@ def validate_tool_bin(argv0: str):
 def install_fleet_wsexec():
     BIN.mkdir(parents=True, exist_ok=True)
     path = BIN / "fleet-wsexec"
-    # Local exec as harness uid — no root round-trip, no HMAC needed.
+    # Name-only handshake to the workspace agent. Argv is never taken from the
+    # harness; agent runs TOOLS_BY_JOB. Wrapper is root-owned 0755.
     path.write_text(
         """#!/usr/bin/env python3
-import json, os, sys, subprocess
+import json, os, sys, time
 from pathlib import Path
-ALLOWED = {
-    "python", "python3", "pip", "pip3", "npm", "npx", "node", "pytest",
-    "cargo", "go", "make", "uv", "poetry", "django-admin", "git",
-    "ls", "cat", "head", "echo", "true", "false", "test", "mkdir", "cp", "touch",
-}
+
 if len(sys.argv) != 2:
     print("usage: fleet-wsexec <tool-name>", file=sys.stderr)
     raise SystemExit(2)
+name = sys.argv[1]
 cwd = os.environ.get("FLEET_WORK_DIR") or ""
+job_id = os.environ.get("FLEET_JOB_ID") or "adhoc"
+fleet = Path(os.environ.get("FLEET_DIR") or "/workspace/.fleet")
 if not cwd or not os.path.isdir(cwd):
     print("fleet-wsexec: FLEET_WORK_DIR missing", file=sys.stderr)
     raise SystemExit(2)
-name = sys.argv[1]
-tools_path = os.path.join(cwd, ".fleet-tools.json")
-try:
-    tools = json.load(open(tools_path, encoding="utf-8"))
-except Exception as e:
-    print(f"fleet-wsexec: cannot read {tools_path}: {e}", file=sys.stderr)
-    raise SystemExit(2)
-if name not in tools or not tools[name].get("argv"):
-    print(f"fleet-wsexec: tool {name!r} not allowlisted", file=sys.stderr)
-    raise SystemExit(2)
-argv = [str(x) for x in tools[name]["argv"]]
-base = Path(argv[0]).name
-if base not in ALLOWED:
-    print(f"fleet-wsexec: argv[0] {argv[0]!r} not allowlisted", file=sys.stderr)
-    raise SystemExit(2)
-os.execvp(argv[0], argv)
+tools_path = Path(cwd) / ".fleet-tools.json"
+if tools_path.is_file():
+    try:
+        listed = json.loads(tools_path.read_text(encoding="utf-8"))
+        if name not in listed:
+            print(f"fleet-wsexec: tool {name!r} not allowlisted", file=sys.stderr)
+            raise SystemExit(2)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+req_id = f"{int(time.time())}-{os.getpid()}"
+req = {
+    "job_id": job_id,
+    "action": "tool",
+    "req_id": req_id,
+    "tool": name,
+    "cwd": cwd,
+}
+req_path = fleet / f"request-{req_id}.json"
+res_path = fleet / f"result-{req_id}.json"
+tmp = req_path.with_name(req_path.name + ".tmp")
+tmp.write_text(json.dumps(req), encoding="utf-8")
+tmp.replace(req_path)
+for _ in range(6000):
+    if res_path.is_file():
+        d = json.loads(res_path.read_text(encoding="utf-8"))
+        sys.stdout.write(d.get("stdout") or "")
+        sys.stderr.write(d.get("stderr") or "")
+        code = 0 if d.get("ok") else int(d.get("exit_code") or 1)
+        raise SystemExit(code)
+    time.sleep(0.1)
+print("fleet-wsexec: timeout", file=sys.stderr)
+raise SystemExit(124)
 """
     )
     os.chmod(path, 0o755)
     try:
+        os.chown(BIN, 0, 0)
         os.chmod(BIN, 0o755)
-    except Exception:
-        pass
-    chown_tree(BIN)
-    log(f"installed {path} (local named tools only)")
+        os.chown(path, 0, 0)
+        os.chmod(path, 0o755)
+    except Exception as e:
+        log(f"fleet-wsexec perms warning: {e}")
+    log(f"installed {path} (volume tool handshake, root-owned)")
 
 
 def git_clone(repo_url, git_ref, dest, env):
@@ -310,7 +330,7 @@ def handle_provision(req):
     }
 
 
-def handle_tool(req):
+def handle_tool(req, require_registered: bool = False):
     job_id = req.get("job_id") or "adhoc"
     tool = req.get("tool") or ""
     cwd = Path(req.get("cwd") or req.get("work_dir") or "")
@@ -323,6 +343,10 @@ def handle_tool(req):
         raise ValueError(f"cwd outside job isolation: {resolved} (must be under {jobs_root()})")
     tools = TOOLS_BY_JOB.get(str(job_id))
     if tools is None:
+        if require_registered:
+            raise ValueError(
+                f"unsigned tool request before provision (job {job_id!r} has no registered tools)"
+            )
         tools_path = cwd / ".fleet-tools.json"
         if not tools_path.is_file():
             raise ValueError(f"no tools file at {tools_path}")
@@ -384,11 +408,26 @@ def handle_request(req):
     job_id = req.get("job_id") or ""
     rpath = result_path(req)
     try:
-        verify_request(req)
+        if action == "provision" or action == "exec":
+            verify_request(req)
+        elif action == "tool":
+            if req.get("hmac"):
+                verify_request(req)
+            else:
+                # Harness fleet-wsexec cannot hold the handshake secret.
+                # Name-only: argv never taken from the request; TOOLS_BY_JOB only.
+                if req.get("argv") or req.get("commands") or req.get("cmd"):
+                    raise ValueError("unsigned tool request must not include argv/commands")
+                if str(job_id) not in TOOLS_BY_JOB:
+                    raise ValueError(
+                        f"unsigned tool request before provision (job {job_id!r} has no registered tools)"
+                    )
+        else:
+            raise ValueError(f"unknown action {action}")
         if action == "provision":
             result = handle_provision(req)
         elif action == "tool":
-            result = handle_tool(req)
+            result = handle_tool(req, require_registered=not bool(req.get("hmac")))
         elif action == "exec":
             result = handle_exec_legacy(req)
         else:
