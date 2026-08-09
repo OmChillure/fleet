@@ -50,6 +50,10 @@ $DATA_DIR/projects/<id>/sessions/<session>/artifacts/
 `mock-acp-agent` is resolved next to `fleet-driver` (same `target/debug/`), or set
 `FLEET_MOCK_ACP_BIN`.
 
+On spawn the orchestrator writes `spec.md`, `task.json`, and `prompt.md` into the
+session dir, and injects `FLEET_TASK_TIMEOUT_S` (board timeout) plus any
+`FLEET_HARNESS` / `FLEET_MODEL` / `FLEET_AUTO_APPROVE` set on the orch process.
+
 ### Grok Build
 
 Requires `grok` on `PATH` and existing CLI auth (`grok login` or
