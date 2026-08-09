@@ -245,7 +245,7 @@ class Demo:
 
     def scene_lab(self) -> None:
         """Film a host protocol run (no Docker/LLM) as a local HTML page."""
-        html_path = self.out_dir / "lab-protocol.html"
+        html_path = self.out_dir.resolve() / "lab-protocol.html"
         cmd = [
             sys.executable,
             str(
@@ -277,7 +277,7 @@ class Demo:
                 health = json.loads(r.read().decode())
         except Exception as e:
             raise RuntimeError(f"kind/host API /health not reachable: {e}") from e
-        html_path = self.out_dir / "kind-health.html"
+        html_path = self.out_dir.resolve() / "kind-health.html"
         html_path.write_text(
             "<!doctype html><meta charset=utf-8><title>kind/host health</title>"
             "<pre style='font:14px/1.4 ui-monospace,monospace;padding:24px'>"
@@ -365,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = Path(args.out) if args.out else (REPO / ".tmp" / "demos")
+    out_dir = out_dir.resolve()
     video_dir = out_dir / f"{stamp}-{'-'.join(names[:6])}"
     video_dir.mkdir(parents=True, exist_ok=True)
 
