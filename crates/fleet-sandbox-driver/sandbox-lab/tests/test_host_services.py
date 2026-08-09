@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Host services the install script is supposed to leave running. Soft-skip."""
+"""Host services the install script is supposed to leave running.
+
+Postgres :5433 is required (fail if down). Ollama :11434 and the OpenAI-compat
+proxy :1234 soft-skip when absent.
+"""
 from __future__ import annotations
 
 import json
@@ -34,9 +38,11 @@ class HostServiceTests(unittest.TestCase):
             data = json.loads(r.read().decode())
         self.assertIn("data", data)
 
-    def test_host_postgres_or_skip(self):
-        if not _port(5433):
-            self.skipTest("host postgres :5433 not listening")
+    def test_host_postgres(self):
+        self.assertTrue(
+            _port(5433),
+            "host postgres :5433 not listening (install-full-suite-deps.sh leaves it up)",
+        )
         pg = shutil.which("pg_isready")
         if pg:
             r = subprocess.run(

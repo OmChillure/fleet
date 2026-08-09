@@ -49,10 +49,12 @@ compose tags the **pinned** names so later projects reuse them.
 Then run tests (no sudo):
 
 ```bash
-./scripts/run-full-suite.sh              # cargo + protocol + host e2e + compose + invoices
+./scripts/run-full-suite.sh              # cargo + protocol + lab unittests (host e2e) + compose + invoices
 SKIP_LLM=1 ./scripts/run-full-suite.sh   # skip OpenCode/Pi LLM jobs
-./scripts/run-host-e2e.py                # agent + fleet-wsexec only
+# host e2e only (HMAC provision + fleet-wsexec; also under suite via unittest discover):
+python3 tests/test_host_e2e.py -v
 ./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
+# prefer full suite; thin wrapper for cargo + protocol only:
 ./scripts/run-protocol-tests.sh ../../../.tmp/protocol.log
 DATABASE_URL=postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable \
   cargo test -p fleet-orchestrator
@@ -137,8 +139,13 @@ Agent uses: `fleet-wsexec django_check` (workspace runs fixed argv only).
 ## Tests (no LLM)
 
 ```bash
-# cargo + workspace_agent handle_tool protocol (unknown / ok / cwd escape)
+# Prefer the full suite (cargo + protocol + tests/test_*.py including host e2e):
+./scripts/run-full-suite.sh
+# Thin wrapper (cargo -p fleet-sandbox-driver + workspace_agent protocol only):
 ./scripts/run-protocol-tests.sh ../../../.tmp/protocol.log
+
+# host e2e alone (HMAC + fleet-wsexec; also discovered by suite lab-python stage):
+python3 tests/test_host_e2e.py -v
 
 # compose volume protocol: named tool ok + rejects (requires Docker)
 ./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
@@ -155,7 +162,10 @@ crates/fleet-sandbox-driver/
     driver/Dockerfile
     workspace/workspace_agent.py
     config/                    # opencode + pi invoices jobs, …
+    tests/test_host_e2e.py     # HMAC provision + fleet-wsexec (no Docker/LLM)
+    tests/test_host_services.py
+    scripts/run-full-suite.sh
     scripts/run-invoices-example.sh
     scripts/run-invoices-dual.sh
-    scripts/run-protocol-tests.sh
+    scripts/run-protocol-tests.sh  # thin wrapper; prefer run-full-suite.sh
 ```

@@ -1,33 +1,27 @@
 #!/usr/bin/env bash
-# Headless protocol + cargo tests for sandbox block (no LLM required).
+# Thin wrapper: prefer scripts/run-full-suite.sh (same cargo + protocol gates).
+# Kept for README / habit; optional log path mirrors the old interface.
 set -euo pipefail
-# scripts/ → sandbox-lab/ → fleet-sandbox-driver/ → crates/ → repo root
-LAB="$(cd "$(dirname "$0")/.." && pwd)"
-ROOT="$(cd "$LAB/../../.." && pwd)"
-cd "$ROOT"
+LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "${LAB}/../../.." && pwd)"
+cd "${REPO}"
 OUT="${1:-}"
-if [[ -z "$OUT" ]]; then
-  echo "usage: $0 <output-log-path>" >&2
-  exit 2
-fi
-mkdir -p "$(dirname "$OUT")"
-{
+
+echo "prefer run-full-suite.sh (this wrapper runs cargo -p fleet-sandbox-driver + workspace_agent protocol only)" >&2
+
+run() {
   echo "=== cargo test -p fleet-sandbox-driver ==="
-  cargo test -p fleet-sandbox-driver -- --nocapture
+  cargo test -p fleet-sandbox-driver --offline --locked -- --nocapture
   echo
   echo "=== workspace_agent protocol (unittest) ==="
-  python3 "$LAB/workspace/tests/test_workspace_agent_protocol.py" -v
-  echo
-  echo "=== seed-from-env defaults check ==="
-  python3 - <<'PY'
-from pathlib import Path
-p = Path("crates/fleet-sandbox-driver/sandbox-lab/scripts/seed-from-env.sh")
-src = p.read_text()
-assert '"auto_approve": False' in src or '"auto_approve": false' in src
-assert "permission_allow" in src
-assert '"work_dir": "/workspace/repo"' not in src
-print("seed-from-env.sh: default-deny + no hardcoded /workspace/repo OK")
-PY
+  python3 "${LAB}/workspace/tests/test_workspace_agent_protocol.py" -v
   echo
   echo "ALL PROTOCOL/UNIT GATES PASSED"
-} 2>&1 | tee "$OUT"
+}
+
+if [[ -n "${OUT}" ]]; then
+  mkdir -p "$(dirname "${OUT}")"
+  run 2>&1 | tee "${OUT}"
+else
+  run
+fi

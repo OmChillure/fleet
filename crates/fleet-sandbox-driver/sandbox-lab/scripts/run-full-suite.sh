@@ -60,18 +60,11 @@ else
   fail protocol
 fi
 
-echo "==== install contract + kustomize + host/kind/gitssh (skip if absent) ===="
+echo "==== install contract + kustomize + host e2e + host/kind/gitssh (skip if absent) ===="
 if python3 -m unittest discover -s "${LAB}/tests" -p 'test_*.py' -q; then
   pass lab-python
 else
   fail lab-python
-fi
-
-echo "==== host e2e (no docker/llm) ===="
-if python3 "${SCRIPTS}/run-host-e2e.py"; then
-  pass host-e2e
-else
-  fail host-e2e
 fi
 
 if [[ "${SKIP_COMPOSE}" != "1" ]]; then
