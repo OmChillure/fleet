@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::api::{
     cancel_run, ensure_fleet, list_runs, list_sessions, list_tasks, run_tick, start_fixture,
 };
+use crate::Route;
 use gloo_timers::future::TimeoutFuture;
 
 #[derive(Clone, PartialEq)]
@@ -148,6 +149,7 @@ pub fn Fleet(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading workspace fleet…".to_string());
     let mut project_name = use_signal(|| String::new());
     let mut sandbox_backend = use_signal(|| "stub".to_string());
+    let mut repo_label = use_signal(|| String::new());
     let mut tasks = use_signal(|| Vec::<TaskCard>::new());
     let mut runs = use_signal(|| Vec::<RunCard>::new());
     let mut sessions = use_signal(|| Vec::<SessionCard>::new());
@@ -191,6 +193,13 @@ pub fn Fleet(workspace_id: String) -> Element {
                     if let Some(b) = v["sandbox_backend"].as_str() {
                         sandbox_backend.set(b.to_string());
                     }
+                    let url = v["config"]["repo_url"].as_str().unwrap_or("");
+                    let git_ref = v["config"]["git_ref"].as_str().unwrap_or("main");
+                    repo_label.set(if url.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{url}@{git_ref}")
+                    });
                     status_line.set(format!(
                         "Fleet ready · {} sandbox · project {}",
                         v["sandbox_backend"].as_str().unwrap_or("stub"),
@@ -231,6 +240,13 @@ pub fn Fleet(workspace_id: String) -> Element {
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
                         "workspace {workspace_id} · sandbox {sandbox_backend}"
+                    }
+                    p { class: "mt-0.5 text-xs text-[var(--app-muted)]",
+                        if repo_label().is_empty() {
+                            "No git repo bound — set it in Settings"
+                        } else {
+                            "repo {repo_label}"
+                        }
                     }
                 }
                 div { class: "flex flex-wrap gap-2",
@@ -461,9 +477,13 @@ pub fn Fleet(workspace_id: String) -> Element {
                 } else {
                     div { class: "flex flex-col gap-2",
                         for s in sessions() {
-                            div {
+                            Link {
                                 key: "{s.id}",
-                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
+                                to: Route::SessionDetail {
+                                    workspace_id: workspace_id.clone(),
+                                    session_id: s.id.clone(),
+                                },
+                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 transition hover:border-[var(--app-accent)]",
                                 div { class: "min-w-0",
                                     p { class: "m-0 font-mono text-xs text-[var(--app-muted)]", "{s.id}" }
                                     p { class: "m-0 text-sm text-[var(--app-fg)]",
