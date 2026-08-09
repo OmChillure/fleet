@@ -56,6 +56,6 @@ export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
 ```
 
-Sessions write `artifacts/transcript.md` and `artifacts/result.json`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
+Sessions write `spec.md`, `task.json`, `prompt.md`, plus `artifacts/transcript.md` and `artifacts/result.json`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
 
 Optional: set `ADMIN_TOKEN` to enable `/v1/*` bearer automation (`./scripts/demo-orch.sh`).
