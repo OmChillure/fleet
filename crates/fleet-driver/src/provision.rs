@@ -223,17 +223,30 @@ fn provision_via_workspace_agent(
     }
     let milestones = result.milestones.unwrap_or_default();
     info!(?milestones, "workspace provision complete");
+    let chosen = accept_agent_work_dir(result.work_dir, work_dir)?;
     Ok(Provisioned {
-        work_dir: result
-            .work_dir
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_dir.to_path_buf()),
+        work_dir: chosen,
         repo_url: repo_url.to_string(),
         git_ref: git_ref.to_string(),
         milestones,
         mode: "volume".into(),
         detail: Some(serde_json::from_str(&raw).unwrap_or(json!({}))),
     })
+}
+
+/// Trust the agent's reported work_dir only if it stays under jobs_root().
+fn accept_agent_work_dir(reported: Option<String>, requested: &Path) -> Result<PathBuf> {
+    let chosen = reported
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| requested.to_path_buf());
+    crate::policy::validate_job_cwd(&chosen).with_context(|| {
+        format!(
+            "workspace agent returned work_dir outside isolation: {}",
+            chosen.display()
+        )
+    })?;
+    Ok(chosen)
 }
 
 fn wait_for_workspace_agent(fleet: &Path, max: Duration) -> Result<()> {
@@ -450,7 +463,9 @@ fn git_clone(repo_url: &str, git_ref: &str, dest: &Path) -> Result<()> {
             None,
         )?;
         if !git_ref.is_empty() {
-            let _ = run_git(&["checkout", git_ref], &env_vars, Some(dest));
+            run_git(&["checkout", git_ref], &env_vars, Some(dest)).with_context(|| {
+                format!("git checkout {git_ref:?} failed after default-branch clone")
+            })?;
         }
     }
     info!("clone OK");
@@ -508,6 +523,26 @@ mod tests {
         });
         let (c, _, _) = setup_commands(&job);
         assert!(c[0].contains("scripts/fleet-setup.sh"));
+    }
+
+    #[test]
+    fn accept_agent_work_dir_keeps_requested_when_ok() {
+        let requested = PathBuf::from("/workspace/jobs/j1/repo");
+        let got = accept_agent_work_dir(None, &requested).unwrap();
+        assert_eq!(got, requested);
+        let got = accept_agent_work_dir(
+            Some("/workspace/jobs/j1/repo".into()),
+            &requested,
+        )
+        .unwrap();
+        assert_eq!(got, requested);
+    }
+
+    #[test]
+    fn accept_agent_work_dir_rejects_escape() {
+        let requested = PathBuf::from("/workspace/jobs/j1/repo");
+        assert!(accept_agent_work_dir(Some("/tmp/evil".into()), &requested).is_err());
+        assert!(accept_agent_work_dir(Some("/workspace/jobs/../etc".into()), &requested).is_err());
     }
 
     #[test]

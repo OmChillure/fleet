@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    handshake::init_from_env();
     info!("fleet-driver starting (provision + multi-harness ACP)");
 
     let mut bus = Bus::connect(&args.redis_url, &args.jobs_queue, &args.results_queue).await?;

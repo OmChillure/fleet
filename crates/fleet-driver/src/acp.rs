@@ -711,15 +711,8 @@ mod tests {
     #[tokio::test]
     async fn run_session_against_mock_agent() {
         let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp_agent.py");
-        if !mock.is_file() {
-            eprintln!("skip: mock missing");
-            return;
-        }
-        // Need python3
-        if which::which("python3").is_err() {
-            eprintln!("skip: python3 missing");
-            return;
-        }
+        assert!(mock.is_file(), "ACP mock fixture missing: {}", mock.display());
+        which::which("python3").expect("python3 required for ACP mock session test");
         let harness = HarnessSpec {
             name: "custom".into(),
             command: "python3".into(),

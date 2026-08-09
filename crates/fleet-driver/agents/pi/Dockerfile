@@ -18,7 +18,8 @@ RUN npm install -g \
       "@earendil-works/pi-coding-agent@${PI_VERSION}" \
       "pi-acp@${PI_ACP_VERSION}" \
     && pi --version \
-    && pi-acp --help >/dev/null 2>&1 || true \
+    && command -v pi-acp \
+    && (pi-acp --help >/dev/null 2>&1 || true) \
     && npm cache clean --force \
     && mkdir -p /home/fleet/.pi/agent /home/fleet/.pi/pi-acp \
     && chown -R fleet:fleet /home/fleet

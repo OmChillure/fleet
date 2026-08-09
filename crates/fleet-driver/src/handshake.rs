@@ -1,20 +1,59 @@
 //! HMAC-SHA256 handshake for volume request files.
 //!
-//! The workspace agent and driver share `FLEET_HANDSHAKE_SECRET` via container
-//! env (not the shared volume). The ACP harness child must not inherit it.
+//! Compose injects `FLEET_HANDSHAKE_SECRET` into the driver at start. We copy it
+//! into process memory and unset the env var before any harness spawn. On Linux
+//! we also `PR_SET_DUMPABLE=0` so a same-uid child cannot read `/proc/1/environ`
+//! (that file still shows the *initial* execve environment).
 
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
+use std::sync::Mutex;
 
 type HmacSha256 = Hmac<Sha256>;
 
+static SECRET: Mutex<Option<String>> = Mutex::new(None);
+
+fn stored_secret() -> Option<String> {
+    SECRET
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// Load secret from env, drop it from the process environ, lock down `/proc`.
+pub fn init_from_env() {
+    if let Some(s) = std::env::var("FLEET_HANDSHAKE_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(mut g) = SECRET.lock() {
+            *g = Some(s);
+        }
+    }
+    std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+    lock_down_proc();
+}
+
+#[cfg(target_os = "linux")]
+fn lock_down_proc() {
+    // Same-uid children (ACP harness) must not read /proc/<driver>/environ.
+    let _ = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_down_proc() {}
+
 pub fn handshake_secret() -> Option<String> {
+    // Tests may still set the env var; production uses the in-memory copy.
     std::env::var("FLEET_HANDSHAKE_SECRET")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(stored_secret)
 }
 
 /// Canonical JSON matching Python `json.dumps(..., sort_keys=True, separators=(",", ":"))`.
@@ -95,6 +134,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex as TestMutex;
+
+    static TEST_ENV_LOCK: TestMutex<()> = TestMutex::new(());
 
     #[test]
     fn canonical_matches_python_style() {
@@ -107,6 +149,7 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         std::env::set_var("FLEET_HANDSHAKE_SECRET", "unit-test-secret");
         let signed = sign_value(json!({
             "action": "provision",
@@ -118,6 +161,26 @@ mod tests {
         let mut bad = signed.clone();
         bad["hmac"] = json!("00");
         assert!(verify_value(&bad).is_err());
+        std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+    }
+
+    #[test]
+    fn init_from_env_strips_environ_keeps_secret() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let prev = stored_secret();
+        std::env::set_var("FLEET_HANDSHAKE_SECRET", "init-secret");
+        init_from_env();
+        assert!(
+            std::env::var("FLEET_HANDSHAKE_SECRET").is_err(),
+            "secret must not remain in the process environ"
+        );
+        assert_eq!(stored_secret().as_deref(), Some("init-secret"));
+        assert_eq!(handshake_secret().as_deref(), Some("init-secret"));
+        let signed = sign_value(json!({"action": "provision", "job_id": "j1"})).unwrap();
+        verify_value(&signed).unwrap();
+        if let Ok(mut g) = SECRET.lock() {
+            *g = prev;
+        }
         std::env::remove_var("FLEET_HANDSHAKE_SECRET");
     }
 }

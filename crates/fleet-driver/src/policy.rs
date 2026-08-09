@@ -8,9 +8,11 @@ use std::path::{Component, Path, PathBuf};
 
 /// Isolation root (lab default `/workspace/jobs`). Overridable via `FLEET_JOBS_ROOT`.
 pub fn jobs_root() -> PathBuf {
-    std::env::var("FLEET_JOBS_ROOT")
-        .ok()
-        .map(|s| s.trim().to_string())
+    jobs_root_from(std::env::var("FLEET_JOBS_ROOT").ok().as_deref())
+}
+
+pub(crate) fn jobs_root_from(raw: Option<&str>) -> PathBuf {
+    raw.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/workspace/jobs"))
@@ -236,11 +238,17 @@ mod tests {
 
     #[test]
     fn jobs_root_default_is_workspace_jobs() {
-        // Do not set FLEET_JOBS_ROOT here — tests share the process env.
-        if std::env::var_os("FLEET_JOBS_ROOT").is_some() {
-            return;
-        }
-        assert_eq!(jobs_root(), PathBuf::from("/workspace/jobs"));
+        assert_eq!(jobs_root_from(None), PathBuf::from("/workspace/jobs"));
+        assert_eq!(jobs_root_from(Some("")), PathBuf::from("/workspace/jobs"));
+        assert_eq!(jobs_root_from(Some("   ")), PathBuf::from("/workspace/jobs"));
+    }
+
+    #[test]
+    fn jobs_root_from_explicit_path() {
+        assert_eq!(
+            jobs_root_from(Some("/custom/jobs")),
+            PathBuf::from("/custom/jobs")
+        );
     }
 
     #[test]

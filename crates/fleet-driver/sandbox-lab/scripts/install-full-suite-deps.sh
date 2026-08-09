@@ -431,6 +431,20 @@ if [[ "${OS_FAMILY}" == linux ]] && [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 # --- kubectl + kind (upstream binaries; brew already tried on mac) ----------
+# Stage downloads under ${TMP_ROOT} (never sticky system /tmp).
+install_upstream_bin() {
+  local name="$1" url="$2"
+  local staged="${TMP_ROOT}/${name}.$$"
+  curl -fsSL -o "${staged}" "${url}"
+  chmod 755 "${staged}"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    mv "${staged}" "/usr/local/bin/${name}"
+  else
+    mkdir -p "${REAL_HOME}/.local/bin"
+    mv "${staged}" "${REAL_HOME}/.local/bin/${name}"
+    USER_PATH="${REAL_HOME}/.local/bin:${USER_PATH}"
+  fi
+}
 if ! need_cmd kubectl; then
   echo "==> installing kubectl → /usr/local/bin"
   k8s_os=linux
@@ -438,32 +452,15 @@ if ! need_cmd kubectl; then
   [[ "${OS_FAMILY}" == windows ]] && k8s_os=windows
   k8s_bin=kubectl
   [[ "${OS_FAMILY}" == windows ]] && k8s_bin=kubectl.exe
-  curl -fsSL -o /tmp/kubectl.$$ \
+  install_upstream_bin kubectl \
     "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/${k8s_os}/${ARCH}/${k8s_bin}"
-  if [[ "$(id -u)" -eq 0 ]]; then
-    mv /tmp/kubectl.$$ /usr/local/bin/kubectl
-    chmod 755 /usr/local/bin/kubectl
-  else
-    mkdir -p "${REAL_HOME}/.local/bin"
-    mv /tmp/kubectl.$$ "${REAL_HOME}/.local/bin/kubectl"
-    chmod 755 "${REAL_HOME}/.local/bin/kubectl"
-    USER_PATH="${REAL_HOME}/.local/bin:${USER_PATH}"
-  fi
 fi
 if [[ "${ENABLE_KIND}" == "1" ]] && ! need_cmd kind; then
   echo "==> installing kind → /usr/local/bin"
   kind_os=linux
   [[ "${OS_FAMILY}" == darwin ]] && kind_os=darwin
   [[ "${OS_FAMILY}" == windows ]] && kind_os=windows
-  curl -fsSL -o /tmp/kind.$$ "https://kind.sigs.k8s.io/dl/latest/kind-${kind_os}-${ARCH}"
-  dest=/usr/local/bin/kind
-  if [[ "$(id -u)" -ne 0 ]]; then
-    mkdir -p "${REAL_HOME}/.local/bin"
-    dest="${REAL_HOME}/.local/bin/kind"
-    USER_PATH="${REAL_HOME}/.local/bin:${USER_PATH}"
-  fi
-  mv /tmp/kind.$$ "${dest}"
-  chmod 755 "${dest}"
+  install_upstream_bin kind "https://kind.sigs.k8s.io/dl/latest/kind-${kind_os}-${ARCH}"
 fi
 for bin in kubectl kind; do
   src="$(command -v "${bin}" || true)"

@@ -271,7 +271,9 @@ def git_clone(repo_url, git_ref, dest, env):
         if code != 0:
             raise RuntimeError(f"git clone failed: {err}\n{out}")
         if git_ref:
-            run_argv(["git", "checkout", git_ref], dest, env)
+            code, out, err = run_argv(["git", "checkout", git_ref], dest, env)
+            if code != 0:
+                raise RuntimeError(f"git checkout {git_ref!r} failed: {err}\n{out}")
 
 
 def write_tools(work_dir, tools):
@@ -370,7 +372,7 @@ def handle_provision(req):
     }
 
 
-def handle_tool(req, require_registered: bool = False):
+def handle_tool(req):
     job_id = req.get("job_id") or "adhoc"
     tool = req.get("tool") or ""
     cwd = Path(req.get("cwd") or req.get("work_dir") or "")
@@ -381,16 +383,13 @@ def handle_tool(req, require_registered: bool = False):
     resolved = cwd.resolve()
     if not path_under_jobs(cwd):
         raise ValueError(f"cwd outside job isolation: {resolved} (must be under {jobs_root()})")
+    # Argv comes only from the signed provision (TOOLS_BY_JOB). Never from
+    # `.fleet-tools.json` — that file is under a fleet-writable job dir.
     tools = TOOLS_BY_JOB.get(str(job_id))
     if tools is None:
-        if require_registered:
-            raise ValueError(
-                f"unsigned tool request before provision (job {job_id!r} has no registered tools)"
-            )
-        tools_path = cwd / ".fleet-tools.json"
-        if not tools_path.is_file():
-            raise ValueError(f"no tools file at {tools_path}")
-        tools = json.loads(tools_path.read_text(encoding="utf-8"))
+        raise ValueError(
+            f"no registered tools for job {job_id!r} (provision first; argv is not read from .fleet-tools.json)"
+        )
     if tool not in tools:
         raise ValueError(f"tool {tool!r} not allowlisted; allowed={sorted(tools)}")
     argv = tools[tool].get("argv") or []
@@ -467,7 +466,7 @@ def handle_request(req):
         if action == "provision":
             result = handle_provision(req)
         elif action == "tool":
-            result = handle_tool(req, require_registered=not bool(req.get("hmac")))
+            result = handle_tool(req)
         elif action == "exec":
             result = handle_exec_legacy(req)
         else:

@@ -68,6 +68,8 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             json.dumps(tools, indent=2) + "\n", encoding="utf-8"
         )
         self.agent = load_agent(self.fleet, self.jobs)
+        # File is documentation only; argv comes from TOOLS_BY_JOB.
+        self.agent.TOOLS_BY_JOB[self.job_id] = tools
 
     def sign(self, req: dict) -> dict:
         body = {k: v for k, v in req.items() if k != "hmac"}
@@ -186,8 +188,9 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         self.assertIn("not allowlisted", body.get("error") or body.get("stderr") or "")
 
     def test_unsigned_request_rejected_before_provision(self):
+        other = "job-not-provisioned"
         req = {
-            "job_id": self.job_id,
+            "job_id": other,
             "action": "tool",
             "req_id": "unsigned",
             "tool": "echo_ok",
@@ -197,7 +200,33 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         body = json.loads((self.fleet / "result-unsigned.json").read_text(encoding="utf-8"))
         self.assertFalse(body["ok"])
         err = (body.get("error") or "").lower()
-        self.assertTrue("hmac" in err or "before provision" in err, body)
+        self.assertTrue(
+            "hmac" in err or "before provision" in err or "no registered tools" in err,
+            body,
+        )
+
+    def test_hmac_tool_does_not_read_tools_file(self):
+        """Signed tool requests must not take argv from a planted tools file."""
+        planted = "hmac-planted"
+        (self.cwd / ".fleet-tools.json").write_text(
+            json.dumps({"pwn": {"argv": ["echo", "from-file"]}}),
+            encoding="utf-8",
+        )
+        req = self.sign(
+            {
+                "job_id": planted,
+                "action": "tool",
+                "req_id": "hmac-file",
+                "tool": "pwn",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-hmac-file.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        err = (body.get("error") or "").lower()
+        self.assertIn("no registered tools", err)
+        self.assertNotIn("from-file", (body.get("stdout") or ""))
 
     def test_unsigned_tool_after_register_uses_memory_argv(self):
         self.agent.TOOLS_BY_JOB[self.job_id] = {
@@ -242,6 +271,26 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             self.agent.validate_git_arg("git_ref", 'main"; curl evil')
         with self.assertRaises(ValueError):
             self.agent.validate_git_arg("git_ref", "-evil")
+
+    def test_git_clone_missing_ref_fails_closed(self):
+        import subprocess
+
+        src = self.tmp / "src-repo"
+        src.mkdir()
+        (src / "README").write_text("only-main\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main", str(src)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(src), "config", "user.email", "t@example.test"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+        subprocess.run(["git", "-C", str(src), "add", "README"], check=True)
+        subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "init"], check=True)
+        dest = self.tmp / "clone-dest"
+        with self.assertRaises(RuntimeError) as cm:
+            self.agent.git_clone(str(src), "no-such-ref", dest, os.environ.copy())
+        self.assertIn("checkout", str(cm.exception).lower())
+        self.assertIn("no-such-ref", str(cm.exception))
 
     def test_mutated_tools_file_ignored_after_register(self):
         self.agent.TOOLS_BY_JOB[self.job_id] = {

@@ -1620,6 +1620,7 @@ dependencies = [
  "clap",
  "hex",
  "hmac",
+ "libc",
  "redis",
  "reqwest",
  "serde",

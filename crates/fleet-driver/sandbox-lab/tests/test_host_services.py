@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
+import subprocess
 import urllib.request
 import unittest
 
@@ -35,6 +37,19 @@ class HostServiceTests(unittest.TestCase):
     def test_host_postgres_or_skip(self):
         if not _port(5433):
             self.skipTest("host postgres :5433 not listening")
+        pg = shutil.which("pg_isready")
+        if pg:
+            r = subprocess.run(
+                [pg, "-h", "127.0.0.1", "-p", "5433"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(r.returncode, 0, (r.stdout or "") + (r.stderr or ""))
+        else:
+            with socket.create_connection(("127.0.0.1", 5433), timeout=2) as sock:
+                peer = sock.getpeername()
+            self.assertEqual(peer[1], 5433)
 
 
 if __name__ == "__main__":

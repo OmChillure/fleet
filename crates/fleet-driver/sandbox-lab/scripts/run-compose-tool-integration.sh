@@ -38,24 +38,27 @@ ws_py() {
     exit 10
   fi
   dc ps
+  alive=0
   for i in $(seq 1 50); do
     if dc exec -T workspace test -f /workspace/.fleet/agent.alive 2>/dev/null; then
       echo "workspace agent alive"
+      alive=1
       break
     fi
     sleep 0.2
   done
+  if [[ "${alive}" != "1" ]]; then
+    echo "workspace agent never became alive" >&2
+    exit 1
+  fi
 
   JOB_ID="compose-int-$(date +%s)"
   CWD="/workspace/jobs/${JOB_ID}/repo"
-  echo "=== create job tree + tools at $CWD ==="
-  dc exec -T workspace mkdir -p "$CWD"
-  dc exec -T workspace sh -c "echo compose-smoke > '$CWD/marker.txt'"
-  dc exec -T workspace python3 -c "import json,pathlib; p=pathlib.Path('$CWD')/'.fleet-tools.json'; p.write_text(json.dumps({'read_marker':{'argv':['cat','marker.txt']},'list_dir':{'argv':['ls','-la']}}))"
-  dc exec -T workspace chmod -R a+rwX "/workspace/jobs/$JOB_ID" || true
+  echo "=== seed local git repo for signed provision ==="
+  dc exec -T workspace sh -c 'rm -rf /tmp/compose-int-src && mkdir -p /tmp/compose-int-src && cd /tmp/compose-int-src && git init -b main && git config user.email lab@example.test && git config user.name lab && echo compose-smoke > marker.txt && git add marker.txt && git commit -m init'
 
-  echo "=== named tool request (known) ==="
-  ws_py int1 known <<'PY'
+  echo "=== signed provision (registers TOOLS_BY_JOB) ==="
+  ws_py prov provision <<'PY'
 import hashlib, hmac, json, os, time
 from pathlib import Path
 
@@ -70,7 +73,45 @@ job_id = os.environ["E2E_JOB_ID"]
 cwd = os.environ["E2E_CWD"]
 req_id = os.environ["E2E_REQ_ID"]
 fleet = Path("/workspace/.fleet")
-req = sign({"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "read_marker", "cwd": cwd})
+req = sign({
+    "job_id": job_id,
+    "action": "provision",
+    "req_id": req_id,
+    "repo_url": "/tmp/compose-int-src",
+    "git_ref": "main",
+    "work_dir": cwd,
+    "commands": [],
+    "smoke_commands": ["test -f marker.txt"],
+    "env": {},
+    "tools": {
+        "read_marker": {"argv": ["cat", "marker.txt"], "description": "marker"},
+        "list_dir": {"argv": ["ls", "-la"], "description": "ls"},
+    },
+})
+(fleet / f"request-{req_id}.json").write_text(json.dumps(req))
+res = fleet / f"result-{req_id}.json"
+for _ in range(200):
+    if res.is_file():
+        d = json.loads(res.read_text())
+        print(json.dumps(d, indent=2))
+        assert d.get("ok") is True, d
+        print("PROVISION_OK")
+        break
+    time.sleep(0.1)
+else:
+    raise SystemExit("timeout waiting for provision")
+PY
+
+  echo "=== unsigned named tool (fleet-wsexec path) ==="
+  ws_py int1 known <<'PY'
+import json, os, time
+from pathlib import Path
+
+job_id = os.environ["E2E_JOB_ID"]
+cwd = os.environ["E2E_CWD"]
+req_id = os.environ["E2E_REQ_ID"]
+fleet = Path("/workspace/.fleet")
+req = {"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "read_marker", "cwd": cwd}
 (fleet / f"request-{req_id}.json").write_text(json.dumps(req))
 res = fleet / f"result-{req_id}.json"
 for _ in range(100):
@@ -88,21 +129,14 @@ PY
 
   echo "=== unknown tool rejected ==="
   ws_py int-bad unknown <<'PY'
-import hashlib, hmac, json, os, time
+import json, os, time
 from pathlib import Path
-
-def sign(req):
-    secret = os.environ.get("FLEET_HANDSHAKE_SECRET") or ""
-    body = {k: v for k, v in req.items() if k != "hmac"}
-    raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    return body
 
 job_id = os.environ["E2E_JOB_ID"]
 cwd = os.environ["E2E_CWD"]
 req_id = os.environ["E2E_REQ_ID"]
 fleet = Path("/workspace/.fleet")
-req = sign({"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "not_a_tool", "cwd": cwd})
+req = {"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "not_a_tool", "cwd": cwd}
 (fleet / f"request-{req_id}.json").write_text(json.dumps(req))
 res = fleet / f"result-{req_id}.json"
 for _ in range(100):
@@ -121,6 +155,33 @@ PY
 
   echo "=== cwd outside jobs rejected ==="
   ws_py int-out outside <<'PY'
+import json, os, time
+from pathlib import Path
+
+job_id = os.environ["E2E_JOB_ID"]
+req_id = os.environ["E2E_REQ_ID"]
+fleet = Path("/workspace/.fleet")
+evil = Path("/tmp/evil-tools")
+evil.mkdir(exist_ok=True)
+(evil / ".fleet-tools.json").write_text(json.dumps({"x": {"argv": ["echo", "no"]}}))
+req = {"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "x", "cwd": str(evil)}
+(fleet / f"request-{req_id}.json").write_text(json.dumps(req))
+res = fleet / f"result-{req_id}.json"
+for _ in range(100):
+    if res.is_file():
+        d = json.loads(res.read_text())
+        print(json.dumps(d, indent=2))
+        assert d.get("ok") is False, d
+        assert "outside job isolation" in (d.get("error") or ""), d
+        print("OUTSIDE_CWD_REJECTED")
+        break
+    time.sleep(0.1)
+else:
+    raise SystemExit("timeout")
+PY
+
+  echo "=== hmac tool without provision must not use planted file ==="
+  ws_py int-hmac planted <<'PY'
 import hashlib, hmac, json, os, time
 from pathlib import Path
 
@@ -131,13 +192,18 @@ def sign(req):
     body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
     return body
 
-job_id = os.environ["E2E_JOB_ID"]
 req_id = os.environ["E2E_REQ_ID"]
 fleet = Path("/workspace/.fleet")
-evil = Path("/tmp/evil-tools")
-evil.mkdir(exist_ok=True)
-(evil / ".fleet-tools.json").write_text(json.dumps({"x": {"argv": ["echo", "no"]}}))
-req = sign({"job_id": job_id, "action": "tool", "req_id": req_id, "tool": "x", "cwd": str(evil)})
+planted_cwd = Path("/workspace/jobs/hmac-planted/repo")
+planted_cwd.mkdir(parents=True, exist_ok=True)
+(planted_cwd / ".fleet-tools.json").write_text(json.dumps({"pwn": {"argv": ["echo", "from-file"]}}))
+req = sign({
+    "job_id": "hmac-planted",
+    "action": "tool",
+    "req_id": req_id,
+    "tool": "pwn",
+    "cwd": str(planted_cwd),
+})
 (fleet / f"request-{req_id}.json").write_text(json.dumps(req))
 res = fleet / f"result-{req_id}.json"
 for _ in range(100):
@@ -145,8 +211,10 @@ for _ in range(100):
         d = json.loads(res.read_text())
         print(json.dumps(d, indent=2))
         assert d.get("ok") is False, d
-        assert "outside job isolation" in (d.get("error") or ""), d
-        print("OUTSIDE_CWD_REJECTED")
+        err = (d.get("error") or "").lower()
+        assert "no registered tools" in err, d
+        assert "from-file" not in (d.get("stdout") or "")
+        print("HMAC_FILE_IGNORED")
         break
     time.sleep(0.1)
 else:

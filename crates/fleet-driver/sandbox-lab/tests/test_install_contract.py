@@ -45,6 +45,12 @@ class InstallContractTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("enum-ordinalize", text)
 
+    def test_kubectl_kind_stage_under_repo_tmp(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("/tmp/kubectl", text)
+        self.assertNotIn("/tmp/kind", text)
+        self.assertIn('staged="${TMP_ROOT}/${name}.$$"', text)
+
     def test_agents_md_points_at_script(self):
         agents = REPO / "AGENTS.md"
         self.assertTrue(agents.is_file())
