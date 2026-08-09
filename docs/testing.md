@@ -3,6 +3,7 @@
 How this repo is tested. Install is still one script
 (`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`)
 and repo-root `.env`. This page only says **how to run tests**.
+Where a new test belongs: [`testing-standardization.md`](./testing-standardization.md).
 
 ## No GitLab CI
 
@@ -16,16 +17,16 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 
 | Layer | Where | Command | Skip? |
 | --- | --- | --- | --- |
-| Unit | `#[cfg(test)]` next to Rust code | `just test` → `cargo test --workspace --lib --exclude fleet-ui --locked` | Never |
+| Unit | `#[cfg(test)]` next to Rust code (includes `fleet-chat-md`) | `just test` → `cargo test --workspace --lib --exclude fleet-ui --locked` | Never |
 | Process worker | `crates/fleet-driver/tests/` (`acp_mock`, `worker_protocol`) | same `just test` → `cargo test -p fleet-driver --locked` | Never (`acp_grok` is `#[ignore]`) |
-| Rust integration | `fleet-orchestrator` / `fleet-auth` / `fleet-server` `tests/` | `just test-integration` (needs Postgres via `just db-up`) | **Fail** if `DATABASE_URL` is unset |
+| Rust integration | `fleet-orchestrator` / `fleet-auth` / `fleet-server` / `fleet-db` `tests/` | `just test-integration` (needs Postgres via `just db-up`) | **Fail** if `DATABASE_URL` is unset |
 | Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | `skipUnless` only for optional kind / git-ssh |
 | Browser | `tests/browser/test_app_e2e.py` | suite stage when `ENABLE_BROWSER_E2E=1` (needs `:3030` + `:8080`; after kind when `ENABLE_KIND=1`) | Off unless enabled; then **fail** if the stack is down |
 | Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI |
 | MR demo video | `scripts/human-test.sh record` (agent, Playwright `.webm`) | attach to the GitLab MR | Agent records; never commit the file |
 | Live LLM / Grok ACP | `#[ignore]` | `cargo test -p fleet-driver -- --ignored` | Ignored by default |
 
-`fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover it with Playwright.
+`fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover chrome with Playwright. Chat markdown units live in `fleet-chat-md` and run on `just test`.
 
 `ENABLE_BROWSER_E2E` defaults **on** only for `PROFILE=full` (kind publishes UI/API). `lab` and `minimal` default it off.
 

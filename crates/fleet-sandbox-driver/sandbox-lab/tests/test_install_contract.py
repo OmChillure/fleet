@@ -100,6 +100,7 @@ class InstallContractTests(unittest.TestCase):
         self.assertIn(".gitlab-ci.yml", body)
         self.assertIn("no runner", body.lower())
         self.assertIn("docs/human-testing.md", body)
+        self.assertIn("docs/testing-standardization.md", body)
         self.assertIn("./scripts/human-test.sh", body)
         self.assertIn("peer", body.lower())
         self.assertIn("record", body.lower())
@@ -111,6 +112,9 @@ class InstallContractTests(unittest.TestCase):
         human = REPO / "docs" / "human-testing.md"
         rec = REPO / "tests" / "browser" / "record_demo.py"
         script = REPO / "scripts" / "human-test.sh"
+        std = REPO / "docs" / "testing-standardization.md"
+        self.assertTrue(std.is_file(), std)
+        self.assertIn("#[cfg(test)]", std.read_text(encoding="utf-8"))
         self.assertTrue(human.is_file(), human)
         self.assertTrue(rec.is_file(), rec)
         self.assertTrue(script.is_file(), script)

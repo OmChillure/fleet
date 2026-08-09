@@ -13,6 +13,7 @@ second install guide and do not pass flags on the command line.
 ## Automated tests
 
 How they are organized and run: `docs/testing.md`.
+Where to put new tests: `docs/testing-standardization.md`.
 
 Before you commit: check whether the install script needs updating (new deps,
 flags, OS/kind/lab behavior) and whether any tests must be added. No
