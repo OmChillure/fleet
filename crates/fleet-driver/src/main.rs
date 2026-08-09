@@ -109,14 +109,25 @@ enum WorkError {
 
 async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
     let prompt = prompt::load_prompt(&cfg.work_dir);
-    let spec = harness::resolve(
+    let mut spec = harness::resolve(
         &cfg.harness,
         cfg.harness_cmd.as_deref(),
         cfg.model.as_deref(),
         cfg.auto_approve,
         cfg.mock_bin.as_deref(),
+        cfg.grok_bin.as_deref(),
+        cfg.reasoning_effort.as_deref(),
     )
     .map_err(|e| WorkError::Failed(format!("harness: {e:#}")))?;
+    if spec.name == "grok" && cfg.grok_debug {
+        let dbg = cfg.work_dir.join("grok-acp.debug.log");
+        // `grok agent [OPTIONS] stdio` — insert before the subcommand.
+        let insert_at = spec.args.len().saturating_sub(1);
+        spec.args.splice(
+            insert_at..insert_at,
+            ["--debug-file".into(), dbg.display().to_string()],
+        );
+    }
 
     let mut extra_env = HashMap::new();
     extra_env.insert("FLEET_SESSION_ID".into(), cfg.session_id.clone());
@@ -146,6 +157,7 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
         "elapsed_sec": outcome.elapsed_sec,
         "agent_info": outcome.agent_info,
         "error": outcome.error,
+        "usage": outcome.usage,
         "transcript_chars": outcome.transcript.chars().count(),
         "plan_task_id": cfg.plan_task_id,
         "board_task_id": cfg.board_task_id,

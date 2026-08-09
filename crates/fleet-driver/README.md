@@ -9,7 +9,7 @@ Does **not** use Docker Compose or Redis.
 | Harness | How | Tokens |
 | --- | --- | --- |
 | **`mock`** (default) | `mock-acp-agent` stdio ACP | none — CI / demos |
-| **`grok`** | `grok agent [--always-approve] [-m MODEL] stdio` | Grok Build login / `GROK_DEPLOYMENT_KEY` |
+| **`grok`** | `grok agent --no-leader [--always-approve] stdio` | Grok Build (`grok login` / `~/.grok/auth.json`) |
 
 ## Layout
 
@@ -25,6 +25,8 @@ Does **not** use Docker Compose or Redis.
 
 ```bash
 cargo test -p fleet-driver
+# live Grok Build (uses tokens; needs grok login):
+FLEET_GROK_ACP_E2E=1 cargo test -p fleet-driver grok_tiny_prompt_over_acp -- --nocapture
 ```
 
 ## Run with the orchestrator
@@ -56,15 +58,23 @@ session dir, and injects `FLEET_TASK_TIMEOUT_S` (board timeout) plus any
 
 ### Grok Build
 
-Requires `grok` on `PATH` and existing CLI auth (`grok login` or
-`GROK_DEPLOYMENT_KEY`). The driver does **not** change `HOME`, so host auth
-works under the process sandbox.
+Verified against `grok agent stdio` (NDJSON ACP): `initialize` → `authenticate`
+(`cached_token` from `~/.grok/auth.json`) → `session/new` → `session/prompt` →
+`session/close`. The driver does **not** change `HOME`, so host CLI login and
+config apply. `--no-leader` avoids attaching to a TUI leader process.
 
 ```bash
 export FLEET_HARNESS=grok
-export FLEET_AUTO_APPROVE=1        # default
-# export FLEET_HARNESS_CMD='docker run --rm -i agent-fleet-grok:alpine'
+export FLEET_AUTO_APPROVE=1                 # default
+# export FLEET_MODEL=v9                     # grok agent -m
+# export FLEET_REASONING_EFFORT=low         # or medium / high
+# export FLEET_GROK_BIN=$HOME/.grok/bin/grok
+# export FLEET_GROK_DEBUG=1                 # work_dir/grok-acp.debug.log
+# export PATH="$HOME/.grok/bin:$PATH"
 ```
+
+Process sandbox uses your user `~/.grok` (including MCP servers in
+`config.toml`). Isolate later via Docker/k8s if that is too much host coupling.
 
 ## Env
 
@@ -72,7 +82,10 @@ export FLEET_AUTO_APPROVE=1        # default
 | --- | --- | --- |
 | `FLEET_*` | (required) | Same as `fleet-worker` (session, token, API URL, work dir) |
 | `FLEET_HARNESS` | `mock` | `mock` \| `grok` |
-| `FLEET_MODEL` | unset | Passed as `grok agent -m` |
+| `FLEET_MODEL` | unset | `grok agent -m` (else Grok config default) |
+| `FLEET_REASONING_EFFORT` | unset | `grok agent --reasoning-effort` |
+| `FLEET_GROK_BIN` | `~/.grok/bin/grok` or `PATH` | Grok CLI |
+| `FLEET_GROK_DEBUG` | `0` | Write `grok-acp.debug.log` in the work dir |
 | `FLEET_TASK_TIMEOUT_S` | `3600` | ACP wall clock |
 | `FLEET_HEARTBEAT_INTERVAL_S` | `2` | Must stay `<` orch `heartbeat_stale_s` |
 | `FLEET_AUTO_APPROVE` | `1` | ACP permission requests |

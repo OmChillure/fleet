@@ -26,6 +26,12 @@ pub struct DriverConfig {
     pub harness_cmd: Option<String>,
     /// Override path to `mock-acp-agent`.
     pub mock_bin: Option<PathBuf>,
+    /// Override path to the `grok` CLI.
+    pub grok_bin: Option<PathBuf>,
+    /// Passed as `grok agent --reasoning-effort`.
+    pub reasoning_effort: Option<String>,
+    /// Write `grok-acp.debug.log` in the work dir.
+    pub grok_debug: bool,
 }
 
 impl DriverConfig {
@@ -79,6 +85,14 @@ impl DriverConfig {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .map(PathBuf::from),
+            grok_bin: env::var("FLEET_GROK_BIN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from),
+            reasoning_effort: env::var("FLEET_REASONING_EFFORT")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            grok_debug: parse_env_bool_default_false(env::var("FLEET_GROK_DEBUG").ok().as_deref()),
         })
     }
 }
@@ -93,6 +107,16 @@ pub fn parse_env_bool_default_true(raw: Option<&str>) -> bool {
             _ => true,
         },
     }
+}
+
+/// Unset / empty / unknown → false.
+pub fn parse_env_bool_default_false(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+            .unwrap_or(""),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[cfg(test)]
