@@ -37,6 +37,7 @@ unit:
   script:
     - cargo test -p fleet-orchestrator --lib --locked
     - cargo test -p agent-fleet-contracts --lib --locked || true
+    - cargo test -p fleet-driver --locked
 
 orch-integration:
   extends: .rust_base

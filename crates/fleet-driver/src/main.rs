@@ -1,0 +1,182 @@
+//! Process-backend driver: ACP session + orchestrator worker protocol.
+//!
+//! Same `FLEET_*` contract as `fleet-worker`. Default harness is `mock`
+//! (`mock-acp-agent`). Set `FLEET_HARNESS=grok` to drive Grok Build.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::Duration;
+
+use anyhow::Result;
+use fleet_driver::acp::{self, AcpRun};
+use fleet_driver::config::DriverConfig;
+use fleet_driver::harness;
+use fleet_driver::orch::{OrchClient, truncate_reason};
+use fleet_driver::prompt;
+use fleet_driver::report;
+use serde_json::json;
+use tracing::{error, info, warn};
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
+    if let Err(e) = run().await {
+        eprintln!("fleet-driver fatal: {e:#}");
+        std::process::exit(2);
+    }
+}
+
+async fn run() -> Result<()> {
+    let cfg = DriverConfig::from_env()?;
+    info!(
+        session = %cfg.session_id,
+        project = %cfg.project_id,
+        task = %cfg.board_task_id,
+        harness = %cfg.harness,
+        work_dir = %cfg.work_dir.display(),
+        "fleet-driver start"
+    );
+
+    let client = OrchClient::new(&cfg.api_base, &cfg.project_id, &cfg.session_id, &cfg.token)?;
+
+    client.post_status(1, "running", None).await?;
+    client.post_heartbeat(2, Some(5)).await?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let seq = Arc::new(AtomicI32::new(3));
+    let hb_stop = stop.clone();
+    let hb_seq = seq.clone();
+    let hb_client = client.clone();
+    let hb_interval = cfg.heartbeat_interval;
+    let hb = tokio::spawn(async move {
+        let mut pct = 10i32;
+        loop {
+            tokio::time::sleep(hb_interval).await;
+            if hb_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            pct = (pct + 15).min(90);
+            let s = hb_seq.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = hb_client.post_heartbeat(s, Some(pct)).await {
+                warn!(error = %e, "heartbeat failed");
+            }
+        }
+    });
+
+    let work = execute_agent(&cfg).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = tokio::time::timeout(Duration::from_secs(2), hb).await;
+
+    match work {
+        Ok(summary) => {
+            let s = seq.fetch_add(1, Ordering::Relaxed);
+            let _ = client.post_heartbeat(s, Some(100)).await;
+            let s = seq.fetch_add(1, Ordering::Relaxed);
+            client.post_status(s, "success", Some(&summary)).await?;
+            info!(%summary, "fleet-driver success");
+            Ok(())
+        }
+        Err(WorkError::Blocked(reason)) => {
+            let s = seq.fetch_add(1, Ordering::Relaxed);
+            let r = truncate_reason(&reason, 512);
+            client.post_status(s, "blocked", Some(&r)).await?;
+            info!(%reason, "fleet-driver blocked");
+            Ok(())
+        }
+        Err(WorkError::Failed(reason)) => {
+            let s = seq.fetch_add(1, Ordering::Relaxed);
+            let r = truncate_reason(&reason, 512);
+            let _ = client.post_status(s, "failed", Some(&r)).await;
+            error!(%reason, "fleet-driver failed");
+            anyhow::bail!("{reason}")
+        }
+    }
+}
+
+enum WorkError {
+    Failed(String),
+    #[allow(dead_code)]
+    Blocked(String),
+}
+
+async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
+    let prompt = prompt::load_prompt(&cfg.work_dir);
+    let spec = harness::resolve(
+        &cfg.harness,
+        cfg.harness_cmd.as_deref(),
+        cfg.model.as_deref(),
+        cfg.auto_approve,
+        cfg.mock_bin.as_deref(),
+    )
+    .map_err(|e| WorkError::Failed(format!("harness: {e:#}")))?;
+
+    let mut extra_env = HashMap::new();
+    extra_env.insert("FLEET_SESSION_ID".into(), cfg.session_id.clone());
+    extra_env.insert("FLEET_PROJECT_ID".into(), cfg.project_id.clone());
+
+    let outcome = acp::run_session(AcpRun {
+        harness: spec.clone(),
+        cwd: cfg.work_dir.clone(),
+        prompt: prompt.clone(),
+        model: cfg.model.clone(),
+        auto_approve: cfg.auto_approve,
+        timeout: cfg.timeout,
+        extra_env,
+    })
+    .await
+    .map_err(|e| WorkError::Failed(format!("acp: {e:#}")))?;
+
+    let result = json!({
+        "worker": "fleet-driver",
+        "ok": outcome.ok,
+        "harness": spec.name,
+        "command": outcome.command,
+        "model": outcome.model,
+        "session_id": cfg.session_id,
+        "acp_session_id": outcome.session_id,
+        "stop_reason": outcome.stop_reason,
+        "elapsed_sec": outcome.elapsed_sec,
+        "agent_info": outcome.agent_info,
+        "error": outcome.error,
+        "transcript_chars": outcome.transcript.chars().count(),
+        "plan_task_id": cfg.plan_task_id,
+        "board_task_id": cfg.board_task_id,
+    });
+    if let Err(e) = report::write_artifacts(&cfg.work_dir, &result, &outcome.transcript) {
+        warn!(error = %e, "failed to write artifacts");
+    }
+
+    if outcome.ok {
+        Ok(format!(
+            "acp ok harness={} stop={} elapsed={:.2}s chars={}",
+            spec.name,
+            outcome.stop_reason.as_deref().unwrap_or("-"),
+            outcome.elapsed_sec,
+            outcome.transcript.chars().count()
+        ))
+    } else {
+        let mut reason = outcome.error.unwrap_or_else(|| "ACP session failed".into());
+        if !outcome.stderr_tail.is_empty() {
+            let tail: String = outcome
+                .stderr_tail
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            reason.push_str(" — stderr: ");
+            reason.push_str(&tail);
+        }
+        Err(WorkError::Failed(reason))
+    }
+}

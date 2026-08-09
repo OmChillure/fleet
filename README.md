@@ -16,6 +16,7 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
 | [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
+| [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | Process worker: ACP (Grok Build + mock) + orch heartbeat/status |
 
 ## Local development
 
