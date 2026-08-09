@@ -35,9 +35,16 @@ ok ".env DATABASE_URL → compose :5433, ENABLE_BROWSER_E2E=1"
 
 if ! need dx; then
   echo "==> cargo install dioxus-cli 0.7.3 (matches workspace dioxus pin)"
-  cargo install dioxus-cli --version 0.7.3 --locked
+  if ! cargo install dioxus-cli --version 0.7.3 --locked; then
+    echo "WARN: dx install failed (often OpenSSL 4 vs openssl-sys). Kind UI image is enough for e2e." >&2
+    echo "      Host UI: install libssl-dev matching OpenSSL 3, or use agent-fleet-ui:local." >&2
+  fi
 fi
-ok "dx $(dx --version 2>/dev/null || true)"
+if need dx; then
+  ok "dx $(dx --version 2>/dev/null || true)"
+else
+  echo "WARN: dx not on PATH — use Kind UI or fix openssl and re-run bootstrap" >&2
+fi
 
 if ! python3 -c "from playwright.sync_api import sync_playwright" >/dev/null 2>&1; then
   python3 -m pip install --user playwright || python3 -m pip install --user --break-system-packages playwright

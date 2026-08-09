@@ -33,6 +33,7 @@ class GitSshLiveTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(wa)
         tmp = Path(tempfile.mkdtemp(prefix="fleet-gitssh-test-"))
+        old_home = os.environ.get("HOME")
         os.environ["GIT_SSH_KEY_PATH"] = str(KEY)
         os.environ["HOME"] = str(tmp / "home")
         (tmp / "home").mkdir()
@@ -49,6 +50,10 @@ class GitSshLiveTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
             os.environ.pop("GIT_SSH_KEY_PATH", None)
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
 
 
 if __name__ == "__main__":

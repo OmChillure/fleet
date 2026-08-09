@@ -18,11 +18,19 @@ from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
 def _kubectl(*args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    # Do not inherit a leaked HOME from gitssh live tests.
     kube = Path.home() / ".kube" / "config"
+    if not kube.is_file():
+        kube = Path(os.path.expanduser("~")) / ".kube" / "config"
     if kube.is_file():
-        env.setdefault("KUBECONFIG", str(kube))
+        env["KUBECONFIG"] = str(kube)
+    ctx = os.environ.get("KIND_KUBE_CONTEXT", "kind-agent-fleet")
+    cmd = ["kubectl"]
+    if ctx:
+        cmd.extend(["--context", ctx])
+    cmd.extend(args)
     return subprocess.run(
-        ["kubectl", *args],
+        cmd,
         capture_output=True,
         text=True,
         timeout=30,
