@@ -35,6 +35,7 @@ async fn grok_tiny_prompt_over_acp() {
     let out = acp::run_session(AcpRun {
         harness: spec,
         cwd: dir.path().to_path_buf(),
+        session_dir: dir.path().to_path_buf(),
         prompt: "Reply with exactly the single word pong and nothing else. Do not use tools."
             .into(),
         model: None,

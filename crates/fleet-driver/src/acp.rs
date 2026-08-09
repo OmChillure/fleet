@@ -5,6 +5,8 @@
 //! compatibility).
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +48,8 @@ pub struct AcpOutcome {
 pub struct AcpRun {
     pub harness: HarnessSpec,
     pub cwd: PathBuf,
+    /// Session dir for `live.jsonl` / artifacts (may differ from agent cwd after clone).
+    pub session_dir: PathBuf,
     pub prompt: String,
     pub model: Option<String>,
     pub auto_approve: bool,
@@ -110,6 +114,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
     let transcript_r = transcript.clone();
     let terminals = TerminalHub::new();
     let terminals_r = terminals.clone();
+    let session_dir = run.session_dir.clone();
     let reader = tokio::spawn(async move {
         if let Err(e) = read_loop(
             stdout,
@@ -119,6 +124,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
             cwd,
             auto_approve,
             terminals_r,
+            session_dir,
         )
         .await
         {
@@ -385,6 +391,7 @@ async fn read_loop(
     cwd: PathBuf,
     auto_approve: bool,
     terminals: TerminalHub,
+    session_dir: PathBuf,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut mode = FrameMode::Auto;
@@ -420,6 +427,7 @@ async fn read_loop(
                     preview = %piece.chars().take(160).collect::<String>(),
                     "ACP update"
                 );
+                append_live_event(&session_dir, "update", &piece);
                 let mut t = transcript.lock().await;
                 if t.len() < TRANSCRIPT_CAP {
                     t.push_str(&piece);
@@ -641,6 +649,23 @@ fn method_is_write_file(method: &str) -> bool {
     m.contains("write_text_file") || m.contains("writetextfile")
 }
 
+fn append_live_event(session_dir: &Path, kind: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let rec = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": kind,
+        "text": text,
+    });
+    let path = session_dir.join("live.jsonl");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path)
+        && let Ok(line) = serde_json::to_string(&rec)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn method_is_terminal(method: &str) -> bool {
     let m = method.to_ascii_lowercase();
     m.starts_with("terminal/") || m.contains("terminal/create") || m.contains("create_terminal")
@@ -758,7 +783,23 @@ fn format_session_update(update: &Value) -> Option<String> {
                 .or_else(|| update.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool");
-            Some(format!("\n[{kind}: {title}]\n"))
+            let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let extra = update
+                .pointer("/content/0/content/text")
+                .or_else(|| update.pointer("/content/0/text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let mut line = format!("\n[{kind}: {title}");
+            if !status.is_empty() {
+                line.push_str(" ");
+                line.push_str(status);
+            }
+            line.push_str("]\n");
+            if !extra.is_empty() {
+                line.push_str(extra);
+                line.push('\n');
+            }
+            Some(line)
         }
         _ => {
             // Sometimes the update *is* the content object.

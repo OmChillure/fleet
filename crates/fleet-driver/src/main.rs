@@ -136,6 +136,7 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
     let outcome = acp::run_session(AcpRun {
         harness: spec.clone(),
         cwd: cfg.work_dir.clone(),
+        session_dir: cfg.work_dir.clone(),
         prompt: prompt.clone(),
         model: cfg.model.clone(),
         auto_approve: cfg.auto_approve,

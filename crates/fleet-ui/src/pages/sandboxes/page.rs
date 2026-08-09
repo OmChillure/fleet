@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use super::api::list_sessions;
+use crate::Route;
 
 #[derive(Clone, PartialEq)]
 struct SessionRow {
@@ -117,9 +118,13 @@ pub fn Sandboxes(workspace_id: String) -> Element {
             } else {
                 div { class: "flex flex-col gap-2",
                     for s in rows() {
-                        div {
+                        Link {
                             key: "{s.id}",
-                            class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                            to: Route::SessionDetail {
+                                workspace_id: workspace_id.clone(),
+                                session_id: s.id.clone(),
+                            },
+                            class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 transition hover:border-[var(--app-accent)]",
                             div { class: "flex flex-wrap items-center justify-between gap-2",
                                 p { class: "m-0 font-medium text-[var(--app-fg)]", "{s.backend} · {s.profile}" }
                                 span { class: "text-xs text-[var(--app-muted)]", "{s.status} · {s.progress}%" }

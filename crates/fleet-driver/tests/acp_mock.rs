@@ -24,6 +24,7 @@ fn base_run(dir: &std::path::Path, spec: HarnessSpec) -> AcpRun {
     AcpRun {
         harness: spec,
         cwd: dir.to_path_buf(),
+        session_dir: dir.to_path_buf(),
         prompt: "Write a short greeting.".into(),
         model: Some("mock-fast".into()),
         auto_approve: true,
