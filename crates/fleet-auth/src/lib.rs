@@ -2,7 +2,8 @@
 //!
 //! Mounted by [`fleet-server`](../fleet-server). Does not own `main`.
 
-#![forbid(unsafe_code)]
+// `std::env::set_var` is unsafe on recent Rust; tests may mutate process env.
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 mod cookies;
 mod error;

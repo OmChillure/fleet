@@ -26,3 +26,26 @@ pub fn verify_password(password: &str, password_hash: &str) -> AppResult<bool> {
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_and_verify_ok() {
+        let hash = hash_password("correct-horse").expect("hash");
+        assert!(verify_password("correct-horse", &hash).expect("verify"));
+    }
+
+    #[test]
+    fn wrong_password_returns_false() {
+        let hash = hash_password("correct-horse").expect("hash");
+        assert!(!verify_password("wrong-password", &hash).expect("verify"));
+    }
+
+    #[test]
+    fn garbage_hash_is_error_not_panic() {
+        let result = verify_password("anything", "not-a-valid-argon2-hash");
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+}

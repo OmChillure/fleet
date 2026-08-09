@@ -49,3 +49,92 @@ pub fn validate_cookie_policy(cfg: &AuthConfig) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use axum::http::header::SET_COOKIE;
+
+    fn test_cfg(cookie_secure: bool) -> AuthConfig {
+        AuthConfig {
+            jwt_secret: "test-secret-at-least-32-characters-long!!".into(),
+            access_ttl: Duration::from_secs(900),
+            refresh_ttl: Duration::from_secs(604_800),
+            cookie_secure,
+            cookie_samesite: SameSite::Lax,
+        }
+    }
+
+    fn set_cookie_values(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().expect("set-cookie utf8").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn set_auth_cookies_http_only_path_and_secure_follows_config() {
+        let cfg = test_cfg(false);
+        let mut headers = HeaderMap::new();
+        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+        let cookies = set_cookie_values(&headers);
+        assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+
+        for raw in &cookies {
+            let lower = raw.to_ascii_lowercase();
+            assert!(
+                lower.contains("httponly"),
+                "missing HttpOnly: {raw}"
+            );
+            assert!(
+                lower.contains("path=/"),
+                "missing Path=/: {raw}"
+            );
+            assert!(
+                !lower.contains("secure"),
+                "Secure must follow config=false: {raw}"
+            );
+        }
+
+        assert!(
+            cookies.iter().any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
+            "missing access cookie: {cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}="))),
+            "missing refresh cookie: {cookies:?}"
+        );
+    }
+
+    #[test]
+    fn clear_auth_cookies_max_age_zero() {
+        let cfg = test_cfg(false);
+        let mut headers = HeaderMap::new();
+        clear_auth_cookies(&mut headers, &cfg);
+
+        let cookies = set_cookie_values(&headers);
+        assert_eq!(cookies.len(), 2, "expected access + refresh clear cookies");
+
+        for raw in &cookies {
+            let lower = raw.to_ascii_lowercase();
+            assert!(
+                lower.contains("max-age=0"),
+                "clear cookie must set Max-Age=0: {raw}"
+            );
+            assert!(
+                lower.contains("httponly"),
+                "missing HttpOnly: {raw}"
+            );
+            assert!(
+                lower.contains("path=/"),
+                "missing Path=/: {raw}"
+            );
+        }
+    }
+}

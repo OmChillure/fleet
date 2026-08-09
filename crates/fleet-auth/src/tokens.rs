@@ -66,3 +66,75 @@ pub fn generate_refresh_token() -> String {
 pub fn hash_refresh_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    const SECRET: &str = "test-secret-at-least-32-characters-long!!";
+    const OTHER_SECRET: &str = "other-secret-at-least-32-characters-long!";
+
+    #[test]
+    fn issue_and_decode_access_jwt() {
+        let user_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let token = issue_access_token(
+            SECRET,
+            user_id,
+            "user@example.test",
+            session_id,
+            Duration::from_secs(900),
+        )
+        .expect("issue");
+
+        let claims = decode_access_token(SECRET, &token).expect("decode");
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.email, "user@example.test");
+        assert_eq!(claims.sid, session_id.to_string());
+    }
+
+    #[test]
+    fn wrong_secret_fails() {
+        let token = issue_access_token(
+            SECRET,
+            Uuid::new_v4(),
+            "user@example.test",
+            Uuid::new_v4(),
+            Duration::from_secs(900),
+        )
+        .expect("issue");
+
+        let err = decode_access_token(OTHER_SECRET, &token).expect_err("wrong secret");
+        assert!(
+            matches!(err, AppError::Unauthorized(_)),
+            "expected Unauthorized, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn expired_token_fails() {
+        // Validation::default() uses a 60s leeway, so ttl=0/1ms + short sleep is
+        // not enough. Encode claims already past leeway and decode via public API.
+        let now = Utc::now();
+        let claims = AccessClaims {
+            sub: Uuid::new_v4().to_string(),
+            email: "user@example.test".into(),
+            sid: Uuid::new_v4().to_string(),
+            exp: (now - ChronoDuration::seconds(120)).timestamp(),
+            iat: (now - ChronoDuration::seconds(180)).timestamp(),
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .expect("encode expired token");
+
+        let err = decode_access_token(SECRET, &token).expect_err("expired");
+        assert!(
+            matches!(err, AppError::Unauthorized(_)),
+            "expected Unauthorized, got {err:?}"
+        );
+    }
+}
