@@ -24,12 +24,17 @@ services:
       dockerfile: Dockerfile
     volumes:
       - sandbox-workspace:/workspace
+      - ${SSH_KEY_HOST_PATH:-../../../.tmp/ssh/id_ed25519}:/run/secrets/git_ssh_key:ro
     environment:
       FLEET_DIR: /workspace/.fleet
       FLEET_UID: "1000"
       FLEET_GID: "1000"
       FLEET_HANDSHAKE_SECRET: ${FLEET_HANDSHAKE_SECRET:-dev-lab-handshake-not-for-prod}
       PYTHONUNBUFFERED: "1"
+      HOME: /root
+      GIT_SSH_KEY_PATH: /run/secrets/git_ssh_key
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: "no"
 
   driver:
@@ -60,7 +65,10 @@ services:
       OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROK_DEPLOYMENT_KEY: ${GROK_DEPLOYMENT_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
       GIT_REPO_URL: ${GIT_REPO_URL:-}
       GIT_REF: ${GIT_REF:-main}
       ANALYZE_PROMPT: ${ANALYZE_PROMPT:-Analyze this repository briefly.}
@@ -72,7 +80,7 @@ services:
       XDG_CONFIG_HOME: /home/fleet/.config
       XDG_DATA_HOME: /home/fleet/.local/share
     volumes:
-      - ${SSH_KEY_HOST_PATH}:/run/secrets/git_ssh_key:ro
+      - ${SSH_KEY_HOST_PATH:-../../../.tmp/ssh/id_ed25519}:/run/secrets/git_ssh_key:ro
       - sandbox-workspace:/workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"

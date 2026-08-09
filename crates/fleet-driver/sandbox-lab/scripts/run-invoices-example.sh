@@ -33,8 +33,10 @@ if [[ -z "$JOB_HARNESS" ]]; then
   JOB_HARNESS="${HARNESS:-opencode}"
 fi
 export HARNESS="$JOB_HARNESS"
-# Driver image must match this task's harness (task A opencode, task B pi, …)
-if [[ -z "${DRIVER_BASE_IMAGE:-}" ]]; then
+# Driver image must match this task's harness (task A opencode, task B pi, …).
+# Always recompute unless FLEET_FORCE_DRIVER_IMAGE=1 — a leftover env from a
+# previous job (or alpine matching "pi") used to pin the wrong image.
+if [[ "${FLEET_FORCE_DRIVER_IMAGE:-0}" != "1" ]]; then
   case "$(printf '%s' "$HARNESS" | tr '[:upper:]' '[:lower:]')" in
     pi|pi-dev|pi_acp) export DRIVER_BASE_IMAGE=agent-fleet-pi:alpine ;;
     codex)            export DRIVER_BASE_IMAGE=agent-fleet-codex:alpine ;;
@@ -73,6 +75,22 @@ ensure_base_image() {
         --build-arg BASE_IMAGE=agent-fleet-base:alpine \
         -f "$AGENTS_DIR/opencode/Dockerfile" "$AGENTS_DIR/opencode"
       ;;
+    agent-fleet-grok:alpine|agent-fleet-grok:*)
+      if ! docker image inspect agent-fleet-base:alpine >/dev/null 2>&1; then
+        docker build -t agent-fleet-base:alpine -f "$AGENTS_DIR/base/Dockerfile" "$AGENTS_DIR/base"
+      fi
+      docker build -t agent-fleet-grok:alpine \
+        --build-arg BASE_IMAGE=agent-fleet-base:alpine \
+        -f "$AGENTS_DIR/grok/Dockerfile" "$AGENTS_DIR/grok"
+      ;;
+    agent-fleet-codex:alpine|agent-fleet-codex:*)
+      if ! docker image inspect agent-fleet-base:alpine >/dev/null 2>&1; then
+        docker build -t agent-fleet-base:alpine -f "$AGENTS_DIR/base/Dockerfile" "$AGENTS_DIR/base"
+      fi
+      docker build -t agent-fleet-codex:alpine \
+        --build-arg BASE_IMAGE=agent-fleet-base:alpine \
+        -f "$AGENTS_DIR/codex/Dockerfile" "$AGENTS_DIR/codex"
+      ;;
     *)
       echo "base image not found: $img" >&2
       echo "build harness images: $AGENTS_DIR/build.sh" >&2
@@ -89,15 +107,24 @@ SHORT="${SHORT:0:12}"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-fleet-task-${SHORT}}"
 export FLEET_LAB_JOB_ID="$JOB_ID"
 export FLEET_LAB_COMPOSE_PROJECT="$COMPOSE_PROJECT_NAME"
-# Per-task state (avoid /tmp races when multiple sandboxes run)
-STATE_DIR="${TMPDIR:-/tmp}/fleet-lab-runs/${COMPOSE_PROJECT_NAME}"
+REPO="$(cd "$ROOT/../../.." && pwd)"
+FLEET_TMP="${FLEET_TMP:-${REPO}/.tmp}"
+export FLEET_TMP
+mkdir -p "${FLEET_TMP}"
+SSH_KEY_HOST_PATH="${SSH_KEY_HOST_PATH:-${REPO}/.tmp/ssh/id_ed25519}"
+if [[ ! -f "${SSH_KEY_HOST_PATH}" ]]; then
+  mkdir -p "$(dirname "${SSH_KEY_HOST_PATH}")"
+  ssh-keygen -t ed25519 -f "${SSH_KEY_HOST_PATH}" -N "" -C "fleet-lab-dummy" >/dev/null
+fi
+export SSH_KEY_HOST_PATH
+# Per-task state (one dir per compose project)
+STATE_DIR="${FLEET_TMP}/lab-runs/${COMPOSE_PROJECT_NAME}"
 mkdir -p "$STATE_DIR"
 export FLEET_LAB_RESULT_FILE="$STATE_DIR/result.json"
 echo "$JOB_ID" > "$STATE_DIR/job_id"
 echo "$COMPOSE_PROJECT_NAME" > "$STATE_DIR/compose_project"
-# Legacy paths for dual summary (last finished task)
-echo "$JOB_ID" > /tmp/fleet-lab-job-id
-echo "$COMPOSE_PROJECT_NAME" > /tmp/fleet-lab-compose-project
+echo "$JOB_ID" > "${FLEET_TMP}/lab-job-id"
+echo "$COMPOSE_PROJECT_NAME" > "${FLEET_TMP}/lab-compose-project"
 
 HARNESS_HINT="$HARNESS"
 MODEL_HINT="${MODEL:-}"
@@ -125,9 +152,9 @@ if [[ "$VERBOSE" == "1" ]]; then
   dc build --pull=false driver
   dc up -d redis workspace
 else
-  if ! dc build --pull=false driver >/tmp/fleet-lab-driver-build.log 2>&1; then
+  if ! dc build --pull=false driver >"${FLEET_TMP}/driver-build.log" 2>&1; then
     echo "driver build failed (BASE_IMAGE=$DRIVER_BASE_IMAGE). last lines:" >&2
-    tail -40 /tmp/fleet-lab-driver-build.log >&2
+    tail -40 "${FLEET_TMP}/driver-build.log" >&2
     exit 1
   fi
   dc up -d redis workspace >/dev/null 2>&1

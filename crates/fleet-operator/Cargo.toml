@@ -24,6 +24,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
+# Direct pin: kube→educe→enum-ordinalize 4.4+ needs rustc 1.89; Docker/CI stay on 1.88.
+enum-ordinalize = "=4.3.2"
 
 [dev-dependencies]
 tokio = { workspace = true }

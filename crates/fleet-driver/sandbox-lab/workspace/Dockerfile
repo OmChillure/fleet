@@ -5,6 +5,7 @@ FROM python:3.13-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
+      openssh-client \
       curl \
       ca-certificates \
       build-essential \

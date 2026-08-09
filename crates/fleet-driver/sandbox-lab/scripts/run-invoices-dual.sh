@@ -6,6 +6,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 AGENTS="$(cd "$ROOT/../agents" && pwd)"
+REPO="$(cd "$ROOT/../../.." && pwd)"
+FLEET_TMP="${FLEET_TMP:-${REPO}/.tmp}"
+export FLEET_TMP
+mkdir -p "${FLEET_TMP}"
 [[ -f .env ]] || cp .env.example .env
 
 echo "dual invoices (2 sandboxes)"
@@ -41,14 +45,14 @@ echo "── 1/2 OpenCode ──"
 # harness comes from job JSON (opencode); image selected per-task
 "$SCRIPTS/run-invoices-example.sh" config/job.123-invoices.opencode.json
 OC=$?
-OC_ID=$(cat /tmp/fleet-lab-job-id 2>/dev/null || true)
+OC_ID=$(cat "${FLEET_TMP}/lab-job-id" 2>/dev/null || true)
 echo
 
 echo "── 2/2 Pi ──"
 # harness comes from job JSON (pi); image selected per-task — not from .env HARNESS
 "$SCRIPTS/run-invoices-example.sh" config/job.123-invoices.pi.json
 PI=$?
-PI_ID=$(cat /tmp/fleet-lab-job-id 2>/dev/null || true)
+PI_ID=$(cat "${FLEET_TMP}/lab-job-id" 2>/dev/null || true)
 set -e
 
 echo

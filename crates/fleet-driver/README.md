@@ -31,15 +31,21 @@ task A → fleet-task-aaa + volume A + workspace A + driver(opencode)
 task B → fleet-task-bbb + volume B + workspace B + driver(pi)
 ```
 
+## Install
+
+See [`sandbox-lab/scripts/install-full-suite-deps.sh`](sandbox-lab/scripts/install-full-suite-deps.sh) (only install doc).
+
 ## Quick tests (no LLM)
 
 ```bash
 # from repo root
 cargo test -p fleet-driver
-./sandbox-lab/scripts/run-protocol-tests.sh /tmp/fleet-sandbox-tests.log
+
+# from crates/fleet-driver
+./sandbox-lab/scripts/run-protocol-tests.sh ../../.tmp/protocol.log
 
 # optional Docker protocol (no LLM)
-cd sandbox-lab && ./scripts/run-compose-tool-integration.sh /tmp/compose-int.log
+cd sandbox-lab && ./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
 ```
 
 ## Harness images
@@ -76,7 +82,7 @@ OPENCODE_PROVIDER_ID=lmstudio
 OPENCODE_BASE_URL=http://host.docker.internal:1234/v1
 OPENCODE_API_KEY=lm-studio
 MODEL=lmstudio/google/gemma-4-e4b
-SSH_KEY_HOST_PATH=/tmp/fleet-lab-ssh/id_ed25519
+SSH_KEY_HOST_PATH=../../../.tmp/ssh/id_ed25519
 ```
 
 | Var | Required | Notes |

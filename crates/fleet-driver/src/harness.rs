@@ -122,10 +122,21 @@ pub fn resolve_harness(job: &Job) -> Result<HarnessSpec> {
 }
 
 fn ensure_bin(name: &str) -> Result<()> {
-    which(name).with_context(|| {
-        format!("harness binary {name:?} not on PATH (wrong agent image?)")
-    })?;
-    Ok(())
+    match which(name) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let fallback = Path::new("/usr/local/bin").join(name);
+            if fallback.exists() {
+                bail!(
+                    "harness binary {name:?} exists at {} but is not executable \
+                     (broken symlink or unreadable target — grok install.sh often \
+                     links into /root/.grok)",
+                    fallback.display()
+                );
+            }
+            bail!("harness binary {name:?} not on PATH (wrong agent image?)");
+        }
+    }
 }
 
 /// Env vars for the harness child process.

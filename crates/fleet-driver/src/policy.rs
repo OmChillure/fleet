@@ -235,6 +235,15 @@ mod tests {
     }
 
     #[test]
+    fn jobs_root_default_is_workspace_jobs() {
+        // Do not set FLEET_JOBS_ROOT here — tests share the process env.
+        if std::env::var_os("FLEET_JOBS_ROOT").is_some() {
+            return;
+        }
+        assert_eq!(jobs_root(), PathBuf::from("/workspace/jobs"));
+    }
+
+    #[test]
     fn resolve_work_dir_explicit_and_default() {
         assert_eq!(
             resolve_work_dir("j1", None),

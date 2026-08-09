@@ -242,15 +242,9 @@ pub async fn run_session(
             .map(|s| s.to_string());
         info!(?stop_reason, "ACP prompt complete");
 
-        let _ = rpc(
-            "session/cancel",
-            json!({ "sessionId": session_id }),
-            &next_id,
-            &pending,
-            &stdin,
-            10,
-        )
-        .await;
+        // Do not send session/cancel after prompt returns. Cancel is for aborting
+        // an in-flight prompt; OpenCode (and others) answer Method not found / spam
+        // stderr if we cancel a finished session. Timeout/error paths kill the child.
 
         let text = transcript.lock().await.clone();
         Ok::<_, anyhow::Error>((session_id, stop_reason, text, agent_info))
@@ -735,12 +729,18 @@ mod tests {
         };
         let cwd = std::env::temp_dir().join(format!("fleet-acp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
+        let methods_log = cwd.join("methods.log");
+        let mut env = HashMap::new();
+        env.insert(
+            "FLEET_ACP_METHODS_LOG".into(),
+            methods_log.display().to_string(),
+        );
         let out = run_session(
             &harness,
             &cwd,
             Some("mock-strong"),
             "Say hi",
-            HashMap::new(),
+            env,
             false,
             &["*".into()],
             30,
@@ -748,11 +748,20 @@ mod tests {
         )
         .await
         .expect("acp session");
+        let methods = std::fs::read_to_string(&methods_log).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&cwd);
         assert!(out.ok, "stderr={}", out.stderr_tail);
         assert_eq!(out.session_id.as_deref(), Some("sess-mock-1"));
         assert!(out.transcript.to_lowercase().contains("hello") || !out.transcript.is_empty(), "transcript={}", out.transcript);
         assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
+        assert!(
+            !methods.lines().any(|l| l.trim() == "session/cancel"),
+            "driver must not send session/cancel after prompt returns; methods={methods:?}"
+        );
+        assert!(
+            methods.lines().any(|l| l.trim() == "session/prompt"),
+            "expected session/prompt in {methods:?}"
+        );
     }
 
     #[test]

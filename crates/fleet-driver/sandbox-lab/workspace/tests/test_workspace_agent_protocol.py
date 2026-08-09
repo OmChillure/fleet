@@ -263,6 +263,34 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.agent.validate_tool_bin("bash")
 
+    def test_ssh_repo_detection(self):
+        self.assertTrue(self.agent.is_ssh_repo("git@github.com:org/repo.git"))
+        self.assertTrue(
+            self.agent.is_ssh_repo("ssh://git@host.docker.internal:2222/srv/git/hello.git")
+        )
+        self.assertFalse(self.agent.is_ssh_repo("https://github.com/org/repo.git"))
+
+    def test_write_json_default_mode_is_group_readable(self):
+        path = self.fleet / "result-mode.json"
+        self.agent.write_json(path, {"ok": True})
+        mode = path.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o664, oct(mode))
+
+    def test_git_ssh_env_sets_command_when_key_present(self):
+        key = self.tmp / "id_ed25519"
+        key.write_text("dummy-key\n", encoding="utf-8")
+        os.environ["GIT_SSH_KEY_PATH"] = str(key)
+        os.environ["HOME"] = str(self.tmp / "home")
+        (self.tmp / "home").mkdir()
+        try:
+            env = self.agent.git_ssh_env({})
+            self.assertIn("GIT_SSH_COMMAND", env)
+            self.assertIn("ssh -F", env["GIT_SSH_COMMAND"])
+            ident = self.tmp / "home" / ".ssh" / "id_fleet"
+            self.assertTrue(ident.is_file())
+        finally:
+            os.environ.pop("GIT_SSH_KEY_PATH", None)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -200,6 +200,50 @@ raise SystemExit(124)
     log(f"installed {path} (volume tool handshake, root-owned)")
 
 
+def is_ssh_repo(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return u.startswith("git@") or u.startswith("ssh://") or u.startswith("ssh+")
+
+
+def git_ssh_env(env: dict) -> dict:
+    """Point git at a mounted deploy key. Volume clone runs here, not in the driver."""
+    out = dict(env)
+    key = (os.environ.get("GIT_SSH_KEY_PATH") or "").strip()
+    if not key:
+        return out
+    key_path = Path(key)
+    if not key_path.is_file():
+        log(f"GIT_SSH_KEY_PATH={key} missing; clone will use default ssh")
+        return out
+    home = Path(out.get("HOME") or os.environ.get("HOME") or "/root")
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(ssh_dir, 0o700)
+    except OSError:
+        pass
+    ident = ssh_dir / "id_fleet"
+    shutil.copy2(key_path, ident)
+    os.chmod(ident, 0o600)
+    known = ssh_dir / "known_hosts"
+    kh = (os.environ.get("GIT_SSH_KNOWN_HOSTS") or "").strip()
+    if kh and Path(kh).is_file():
+        shutil.copy2(kh, known)
+    config = ssh_dir / "config"
+    config.write_text(
+        "Host *\n"
+        f"  IdentityFile {ident}\n"
+        "  IdentitiesOnly yes\n"
+        "  StrictHostKeyChecking accept-new\n"
+        f"  UserKnownHostsFile {known}\n",
+        encoding="utf-8",
+    )
+    os.chmod(config, 0o600)
+    out["GIT_SSH_COMMAND"] = f"ssh -F {config}"
+    log(f"git ssh via {ident}")
+    return out
+
+
 def git_clone(repo_url, git_ref, dest, env):
     repo_url = validate_git_arg("repo_url", repo_url)
     git_ref = validate_git_arg("git_ref", git_ref or "main")
@@ -208,6 +252,8 @@ def git_clone(repo_url, git_ref, dest, env):
         log(f"removing existing {dest}")
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if is_ssh_repo(repo_url):
+        env = git_ssh_env(env)
     code, out, err = run_argv(
         ["git", "clone", "--depth", "1", "--branch", git_ref, repo_url, str(dest)],
         dest.parent,

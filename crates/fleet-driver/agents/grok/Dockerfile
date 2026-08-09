@@ -33,6 +33,13 @@ RUN set -eux; \
       find /root /usr/local -name 'grok' -type f 2>/dev/null || true; \
       exit 1; \
     fi; \
+    # install.sh often leaves a symlink into /root/.grok/downloads (mode 0700).
+    # The fleet user (uid 1000) cannot read that path — copy the real binary.
+    if [ -L /usr/local/bin/grok ]; then \
+      src="$(readlink -f /usr/local/bin/grok)"; \
+      install -m 0755 "${src}" /usr/local/bin/grok; \
+    fi; \
+    chmod 755 /usr/local/bin/grok; \
     # Smoke-test under gcompat; fail the build early if musl is incompatible.
     /usr/local/bin/grok --version
 

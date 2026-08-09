@@ -13,18 +13,10 @@ Do not share `/workspace` across tasks. Driver code lives in `crates/fleet-drive
 
 Architecture: [`docs/architecture/sandbox-workspace.md`](../../../docs/architecture/sandbox-workspace.md)
 
-## Prerequisites
+## Prerequisites / install
 
-1. Docker + compose  
-2. Harness images: `./../agents/build.sh` (opencode, pi, …)  
-3. LM Studio / Ollama / other OpenAI-compatible server reachable from containers  
-4. `cp -n .env.example .env` (see sample vars below)
-
-One-shot host install (packages, Ollama bind, model pull, images, dummy SSH key):
-
-```bash
-sudo ./scripts/install-full-suite-deps.sh
-```
+**Install (only source of truth):** [`scripts/install-full-suite-deps.sh`](scripts/install-full-suite-deps.sh)  
+Settings live in the repo-root `.env`. No command-line flags.
 
 Then run tests (no sudo):
 
@@ -32,8 +24,11 @@ Then run tests (no sudo):
 ./scripts/run-full-suite.sh              # cargo + protocol + host e2e + compose + invoices
 SKIP_LLM=1 ./scripts/run-full-suite.sh   # skip OpenCode/Pi LLM jobs
 ./scripts/run-host-e2e.py                # agent + fleet-wsexec only
-./scripts/run-compose-tool-integration.sh /tmp/fleet-compose-int.log
-./scripts/run-protocol-tests.sh /tmp/fleet-protocol.log
+./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
+./scripts/run-protocol-tests.sh ../../../.tmp/protocol.log
+DATABASE_URL=postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable \
+  cargo test -p fleet-orchestrator
+kubectl -n agent-fleet get pods
 ```
 
 ## Env sample
@@ -43,7 +38,7 @@ OPENCODE_PROVIDER_ID=lmstudio
 OPENCODE_BASE_URL=http://host.docker.internal:1234/v1
 OPENCODE_API_KEY=lm-studio
 MODEL=lmstudio/google/gemma-4-e4b
-SSH_KEY_HOST_PATH=/tmp/fleet-lab-ssh/id_ed25519
+SSH_KEY_HOST_PATH=../../../.tmp/ssh/id_ed25519
 ```
 
 ## Working example: 123-invoices
@@ -111,10 +106,10 @@ Agent uses: `fleet-wsexec django_check` (workspace runs fixed argv only).
 
 ```bash
 # cargo + workspace_agent handle_tool protocol (unknown / ok / cwd escape)
-./scripts/run-protocol-tests.sh /tmp/fleet-sandbox-tests.log
+./scripts/run-protocol-tests.sh ../../../.tmp/protocol.log
 
 # compose volume protocol: named tool ok + rejects (requires Docker)
-./scripts/run-compose-tool-integration.sh /tmp/compose-integration.log
+./scripts/run-compose-tool-integration.sh ../../../.tmp/compose-int.log
 ```
 
 ## Layout

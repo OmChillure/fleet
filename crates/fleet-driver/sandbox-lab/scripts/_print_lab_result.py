@@ -2,7 +2,7 @@
 """Compact lab result printer.
 
 Prefers env FLEET_LAB_JOB_ID / FLEET_LAB_COMPOSE_PROJECT (per-task).
-Falls back to /tmp/fleet-lab-* for older callers.
+Falls back to $FLEET_TMP or <repo>/.tmp/lab-*, then legacy /tmp/fleet-lab-*.
 Can also read a cached result JSON via FLEET_LAB_RESULT_FILE.
 """
 from __future__ import annotations
@@ -14,22 +14,29 @@ import sys
 from pathlib import Path
 
 
+def _tmp_root() -> Path:
+    if env := (os.environ.get("FLEET_TMP") or "").strip():
+        return Path(env)
+    # scripts/ → sandbox-lab/ → fleet-driver/ → crates/ → repo
+    return Path(__file__).resolve().parents[4] / ".tmp"
+
+
+def _read_sidecars(name: str) -> str:
+    for path in (
+        _tmp_root() / name,
+        Path("/tmp") / f"fleet-{name}",
+        Path("/tmp/fleet-lab-job-id") if name == "lab-job-id" else None,
+        Path("/tmp/fleet-lab-compose-project") if name == "lab-compose-project" else None,
+    ):
+        if path is not None and path.is_file():
+            return path.read_text().strip()
+    return ""
+
+
 def main() -> int:
-    jid = (
-        os.environ.get("FLEET_LAB_JOB_ID")
-        or (
-            Path("/tmp/fleet-lab-job-id").read_text().strip()
-            if Path("/tmp/fleet-lab-job-id").is_file()
-            else ""
-        )
-    )
-    proj = (
-        os.environ.get("FLEET_LAB_COMPOSE_PROJECT")
-        or (
-            Path("/tmp/fleet-lab-compose-project").read_text().strip()
-            if Path("/tmp/fleet-lab-compose-project").is_file()
-            else ""
-        )
+    jid = os.environ.get("FLEET_LAB_JOB_ID") or _read_sidecars("lab-job-id")
+    proj = os.environ.get("FLEET_LAB_COMPOSE_PROJECT") or _read_sidecars(
+        "lab-compose-project"
     )
     if not jid or not proj:
         print("  error: missing job_id / compose project", file=sys.stderr)

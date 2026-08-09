@@ -2,6 +2,7 @@
 # Compose-level: provision-free job tree + named tool via workspace agent protocol (no LLM).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$ROOT/../../.." && pwd)"
 cd "$ROOT"
 OUT="${1:-}"
 if [[ -z "$OUT" ]]; then
@@ -9,6 +10,13 @@ if [[ -z "$OUT" ]]; then
   exit 2
 fi
 mkdir -p "$(dirname "$OUT")"
+# Bind-mount source must be a file; Docker otherwise creates a directory.
+SSH_KEY_HOST_PATH="${SSH_KEY_HOST_PATH:-${REPO}/.tmp/ssh/id_ed25519}"
+if [[ ! -f "${SSH_KEY_HOST_PATH}" ]]; then
+  mkdir -p "$(dirname "${SSH_KEY_HOST_PATH}")"
+  ssh-keygen -t ed25519 -f "${SSH_KEY_HOST_PATH}" -N "" -C "fleet-lab-dummy" >/dev/null
+fi
+export SSH_KEY_HOST_PATH
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-fleet-compose-int-$$}"
 dc() { docker compose -p "$COMPOSE_PROJECT_NAME" "$@"; }
 trap 'dc down -v --remove-orphans >/dev/null 2>&1 || true' EXIT

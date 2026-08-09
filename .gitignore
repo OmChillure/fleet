@@ -31,3 +31,6 @@ crates/fleet-ui/toast-ref.*
 
 # fleet-dev.sh runtime (pids, nohup logs)
 .run/
+
+# install-full-suite-deps.sh scratch (ssh dummy key, cargo metadata, logs)
+.tmp/
