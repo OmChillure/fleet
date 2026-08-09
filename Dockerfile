@@ -27,6 +27,10 @@ USER fleet
 ENV DATA_DIR=/data
 ENV HOST=0.0.0.0
 ENV PORT=8080
+# Set at image build (`--build-arg FLEET_GIT_SHA=$(git rev-parse HEAD)`).
+# Live tests require this to match the worktree HEAD. Old images have empty/null.
+ARG FLEET_GIT_SHA=
+ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \

@@ -267,12 +267,25 @@ cmd_setup() {
   echo "Next: ./scripts/fleet-dev.sh start"
 }
 
+export_git_sha() {
+  if [[ -z "${FLEET_GIT_SHA:-}" ]]; then
+    FLEET_GIT_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
+  fi
+  export FLEET_GIT_SHA
+}
+
 start_server() {
   load_dotenv
+  export_git_sha
   local port="${PORT:-$API_PORT}"
   if [[ -n "$(port_pids "$port")" ]]; then
-    warn "Port $port already in use — not starting fleet-server"
-    return 0
+    if python3 "${ROOT}/tests/browser/stack_identity.py"; then
+      warn "Port $port already in use and /health matches this tree — not starting"
+      return 0
+    fi
+    err "Port $port is in use but is not this checkout (Kind extraPortMappings?)."
+    err "Free :8080/:3030 or rebuild images from this commit. See tests/browser/stack_identity.py"
+    exit 1
   fi
   local pid
   pid="$(read_pid "$PID_SERVER")"
@@ -285,6 +298,7 @@ start_server() {
   # shellcheck disable=SC2086
   nohup env \
     CARGO_TERM_COLOR=never \
+    FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
     cargo run -p fleet-server \
     >>"$LOG_SERVER" 2>&1 &
   echo $! >"$PID_SERVER"
@@ -301,6 +315,7 @@ start_ui() {
     return 0
   fi
   if [[ -n "$(port_pids "$UI_PORT")" ]]; then
+    # UI port alone is not identity; API probe already ran in start_server / cmd_start.
     warn "Port $UI_PORT already in use — not starting fleet-ui"
     return 0
   fi

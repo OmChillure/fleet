@@ -162,10 +162,15 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
     if !db_ok {
         tracing::warn!("health check degraded: database down");
     }
+    let git_sha = std::env::var("FLEET_GIT_SHA")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     Json(json!({
         "status": if db_ok { "ok" } else { "degraded" },
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
+        "git_sha": git_sha,
         "apis": ["auth", "workspaces", "personas", "integrations", "chat", "fleet", "orchestrator"],
     }))
 }

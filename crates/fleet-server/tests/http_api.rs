@@ -465,6 +465,11 @@ async fn health_ok_healthz_ok_api_index_lists_auth_and_fleet() {
             "health.apis must advertise {need}: {apis:?}"
         );
     }
+    assert!(
+        health.body.get("git_sha").is_some(),
+        "health must expose git_sha (null in oneshot tests): {}",
+        health.body
+    );
 
     let healthz = call(&app, "GET", "/healthz", None, None).await;
     assert_eq!(healthz.status, StatusCode::OK, "{}", healthz.body);
