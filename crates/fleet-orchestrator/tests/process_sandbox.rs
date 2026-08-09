@@ -15,8 +15,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
-fn db_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
+fn require_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "DATABASE_URL is required for this integration test. \
+                 Start Postgres (just db-up) and export DATABASE_URL."
+            )
+        })
 }
 
 fn worker_bin() -> PathBuf {
@@ -25,10 +33,7 @@ fn worker_bin() -> PathBuf {
 
 #[tokio::test]
 async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
-    let Some(database_url) = db_url() else {
-        eprintln!("skip process sandbox e2e: DATABASE_URL unset");
-        return;
-    };
+    let database_url = require_database_url();
     assert!(
         worker_bin().is_file(),
         "fleet-worker binary missing at {}",

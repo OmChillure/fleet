@@ -19,15 +19,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-fn db_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
+fn require_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "DATABASE_URL is required for this integration test. \
+                 Start Postgres (just db-up) and export DATABASE_URL."
+            )
+        })
 }
 
-async fn setup() -> Option<Store> {
-    let url = db_url()?;
+async fn setup() -> Store {
+    let url = require_database_url();
     let pool = connect(&url).await.expect("connect");
     migrate(&pool).await.expect("migrate");
-    Some(Store::new(pool))
+    Store::new(pool)
 }
 
 fn runner(store: Store, stub_ms: u64) -> TickRunner {
@@ -120,10 +128,7 @@ async fn run_status(store: &Store, run_id: Uuid) -> String {
 /// Happy path: two-task chain completes via stub duration 0.
 #[tokio::test]
 async fn e2e_happy_dependency_chain() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-happy-{}", Uuid::new_v4()), 3)
         .await
@@ -151,10 +156,7 @@ async fn e2e_happy_dependency_chain() {
 /// Fail-and-retry: stale heartbeat kills attempt 1 → retry_wait → ready → success.
 #[tokio::test]
 async fn e2e_fail_and_retry() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-retry-{}", Uuid::new_v4()), 3)
         .await
@@ -224,10 +226,7 @@ async fn e2e_fail_and_retry() {
 /// Cancel mid-run drains in-flight work to run cancelled.
 #[tokio::test]
 async fn e2e_cancel_mid_run() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-cancel-{}", Uuid::new_v4()), 3)
         .await
@@ -260,10 +259,7 @@ async fn e2e_cancel_mid_run() {
 /// Blocked worker + HITL resume intent → re-queue → complete.
 #[tokio::test]
 async fn e2e_blocked_and_resume() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-hitl-{}", Uuid::new_v4()), 3)
         .await
@@ -338,10 +334,7 @@ async fn e2e_blocked_and_resume() {
 /// Double tick after a complete board must not re-materialize or re-spawn.
 #[tokio::test]
 async fn e2e_double_force_tick_idempotent() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-idemp-{}", Uuid::new_v4()), 3)
         .await
@@ -382,10 +375,7 @@ async fn e2e_double_force_tick_idempotent() {
 /// Cancel before first tick → zero board cards, run cancelled.
 #[tokio::test]
 async fn e2e_cancel_before_materialize() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("e2e-c0-{}", Uuid::new_v4()), 3)
         .await

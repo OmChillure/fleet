@@ -1,6 +1,7 @@
-//! Live Grok Build ACP (skipped unless `FLEET_GROK_ACP_E2E=1`).
+//! Live Grok Build ACP e2e.
 //!
 //! Requires `grok` on PATH or `~/.grok/bin/grok` and `grok login` / auth.json.
+//! Run with `cargo test -p fleet-driver --test acp_grok -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -9,23 +10,9 @@ use fleet_driver::acp::{self, AcpRun};
 use fleet_driver::harness;
 use tempfile::tempdir;
 
-fn enabled() -> bool {
-    matches!(
-        std::env::var("FLEET_GROK_ACP_E2E")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
+#[ignore]
 #[tokio::test]
 async fn grok_tiny_prompt_over_acp() {
-    if !enabled() {
-        eprintln!("skip grok ACP e2e (set FLEET_GROK_ACP_E2E=1)");
-        return;
-    }
-
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("README.md"), "fleet grok e2e\n").unwrap();
 

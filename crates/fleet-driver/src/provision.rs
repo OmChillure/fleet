@@ -209,10 +209,10 @@ mod tests {
 
     #[tokio::test]
     async fn clones_local_file_url() {
-        if !git_available() {
-            eprintln!("skip: git not on PATH");
-            return;
-        }
+        assert!(
+            git_available(),
+            "git must be on PATH for this unit test (install git; do not skip)"
+        );
         let src = init_src_repo();
         let url = format!("file://{}", src.path().display());
         let dest_root = tempdir().unwrap();

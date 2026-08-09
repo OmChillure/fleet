@@ -10,13 +10,21 @@ use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn db_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
+fn require_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "DATABASE_URL is required for this integration test. \
+                 Start Postgres (just db-up) and export DATABASE_URL."
+            )
+        })
 }
 
-async fn app() -> Option<axum::Router> {
-    let url = db_url()?;
-    let dir = tempfile::tempdir().ok()?;
+async fn app() -> axum::Router {
+    let url = require_database_url();
+    let dir = tempfile::tempdir().expect("tempdir");
     let cfg = Config {
         database_url: url,
         admin_token: "test-admin".into(),
@@ -44,7 +52,7 @@ async fn app() -> Option<axum::Router> {
     // leak tempdir for process lifetime of test
     std::mem::forget(dir);
     let state = build_app_state(&cfg).await.expect("state");
-    Some(router(state))
+    router(state)
 }
 
 async fn json_req(
@@ -80,10 +88,7 @@ async fn json_req(
 
 #[tokio::test]
 async fn healthz_ok() {
-    let Some(app) = app().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let app = app().await;
     let (st, v) = json_req(app, "GET", "/healthz", None, None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["status"], "ok");
@@ -91,10 +96,7 @@ async fn healthz_ok() {
 
 #[tokio::test]
 async fn fixture_and_tick_happy_path() {
-    let Some(app) = app().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let app = app().await;
     let token = "test-admin";
 
     let (st, proj) = json_req(
@@ -222,10 +224,7 @@ async fn fixture_and_tick_happy_path() {
 
 #[tokio::test]
 async fn admin_auth_required() {
-    let Some(app) = app().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let app = app().await;
     let (st, _) = json_req(
         app,
         "POST",
