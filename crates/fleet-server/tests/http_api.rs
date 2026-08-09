@@ -66,7 +66,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
     }
 }
 
-async fn app() -> axum::Router {
+/// In-process app + state (state is for direct tool calls without an LLM).
+async fn app_with_state() -> (axum::Router, AppState) {
     let database_url = require_database_url();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -149,7 +150,45 @@ async fn app() -> axum::Router {
         grok: config.grok.clone(),
     };
 
-    build_http_app(state, orch, &config).expect("build_http_app")
+    let router = build_http_app(state.clone(), orch, &config).expect("build_http_app");
+    (router, state)
+}
+
+async fn app() -> axum::Router {
+    app_with_state().await.0
+}
+
+/// JWT shaped like OAuth state but with `typ: "access"` (must be rejected by callback).
+fn oauth_state_with_typ_access(secret: &str, provider: &str) -> String {
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct AccessShaped {
+        sub: String,
+        workspace_id: String,
+        provider: String,
+        nonce: String,
+        exp: i64,
+        iat: i64,
+        typ: String,
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    encode(
+        &Header::default(),
+        &AccessShaped {
+            sub: Uuid::new_v4().to_string(),
+            workspace_id: Uuid::new_v4().to_string(),
+            provider: provider.to_string(),
+            nonce: Uuid::now_v7().to_string(),
+            exp: now + 600,
+            iat: now,
+            typ: "access".into(),
+        },
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .expect("encode access-typed oauth state")
 }
 
 #[derive(Debug, Clone)]
@@ -479,10 +518,10 @@ async fn signup_login_fleet_project_id_matches_workspace_owner() {
     assert_eq!(fleet.body["role"], "owner");
 }
 
-// ── 3. fixture chain + tick until done ──────────────────────────────────────
+// ── 3. one BFF fixture + tick with cookie (orch e2e lives in fleet-orchestrator) ─
 
 #[tokio::test]
-async fn fixture_chain_ticks_until_t1_t2_done_success() {
+async fn fixture_bff_start_and_tick_with_cookie() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
@@ -499,66 +538,25 @@ async fn fixture_chain_ticks_until_t1_t2_done_success() {
     assert_eq!(fx.body["project_id"].as_str(), Some(ws.as_str()));
     assert!(fx.body["run_id"].as_str().is_some(), "{}", fx.body);
 
-    let tasks = tick_until_tasks_done(&app, &jar, &ws, &["t1", "t2"]).await;
-    let list = tasks["tasks"].as_array().unwrap();
-    for id in ["t1", "t2"] {
-        let t = list
-            .iter()
-            .find(|t| t["plan_task_id"] == id)
-            .unwrap_or_else(|| panic!("missing {id} in {tasks}"));
-        assert_eq!(t["status"], "done_success", "{id}: {tasks}");
-    }
-}
-
-// ── 4. fixture diamond ──────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn fixture_diamond_materializes_root_left_right_join() {
-    let app = app().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-
-    let fx = call(
-        &app,
-        "POST",
-        &fleet(&ws, "/runs/fixture"),
-        Some(&jar),
-        Some(json!({ "kind": "diamond" })),
-    )
-    .await;
-    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
-    assert_eq!(fx.body["kind"], "diamond", "{}", fx.body);
-
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
-    assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
 
     let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
     assert_eq!(tasks.status, StatusCode::OK, "{}", tasks.body);
     let list = tasks.body["tasks"].as_array().cloned().unwrap_or_default();
-    let by_id: std::collections::BTreeMap<_, _> = list
-        .iter()
-        .filter_map(|t| {
-            Some((
-                t["plan_task_id"].as_str()?.to_string(),
-                t["status"].as_str()?.to_string(),
-            ))
-        })
-        .collect();
-    for want in ["root", "left", "right", "join"] {
-        assert!(
-            by_id.contains_key(want),
-            "plan_task_ids missing {want}: {by_id:?} body={}",
-            tasks.body
-        );
-    }
-    // Join depends on left+right. One tick cannot honestly finish the join.
-    assert_ne!(
-        by_id.get("join").map(String::as_str),
-        Some("done_success"),
-        "join must not complete before its deps: {by_id:?}"
+    assert!(
+        !list.is_empty(),
+        "fixture + tick must materialize tasks: {}",
+        tasks.body
+    );
+    assert!(
+        list.iter().any(|t| t["plan_task_id"].as_str() == Some("t1")),
+        "expected plan_task_id t1: {}",
+        tasks.body
     );
 }
 
-// ── 5. cancel run ───────────────────────────────────────────────────────────
+// ── 4. cancel run ───────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn cancel_run_reaches_cancelled() {
@@ -606,7 +604,7 @@ async fn cancel_run_reaches_cancelled() {
     panic!("run {run_id} did not become cancelled within 24 ticks: {last}");
 }
 
-// ── 6. PATCH fleet config ───────────────────────────────────────────────────
+// ── 5. PATCH fleet config ───────────────────────────────────────────────────
 
 #[tokio::test]
 async fn patch_fleet_config_round_trip_empty_clears_git_ref_only_400() {
@@ -668,7 +666,7 @@ async fn patch_fleet_config_round_trip_empty_clears_git_ref_only_400() {
     assert_eq!(ref_only.status, StatusCode::BAD_REQUEST, "{}", ref_only.body);
 }
 
-// ── 7. workers / sessions after stub run ────────────────────────────────────
+// ── 6. workers / sessions after stub run ────────────────────────────────────
 
 #[tokio::test]
 async fn workers_sandboxes_match_sessions_and_detail_shape() {
@@ -754,7 +752,7 @@ async fn workers_sandboxes_match_sessions_and_detail_shape() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
 }
 
-// ── 8. personas ─────────────────────────────────────────────────────────────
+// ── 7. personas ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn personas_seed_starters_create_patch_archive() {
@@ -843,13 +841,14 @@ async fn personas_seed_starters_create_patch_archive() {
     );
 }
 
-// ── 9. integrations + oauth ─────────────────────────────────────────────────
+// ── 8. integrations + oauth ─────────────────────────────────────────────────
 
 #[tokio::test]
-async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_token() {
+async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
+    // Catalog: github available, gitlab coming_soon (matches fleet_integrations catalog).
     let list = call(
         &app,
         "GET",
@@ -878,6 +877,7 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         "OAuth start must be omitted when the server has no GitHub client: {github}"
     );
 
+    // OAuth start without client id → 4xx (not 500 / not 302).
     let start = call(
         &app,
         "GET",
@@ -886,6 +886,12 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         None,
     )
     .await;
+    assert!(
+        start.status.is_client_error(),
+        "coming-soon oauth start must be 4xx not {}: {}",
+        start.status,
+        start.body
+    );
     assert_eq!(start.status, StatusCode::BAD_REQUEST, "{}", start.body);
     assert!(
         start.body["error"]
@@ -905,10 +911,16 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         None,
     )
     .await;
+    assert!(
+        gh_start.status.is_client_error(),
+        "unconfigured GitHub OAuth must be 4xx not {}: {}",
+        gh_start.status,
+        gh_start.body
+    );
     assert_eq!(
         gh_start.status,
         StatusCode::BAD_REQUEST,
-        "unconfigured GitHub OAuth must not 302: {}",
+        "unconfigured GitHub OAuth must not 302/5xx: {}",
         gh_start.body
     );
     let gh_err = gh_start.body["error"].as_str().unwrap_or("").to_ascii_lowercase();
@@ -918,7 +930,7 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         gh_start.body
     );
 
-    let unknown = call(
+    let unknown_start = call(
         &app,
         "GET",
         &format!("/api/workspaces/{ws}/integrations/notaprovider/oauth/start"),
@@ -926,7 +938,29 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         None,
     )
     .await;
-    assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+    assert_eq!(
+        unknown_start.status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        unknown_start.body
+    );
+
+    // DELETE: unknown provider and not-connected known provider are both 404
+    // (routes.rs: is_known_provider → not_found; disconnect false → not_found).
+    let disc_unknown = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/integrations/notaprovider"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        disc_unknown.status,
+        StatusCode::NOT_FOUND,
+        "unknown provider disconnect: {}",
+        disc_unknown.body
+    );
 
     let disc = call(
         &app,
@@ -936,8 +970,28 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         None,
     )
     .await;
-    assert_eq!(disc.status, StatusCode::NOT_FOUND, "{}", disc.body);
+    assert_eq!(
+        disc.status,
+        StatusCode::NOT_FOUND,
+        "not-connected github disconnect: {}",
+        disc.body
+    );
+    assert!(
+        disc.body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("not connected")
+            || disc.body["error"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("github"),
+        "expected not-connected message: {}",
+        disc.body
+    );
 
+    // Callback without code/state: HTML close page, no token leak, not 5xx.
     let cb = call(
         &app,
         "GET",
@@ -946,6 +1000,12 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         None,
     )
     .await;
+    assert!(
+        !cb.status.is_server_error(),
+        "oauth callback must not 5xx: {} {}",
+        cb.status,
+        cb.raw
+    );
     assert!(
         cb.status == StatusCode::OK || cb.status == StatusCode::BAD_REQUEST,
         "oauth callback status {}: {}",
@@ -962,9 +1022,53 @@ async fn integrations_github_available_gitlab_coming_soon_oauth_callback_no_toke
         "callback must not leak access_token: {}",
         cb.raw
     );
+
+    // Callback with typ=access state JWT must be rejected (same secret as state_secret).
+    // Mirrors fleet_integrations oauth state_token unit; exercises the HTTP path.
+    let bad_state = oauth_state_with_typ_access(TEST_JWT_SECRET, "github");
+    let cb_access = call(
+        &app,
+        "GET",
+        &format!(
+            "/api/integrations/oauth/callback/github?code=fake-code&state={bad_state}"
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        !cb_access.status.is_server_error(),
+        "typ=access state must not 5xx: {} {}",
+        cb_access.status,
+        cb_access.raw
+    );
+    assert_eq!(
+        cb_access.status,
+        StatusCode::OK,
+        "callback always returns HTML close page: {}",
+        cb_access.raw
+    );
+    let lower = cb_access.raw.to_ascii_lowercase();
+    assert!(
+        lower.contains("connection failed")
+            || lower.contains("invalid")
+            || lower.contains("failed"),
+        "access-typed state must fail connection: {}",
+        cb_access.raw
+    );
+    assert!(
+        lower.contains("ok: false") || lower.contains("ok:false"),
+        "popup payload must report ok=false: {}",
+        cb_access.raw
+    );
+    assert!(
+        !cb_access.raw.contains("access_token"),
+        "must not leak access_token: {}",
+        cb_access.raw
+    );
 }
 
-// ── 10. chat conversations ──────────────────────────────────────────────────
+// ── 9. chat conversations ───────────────────────────────────────────────────
 
 #[tokio::test]
 async fn chat_status_create_list_delete_other_user_forbidden() {
@@ -1107,6 +1211,76 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
     .await;
     assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
     assert_eq!(deleted.body["deleted"], true);
+}
+
+// ── 10. chat tools without live LLM (direct execute_tool + stub sandbox) ────
+
+#[tokio::test]
+async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    assert_eq!(me.status, StatusCode::OK, "me: {}", me.body);
+    let user_id = Uuid::parse_str(
+        me.body["user"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("user.id: {}", me.body)),
+    )
+    .expect("user id uuid");
+    let workspace_id = Uuid::parse_str(&ws).expect("workspace uuid");
+
+    let (content, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "launch_agent_task",
+        &json!({
+            "title": "http_api stub launch",
+            "spec": "Settle under stub sandbox without a live LLM.",
+            "worker_profile": "coding"
+        }),
+    )
+    .await;
+
+    assert!(
+        action.ok,
+        "launch_agent_task should succeed under stub: action={action:?} content={content}"
+    );
+    assert_eq!(action.tool, "launch_agent_task");
+    assert!(
+        action.run_id.as_deref().filter(|s| !s.is_empty()).is_some(),
+        "run_id: {action:?}"
+    );
+    assert_eq!(
+        content["run_terminal"], true,
+        "stub ticks should settle the single-task run: {content}"
+    );
+    assert_eq!(content["task_count"], 1, "{content}");
+    let tasks = content["tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tasks array: {content}"));
+    let t1 = tasks
+        .iter()
+        .find(|t| t["plan_task_id"] == "t1")
+        .unwrap_or_else(|| panic!("missing t1: {content}"));
+    assert_eq!(
+        t1["status"], "done_success",
+        "chat plan t1 should finish under stub: {content}"
+    );
+
+    // Same workspace cookie BFF should see the run the tool materialized.
+    let runs = call(&app, "GET", &fleet(&ws, "/runs"), Some(&jar), None).await;
+    assert_eq!(runs.status, StatusCode::OK, "{}", runs.body);
+    let run_id = action.run_id.as_deref().unwrap();
+    let run_list = runs.body["runs"].as_array().cloned().unwrap_or_default();
+    assert!(
+        run_list
+            .iter()
+            .any(|r| r["id"].as_str() == Some(run_id)),
+        "BFF runs missing tool run_id {run_id}: {}",
+        runs.body
+    );
 }
 
 // ── 11. /v1 admin bearer vs cookie ──────────────────────────────────────────
