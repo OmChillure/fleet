@@ -38,6 +38,8 @@ pub struct AcpOutcome {
     pub agent_info: Option<Value>,
     pub error: Option<String>,
     pub stderr_tail: String,
+    /// Prompt-result `_meta` (tokens / model) when the agent provides it.
+    pub usage: Option<Value>,
 }
 
 pub struct AcpRun {
@@ -135,6 +137,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
             model: run.model.clone(),
             agent_info: None,
             error: Some(format!("{e:#}")),
+            usage: None,
         },
         Err(_) => {
             let _ = rpc(
@@ -153,6 +156,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
                 model: run.model.clone(),
                 agent_info: None,
                 error: Some(format!("ACP session timed out after {:?}", run.timeout)),
+                usage: None,
             }
         }
     };
@@ -188,6 +192,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
         agent_info: outcome.agent_info,
         error: outcome.error,
         stderr_tail,
+        usage: outcome.usage,
     })
 }
 
@@ -198,6 +203,7 @@ struct AcpPartial {
     model: Option<String>,
     agent_info: Option<Value>,
     error: Option<String>,
+    usage: Option<Value>,
 }
 
 async fn drive_session(
@@ -272,6 +278,11 @@ async fn drive_session(
         .map(|s| s.to_string())
         .context("session/new missing sessionId")?;
 
+    let session_model = new_sess
+        .pointer("/models/currentModelId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     if let Some(m) = model
         && let Some(opt_id) = pick_model_option(&new_sess)
     {
@@ -311,6 +322,12 @@ async fn drive_session(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let usage = prompt_result.get("_meta").cloned();
+    let usage_model = usage
+        .as_ref()
+        .and_then(|u| u.get("modelId").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
     let ok = match stop_reason.as_deref() {
         Some("end_turn") | Some("done") | Some("") | None => true,
         Some("cancelled") | Some("timeout") | Some("refusal") | Some("error") => false,
@@ -331,7 +348,10 @@ async fn drive_session(
         ok,
         session_id: Some(session_id),
         stop_reason: stop_reason.clone(),
-        model: model.map(|s| s.to_string()),
+        model: model
+            .map(|s| s.to_string())
+            .or(usage_model)
+            .or(session_model),
         agent_info,
         error: if ok {
             None
@@ -341,6 +361,7 @@ async fn drive_session(
                 stop_reason.as_deref().unwrap_or("unknown")
             ))
         },
+        usage,
     })
 }
 

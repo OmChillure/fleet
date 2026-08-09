@@ -93,6 +93,9 @@ pub fn pass_through_driver_env(env: &mut std::collections::HashMap<String, Strin
         "FLEET_AUTO_APPROVE",
         "FLEET_HARNESS_CMD",
         "FLEET_MOCK_ACP_BIN",
+        "FLEET_GROK_BIN",
+        "FLEET_REASONING_EFFORT",
+        "FLEET_GROK_DEBUG",
     ] {
         if let Ok(v) = std::env::var(key)
             && !v.trim().is_empty()

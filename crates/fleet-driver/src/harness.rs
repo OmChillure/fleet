@@ -15,13 +15,15 @@ pub struct HarnessSpec {
 ///
 /// * `FLEET_HARNESS_CMD` (whitespace-split) overrides command+args entirely.
 /// * `mock` looks next to the current executable, then PATH.
-/// * `grok` → `grok agent [--always-approve] [-m MODEL] stdio`
+/// * `grok` → `grok agent --no-leader [--always-approve] [--reasoning-effort E] [-m MODEL] stdio`
 pub fn resolve(
     name: &str,
     harness_cmd: Option<&str>,
     model: Option<&str>,
     auto_approve: bool,
     mock_bin: Option<&Path>,
+    grok_bin: Option<&Path>,
+    reasoning_effort: Option<&str>,
 ) -> Result<HarnessSpec> {
     let name = name.trim().to_ascii_lowercase();
     if let Some(raw) = harness_cmd.map(str::trim).filter(|s| !s.is_empty()) {
@@ -50,9 +52,13 @@ pub fn resolve(
             })
         }
         "grok" => {
-            let mut args = vec!["agent".into()];
+            let mut args = vec!["agent".into(), "--no-leader".into()];
             if auto_approve {
                 args.push("--always-approve".into());
+            }
+            if let Some(e) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
+                args.push("--reasoning-effort".into());
+                args.push(e.to_string());
             }
             if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
                 args.push("-m".into());
@@ -61,7 +67,7 @@ pub fn resolve(
             args.push("stdio".into());
             Ok(HarnessSpec {
                 name: "grok".into(),
-                command: "grok".into(),
+                command: find_grok(grok_bin),
                 args,
             })
         }
@@ -96,25 +102,70 @@ pub fn mock_bin_path() -> PathBuf {
     PathBuf::from(mock_command(None))
 }
 
+fn find_grok(explicit: Option<&Path>) -> String {
+    if let Some(p) = explicit {
+        return p.display().to_string();
+    }
+    if let Ok(p) = std::env::var("FLEET_GROK_BIN")
+        && !p.trim().is_empty()
+    {
+        return p;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join(".grok/bin/grok");
+        if candidate.is_file() {
+            return candidate.display().to_string();
+        }
+    }
+    "grok".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn grok_argv_with_model_and_approve() {
-        let h = resolve("grok", None, Some("grok-4"), true, None).unwrap();
+        let h = resolve(
+            "grok",
+            None,
+            Some("grok-4"),
+            true,
+            None,
+            Some(Path::new("/usr/bin/grok")),
+            Some("low"),
+        )
+        .unwrap();
         assert_eq!(h.name, "grok");
-        assert_eq!(h.command, "grok");
+        assert_eq!(h.command, "/usr/bin/grok");
         assert_eq!(
             h.args,
-            vec!["agent", "--always-approve", "-m", "grok-4", "stdio"]
+            vec![
+                "agent",
+                "--no-leader",
+                "--always-approve",
+                "--reasoning-effort",
+                "low",
+                "-m",
+                "grok-4",
+                "stdio"
+            ]
         );
     }
 
     #[test]
     fn grok_argv_no_approve() {
-        let h = resolve("grok", None, None, false, None).unwrap();
-        assert_eq!(h.args, vec!["agent", "stdio"]);
+        let h = resolve(
+            "grok",
+            None,
+            None,
+            false,
+            None,
+            Some(Path::new("grok")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(h.args, vec!["agent", "--no-leader", "stdio"]);
     }
 
     #[test]
@@ -125,6 +176,8 @@ mod tests {
             None,
             true,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(h.command, "docker");
@@ -133,6 +186,6 @@ mod tests {
 
     #[test]
     fn unknown_harness_errs() {
-        assert!(resolve("opencode", None, None, true, None).is_err());
+        assert!(resolve("opencode", None, None, true, None, None, None).is_err());
     }
 }

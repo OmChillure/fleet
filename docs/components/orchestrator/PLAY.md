@@ -50,8 +50,11 @@ cargo build -p fleet-driver --bins
 export SANDBOX_BACKEND=process
 export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
 export FLEET_HARNESS=mock
-# export FLEET_HARNESS=grok          # requires `grok` on PATH + grok login
-# export FLEET_MODEL=…               # optional grok -m
+# Grok Build (host CLI auth):
+# export PATH="$HOME/.grok/bin:$PATH"
+# export FLEET_HARNESS=grok
+# export FLEET_REASONING_EFFORT=low
+# export FLEET_MODEL=v9
 export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
 ```
