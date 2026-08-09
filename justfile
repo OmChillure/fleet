@@ -1,0 +1,127 @@
+# Agent Fleet — local development
+#
+#   just setup   # once: create .env.local + start Postgres
+#   just dev     # Postgres + API (:8080) + UI (:3030)
+#
+# Env is loaded from `.env.local` (see `.env.local.example`).
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set dotenv-filename := ".env.local"
+set dotenv-load := true
+
+export RUST_LOG := env_var_or_default("RUST_LOG", "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info,fleet_orchestrator=info")
+
+ui_port := env_var_or_default("UI_PORT", "3030")
+
+# List recipes (default).
+default:
+    @just --list
+
+# Create `.env.local` from the example if missing, then start Postgres.
+setup: _env-init db-up
+    @echo ""
+    @echo "Ready. Run the full stack with:  just dev"
+    @echo "  API  http://localhost:8080"
+    @echo "  UI   http://localhost:{{ ui_port }}"
+
+# Create `.env.local` from `.env.local.example` when it does not exist.
+_env-init:
+    #!/usr/bin/env bash
+    if [[ -f .env.local ]]; then
+      echo ".env.local already exists"
+    else
+      cp .env.local.example .env.local
+      echo "Created .env.local from .env.local.example"
+    fi
+
+# Fail fast if local env is missing.
+_require-env:
+    #!/usr/bin/env bash
+    if [[ ! -f .env.local ]]; then
+      echo "Missing .env.local — run: just setup" >&2
+      exit 1
+    fi
+
+# Start Postgres (docker compose) and wait until healthy.
+db-up:
+    #!/usr/bin/env bash
+    docker compose up -d postgres
+    echo "Waiting for Postgres…"
+    for i in $(seq 1 60); do
+      if docker compose exec -T postgres pg_isready -U fleet -d fleet >/dev/null 2>&1; then
+        echo "Postgres is ready (localhost:5433)"
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "Postgres did not become ready in time" >&2
+    exit 1
+
+# Stop compose services (keeps volume).
+db-down:
+    docker compose down
+
+# Stop compose services and delete the Postgres volume.
+db-reset:
+    docker compose down -v
+
+# Tail Postgres logs.
+db-logs:
+    docker compose logs -f postgres
+
+# Build workspace (debug).
+build:
+    cargo build
+
+# Build release binaries.
+build-release:
+    cargo build --release
+
+# Run unit tests that do not need Postgres.
+test:
+    cargo test -p fleet-orchestrator --lib
+    cargo test -p agent-fleet-contracts --lib
+    cargo test -p fleet-driver
+
+# Run orchestrator integration tests (requires `just db-up` + `.env.local`).
+test-integration: _require-env db-up
+    cargo test -p fleet-orchestrator --locked \
+      --test store_integration \
+      --test tick_integration \
+      --test api_integration \
+      --test e2e_matrix
+
+# cargo check the whole workspace.
+check:
+    cargo check --workspace
+
+# fleet-server: auth + workspaces + orchestrator (http://HOST:PORT from .env.local).
+server: _require-env
+    cargo run -p fleet-server
+
+# Dioxus UI (http://localhost:UI_PORT, default 3030).
+ui:
+    dx serve --package fleet-ui --port {{ ui_port }}
+
+# Standalone orchestrator only (HTTP_ADDR from .env.local, default :8081).
+orch: _require-env
+    cargo run -p fleet-orchestrator
+
+# Scripted orch demo (ADMIN_TOKEN + running orch/server with /v1).
+demo scenario="happy":
+    SCENARIO={{ scenario }} ./scripts/demo-orch.sh
+
+# API + UI after Postgres is up (dependencies run in parallel).
+[parallel]
+_app: server ui
+
+# Full local stack: Postgres, then API + UI together.
+dev: _require-env db-up _app
+
+# Format Rust sources.
+fmt:
+    cargo fmt --all
+
+# Clippy the workspace.
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
