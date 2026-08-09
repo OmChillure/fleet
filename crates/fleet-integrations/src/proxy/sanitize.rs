@@ -142,6 +142,39 @@ mod tests {
     }
 
     #[test]
+    fn strips_secret_keys_from_sample_json() {
+        let raw = json!({
+            "id": 1,
+            "Authorization": "Bearer leak",
+            "api-key": "k",
+            "client_secret": "cs",
+            "password": "p",
+            "private_key": "pk",
+            "token": "t",
+            "items": [
+                { "name": "keep", "github_access_token": "gat", "secret": "s" }
+            ]
+        });
+        assert!(contains_secret_keys(&raw));
+        let clean = sanitize_value(&raw);
+        assert!(!contains_secret_keys(&clean));
+        assert_eq!(clean["id"], 1);
+        assert_eq!(clean["items"][0]["name"], "keep");
+        for key in [
+            "Authorization",
+            "api-key",
+            "client_secret",
+            "password",
+            "private_key",
+            "token",
+        ] {
+            assert!(clean.get(key).is_none(), "secret key `{key}` should be stripped");
+        }
+        assert!(clean["items"][0].get("github_access_token").is_none());
+        assert!(clean["items"][0].get("secret").is_none());
+    }
+
+    #[test]
     fn caps_large_item_lists() {
         let items: Vec<Value> = (0..5000)
             .map(|i| json!({ "id": i, "title": format!("item-{i}-{}", "x".repeat(40)) }))

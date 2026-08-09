@@ -61,3 +61,71 @@ pub fn verify_oauth_state(secret: &str, token: &str) -> AppResult<OAuthStateClai
     }
     Ok(data.claims)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_auth::AppError;
+
+    fn flip_last_char(s: &str) -> String {
+        let mut chars: Vec<char> = s.chars().collect();
+        let last = chars.last_mut().expect("non-empty");
+        *last = if *last == 'A' { 'B' } else { 'A' };
+        chars.into_iter().collect()
+    }
+
+    #[test]
+    fn issue_and_verify_round_trip() {
+        let secret = "oauth-state-test-secret";
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let token = issue_oauth_state(secret, user_id, workspace_id, "github").unwrap();
+
+        let claims = verify_oauth_state(secret, &token).expect("valid token");
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.workspace_id, workspace_id.to_string());
+        assert_eq!(claims.provider, "github");
+        assert_eq!(claims.typ, "oauth_state");
+        assert!(!claims.nonce.is_empty());
+        assert!(claims.exp > claims.iat);
+    }
+
+    #[test]
+    fn wrong_secret_rejected() {
+        let token = issue_oauth_state(
+            "correct-secret",
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "slack",
+        )
+        .unwrap();
+
+        let err = verify_oauth_state("other-secret", &token).unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn tampered_signature_rejected() {
+        let secret = "oauth-state-test-secret";
+        let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "jira").unwrap();
+        let (head, sig) = token.rsplit_once('.').expect("jwt has signature");
+        let tampered = format!("{head}.{}", flip_last_char(sig));
+
+        let err = verify_oauth_state(secret, &tampered).unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn tampered_payload_rejected_even_if_provider_changed() {
+        // Provider matching is the caller's job; verify only checks the signature.
+        let secret = "oauth-state-test-secret";
+        let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "github").unwrap();
+        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+        assert_eq!(parts.len(), 3, "jwt has three segments");
+        parts[1] = flip_last_char(&parts[1]);
+        let tampered = parts.join(".");
+
+        let err = verify_oauth_state(secret, &tampered).unwrap_err();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+    }
+}

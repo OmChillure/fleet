@@ -70,3 +70,29 @@ pub async fn dispatch(
         _ => ProxyResult::err(provider, operation, "unknown_provider", "unsupported", None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn supported_providers_has_nine_unique_ids() {
+        let ids = supported_providers();
+        assert_eq!(ids.len(), 9);
+        let unique: HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 9);
+    }
+
+    #[test]
+    fn github_operations_include_commit_files_and_create_pr() {
+        let ops = operations_for("github");
+        assert!(ops.contains(&"commit_files"));
+        assert!(ops.contains(&"create_pr"));
+    }
+
+    #[test]
+    fn unknown_provider_has_no_operations() {
+        assert!(operations_for("unknown").is_empty());
+    }
+}
