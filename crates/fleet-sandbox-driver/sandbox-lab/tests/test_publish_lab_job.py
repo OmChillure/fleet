@@ -7,8 +7,10 @@ import os
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("publish_lab_job", HERE / "_publish_lab_job.py")
+LAB = Path(__file__).resolve().parents[1]
+REPO = LAB.parents[2]
+SCRIPTS = LAB / "scripts"
+SPEC = importlib.util.spec_from_file_location("publish_lab_job", SCRIPTS / "_publish_lab_job.py")
 mod = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(mod)

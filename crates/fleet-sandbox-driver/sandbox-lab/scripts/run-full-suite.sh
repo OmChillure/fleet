@@ -15,29 +15,30 @@ SKIP_LLM="${SKIP_LLM:-0}"
 SKIP_COMPOSE="${SKIP_COMPOSE:-0}"
 SKIP_KIND="${SKIP_KIND:-0}"
 SKIP_ORCH="${SKIP_ORCH:-0}"
+SKIP_BROWSER="${SKIP_BROWSER:-0}"
 FAIL=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAIL=1; }
 
+echo "==== cargo test --workspace --lib (exclude fleet-ui WASM) ===="
+if cargo test --workspace --lib --exclude fleet-ui --locked --offline; then
+  pass cargo-workspace-lib
+else
+  fail cargo-workspace-lib
+fi
+
 echo "==== cargo test -p fleet-sandbox-driver ===="
-if cargo test -p fleet-sandbox-driver --offline; then
+if cargo test -p fleet-sandbox-driver --offline --locked; then
   pass cargo-sandbox-driver
 else
   fail cargo-sandbox-driver
 fi
 
 echo "==== cargo test -p fleet-driver (process worker) ===="
-if cargo test -p fleet-driver --offline; then
+if cargo test -p fleet-driver --offline --locked; then
   pass cargo-driver
 else
   fail cargo-driver
-fi
-
-echo "==== cargo test -p fleet-operator --lib ===="
-if cargo test -p fleet-operator --lib --offline; then
-  pass cargo-operator
-else
-  fail cargo-operator
 fi
 
 echo "==== workspace_agent protocol ===="
@@ -45,13 +46,6 @@ if python3 "${LAB}/workspace/tests/test_workspace_agent_protocol.py" -q; then
   pass protocol
 else
   fail protocol
-fi
-
-echo "==== publish overlay ===="
-if python3 "${SCRIPTS}/test_publish_lab_job.py" -q; then
-  pass publish-overlay
-else
-  fail publish-overlay
 fi
 
 echo "==== install contract + kustomize + host/kind/gitssh (skip if absent) ===="
@@ -89,6 +83,23 @@ if [[ "${SKIP_ORCH}" != "1" ]]; then
     pass orch-integration
   else
     fail orch-integration
+  fi
+  echo "==== fleet-auth + fleet-server HTTP integration ===="
+  if cargo test -p fleet-auth --locked --offline --tests \
+     && cargo test -p fleet-server --locked --offline --tests; then
+    pass auth-server-integration
+  else
+    fail auth-server-integration
+  fi
+fi
+
+if [[ "${SKIP_BROWSER}" != "1" ]]; then
+  echo "==== headless browser e2e (needs :3030 UI + :8080 API) ===="
+  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${FLEET_TMP}/ms-playwright}"
+  if python3 "${REPO}/tests/browser/test_app_e2e.py" -q; then
+    pass browser-e2e
+  else
+    fail browser-e2e
   fi
 fi
 

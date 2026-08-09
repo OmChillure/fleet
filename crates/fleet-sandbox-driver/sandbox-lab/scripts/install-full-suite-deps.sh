@@ -46,6 +46,8 @@
 #   ENABLE_OLLAMA              install/bind Ollama + pull OLLAMA_MODEL
 #   ENABLE_LMSTUDIO_PROXY      TCP :1234 → :11434 so LM Studio job URLs work
 #   ENABLE_GITSSH              local git+ssh container :2222 (tiny)
+#   ENABLE_BROWSER_E2E         pip playwright + Chromium under <repo>/.tmp/ms-playwright
+#                              (headless UI e2e in run-full-suite.sh)
 # FORCE_REBUILD=1              rebuild docker tags even if they exist
 # OLLAMA_MODEL                 default llama3.2:1b (small). Do not pull 70B on
 #                              minimal hosts.
@@ -205,6 +207,7 @@ case "${PROFILE}" in
     set_default ENABLE_OLLAMA 1
     set_default ENABLE_LMSTUDIO_PROXY 1
     set_default ENABLE_GITSSH 1
+    set_default ENABLE_BROWSER_E2E 1
     ;;
   lab)
     set_default ENABLE_SANDBOX_LAB 1
@@ -217,6 +220,7 @@ case "${PROFILE}" in
     set_default ENABLE_OLLAMA 1
     set_default ENABLE_LMSTUDIO_PROXY 1
     set_default ENABLE_GITSSH 1
+    set_default ENABLE_BROWSER_E2E 1
     ;;
   minimal)
     set_default ENABLE_SANDBOX_LAB 1
@@ -229,6 +233,7 @@ case "${PROFILE}" in
     set_default ENABLE_OLLAMA 1
     set_default ENABLE_LMSTUDIO_PROXY 0
     set_default ENABLE_GITSSH 0
+    set_default ENABLE_BROWSER_E2E 0
     ;;
   *)
     echo "ERROR: PROFILE=${PROFILE} (want full|lab|minimal)" >&2
@@ -299,7 +304,7 @@ echo "==> install  user=${REAL_USER} home=${REAL_HOME} os=${OS_FAMILY} arch=${AR
 echo "    repo=${REPO}"
 echo "    PROFILE=${PROFILE}  FORCE_REBUILD=${FORCE_REBUILD}"
 echo "    ENABLE sandbox_lab=${ENABLE_SANDBOX_LAB} opencode=${ENABLE_HARNESS_OPENCODE} pi=${ENABLE_HARNESS_PI} codex=${ENABLE_HARNESS_CODEX} grok=${ENABLE_HARNESS_GROK}"
-echo "    ENABLE full_images=${ENABLE_FULL_IMAGES} kind=${ENABLE_KIND} ollama=${ENABLE_OLLAMA} proxy1234=${ENABLE_LMSTUDIO_PROXY} gitssh=${ENABLE_GITSSH}"
+echo "    ENABLE full_images=${ENABLE_FULL_IMAGES} kind=${ENABLE_KIND} ollama=${ENABLE_OLLAMA} proxy1234=${ENABLE_LMSTUDIO_PROXY} gitssh=${ENABLE_GITSSH} browser_e2e=${ENABLE_BROWSER_E2E}"
 echo "    rust-version=${RUST_TOOLCHAIN}  image=${RUST_IMAGE}  ollama_model=${OLLAMA_MODEL}"
 echo "    tmp=${TMP_ROOT}"
 
@@ -552,6 +557,24 @@ fi
 if ! as_user python3 -c "import redis" >/dev/null 2>&1; then
   echo "ERROR: python3 cannot import redis (install python3-redis / pip install redis)" >&2
   exit 1
+fi
+
+# --- headless Chromium (Playwright) ----------------------------------------
+if [[ "${ENABLE_BROWSER_E2E}" == "1" ]]; then
+  PW_BROWSERS="${TMP_ROOT}/ms-playwright"
+  mkdir -p "${PW_BROWSERS}"
+  chown -R "${REAL_UID}:${REAL_GID}" "${PW_BROWSERS}" 2>/dev/null || true
+  echo "==> playwright + chromium → ${PW_BROWSERS}"
+  if ! as_user python3 -c "from playwright.sync_api import sync_playwright" >/dev/null 2>&1; then
+    as_user_sh "python3 -m pip install --user playwright" \
+      || as_user_sh "python3 -m pip install --user --break-system-packages playwright" \
+      || true
+  fi
+  if ! as_user python3 -c "from playwright.sync_api import sync_playwright" >/dev/null 2>&1; then
+    echo "ERROR: python3 cannot import playwright (pip install playwright)" >&2
+    exit 1
+  fi
+  as_user_sh "PLAYWRIGHT_BROWSERS_PATH='${PW_BROWSERS}' python3 -m playwright install chromium"
 fi
 
 # --- ollama -----------------------------------------------------------------
@@ -927,6 +950,7 @@ echo "    rustc ${RUST_TOOLCHAIN}  tmp ${TMP_ROOT}  env ${ENV_FILE}"
 [[ "${ENABLE_SANDBOX_LAB}" == "1" ]] && echo "    sandbox compose workspace+driver + postgres :5433"
 [[ "${ENABLE_FULL_IMAGES}" == "1" ]] && echo "    images agent-fleet-{api,ui,operator}:local"
 [[ "${ENABLE_KIND}" == "1" ]] && echo "    kind ${KIND_CLUSTER}"
+[[ "${ENABLE_BROWSER_E2E}" == "1" ]] && echo "    playwright chromium  ${TMP_ROOT}/ms-playwright"
 echo
 echo "Do not run tests here. As ${REAL_USER}:"
 echo "  source ~/.cargo/env   # if rustup is new"

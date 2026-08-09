@@ -38,7 +38,14 @@ class InstallContractTests(unittest.TestCase):
 
     def test_documents_profiles(self):
         text = SCRIPT.read_text(encoding="utf-8")
-        for token in ("PROFILE=full", "PROFILE=lab", "PROFILE=minimal", "ENABLE_KIND", "ENABLE_SANDBOX_LAB"):
+        for token in (
+            "PROFILE=full",
+            "PROFILE=lab",
+            "PROFILE=minimal",
+            "ENABLE_KIND",
+            "ENABLE_SANDBOX_LAB",
+            "ENABLE_BROWSER_E2E",
+        ):
             self.assertIn(token, text, token)
 
     def test_no_crate_version_pin_in_script(self):
@@ -50,6 +57,13 @@ class InstallContractTests(unittest.TestCase):
         self.assertNotIn("/tmp/kubectl", text)
         self.assertNotIn("/tmp/kind", text)
         self.assertIn('staged="${TMP_ROOT}/${name}.$$"', text)
+
+    def test_full_suite_runs_browser_e2e(self):
+        suite = LAB / "scripts" / "run-full-suite.sh"
+        text = suite.read_text(encoding="utf-8")
+        self.assertIn("tests/browser/test_app_e2e.py", text)
+        self.assertIn("SKIP_BROWSER", text)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH", text)
 
     def test_agents_md_points_at_script(self):
         agents = REPO / "AGENTS.md"
