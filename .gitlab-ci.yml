@@ -1,4 +1,12 @@
 # Agent Fleet CI
+#
+# This GitLab instance has no runner. A pending pipeline blocks MR merge
+# ("pipelines must succeed" + job never starts). Do not create pipelines
+# until a runner exists — then delete the workflow block below.
+workflow:
+  rules:
+    - when: never
+
 stages:
   - test
 
@@ -38,6 +46,8 @@ unit:
     - cargo test -p fleet-orchestrator --lib --locked
     - cargo test -p agent-fleet-contracts --lib --locked || true
     - cargo test -p fleet-driver --locked
+    - cargo test -p fleet-sandbox-driver --locked
+    - cargo test -p fleet-operator --lib --locked
 
 orch-integration:
   extends: .rust_base

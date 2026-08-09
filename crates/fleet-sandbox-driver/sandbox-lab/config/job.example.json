@@ -1,0 +1,25 @@
+{
+  "job_id": "replace-with-uuid-or-leave-for-script",
+  "type": "analyze_repo",
+  "harness": "opencode",
+  "repo_url": "https://github.com/octocat/Hello-World.git",
+  "git_ref": "master",
+  "prompt": "Analyze this repository. Summarize purpose, top-level layout, main languages, and how to build/test. Keep under 40 lines.",
+  "model": "myprovider/my-model",
+  "timeout_sec": 600,
+  "auto_approve": false,
+  "provider": {
+    "id": "myprovider",
+    "name": "My OpenAI-compatible provider",
+    "npm": "@ai-sdk/openai-compatible",
+    "base_url": "https://api.example.com/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "models": {
+      "my-model": {
+        "name": "My Model"
+      }
+    }
+  },
+  "notes": "Or pass full OpenCode config as `opencode` (opencode.json body). See config/examples/ and https://opencode.ai/docs/providers/",
+  "permission_allow": []
+}

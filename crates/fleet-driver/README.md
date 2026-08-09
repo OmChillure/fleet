@@ -100,3 +100,7 @@ Process sandbox uses your user `~/.grok` (including MCP servers in
 | `FLEET_MOCK_ACP_BIN` | sibling / PATH | Mock agent binary |
 
 Keep using `fleet-worker` for orchestrator fixture tests that must not speak ACP.
+
+In-sandbox Compose isolation (OpenCode/Pi/volume handshake) is
+[`crates/fleet-sandbox-driver`](../fleet-sandbox-driver/). Do not point
+`PROCESS_WORKER_BIN` at `fleet-sandbox-driver`.

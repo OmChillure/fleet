@@ -1,0 +1,32 @@
+[package]
+name = "fleet-sandbox-driver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "In-sandbox driver: provision workspace + run harness over ACP (per-task compose)"
+readme = "README.md"
+
+[[bin]]
+name = "fleet-sandbox-driver"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+hex = { workspace = true }
+hmac = "0.12"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+reqwest = { workspace = true, features = ["json", "blocking"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+which = "6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

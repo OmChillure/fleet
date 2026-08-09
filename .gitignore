@@ -1,11 +1,16 @@
 /target
+**/target/
 /bin/
 /data/
 data/
+**/*.rs.bk
 *.exe
 *.test
 *.out
 .DS_Store
+default.profraw
+*.db
+*.db-*
 .env
 .env.*
 .env.local
@@ -13,8 +18,9 @@ data/
 coverage.out
 vendor/
 *.pem
+.skills-data/
 
-# fleet-ui — npm install output (optional local CSS tooling; dx serves assets/)
+# fleet-ui — npm leftover (dx serves assets/; optional local CSS tooling)
 crates/fleet-ui/node_modules/
 crates/fleet-ui/package-lock.json
 
@@ -25,3 +31,6 @@ crates/fleet-ui/toast-ref.*
 
 # fleet-dev.sh runtime (pids, nohup logs)
 .run/
+
+# install-full-suite-deps.sh scratch (ssh dummy key, cargo metadata, logs)
+.tmp/
