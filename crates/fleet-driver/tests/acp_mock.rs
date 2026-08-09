@@ -100,3 +100,20 @@ async fn mock_permission_auto_approve() {
     assert!(out.ok, "error={:?} stderr={}", out.error, out.stderr_tail);
     assert!(out.transcript.contains("hello from mock agent"));
 }
+
+#[tokio::test]
+async fn mock_terminal_create_echo() {
+    let dir = tempdir().unwrap();
+    let out = acp::run_session(base_run(
+        dir.path(),
+        spec_with_args(vec!["--terminal".into()]),
+    ))
+    .await
+    .unwrap();
+    assert!(out.ok, "error={:?} stderr={}", out.error, out.stderr_tail);
+    assert!(
+        out.transcript.contains("hello-from-terminal"),
+        "transcript={}",
+        out.transcript
+    );
+}

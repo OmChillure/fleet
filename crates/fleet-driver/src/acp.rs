@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::harness::HarnessSpec;
+use crate::terminal::TerminalHub;
 
 const STDERR_CAP: usize = 40_000;
 const TRANSCRIPT_CAP: usize = 256_000;
@@ -107,8 +108,19 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
     let pending_r = pending.clone();
     let stdin_r = stdin.clone();
     let transcript_r = transcript.clone();
+    let terminals = TerminalHub::new();
+    let terminals_r = terminals.clone();
     let reader = tokio::spawn(async move {
-        if let Err(e) = read_loop(stdout, pending_r, stdin_r, transcript_r, cwd, auto_approve).await
+        if let Err(e) = read_loop(
+            stdout,
+            pending_r,
+            stdin_r,
+            transcript_r,
+            cwd,
+            auto_approve,
+            terminals_r,
+        )
+        .await
         {
             warn!(error = %e, "ACP reader stopped");
         }
@@ -372,6 +384,7 @@ async fn read_loop(
     transcript: Arc<Mutex<String>>,
     cwd: PathBuf,
     auto_approve: bool,
+    terminals: TerminalHub,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut mode = FrameMode::Auto;
@@ -396,7 +409,7 @@ async fn read_loop(
 
         if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
             if msg.get("id").is_some() {
-                handle_agent_request(&msg, method, auto_approve, &stdin, &cwd).await;
+                handle_agent_request(&msg, method, auto_approve, &stdin, &cwd, &terminals).await;
             } else if method == "session/update"
                 && let Some(update) = msg
                     .pointer("/params/update")
@@ -539,6 +552,7 @@ async fn handle_agent_request(
     auto_approve: bool,
     stdin: &SharedStdin,
     cwd: &Path,
+    terminals: &TerminalHub,
 ) {
     let Some(id) = msg.get("id").cloned() else {
         return;
@@ -569,9 +583,20 @@ async fn handle_agent_request(
                 return;
             }
         }
+    } else if method_is_terminal(method) {
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        match terminals.handle(method, &params, cwd).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%method, error = %e, "ACP terminal method failed");
+                send_error(stdin, id, e.to_string()).await;
+                return;
+            }
+        }
     } else {
-        debug!(%method, "ACP agent request (empty result)");
-        json!({})
+        warn!(%method, "ACP agent request not implemented");
+        send_error(stdin, id, format!("method not implemented: {method}")).await;
+        return;
     };
 
     let reply = json!({
@@ -614,6 +639,11 @@ fn method_is_read_file(method: &str) -> bool {
 fn method_is_write_file(method: &str) -> bool {
     let m = method.to_ascii_lowercase().replace('-', "_");
     m.contains("write_text_file") || m.contains("writetextfile")
+}
+
+fn method_is_terminal(method: &str) -> bool {
+    let m = method.to_ascii_lowercase();
+    m.starts_with("terminal/") || m.contains("terminal/create") || m.contains("create_terminal")
 }
 
 fn permission_allow_result(msg: &Value) -> Value {
