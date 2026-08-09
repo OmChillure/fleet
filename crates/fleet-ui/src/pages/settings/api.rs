@@ -1,3 +1,3 @@
-//! Client-side API helpers for settings.
+//! Workspace settings — fleet project config (git remote).
 
-#![allow(dead_code)]
+pub use crate::pages::fleet::api::{ensure_fleet, update_fleet_config};

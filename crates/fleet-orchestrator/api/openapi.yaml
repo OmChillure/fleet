@@ -141,6 +141,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProjectConfig"
+    patch:
+      tags: [projects]
+      summary: Update project git remote (one repo per project)
+      operationId: patchProjectConfig
+      security:
+        - AdminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchProjectConfigRequest"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectConfig"
+        "400":
+          $ref: "#/components/responses/Error"
 
   /v1/projects/{project_id}/runs/fixture:
     post:
@@ -473,6 +496,12 @@ components:
           type: integer
           minimum: 0
           default: 3
+        repo_url:
+          type: string
+          description: Optional clone URL for the project's single git remote
+        git_ref:
+          type: string
+          description: Branch, tag, or commit (default main)
     CreateProjectResponse:
       type: object
       properties:
@@ -525,6 +554,23 @@ components:
           type: boolean
         sandbox_backend:
           type: string
+        repo_url:
+          type: string
+          nullable: true
+          description: Clone URL for the project's single git remote
+        git_ref:
+          type: string
+          description: Branch, tag, or commit (default main)
+    PatchProjectConfigRequest:
+      type: object
+      properties:
+        repo_url:
+          type: string
+          nullable: true
+          description: Set to a clone URL, or empty string to clear. Omit to leave unchanged.
+        git_ref:
+          type: string
+          description: Branch, tag, or commit. Omit to leave unchanged.
     FixtureRequest:
       type: object
       required: [plan]

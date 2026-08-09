@@ -9,5 +9,6 @@ pub mod config;
 pub mod harness;
 pub mod orch;
 pub mod prompt;
+pub mod provision;
 pub mod report;
 pub mod terminal;

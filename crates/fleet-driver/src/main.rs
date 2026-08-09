@@ -14,6 +14,7 @@ use fleet_driver::config::DriverConfig;
 use fleet_driver::harness;
 use fleet_driver::orch::{OrchClient, truncate_reason};
 use fleet_driver::prompt;
+use fleet_driver::provision::{self, RepoToClone};
 use fleet_driver::report;
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -107,7 +108,31 @@ enum WorkError {
     Blocked(String),
 }
 
+async fn provision_if_needed(cfg: &DriverConfig) -> Result<std::path::PathBuf, WorkError> {
+    let spec = cfg
+        .repo_url
+        .as_ref()
+        .map(|url| RepoToClone {
+            url: url.clone(),
+            git_ref: cfg.git_ref.clone(),
+        })
+        .or_else(|| RepoToClone::from_env_and_files(&cfg.work_dir));
+    let Some(spec) = spec else {
+        return Ok(cfg.work_dir.clone());
+    };
+    let timeout = provision::clone_timeout(cfg.timeout);
+    match tokio::time::timeout(timeout, provision::ensure_repo(&cfg.work_dir, &spec)).await {
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(e)) => Err(WorkError::Failed(format!("provision clone: {e:#}"))),
+        Err(_) => Err(WorkError::Failed(format!(
+            "provision clone timed out after {}s",
+            timeout.as_secs()
+        ))),
+    }
+}
+
 async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
+    let agent_cwd = provision_if_needed(cfg).await?;
     let prompt = prompt::load_prompt(&cfg.work_dir);
     let mut spec = harness::resolve(
         &cfg.harness,
@@ -135,7 +160,7 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
 
     let outcome = acp::run_session(AcpRun {
         harness: spec.clone(),
-        cwd: cfg.work_dir.clone(),
+        cwd: agent_cwd.clone(),
         session_dir: cfg.work_dir.clone(),
         prompt: prompt.clone(),
         model: cfg.model.clone(),
@@ -162,6 +187,9 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
         "transcript_chars": outcome.transcript.chars().count(),
         "plan_task_id": cfg.plan_task_id,
         "board_task_id": cfg.board_task_id,
+        "agent_cwd": agent_cwd.display().to_string(),
+        "repo_url": cfg.repo_url,
+        "git_ref": cfg.git_ref,
     });
     if let Err(e) = report::write_artifacts(&cfg.work_dir, &result, &outcome.transcript) {
         warn!(error = %e, "failed to write artifacts");

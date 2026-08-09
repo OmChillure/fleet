@@ -14,8 +14,8 @@ use tower_http::trace::TraceLayer;
 
 use handlers::{
     admin_tick, cancel_run, create_project, fixture_run, get_config, get_project, get_task, healthz,
-    list_runs, list_tasks, list_workers, openapi_yaml, post_heartbeat, post_status, readyz,
-    resume_task, root_index,
+    list_runs, list_tasks, list_workers, openapi_yaml, patch_config, post_heartbeat, post_status,
+    readyz, resume_task, root_index,
 };
 
 /// Core routes (no CORS). Safe to nest/fallback into fleet-server.
@@ -27,7 +27,10 @@ pub fn router(state: AppState) -> Router {
         .route("/openapi.yaml", get(openapi_yaml))
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/{project_id}", get(get_project))
-        .route("/v1/projects/{project_id}/config", get(get_config))
+        .route(
+            "/v1/projects/{project_id}/config",
+            get(get_config).patch(patch_config),
+        )
         .route("/v1/projects/{project_id}/runs/fixture", post(fixture_run))
         .route("/v1/projects/{project_id}/runs", get(list_runs))
         .route(
