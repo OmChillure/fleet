@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
+    "crates/fleet-chat-md",
     "crates/fleet-db",
     "crates/fleet-auth",
     "crates/fleet-integrations",
@@ -55,6 +56,7 @@ tempfile = "3"
 aes-gcm = "0.10"
 fleet-db = { path = "crates/fleet-db" }
 fleet-auth = { path = "crates/fleet-auth" }
+fleet-chat-md = { path = "crates/fleet-chat-md" }
 fleet-integrations = { path = "crates/fleet-integrations" }
 fleet-server = { path = "crates/fleet-server" }
 fleet-orchestrator = { path = "crates/fleet-orchestrator" }

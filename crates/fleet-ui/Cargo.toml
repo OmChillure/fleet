@@ -9,7 +9,7 @@ description = "Agent Fleet web UI (Dioxus)"
 
 [dependencies]
 dioxus = { workspace = true, features = ["router"] }
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+fleet-chat-md = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

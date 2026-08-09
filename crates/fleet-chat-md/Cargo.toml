@@ -1,0 +1,11 @@
+[package]
+name = "fleet-chat-md"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Safe markdown → HTML / code parts for fleet chat (host-testable)"
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
