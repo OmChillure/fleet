@@ -216,10 +216,17 @@ pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) 
 }
 
 fn looks_like_unrestricted_shell(hay: &str) -> bool {
-    hay.contains("bash")
-        || hay.contains("/bin/sh")
-        || hay.contains("/bin/zsh")
-        || hay.contains("busybox")
+    hay.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == '\\'))
+        .any(|tok| {
+            if tok.is_empty() {
+                return false;
+            }
+            let base = tok
+                .rsplit(|c| c == '/' || c == '\\')
+                .next()
+                .unwrap_or(tok);
+            matches!(base, "bash" | "sh" | "zsh" | "dash" | "busybox" | "shell")
+        })
 }
 
 #[cfg(test)]
@@ -379,6 +386,20 @@ mod tests {
             "fleet-wsexec django_check"
         ));
         assert!(permission_allowed(false, &allow, "read FLEET_TOOLS.md"));
+    }
+
+    #[test]
+    fn bash_substring_in_filename_is_not_unrestricted_shell() {
+        assert!(permission_allowed(
+            false,
+            &["app/".into(), "fleet-wsexec".into()],
+            "write path=app/bash_utils.py"
+        ));
+        assert!(!permission_allowed(
+            false,
+            &["app/".into()],
+            "bash -lc 'rm -rf /'"
+        ));
     }
 
     #[test]

@@ -17,7 +17,7 @@ from pathlib import Path
 def _tmp_root() -> Path:
     if env := (os.environ.get("FLEET_TMP") or "").strip():
         return Path(env)
-    # scripts/ → sandbox-lab/ → fleet-driver/ → crates/ → repo
+    # scripts/ → sandbox-lab/ → fleet-sandbox-driver/ → crates/ → repo
     return Path(__file__).resolve().parents[4] / ".tmp"
 
 

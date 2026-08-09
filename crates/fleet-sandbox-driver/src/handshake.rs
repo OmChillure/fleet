@@ -23,8 +23,9 @@ fn stored_secret() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Load secret from env, drop it from the process environ, lock down `/proc`.
-pub fn init_from_env() {
+/// Load secret from env, wipe it from the execve environ block, unset, lock `/proc`.
+/// Must run from a sync `main` **before** any Tokio worker threads start.
+pub fn init_from_env() -> Result<()> {
     if let Some(s) = std::env::var("FLEET_HANDSHAKE_SECRET")
         .ok()
         .map(|s| s.trim().to_string())
@@ -34,21 +35,59 @@ pub fn init_from_env() {
             *g = Some(s);
         }
     }
-    // SAFETY: called once at process start, before any threads spawn the harness.
+    // Zero the value in the original environ strings *before* unsetenv.
+    // `/proc/self/environ` is the execve block and is not updated by unsetenv.
+    scrub_secret_from_environ();
+    // SAFETY: caller guarantees no other threads yet (see `main`).
     unsafe {
         std::env::remove_var("FLEET_HANDSHAKE_SECRET");
     }
-    lock_down_proc();
+    lock_down_proc()?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn lock_down_proc() {
-    // Same-uid children (ACP harness) must not read /proc/<driver>/environ.
-    let _ = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+fn scrub_secret_from_environ() {
+    const PREFIX: &[u8] = b"FLEET_HANDSHAKE_SECRET=";
+    unsafe {
+        unsafe extern "C" {
+            static mut environ: *mut *mut libc::c_char;
+        }
+        if environ.is_null() {
+            return;
+        }
+        let mut p = environ;
+        while !(*p).is_null() {
+            let entry = std::slice::from_raw_parts(*p as *const u8, libc::strlen(*p));
+            if entry.starts_with(PREFIX) {
+                let val = (*p).add(PREFIX.len());
+                let n = libc::strlen(val);
+                std::ptr::write_bytes(val, b'x', n);
+            }
+            p = p.add(1);
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn lock_down_proc() {}
+fn scrub_secret_from_environ() {}
+
+#[cfg(target_os = "linux")]
+fn lock_down_proc() -> Result<()> {
+    let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if rc != 0 {
+        bail!(
+            "prctl(PR_SET_DUMPABLE, 0) failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_down_proc() -> Result<()> {
+    Ok(())
+}
 
 pub fn handshake_secret() -> Option<String> {
     // Tests may still set the env var; production uses the in-memory copy.
@@ -178,7 +217,7 @@ mod tests {
         unsafe {
             std::env::set_var("FLEET_HANDSHAKE_SECRET", "init-secret");
         }
-        init_from_env();
+        init_from_env().expect("init_from_env");
         assert!(
             std::env::var("FLEET_HANDSHAKE_SECRET").is_err(),
             "secret must not remain in the process environ"
@@ -187,6 +226,14 @@ mod tests {
         assert_eq!(handshake_secret().as_deref(), Some("init-secret"));
         let signed = sign_value(json!({"action": "provision", "job_id": "j1"})).unwrap();
         verify_value(&signed).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let blob = std::fs::read("/proc/self/environ").unwrap_or_default();
+            assert!(
+                !blob.windows(b"init-secret".len()).any(|w| w == b"init-secret"),
+                "secret must not remain in /proc/self/environ"
+            );
+        }
         if let Ok(mut g) = SECRET.lock() {
             *g = prev;
         }

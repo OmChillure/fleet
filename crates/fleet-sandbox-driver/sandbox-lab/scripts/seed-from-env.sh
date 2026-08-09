@@ -17,7 +17,7 @@ import json, os, uuid
 provider_id = os.environ.get("OPENCODE_PROVIDER_ID")
 base = os.environ.get("OPENCODE_BASE_URL") or os.environ.get("LMSTUDIO_BASE_URL")
 model = os.environ.get("MODEL") or os.environ.get("OPENCODE_MODEL") or os.environ.get("LMSTUDIO_MODEL")
-# Align with fleet-driver seed_job_from_env / policy defaults:
+# Align with fleet-sandbox-driver seed_job_from_env / policy defaults:
 # - work_dir omitted → /workspace/jobs/{job_id}/repo
 # - auto_approve false, empty permission_allow (default-deny)
 job = {

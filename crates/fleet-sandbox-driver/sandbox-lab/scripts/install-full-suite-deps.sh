@@ -28,13 +28,14 @@
 #
 # PROFILE=full     ~16 GiB RAM, ~25–40 GiB disk. kind + api/ui/operator rust
 #                  images + all harnesses + ollama + lab. Default on big hosts.
-# PROFILE=lab      ~8 GiB RAM, ~8–15 GiB disk. Sandbox-lab e2e only (no kind,
-#                  no api/ui/operator images). Enough for fleet-driver MR work.
+# PROFILE=lab      ~8 GiB RAM, ~8–15 GiB disk. Sandbox compose e2e only (no kind,
+#                  no api/ui/operator images). Enough for fleet-sandbox-driver work.
 # PROFILE=minimal  ~4–8 GiB RAM, ~4–8 GiB disk. OpenCode harness only, no
 #                  grok/codex, no kind, no git-ssh, no full-stack images.
 #
 # ENABLE_* (0/1). Unset → take PROFILE default. Explicit 0/1 always wins.
-#   ENABLE_LAB                 sandbox-lab compose images + host Postgres :5433 + .env
+#   ENABLE_SANDBOX_LAB         compose images + host Postgres :5433 + sandbox .env
+#   ENABLE_LAB                 alias for ENABLE_SANDBOX_LAB (back-compat)
 #   ENABLE_HARNESS_OPENCODE    agent-fleet-opencode:alpine (+ base)
 #   ENABLE_HARNESS_PI          agent-fleet-pi:alpine
 #   ENABLE_HARNESS_CODEX       agent-fleet-codex:alpine
@@ -179,6 +180,10 @@ if [[ "${SKIP_HARNESS:-0}" == "1" ]]; then
   ENABLE_HARNESS_CODEX=0
   ENABLE_HARNESS_GROK=0
 fi
+# ENABLE_LAB is a documented alias for ENABLE_SANDBOX_LAB.
+if [[ -z "${ENABLE_SANDBOX_LAB:-}" && -n "${ENABLE_LAB:-}" ]]; then
+  ENABLE_SANDBOX_LAB="${ENABLE_LAB}"
+fi
 
 set_default() {
   # set_default VAR value  — only if VAR is unset/empty
@@ -190,7 +195,7 @@ set_default() {
 
 case "${PROFILE}" in
   full)
-    set_default ENABLE_LAB 1
+    set_default ENABLE_SANDBOX_LAB 1
     set_default ENABLE_HARNESS_OPENCODE 1
     set_default ENABLE_HARNESS_PI 1
     set_default ENABLE_HARNESS_CODEX 1
@@ -202,7 +207,7 @@ case "${PROFILE}" in
     set_default ENABLE_GITSSH 1
     ;;
   lab)
-    set_default ENABLE_LAB 1
+    set_default ENABLE_SANDBOX_LAB 1
     set_default ENABLE_HARNESS_OPENCODE 1
     set_default ENABLE_HARNESS_PI 1
     set_default ENABLE_HARNESS_CODEX 0
@@ -214,7 +219,7 @@ case "${PROFILE}" in
     set_default ENABLE_GITSSH 1
     ;;
   minimal)
-    set_default ENABLE_LAB 1
+    set_default ENABLE_SANDBOX_LAB 1
     set_default ENABLE_HARNESS_OPENCODE 1
     set_default ENABLE_HARNESS_PI 0
     set_default ENABLE_HARNESS_CODEX 0
@@ -293,7 +298,7 @@ dc() {
 echo "==> install  user=${REAL_USER} home=${REAL_HOME} os=${OS_FAMILY} arch=${ARCH}"
 echo "    repo=${REPO}"
 echo "    PROFILE=${PROFILE}  FORCE_REBUILD=${FORCE_REBUILD}"
-echo "    ENABLE lab=${ENABLE_LAB} opencode=${ENABLE_HARNESS_OPENCODE} pi=${ENABLE_HARNESS_PI} codex=${ENABLE_HARNESS_CODEX} grok=${ENABLE_HARNESS_GROK}"
+echo "    ENABLE sandbox_lab=${ENABLE_SANDBOX_LAB} opencode=${ENABLE_HARNESS_OPENCODE} pi=${ENABLE_HARNESS_PI} codex=${ENABLE_HARNESS_CODEX} grok=${ENABLE_HARNESS_GROK}"
 echo "    ENABLE full_images=${ENABLE_FULL_IMAGES} kind=${ENABLE_KIND} ollama=${ENABLE_OLLAMA} proxy1234=${ENABLE_LMSTUDIO_PROXY} gitssh=${ENABLE_GITSSH}"
 echo "    rust-version=${RUST_TOOLCHAIN}  image=${RUST_IMAGE}  ollama_model=${OLLAMA_MODEL}"
 echo "    tmp=${TMP_ROOT}"
@@ -425,9 +430,8 @@ if [[ "${OS_FAMILY}" == linux ]] && [[ "$(id -u)" -eq 0 ]]; then
   if need_cmd setfacl && [[ -S /var/run/docker.sock ]]; then
     setfacl -m "u:${REAL_USER}:rw" /var/run/docker.sock || true
   fi
-  if [[ -S /var/run/docker.sock ]]; then
-    chmod 666 /var/run/docker.sock || true
-  fi
+  # Do not chmod 666 docker.sock (world-writable = root). Group + ACL is enough.
+  # New shells need `newgrp docker` / re-login if only usermod ran.
 fi
 
 # --- kubectl + kind (upstream binaries; brew already tried on mac) ----------
@@ -777,10 +781,10 @@ echo "==> pulling base images (needed ones only)"
 docker pull redis:7-alpine
 docker pull python:3.13-bookworm
 docker pull alpine:3.21
-if [[ "${ENABLE_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
+if [[ "${ENABLE_SANDBOX_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
   docker pull "${RUST_IMAGE}"
 fi
-if [[ "${ENABLE_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
+if [[ "${ENABLE_SANDBOX_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
   docker pull postgres:16-alpine
 fi
 
@@ -828,7 +832,7 @@ if have_image agent-fleet-grok:alpine && [[ "${ENABLE_HARNESS_GROK}" == "1" ]]; 
   echo "==> grok image ok as uid 1000: $(tr '\n' ' ' <"${TMP_ROOT}/grok-version.txt")"
 fi
 
-if [[ "${ENABLE_LAB}" == "1" ]]; then
+if [[ "${ENABLE_SANDBOX_LAB}" == "1" ]]; then
   echo "==> building lab workspace + driver"
   (
     cd "${LAB}"
@@ -921,7 +925,7 @@ echo "    rustc ${RUST_TOOLCHAIN}  tmp ${TMP_ROOT}  env ${ENV_FILE}"
 [[ "${ENABLE_OLLAMA}" == "1" ]] && echo "    ollama ${OLLAMA_MODEL}"
 [[ "${ENABLE_LMSTUDIO_PROXY}" == "1" ]] && echo "    proxy :1234 -> :11434"
 [[ "${ENABLE_GITSSH}" == "1" ]] && echo "    git-ssh :2222  key ${SSH_DIR}/id_ed25519"
-[[ "${ENABLE_LAB}" == "1" ]] && echo "    lab workspace+driver + postgres :5433"
+[[ "${ENABLE_SANDBOX_LAB}" == "1" ]] && echo "    sandbox compose workspace+driver + postgres :5433"
 [[ "${ENABLE_FULL_IMAGES}" == "1" ]] && echo "    images agent-fleet-{api,ui,operator}:local"
 [[ "${ENABLE_KIND}" == "1" ]] && echo "    kind ${KIND_CLUSTER}"
 echo

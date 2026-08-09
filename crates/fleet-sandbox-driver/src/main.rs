@@ -46,8 +46,9 @@ struct Args {
     auto_seed_job: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Scrub handshake secret before Tokio starts worker threads (edition 2024).
+    handshake::init_from_env().context("handshake init")?;
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -56,7 +57,14 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    handshake::init_from_env();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("tokio runtime")?
+        .block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> Result<()> {
     info!("fleet-sandbox-driver starting (provision + multi-harness ACP)");
 
     let mut bus = Bus::connect(&args.redis_url, &args.jobs_queue, &args.results_queue).await?;

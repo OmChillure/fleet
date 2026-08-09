@@ -1,6 +1,6 @@
 # Pi coding agent (https://pi.dev) + pi-acp adapter (ACP over stdio).
 # Spawns: pi-acp  (bridges ACP ↔ pi --mode rpc)
-# Local models: ~/.pi/agent/models.json (written by fleet-driver from job.provider)
+# Local models: ~/.pi/agent/models.json (written by fleet-sandbox-driver from job.provider)
 #
 # Build (from crates/fleet-sandbox-driver/agents or via ./build.sh):
 #   docker build -t agent-fleet-base:alpine -f base/Dockerfile base
@@ -32,7 +32,7 @@ ENV HOME=/home/fleet \
 
 WORKDIR /workspace
 
-# Host/fleet-driver controls this process over Docker stdio, e.g.:
+# Host/fleet-sandbox-driver controls this process over Docker stdio, e.g.:
 #   docker run --rm -i -v "$PWD:/workspace" agent-fleet-pi:alpine
 ENTRYPOINT ["/sbin/tini", "--", "pi-acp"]
 CMD []

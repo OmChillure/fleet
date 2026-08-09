@@ -298,7 +298,7 @@ Sandbox path implemented:
 
 1. **Per-task sandbox:** `COMPOSE_PROJECT_NAME=fleet-task-<id>` → isolated redis + workspace + volume + driver. Torn down after run (`KEEP_SANDBOX=1` to keep).  
 2. Driver writes provision request; workspace agent clones + runs `project_setup` under **`/workspace/jobs/{job_id}/repo`** on **that** volume.  
-3. Workspace writes `.fleet-tools.json` (named allowlist) + installs `fleet-wsexec`.  
+3. Workspace registers `TOOLS_BY_JOB` from the signed provision, writes `.fleet-tools.json` / `FLEET_TOOLS.md` as documentation only, and installs `fleet-wsexec`.  
 4. ACP only on harness (`opencode acp` or `pi-acp`) with `cwd` = job tree; file edits on the volume.  
 5. Agent runs project checks via **`fleet-wsexec <name>`** (no free shell into workspace).  
 6. Result on **task redis** + compact host-side summary (quiet by default; `VERBOSE=1` / `FULL_TRANSCRIPT=1`).  
@@ -340,7 +340,7 @@ The harness does **not** get a free shell into the workspace. It gets:
 Harness (stable image)
   ├─ volume mount → job source tree
   └─ fleet-wsexec <tool-name>  ──► workspace agent
-                                      ├─ loads .fleet-tools.json (allowlist)
+                                      ├─ TOOLS_BY_JOB from signed provision (not the tools file)
                                       ├─ runs fixed argv only
                                       └─ cwd must be under /workspace/jobs/{job_id}/
 ```
@@ -367,7 +367,7 @@ Harness (stable image)
 }
 ```
 
-- Provision writes `.fleet-tools.json` (+ `FLEET_TOOLS.md`) into the job work_dir.
+- Provision registers argv in `TOOLS_BY_JOB` (authoritative). `.fleet-tools.json` / `FLEET_TOOLS.md` are documentation only.
 - Agent is instructed to use `fleet-wsexec django_check`, not arbitrary shell.
 - Raw `action=exec` is **disabled** unless `FLEET_ALLOW_RAW_EXEC=1` (debug only).
 

@@ -83,17 +83,6 @@ pub fn provision(job: &Job) -> Result<Provisioned> {
         .or_else(|| std::env::var("GIT_REPO_URL").ok())
         .context("repo_url missing in job and GIT_REPO_URL env")?;
 
-    for (k, v) in &job.env_public {
-        if k.to_lowercase().contains("key") || k.to_lowercase().contains("token") {
-            info!(key = %k, "env_public set");
-        } else {
-            info!(key = %k, value = %v, "env_public set");
-        }
-        unsafe {
-            std::env::set_var(k, v);
-        }
-    }
-
     let git_ref = if job.git_ref.is_empty() {
         std::env::var("GIT_REF").unwrap_or_else(|_| "main".into())
     } else {
@@ -149,7 +138,10 @@ fn provision_via_workspace_agent(
     // Wait briefly for workspace agent to appear (status file or just dir writable)
     wait_for_workspace_agent(&fleet, Duration::from_secs(60))?;
 
-    let (commands, smoke, setup_env) = setup_commands(job);
+    let (commands, smoke, mut setup_env) = setup_commands(job);
+    for (k, v) in &job.env_public {
+        setup_env.insert(k.clone(), v.clone());
+    }
     let tools_json = job
         .project_setup
         .as_ref()
@@ -216,7 +208,11 @@ fn provision_via_workspace_agent(
     }
 
     let raw = fs::read_to_string(&result_path).context("read provision result")?;
-    let result: FleetResult = serde_json::from_str(&raw).context("parse result.json")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).context("parse result.json")?;
+    handshake::verify_value(&value)
+        .context("unsigned or forged provision result (hmac)")?;
+    let result: FleetResult = serde_json::from_value(value).context("decode result.json")?;
     if !result.ok {
         bail!(
             "workspace provision failed: {}",
@@ -291,6 +287,9 @@ fn provision_local(
     if !commands.is_empty() || !smoke.is_empty() {
         milestones.push("deps_install_started".into());
         let mut env_vars: Vec<(String, String)> = std::env::vars().collect();
+        for (k, v) in &job.env_public {
+            env_vars.push((k.clone(), v.clone()));
+        }
         for (k, v) in setup_env {
             env_vars.push((k, v));
         }

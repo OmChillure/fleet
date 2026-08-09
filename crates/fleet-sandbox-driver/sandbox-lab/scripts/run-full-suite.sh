@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the fleet-driver test suite (does not install packages).
+# Run the fleet-sandbox-driver suite (does not install packages).
 # Prereq: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh once.
 set -euo pipefail
 

@@ -41,6 +41,17 @@ def verify_request(req: dict) -> None:
         raise ValueError("invalid handshake hmac")
 
 
+def sign_body(obj: dict) -> dict:
+    """HMAC-sign a result so the driver can reject harness-forged files."""
+    secret = handshake_secret()
+    if not secret:
+        raise ValueError("FLEET_HANDSHAKE_SECRET not set; refusing to write result")
+    body = {k: v for k, v in obj.items() if k != "hmac"}
+    raw = canonical_json(body).encode()
+    body["hmac"] = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return body
+
+
 def jobs_root() -> Path:
     """Job isolation root (default /workspace/jobs). Overridable for tests via FLEET_JOBS_ROOT."""
     raw = os.environ.get("FLEET_JOBS_ROOT", "/workspace/jobs")
@@ -471,12 +482,15 @@ def handle_request(req):
             result = handle_exec_legacy(req)
         else:
             raise ValueError(f"unknown action {action}")
-        write_json(rpath, result)
+        write_json(rpath, sign_body(result))
         status(job_id, "done", ok=True, message="ok")
     except Exception as e:
         log(f"FAILED: {e}\n{traceback.format_exc()}")
         err = {"ok": False, "job_id": job_id, "error": str(e), "exit_code": 1, "stdout": "", "stderr": str(e)}
-        write_json(rpath, err)
+        try:
+            write_json(rpath, sign_body(err))
+        except Exception:
+            write_json(rpath, err)
         status(job_id, "failed", ok=False, message=str(e))
 
 

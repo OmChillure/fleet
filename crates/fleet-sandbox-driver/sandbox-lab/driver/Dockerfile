@@ -27,11 +27,11 @@ RUN RUST_TARGET="$(cat /tmp/rust-target)" \
 FROM ${BASE_IMAGE}
 USER root
 RUN apk add --no-cache openssh-client git \
-    && mkdir -p /opt/fleet-driver /workspace /home/fleet/.ssh /home/fleet/.config/opencode \
-    && chown -R fleet:fleet /opt/fleet-driver /workspace /home/fleet
+    && mkdir -p /opt/fleet-sandbox-driver /workspace /home/fleet/.ssh /home/fleet/.config/opencode \
+    && chown -R fleet:fleet /opt/fleet-sandbox-driver /workspace /home/fleet
 
 COPY --from=builder /fleet-sandbox-driver /usr/local/bin/fleet-sandbox-driver
-COPY crates/fleet-sandbox-driver/sandbox-lab/config/examples /opt/fleet-driver/examples
+COPY crates/fleet-sandbox-driver/sandbox-lab/config/examples /opt/fleet-sandbox-driver/examples
 RUN chmod 755 /usr/local/bin/fleet-sandbox-driver \
     && chown -R fleet:fleet /home/fleet
 

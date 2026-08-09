@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless protocol + cargo tests for sandbox block (no LLM required).
 set -euo pipefail
-# scripts/ → sandbox-lab/ → fleet-driver/ → crates/ → repo root
+# scripts/ → sandbox-lab/ → fleet-sandbox-driver/ → crates/ → repo root
 LAB="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$LAB/../../.." && pwd)"
 cd "$ROOT"

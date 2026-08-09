@@ -1,6 +1,6 @@
 # Agent Fleet — Alpine agent images
 
-Small **Alpine 3.21** images for ACP harnesses used by fleet-driver (sandbox lab).
+Small **Alpine 3.21** images for ACP harnesses used by fleet-sandbox-driver.
 
 | Image | Tag | Entry (stdio ACP) | Package / install |
 |-------|-----|-------------------|-------------------|

@@ -38,7 +38,7 @@ class InstallContractTests(unittest.TestCase):
 
     def test_documents_profiles(self):
         text = SCRIPT.read_text(encoding="utf-8")
-        for token in ("PROFILE=full", "PROFILE=lab", "PROFILE=minimal", "ENABLE_KIND"):
+        for token in ("PROFILE=full", "PROFILE=lab", "PROFILE=minimal", "ENABLE_KIND", "ENABLE_SANDBOX_LAB"):
             self.assertIn(token, text, token)
 
     def test_no_crate_version_pin_in_script(self):

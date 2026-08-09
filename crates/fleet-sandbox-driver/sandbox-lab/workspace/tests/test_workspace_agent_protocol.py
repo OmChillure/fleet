@@ -173,6 +173,10 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         body = json.loads(rpath.read_text(encoding="utf-8"))
         self.assertTrue(body["ok"])
         self.assertIn("tool-ok", body["stdout"])
+        self.assertTrue(body.get("hmac"), "result must be HMAC-signed")
+        unsigned = {k: v for k, v in body.items() if k != "hmac"}
+        expect = self.agent.sign_body(unsigned)["hmac"]
+        self.assertEqual(body["hmac"], expect)
 
     def test_handle_request_unknown_tool_fails_result(self):
         req = {
