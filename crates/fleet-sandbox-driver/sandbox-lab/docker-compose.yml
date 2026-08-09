@@ -6,6 +6,12 @@
 # Host scripts talk to that project's redis via:
 #   docker compose -p fleet-task-… exec -T redis redis-cli …
 # (no host port publish — avoids collisions when many sandboxes run).
+#
+# Pinned image tags: workspace + driver use stable local names so each
+# COMPOSE_PROJECT_NAME=fleet-task-* reuses images (no project-scoped rebuild).
+# Build once from this directory:
+#   docker compose build workspace driver
+# Later orch spawn can --no-build --pull never after preflighting these refs.
 
 services:
   redis:
@@ -19,6 +25,8 @@ services:
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   workspace:
+    # Stable tag shared across fleet-task-* projects (not project-scoped names).
+    image: ${COMPOSE_SANDBOX_WORKSPACE_IMAGE:-agent-fleet-sandbox-workspace:local}
     build:
       context: ./workspace
       dockerfile: Dockerfile
@@ -38,6 +46,8 @@ services:
     restart: "no"
 
   driver:
+    # Rebuild when DRIVER_BASE_IMAGE / harness changes; tag stays stable across projects.
+    image: ${COMPOSE_SANDBOX_DRIVER_IMAGE:-agent-fleet-sandbox-driver:local}
     build:
       context: ../../..
       dockerfile: crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile

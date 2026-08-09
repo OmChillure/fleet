@@ -837,10 +837,9 @@ if [[ "${ENABLE_SANDBOX_LAB}" == "1" ]]; then
   (
     cd "${LAB}"
     export DRIVER_BASE_IMAGE=agent-fleet-opencode:alpine
+    # compose image: → agent-fleet-sandbox-workspace:local / agent-fleet-sandbox-driver:local
     dc build workspace
     dc build --pull=false driver
-    docker tag "$(basename "${LAB}")-workspace" agent-fleet-sandbox-workspace:local 2>/dev/null || true
-    docker tag "$(basename "${LAB}")-driver" agent-fleet-sandbox-driver:local 2>/dev/null || true
   )
   echo "==> host Postgres on :5433"
   (
