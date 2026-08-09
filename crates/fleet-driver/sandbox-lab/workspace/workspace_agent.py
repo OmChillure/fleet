@@ -17,7 +17,7 @@ TOOLS_BY_JOB: dict[str, dict] = {}
 ALLOWED_BINS = {
     "python", "python3", "pip", "pip3", "npm", "npx", "node", "pytest",
     "cargo", "go", "make", "uv", "poetry", "django-admin", "git",
-    "ls", "cat", "echo", "true", "false", "test", "mkdir", "cp", "touch",
+    "ls", "cat", "head", "echo", "true", "false", "test", "mkdir", "cp", "touch",
 }
 
 
@@ -150,7 +150,7 @@ from pathlib import Path
 ALLOWED = {
     "python", "python3", "pip", "pip3", "npm", "npx", "node", "pytest",
     "cargo", "go", "make", "uv", "poetry", "django-admin", "git",
-    "ls", "cat", "echo", "true", "false", "test", "mkdir", "cp", "touch",
+    "ls", "cat", "head", "echo", "true", "false", "test", "mkdir", "cp", "touch",
 }
 if len(sys.argv) != 2:
     print("usage: fleet-wsexec <tool-name>", file=sys.stderr)

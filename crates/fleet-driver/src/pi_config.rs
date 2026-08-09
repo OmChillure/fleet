@@ -213,7 +213,7 @@ mod tests {
             "provider": {
                 "id": "lmstudio",
                 "name": "LM Studio",
-                "base_url": "http://10.77.0.2:1234/v1",
+                "base_url": "http://host.docker.internal:1234/v1",
                 "api_key": "lm-studio",
                 "models": { "google/gemma-4-e4b": { "name": "Gemma" } }
             }
@@ -223,7 +223,7 @@ mod tests {
         let v = build_pi_models_json(&job, &mut env).unwrap();
         assert_eq!(
             v["providers"]["lmstudio"]["baseUrl"],
-            "http://10.77.0.2:1234/v1"
+            "http://host.docker.internal:1234/v1"
         );
         assert_eq!(v["providers"]["lmstudio"]["api"], "openai-completions");
         let models = v["providers"]["lmstudio"]["models"].as_array().unwrap();

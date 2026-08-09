@@ -73,7 +73,7 @@ Working sample:
 
 ```bash
 OPENCODE_PROVIDER_ID=lmstudio
-OPENCODE_BASE_URL=http://10.77.0.2:1234/v1
+OPENCODE_BASE_URL=http://host.docker.internal:1234/v1
 OPENCODE_API_KEY=lm-studio
 MODEL=lmstudio/google/gemma-4-e4b
 SSH_KEY_HOST_PATH=/tmp/fleet-lab-ssh/id_ed25519

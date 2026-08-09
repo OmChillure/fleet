@@ -17,9 +17,11 @@ from pathlib import Path
 def main() -> int:
     jid = (
         os.environ.get("FLEET_LAB_JOB_ID")
-        or Path("/tmp/fleet-lab-job-id").read_text().strip()
-        if Path("/tmp/fleet-lab-job-id").is_file()
-        else ""
+        or (
+            Path("/tmp/fleet-lab-job-id").read_text().strip()
+            if Path("/tmp/fleet-lab-job-id").is_file()
+            else ""
+        )
     )
     proj = (
         os.environ.get("FLEET_LAB_COMPOSE_PROJECT")

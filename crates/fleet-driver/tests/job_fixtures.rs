@@ -128,6 +128,15 @@ fn invoices_pi_job_is_model_field_task() {
 fn minimal_node_job_shape_differs_from_django() {
     let j = load_job("job.minimal-node.json");
     assert_eq!(j["auto_approve"], false);
+    let allow: Vec<&str> = j["permission_allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(!allow.iter().any(|a| *a == "*"), "{allow:?}");
+    assert!(allow.iter().any(|a| a.contains("docs/")), "{allow:?}");
+    assert!(allow.iter().any(|a| *a == "fleet-wsexec"), "{allow:?}");
     let tools = &j["project_setup"]["tools"];
     assert!(tools.get("list_root").is_some());
     assert!(tools.get("django_check").is_none());

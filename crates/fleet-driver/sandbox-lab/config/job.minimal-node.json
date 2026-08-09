@@ -7,7 +7,11 @@
   "model": "lmstudio/google/gemma-4-e4b",
   "timeout_sec": 600,
   "auto_approve": false,
-  "permission_allow": ["*"],
+  "permission_allow": [
+    "docs/",
+    "fleet-wsexec",
+    "read"
+  ],
   "project_setup": {
     "strategy": "commands",
     "timeout_sec": 120,
@@ -33,7 +37,7 @@
     "id": "lmstudio",
     "name": "LM Studio (local)",
     "npm": "@ai-sdk/openai-compatible",
-    "base_url": "http://10.77.0.2:1234/v1",
+    "base_url": "http://host.docker.internal:1234/v1",
     "api_key_env": "OPENCODE_API_KEY",
     "api_key": "lm-studio",
     "models": {

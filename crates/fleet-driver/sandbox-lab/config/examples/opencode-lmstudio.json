@@ -6,7 +6,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "LM Studio (local)",
       "options": {
-        "baseURL": "http://10.77.0.2:1234/v1",
+        "baseURL": "http://host.docker.internal:1234/v1",
         "apiKey": "{env:OPENCODE_API_KEY}"
       },
       "models": {

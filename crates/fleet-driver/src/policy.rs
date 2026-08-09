@@ -103,6 +103,7 @@ pub fn validate_tool_bin(argv0: &str) -> Result<()> {
         "git",
         "ls",
         "cat",
+        "head",
         "echo",
         "true",
         "false",
