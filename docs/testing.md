@@ -52,6 +52,7 @@ way to go green. Kind videos filmed without a matching sha are not proof.
 just test                          # no Postgres
 just test-integration              # just db-up + DATABASE_URL from .env.local
 crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh
+./scripts/run-every-test.sh         # every bucket; no SKIP_* (see bootstrap-every-test.sh)
 ```
 
 Live Grok ACP (optional):
