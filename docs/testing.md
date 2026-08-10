@@ -7,9 +7,9 @@ Where a new test belongs: [`testing-standardization.md`](./testing-standardizati
 
 ## No GitLab CI
 
-This GitLab has no runner. Do **not** add `.gitlab-ci.yml`, GitLab runners,
-or any pipeline config. A pending pipeline blocks MR merge ("pipelines must
-succeed" + the job never starts). Tests run on a developer or agent host:
+This GitLab has no runner. `.gitlab-ci.yml` is only `workflow: rules:
+- when: never` so GitLab does not create a pending pipeline. Do not add
+jobs or a runner. Tests run on a developer or agent host:
 
 `just test`, `just test-integration`, `run-full-suite.sh`.
 
@@ -48,7 +48,7 @@ ids are not proof. Contract: `tests/browser/test_fail_closed_contract.py`.
 - No silent `eprintln!("skip"); return;` in `crates/**/tests/*.rs`. Missing `DATABASE_URL` panics with a one-line how-to.
 - Do not use `|| true` around `cargo test`.
 - `SKIP_*` on `run-full-suite.sh` is for operators who cannot run compose/kind/LLM, not a way to hide failures.
-- Do not add GitLab CI or runners back.
+- Do not add GitLab jobs or runners. Keep `.gitlab-ci.yml` as `when: never`.
 - Human testing and agent-recorded MR demos: [`human-testing.md`](./human-testing.md).
 - Behavior catalog: [`behavior-interactions.md`](./behavior-interactions.md). HTTP/auth/fleet coverage lives in crate integration tests, not a second Python framework.
 

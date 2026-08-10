@@ -53,9 +53,10 @@ A missing tool, missing build, or foreign stack is a **fail**, not a WARN.
 - There is no green path via `FLEET_ALLOW_FOREIGN_STACK`.
 - Contract: `tests/browser/test_fail_closed_contract.py`.
 
-This GitLab has no runner. Do not add `.gitlab-ci.yml`, GitLab runners, or
-any pipeline that GitLab would create on push or MR. Pending jobs block
-merge ("pipelines must succeed" + nothing ever starts). Run tests locally.
+This GitLab has no runner. Keep `.gitlab-ci.yml` as `workflow: rules:
+- when: never` only. Do not add jobs, runners, or Auto DevOps. A missing
+file or a real job creates a pending pipeline that blocks merge. Run
+tests locally.
 
 ## Human testing
 

@@ -30,7 +30,7 @@ framework.
 | Human walkthrough | `./scripts/human-test.sh` |
 | Agent MR demo | `./scripts/human-test.sh record [scenes…]` |
 
-There is **no GitLab runner**. Do not add `.gitlab-ci.yml`.
+There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not add jobs.
 
 ## Fail closed
 

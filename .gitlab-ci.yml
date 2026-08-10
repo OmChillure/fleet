@@ -1,0 +1,8 @@
+# This GitLab has no runner. Deleting this file lets Auto DevOps (or an
+# empty project CI config) create a pending pipeline that blocks merge.
+# Do not add jobs. Do not add a runner. Tests run locally.
+#
+# `when: never` = do not create a pipeline on push or MR.
+workflow:
+  rules:
+    - when: never

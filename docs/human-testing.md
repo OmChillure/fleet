@@ -27,8 +27,8 @@ and repo-root `.env`. This page does not install packages.
 If it can break a user, a sandbox, or the next install, it is **not** a small
 tweak. Prefer an MR and a named reviewer even when you could push.
 
-There is **no GitLab runner**. Do not add `.gitlab-ci.yml`. Tests and demos
-run on a developer or agent host.
+There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`. Tests
+and demos run on a developer or agent host.
 
 ---
 
