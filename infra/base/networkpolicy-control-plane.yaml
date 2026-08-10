@@ -33,18 +33,8 @@ spec:
       app.kubernetes.io/name: fleet-api
   policyTypes: ["Ingress"]
   ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: fleet-ui
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: fleet-operator
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: sandbox
-        - podSelector: {} # port-forward / in-ns debug
-      ports:
+    # NodePort / k3d loadbalancer / in-cluster clients (UI, operator, sandboxes).
+    - ports:
         - protocol: TCP
           port: 8080
 ---

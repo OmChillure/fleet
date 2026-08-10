@@ -14,6 +14,8 @@ use crate::crypto::CredentialsKey;
 pub struct OAuthClientConfig {
     pub client_id: String,
     pub client_secret: String,
+    /// When set, GitHub connect uses the App install URL (repo picker + permissions).
+    pub github_app_slug: Option<String>,
 }
 
 /// Integrations + OAuth settings for the control plane.
@@ -139,6 +141,7 @@ fn optional_oauth(id_key: &str, secret_key: &str) -> anyhow::Result<Option<OAuth
         (Some(client_id), Some(client_secret)) => Ok(Some(OAuthClientConfig {
             client_id: client_id.trim().into(),
             client_secret: client_secret.trim().into(),
+            github_app_slug: None,
         })),
         (None, None) => Ok(None),
         (Some(_), None) => bail!("{secret_key} is required when {id_key} is set"),

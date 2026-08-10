@@ -1,0 +1,25 @@
+# Small local k3d (k3s) cluster for Agent Fleet.
+#   k3d cluster create --config infra/k3d.yaml
+#
+# Host → NodePort:
+#   http://localhost:8080  → api-node 30080
+#   http://localhost:3030  → ui-node  30303
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: agent-fleet
+servers: 1
+agents: 0
+ports:
+  - port: 8080:30080
+    nodeFilters:
+      - loadbalancer
+  - port: 3030:30303
+    nodeFilters:
+      - loadbalancer
+options:
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*

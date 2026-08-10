@@ -27,10 +27,21 @@ pub fn authorize_url(
     let client_id = urlencoding(&client.client_id);
 
     let url = match provider {
-        "github" => format!(
-            "https://github.com/login/oauth/authorize?client_id={client_id}&redirect_uri={redirect_enc}&scope={scope}&state={state_enc}",
-            scope = urlencoding("read:user repo"),
-        ),
+        "github" => {
+            if let Some(slug) = client
+                .github_app_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                crate::oauth::github_install_url(slug, state)
+            } else {
+                format!(
+                    "https://github.com/login/oauth/authorize?client_id={client_id}&redirect_uri={redirect_enc}&scope={scope}&state={state_enc}",
+                    scope = urlencoding("read:user repo"),
+                )
+            }
+        }
         "slack" => format!(
             "https://slack.com/oauth/v2/authorize?client_id={client_id}&scope={scope}&redirect_uri={redirect_enc}&state={state_enc}",
             scope = urlencoding("chat:write,channels:read,users:read"),

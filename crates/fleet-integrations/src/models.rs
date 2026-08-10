@@ -39,11 +39,17 @@ pub struct IntegrationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docs_url: Option<String>,
     pub auth_method: AuthMethod,
-    /// Server has CLIENT_ID/SECRET for this provider.
+    /// Env *or* workspace OAuth app credentials exist for this provider.
     pub oauth_configured: bool,
-    /// Browser navigates here to start OAuth (when available + configured + not just info).
+    /// Browser navigates here to start OAuth (available providers).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_start_path: Option<String>,
+    /// Redirect URI to paste into the provider's OAuth app settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_callback_url: Option<String>,
+    /// Where to create an OAuth app for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_app_create_url: Option<String>,
     pub connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<IntegrationConnectionPublic>,

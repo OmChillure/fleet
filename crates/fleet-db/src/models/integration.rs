@@ -53,6 +53,19 @@ impl From<&IntegrationConnection> for IntegrationConnectionPublic {
     }
 }
 
+/// Workspace-owned OAuth application (client credentials for starting a flow).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct IntegrationOAuthApp {
+    pub workspace_id: Uuid,
+    pub provider: String,
+    pub client_id: String,
+    /// Encrypted envelope — never return on public APIs.
+    pub client_secret: Value,
+    pub created_by: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl From<IntegrationConnection> for IntegrationConnectionPublic {
     fn from(c: IntegrationConnection) -> Self {
         IntegrationConnectionPublic::from(&c)

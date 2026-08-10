@@ -15,6 +15,7 @@ Prefer **`http://localhost:3030`** in the browser (not `127.0.0.1`) so cookie au
 ## Prerequisites
 
 - **Docker** + Docker Compose v2
+- For **k3d**: `brew install k3d` (see [`infra/README.md`](infra/README.md))
 - For **host** development (optional): **Rust 1.88+**, **Dioxus CLI 0.7.3**
 
   ```bash
@@ -38,6 +39,20 @@ docker compose ps
 | UI → API proxy | `curl -s http://localhost:3030/health` |
 
 Migrations run on API startup (auth, integrations, personas, orchestrator).
+
+### Kubernetes (k3d)
+
+Same host URLs, one small k3s cluster:
+
+```bash
+brew install k3d
+make -C infra k3d-create
+make -C infra k3d-load      # build + import api/ui/operator images
+make -C infra apply-k3d
+make -C infra k3d-delete    # tear down
+```
+
+See [`infra/README.md`](infra/README.md).
 
 ### First-time use
 
@@ -211,7 +226,7 @@ PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
 | `Dockerfile` | API image |
 | `Dockerfile.ui` | UI image (dx build + nginx) |
 | `Dockerfile.operator` | Kubernetes sandbox operator |
-| `infra/` | Kustomize control plane + FleetSandbox CRD/operator |
+| `infra/` | Kustomize control plane + FleetSandbox CRD/operator (`make -C infra k3d-create`) |
 | `deploy/nginx-ui.conf` | SPA + `/api` proxy |
 | `crates/fleet-server` | Unified HTTP API |
 | `crates/fleet-auth` | Auth, workspaces, personas |
