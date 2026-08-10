@@ -37,7 +37,7 @@ Operator source: [`crates/fleet-operator`](../crates/fleet-operator/).
 
 - Docker, `kubectl`
 - **k3d** (preferred local) or `kind`
-- Images built from the repo Dockerfiles
+- Images built from the repo Dockerfiles (`make images` passes `FLEET_GIT_SHA`)
 
 ## k3d quickstart (recommended)
 
