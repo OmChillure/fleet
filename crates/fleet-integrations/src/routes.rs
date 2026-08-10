@@ -460,10 +460,7 @@ async fn github_webhook_stub() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// Provider redirects here. Exchange code, store tokens, then:
-/// 1) notify + focus the original Agent Fleet tab
-/// 2) close this auth tab
-/// Never loads the full SPA here.
+/// OAuth callback: exchange code, store tokens, notify opener, close tab.
 async fn oauth_callback(
     State(state): State<IntegrationsState>,
     Path(provider): Path<String>,

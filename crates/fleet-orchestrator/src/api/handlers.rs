@@ -79,6 +79,8 @@ pub async fn readyz(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
 pub struct CreateProjectBody {
     pub name: String,
     pub max_agents: Option<i32>,
+    pub repo_url: Option<String>,
+    pub git_ref: Option<String>,
 }
 
 pub async fn create_project(
@@ -90,28 +92,36 @@ pub async fn create_project(
         return Err(err(StatusCode::BAD_REQUEST, "name required"));
     }
     let max = body.max_agents.unwrap_or(3).max(0);
+    let remote = crate::domain::parse_project_git_remote(
+        body.repo_url.as_deref(),
+        body.git_ref.as_deref(),
+    )
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let project = state
         .store
         .create_project(body.name.trim(), max)
         .await
         .map_err(map_store)?;
-    let cfg = state
-        .store
-        .get_project_config(project.id)
-        .await
-        .map_err(map_store)?;
+    let cfg = if let Some(remote) = remote.as_ref() {
+        state
+            .store
+            .set_project_git_remote(project.id, Some(remote))
+            .await
+            .map_err(map_store)?
+    } else {
+        state
+            .store
+            .get_project_config(project.id)
+            .await
+            .map_err(map_store)?
+    };
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "id": project.id,
             "name": project.name,
             "created_at": project.created_at,
-            "config": {
-                "max_agents": cfg.max_agents,
-                "tick_interval_s": cfg.tick_interval_s,
-                "default_max_retries": cfg.default_max_retries,
-                "sandbox_backend": cfg.sandbox_backend,
-            }
+            "config": cfg.public_json(),
         })),
     ))
 }
@@ -144,20 +154,58 @@ pub async fn get_config(
         .get_project_config(project_id)
         .await
         .map_err(map_store)?;
-    Ok(Json(json!({
-        "project_id": cfg.project_id,
-        "max_agents": cfg.max_agents,
-        "tick_interval_s": cfg.tick_interval_s,
-        "heartbeat_stale_s": cfg.heartbeat_stale_s,
-        "spawn_timeout_s": cfg.spawn_timeout_s,
-        "kill_grace_s": cfg.kill_grace_s,
-        "default_task_timeout_s": cfg.default_task_timeout_s,
-        "default_max_retries": cfg.default_max_retries,
-        "retry_backoff_s": cfg.retry_backoff_s,
-        "on_task_fail": cfg.on_task_fail,
-        "auto_sync_external": cfg.auto_sync_external,
-        "sandbox_backend": cfg.sandbox_backend,
-    })))
+    Ok(Json(cfg.public_json()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchConfigBody {
+    pub repo_url: Option<String>,
+    pub git_ref: Option<String>,
+}
+
+pub async fn patch_config(
+    State(state): State<AppState>,
+    _admin: AdminAuth,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<PatchConfigBody>,
+) -> Result<Json<Value>, ApiError> {
+    // Keep existing ref when only repo_url is sent.
+    let existing = state
+        .store
+        .get_project_config(project_id)
+        .await
+        .map_err(map_store)?;
+    let git_ref = body.git_ref.as_deref().or(Some(existing.git_ref.as_str()));
+    let remote = crate::domain::parse_project_git_remote(body.repo_url.as_deref(), git_ref)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    // If the client omitted repo_url, keep the current URL and only change ref.
+    let remote = match body.repo_url {
+        None => match existing.git_remote() {
+            Some(mut r) => {
+                if let Some(rf) = body.git_ref.as_deref() {
+                    r.git_ref = crate::domain::normalize_git_ref(Some(rf))
+                        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+                }
+                Some(r)
+            }
+            None => {
+                if body.git_ref.is_some() {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "git_ref requires repo_url on this project",
+                    ));
+                }
+                None
+            }
+        },
+        Some(_) => remote,
+    };
+    let cfg = state
+        .store
+        .set_project_git_remote(project_id, remote.as_ref())
+        .await
+        .map_err(map_store)?;
+    Ok(Json(cfg.public_json()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +272,6 @@ pub async fn list_runs(
 
 #[derive(Debug, Deserialize)]
 pub struct CancelBody {
-    #[allow(dead_code)]
     pub reason: Option<String>,
 }
 
@@ -234,13 +281,19 @@ pub async fn cancel_run(
     Path((project_id, run_id)): Path<(Uuid, Uuid)>,
     body: Option<Json<CancelBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let _ = body;
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .filter(|s| !s.trim().is_empty());
     state
         .store
         .request_cancel(project_id, run_id)
         .await
         .map_err(map_store)?;
-    Ok(Json(json!({ "run_id": run_id, "cancel_requested": true })))
+    Ok(Json(json!({
+        "run_id": run_id,
+        "cancel_requested": true,
+        "reason": reason,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -16,8 +16,15 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
 | [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
+| [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | Process worker: ACP (mock/grok) + orch heartbeat/status |
+| [`fleet-sandbox-driver`](crates/fleet-sandbox-driver/) | `crates/fleet-sandbox-driver` | In-sandbox driver: per-task compose, volume provision, multi-harness ACP |
 
 ## Local development
+
+Install is one command, no flags:
+`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
+(`PROFILE` / `ENABLE_*` in repo-root `.env`). Do not `cargo install` around a
+missing `dx` / `kind` / Playwright.
 
 Full guide: **[`development.md`](development.md)** (Docker Compose full stack + host overrides).  
 Kubernetes: **[`infra/README.md`](infra/README.md)** (kustomize + `fleet-operator`).
@@ -62,6 +69,18 @@ dx serve --package fleet-ui --port 3030
    Monitoring, Agents, Workspace. Links stay under the current workspace id.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
+6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
+   `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
+   model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
+   The assistant can call **sandbox tools** (multi-agent `launch_agent_plan`, multi-tick until
+   ephemeral stub sandboxes complete and are destroyed) and **integration_query**
+   (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
+7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
+   - `SANDBOX_BACKEND=stub` — fake timer (default)
+   - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
+   - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
+   - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
+   Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -79,6 +98,11 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
+| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok + Ollama) + model lists |
+| `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
+| `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
+| `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
+| `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -86,11 +110,13 @@ UI app routes (workspace-scoped):
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/dashboard` | Dashboard |
-| `/{workspace_id}/chat` | Chat (composer + messages) |
+| `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
+| `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
-| `/{workspace_id}/sessions` | Sessions / chat history |
+| `/{workspace_id}/sessions` | Chat history (list / open / delete) |
+| `/{workspace_id}/sessions/{session_id}` | Live worker session stream |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
-| `/{workspace_id}/sandboxes` | Sandboxes |
+| `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Settings |
 
@@ -98,7 +124,9 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),
 [`fleet-ui`](crates/fleet-ui/README.md),
 [`fleet-integrations`](crates/fleet-integrations/README.md),
-[`fleet-db`](crates/fleet-db/README.md).
+[`fleet-db`](crates/fleet-db/README.md),
+[`fleet-driver`](crates/fleet-driver/README.md),
+[`fleet-sandbox-driver`](crates/fleet-sandbox-driver/README.md).
 
 ## Docs
 
@@ -106,6 +134,7 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | --- | --- |
 | [`docs/product_vision.md`](docs/product_vision.md) | Product vision and team notes |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | **Orchestration architecture** (layers, components, sequences) |
+| [`docs/architecture/sandbox-workspace.md`](docs/architecture/sandbox-workspace.md) | **Sandbox: harness vs workspace** (compose prototype) |
 | [`docs/architecture/events-overview.md`](docs/architecture/events-overview.md) | Typical events outline (lifecycle + domains) |
 | [`docs/architecture/events.md`](docs/architecture/events.md) | Field-level command & event catalogue + JSON serialization |
 | [`docs/architecture/transport-zenoh.md`](docs/architecture/transport-zenoh.md) | Zenoh transport evaluation + key-space |

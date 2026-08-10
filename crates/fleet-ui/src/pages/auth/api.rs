@@ -268,8 +268,8 @@ pub async fn logout() -> Result<(), AuthError> {
     if res.status().is_success() {
         Ok(())
     } else {
-        let _ = parse_json_or_error::<ErrorBody>(res).await?;
-        Ok(())
+        // Non-success always Err — extracts the server message.
+        parse_json_or_error::<ErrorBody>(res).await.map(|_| ())
     }
 }
 

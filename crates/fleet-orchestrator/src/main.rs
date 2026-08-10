@@ -58,7 +58,7 @@ async fn run() -> anyhow::Result<()> {
     } else {
         cfg.http_addr.parse().or_else(|_| {
             // host:port without scheme
-            format!("{}", cfg.http_addr).parse()
+            cfg.http_addr.to_string().parse()
         })?
     };
 
@@ -82,9 +82,4 @@ async fn run() -> anyhow::Result<()> {
         e
     })?;
     Ok(())
-}
-
-#[allow(dead_code)]
-fn _duration_marker() -> Duration {
-    Duration::from_secs(1)
 }

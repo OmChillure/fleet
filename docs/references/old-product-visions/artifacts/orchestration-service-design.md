@@ -7,7 +7,7 @@
 | **Date** | 2026-07-28 |
 | **Status** | Draft (Rev 3.1 — cancel∩resume Step 2b guard) |
 | **Scope** | Orchestration only — Planning is a handoff producer, out of scope except as consumer of `WorkPlan{status=accepted}` |
-| **Repo** | `/Users/tarun/projects/agent-fleet` (greenfield: vision + HTML artifacts only) |
+| **Repo** | `docs/references/old-product-visions/` (greenfield: vision + HTML artifacts only) |
 | **Grounding** | `product_vision_tarun.html`, `artifacts/sandbox-orchestration-design.html`, `artifacts/diagrams/*.mmd` |
 
 ---
@@ -151,7 +151,7 @@ flowchart TB
 Suggested repo layout:
 
 ```
-/Users/tarun/projects/agent-fleet/
+docs/references/old-product-visions/
   src/
     main.rs
     domain/         # types, CanTransition matrix, IDs
@@ -1579,8 +1579,8 @@ Tick p99 > 2s; killing > 5m; no successful tick with active runs; spawn fail rat
 
 ## References
 
-- `/Users/tarun/projects/agent-fleet/product_vision_tarun.html`
-- `/Users/tarun/projects/agent-fleet/artifacts/sandbox-orchestration-design.html` (§8 handoff, checkpoints, reconcile)
+- `docs/references/old-product-visions/product_vision_tarun.html`
+- `docs/references/old-product-visions/artifacts/sandbox-orchestration-design.html` (§8 handoff, checkpoints, reconcile)
 - `artifacts/diagrams/orchestrator-reconcile-loop.mmd` (capacity caption delta noted)
 - `artifacts/diagrams/planning-orchestration-architecture.mmd`
 - `artifacts/diagrams/work-unit-states.mmd` (Materializing/InForce treated as non-durable)

@@ -32,6 +32,10 @@ pub struct Config {
     pub admin_token: String,
     pub auth_mode: AuthMode,
     pub http_addr: String,
+    /// Where spawned workers POST heartbeat/status. Snapshotted at Config
+    /// build — do not re-read `API_PUBLIC_BASE` at spawn (Kind :8080 in `.env`
+    /// would steal in-process test workers).
+    pub orchestrator_public_url: String,
     pub data_dir: PathBuf,
     pub tick_interval: Duration,
     pub max_agents: i32,
@@ -83,11 +87,7 @@ impl Config {
             }
         };
         let data_dir_raw = env_or("DATA_DIR", "./data");
-        let data_dir = std::fs::canonicalize(&data_dir_raw).or_else(|_| {
-            let p = PathBuf::from(&data_dir_raw);
-            let _ = std::fs::create_dir_all(&p);
-            std::fs::canonicalize(&p).or_else(|_| env::current_dir().map(|c| c.join(&data_dir_raw)))
-        }).map_err(|e| ConfigError::Message(format!("DATA_DIR: {e}")))?;
+        let data_dir = resolve_data_dir(&data_dir_raw)?;
 
         let tick_interval = duration_secs("TICK_INTERVAL_S", 5);
         Ok(Self {
@@ -95,6 +95,7 @@ impl Config {
             admin_token,
             auth_mode,
             http_addr: bind_addr.to_string(),
+            orchestrator_public_url: public_orchestrator_url(bind_addr),
             data_dir,
             tick_interval,
             max_agents: int_env("MAX_AGENTS", 3),
@@ -145,19 +146,7 @@ impl Config {
         }
 
         let data_dir_raw = env_or("DATA_DIR", "./data");
-        let data_dir = std::fs::canonicalize(&data_dir_raw)
-            .or_else(|_| {
-                // Create if missing for abs path resolution of relative paths
-                let p = PathBuf::from(&data_dir_raw);
-                if !p.exists() {
-                    let _ = std::fs::create_dir_all(&p);
-                }
-                std::fs::canonicalize(&p).or_else(|_| {
-                    // fallback: join cwd
-                    env::current_dir().map(|cwd| cwd.join(&data_dir_raw))
-                })
-            })
-            .map_err(|e| ConfigError::Message(format!("DATA_DIR: {e}")))?;
+        let data_dir = resolve_data_dir(&data_dir_raw)?;
 
         let tick_interval = duration_secs("TICK_INTERVAL_S", 5);
         let lock_wait = env::var("LOCK_WAIT_TIMEOUT_S")
@@ -170,7 +159,8 @@ impl Config {
             database_url,
             admin_token,
             auth_mode,
-            http_addr,
+            http_addr: http_addr.clone(),
+            orchestrator_public_url: public_orchestrator_url(&http_addr),
             data_dir,
             tick_interval,
             max_agents: int_env("MAX_AGENTS", 3),
@@ -259,6 +249,17 @@ fn bool_env(k: &str, def: bool) -> bool {
     }
 }
 
+fn resolve_data_dir(data_dir_raw: &str) -> Result<PathBuf, ConfigError> {
+    if let Ok(p) = std::fs::canonicalize(data_dir_raw) {
+        return Ok(p);
+    }
+    let p = PathBuf::from(data_dir_raw);
+    std::fs::create_dir_all(&p).map_err(|e| {
+        ConfigError::Message(format!("DATA_DIR create {}: {e}", p.display()))
+    })?;
+    std::fs::canonicalize(&p).map_err(|e| ConfigError::Message(format!("DATA_DIR: {e}")))
+}
+
 fn is_loopback_addr(addr: &str) -> bool {
     if addr.starts_with(':') {
         return false; // :8080 binds all interfaces
@@ -289,6 +290,8 @@ mod tests {
             "MAX_AGENTS",
             "SANDBOX_BACKEND",
             "LOCK_WAIT_TIMEOUT_S",
+            "API_PUBLIC_BASE",
+            "ORCHESTRATOR_PUBLIC_URL",
         ] {
             unsafe { env::remove_var(k) };
         }
@@ -381,5 +384,18 @@ mod tests {
             "http://orch.internal:8081"
         );
         unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+    }
+
+    #[test]
+    fn from_env_snapshots_public_url_onto_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_relevant();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
+        unsafe { env::set_var("DATA_DIR", dir.path()) };
+        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080") };
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.orchestrator_public_url, "http://localhost:8080");
+        unsafe { env::remove_var("API_PUBLIC_BASE") };
     }
 }

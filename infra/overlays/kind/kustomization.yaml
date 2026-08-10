@@ -4,3 +4,4 @@ resources:
   - ../../crds
   - ../../base
   - nodeport.yaml
+  - api-nodeport-netpol.yaml

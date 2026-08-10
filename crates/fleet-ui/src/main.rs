@@ -13,13 +13,13 @@ use components::navbar::Navbar;
 use components::toast::ToastProvider;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
-use pages::chat::Chat;
+use pages::chat::{Chat, ChatThread};
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
 use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
-use pages::sessions::Sessions;
+use pages::sessions::{SessionDetail, Sessions};
 use pages::settings::Settings;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -43,8 +43,12 @@ pub enum Route {
         Dashboard { workspace_id: String },
         #[route("/:workspace_id/chat")]
         Chat { workspace_id: String },
+        #[route("/:workspace_id/chat/:conversation_id")]
+        ChatThread { workspace_id: String, conversation_id: String },
         #[route("/:workspace_id/fleet")]
         Fleet { workspace_id: String },
+        #[route("/:workspace_id/sessions/:session_id")]
+        SessionDetail { workspace_id: String, session_id: String },
         #[route("/:workspace_id/sessions")]
         Sessions { workspace_id: String },
         #[route("/:workspace_id/agents")]
@@ -63,8 +67,10 @@ impl Route {
         match self {
             Route::Dashboard { workspace_id }
             | Route::Chat { workspace_id }
+            | Route::ChatThread { workspace_id, .. }
             | Route::Fleet { workspace_id }
             | Route::Sessions { workspace_id }
+            | Route::SessionDetail { workspace_id, .. }
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
             | Route::Integrations { workspace_id }

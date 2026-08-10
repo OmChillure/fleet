@@ -1,6 +1,6 @@
 # fleet-ui — Dioxus WASM build served by nginx (proxies /api → api service)
 #
-#   docker build -f Dockerfile.ui -t agent-fleet-ui:local .
+#   docker build --build-arg FLEET_GIT_SHA=$(git rev-parse HEAD) -f Dockerfile.ui -t agent-fleet-ui:local .
 #   docker compose up -d --build ui
 
 # -----------------------------------------------------------------------------
@@ -17,19 +17,33 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
+# SHA after dx install so a dirty tree-id does not bust the cargo-install layer.
+ARG FLEET_GIT_SHA
+RUN test -n "${FLEET_GIT_SHA}" || (echo "ERROR: --build-arg FLEET_GIT_SHA=\$(git rev-parse HEAD) is required" && exit 1)
+ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
+
 # Release web build (static assets under target/dx/.../web/public)
 # Same-origin /api via nginx — do NOT set FLEET_AUTH_URL so the browser uses page origin.
-RUN dx build --package fleet-ui --release --platform web \
+# /fleet-git-sha.txt is a static identity probe (no WASM). Old images 404 / SPA-fallback.
+RUN mkdir -p crates/fleet-ui/public \
+    && printf '%s\n' "${FLEET_GIT_SHA}" > crates/fleet-ui/public/fleet-git-sha.txt \
+    && dx build --package fleet-ui --release --platform web \
     && PUBLIC="$(find target -type f -path '*/web/public/index.html' | head -1 | xargs dirname)" \
     && test -n "$PUBLIC" \
     && echo "UI public dir: $PUBLIC" \
     && mkdir -p /out \
-    && cp -a "$PUBLIC"/. /out/
+    && cp -a "$PUBLIC"/. /out/ \
+    && printf '%s\n' "${FLEET_GIT_SHA}" > /out/fleet-git-sha.txt \
+    && test "$(tr -d '[:space:]' < /out/fleet-git-sha.txt)" = "${FLEET_GIT_SHA}"
 
 # -----------------------------------------------------------------------------
 # Runtime: nginx on :3030
 # -----------------------------------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
+
+ARG FLEET_GIT_SHA
+RUN test -n "${FLEET_GIT_SHA}"
+LABEL fleet.git_sha=${FLEET_GIT_SHA}
 
 COPY deploy/nginx-ui.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /out/ /usr/share/nginx/html/

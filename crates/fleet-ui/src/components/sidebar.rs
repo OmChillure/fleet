@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout,
     me,
@@ -43,7 +44,12 @@ pub fn Sidebar() -> Element {
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
         let section = match use_route::<Route>() {
-            Route::Chat { .. } | Route::Sessions { .. } => Some(NavSection::Chat),
+            Route::Chat { .. }
+            | Route::ChatThread { .. }
+            | Route::Sessions { .. }
+            | Route::SessionDetail { .. } => {
+                Some(NavSection::Chat)
+            }
             Route::Fleet { .. } | Route::Dashboard { .. } | Route::Sandboxes { .. } => {
                 Some(NavSection::Monitoring)
             }
@@ -486,8 +492,17 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                             menu_open.set(false);
                             let navigator = navigator.clone();
                             spawn(async move {
-                                let _ = logout().await;
-                                navigator.replace(Route::Login {});
+                                match logout().await {
+                                    Ok(()) => {
+                                        let _ = navigator.replace(Route::Login {});
+                                    }
+                                    Err(e) => {
+                                        show_toast().error(format!(
+                                            "Log out failed: {}",
+                                            e.message()
+                                        ));
+                                    }
+                                }
                             });
                         },
                         "Log out"

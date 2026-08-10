@@ -1,0 +1,82 @@
+{
+  "type": "implement_and_test",
+  "harness": "opencode",
+  "repo_url": "https://github.com/eugenepyvovarov/123-invoices.git",
+  "git_ref": "main",
+  "prompt": "You are in a prepared Django invoices repo (deps installed, migrate already run once).\n\nThis job is the OpenCode harness task (marker module only).\n\nDo ALL of these, in order. Keep changes minimal.\n\n1) Create Python module `app/fleet_marker.py` with exactly:\n   FLEET_MARKER = \"fleet-ok\"\n\n2) Create Django unit test `tests/test_fleet_smoke.py` that:\n   - uses django.test.SimpleTestCase\n   - imports FLEET_MARKER from app.fleet_marker\n   - has a test method that asserts FLEET_MARKER == \"fleet-ok\"\n\n3) Run tools only via fleet-wsexec (see FLEET_TOOLS.md), in this order:\n   a) fleet-wsexec django_check\n   b) fleet-wsexec django_migrate\n   c) fleet-wsexec django_test_fleet   (required \u2014 one fast test, must pass)\n   d) fleet-wsexec django_test         (full suite \u2014 try once)\n\n4) Final summary: report pass/fail/timeout for each tool and that both files exist.\n\nRules:\n- You may ONLY create/edit files under `app/` and `tests/`. Do not touch invoices/models or other apps.\n- Use ONLY fleet-wsexec <tool-name> for project commands (no free shell installs).\n- Do NOT pip install.\n- Do NOT skip django_test_fleet \u2014 it is one fast test and must succeed.\n- django_test is the full suite: run once after fleet smoke; if it fails or times out, report and stop.\n- If check/migrate/test_fleet fails, fix only your two files under app/ and tests/ and re-run that tool.\n",
+  "model": "lmstudio/google/gemma-4-e4b",
+  "timeout_sec": 1200,
+  "auto_approve": false,
+  "permission_allow": [
+    "app/",
+    "tests/",
+    "fleet-wsexec",
+    "read"
+  ],
+  "project_setup": {
+    "strategy": "commands",
+    "timeout_sec": 900,
+    "commands": [
+      "cp -n env.example .env || true",
+      "mkdir -p db media docs tests",
+      "python -m pip install -r requirements.txt",
+      "python manage.py migrate --noinput"
+    ],
+    "smoke_commands": [
+      "python manage.py check"
+    ],
+    "tools": {
+      "django_check": {
+        "argv": [
+          "python",
+          "manage.py",
+          "check"
+        ],
+        "description": "Django system check"
+      },
+      "django_migrate": {
+        "argv": [
+          "python",
+          "manage.py",
+          "migrate",
+          "--noinput"
+        ],
+        "description": "Apply DB migrations"
+      },
+      "django_test_fleet": {
+        "argv": [
+          "python",
+          "manage.py",
+          "test",
+          "tests.test_fleet_smoke",
+          "--verbosity",
+          "2"
+        ],
+        "description": "Run only the small fleet smoke unit test (required)"
+      },
+      "django_test": {
+        "argv": [
+          "python",
+          "manage.py",
+          "test",
+          "--verbosity",
+          "1"
+        ],
+        "description": "Full Django test suite (optional stretch; timeout/fail is OK to report)"
+      }
+    }
+  },
+  "provider": {
+    "id": "lmstudio",
+    "name": "LM Studio (local)",
+    "npm": "@ai-sdk/openai-compatible",
+    "base_url": "http://host.docker.internal:1234/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "api_key": "lm-studio",
+    "models": {
+      "google/gemma-4-e4b": {
+        "name": "Gemma 4 E4B"
+      }
+    }
+  }
+}

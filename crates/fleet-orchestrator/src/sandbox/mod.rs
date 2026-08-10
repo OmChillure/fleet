@@ -1,7 +1,14 @@
-//! Sandbox runtime adapter (PR4).
+//! Sandbox runtime: `stub` | `process` | `docker` (`SANDBOX_BACKEND`).
+//! Only `FLEET_*` env + task files enter sandboxes — no OAuth tokens.
 //!
-//! Abstract process/container backend so the reconcile tick never depends on a
-//! specific isolation technology. MVP ships `StubRuntime`.
+//! `process` is main's fleet-worker. `local`/`shell` is Om's `bash fleet_worker.sh`.
+
+mod docker;
+pub(crate) mod git_isolate;
+mod worker_script;
+
+pub use docker::{docker_runtime, DockerRuntime};
+pub use worker_script::{extract_bash_blocks, materialize_workspace};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -27,6 +34,11 @@ pub struct SpawnRequest {
     pub work_dir: PathBuf,
     pub env: HashMap<String, String>,
     pub timeout: Duration,
+    /// Task title for work_dir/task.md (docker/process materialize; no secrets).
+    pub task_title: Option<String>,
+    pub task_summary: Option<String>,
+    /// Full task spec markdown; ```bash fences become commands.sh.
+    pub task_spec: Option<String>,
 }
 
 /// Opaque handle returned by a successful spawn (pid, container id, stub key, …).
@@ -215,8 +227,10 @@ impl SandboxRuntime for StubRuntime {
 }
 
 mod process;
+mod process_om;
 
 pub use process::{build_process_runtime, worker_argv_from_env, ProcessRuntime};
+pub use process_om::process_runtime;
 
 /// Options for [`build_runtime`].
 #[derive(Debug, Clone)]
@@ -240,8 +254,10 @@ pub fn build_runtime(opts: &RuntimeBuildOpts) -> Result<Arc<dyn SandboxRuntime>,
             };
             Ok(Arc::new(ProcessRuntime::new(&opts.data_dir, argv)?))
         }
+        "local" | "shell" => Ok(process_runtime()),
+        "docker" | "container" => Ok(docker_runtime()),
         other => Err(SandboxError::Spawn(format!(
-            "unknown sandbox backend {other:?} (supports stub|process)"
+            "unknown sandbox backend {other:?} (supports stub|process|local|docker)"
         ))),
     }
 }
@@ -263,6 +279,9 @@ mod tests {
             work_dir: PathBuf::from("/tmp/fleet-test"),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
+            task_title: None,
+            task_summary: None,
+            task_spec: None,
         }
     }
 
@@ -352,8 +371,14 @@ mod tests {
         };
         let rt = build_runtime(&opts).unwrap();
         assert_eq!(rt.backend_name(), "stub");
+        let mut docker = opts.clone();
+        docker.backend = "docker".into();
+        assert_eq!(build_runtime(&docker).unwrap().backend_name(), "docker");
+        let mut local = opts.clone();
+        local.backend = "local".into();
+        assert_eq!(build_runtime(&local).unwrap().backend_name(), "process");
         let mut bad = opts.clone();
-        bad.backend = "docker".into();
+        bad.backend = "k8s".into();
         assert!(build_runtime(&bad).is_err());
     }
 }

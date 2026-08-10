@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Agent Fleet unified HTTP API — single cargo run entrypoint"
 
+[lib]
+name = "fleet_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fleet-server"
 path = "src/main.rs"
@@ -15,15 +19,27 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
+chrono = { workspace = true }
 uuid = { workspace = true }
 dotenvy = { workspace = true }
 fleet-auth = { workspace = true }
 fleet-db = { workspace = true }
 fleet-integrations = { workspace = true }
 fleet-orchestrator = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+cookie = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+jsonwebtoken = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

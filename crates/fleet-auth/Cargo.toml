@@ -29,3 +29,14 @@ thiserror = { workspace = true }
 time = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde_json = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+cookie = { workspace = true }
+fleet-db = { workspace = true }
+sqlx = { workspace = true }

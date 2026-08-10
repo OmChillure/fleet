@@ -73,11 +73,15 @@ pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewUser) -> DbR
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| {
-            let err = map_query_err(e);
-            if err.is_unique_violation() {
-                DbError::Conflict("an account with this email already exists".into())
-            } else {
-                err
+            // Prefer a domain message over from_sqlx's generic
+            // Conflict("unique constraint violated"). Check 23505 before
+            // map_query_err; is_unique_violation() is still true for either
+            // Conflict form (see DbError::is_unique_violation).
+            if let sqlx::Error::Database(ref db) = e
+                && db.code().as_deref() == Some("23505")
+            {
+                return DbError::Conflict("an account with this email already exists".into());
             }
+            map_query_err(e)
         })
 }

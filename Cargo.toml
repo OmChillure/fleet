@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
+    "crates/fleet-chat-md",
     "crates/fleet-db",
     "crates/fleet-auth",
     "crates/fleet-integrations",
@@ -9,6 +10,8 @@ members = [
     "crates/fleet-ui",
     "crates/fleet-orchestrator",
     "crates/fleet-operator",
+    "crates/fleet-driver",
+    "crates/fleet-sandbox-driver",
 ]
 # `cargo run` from the workspace root starts the unified API.
 default-members = [
@@ -19,6 +22,8 @@ default-members = [
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/dvratil/agent-fleet"
+# Dockerfiles + GitLab CI use rust:1.88-bookworm. Pin enum-ordinalize 4.3.2
+# (via fleet-operator) — 4.4+ requires rustc 1.89 and breaks those images.
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -27,7 +32,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4", "v5", "v7"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 dioxus = "=0.7.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "test-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "test-util", "process", "fs", "io-util"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -51,6 +56,7 @@ tempfile = "3"
 aes-gcm = "0.10"
 fleet-db = { path = "crates/fleet-db" }
 fleet-auth = { path = "crates/fleet-auth" }
+fleet-chat-md = { path = "crates/fleet-chat-md" }
 fleet-integrations = { path = "crates/fleet-integrations" }
 fleet-server = { path = "crates/fleet-server" }
 fleet-orchestrator = { path = "crates/fleet-orchestrator" }

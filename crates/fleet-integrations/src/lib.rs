@@ -3,6 +3,9 @@
 //! Credentials stay in the control plane for AI use; never enter sandboxes.
 //! OAuth tokens are encrypted at rest (AES-256-GCM) before Postgres storage.
 //!
+//! Outbound product APIs (GitHub, Jira, Linear, Slack, Figma, Notion, Drive, Teams, Discord) go through [`proxy`] —
+//! decrypt in-process, allowlisted ops only, sanitized results.
+//!
 //! | Method | Path | Role |
 //! | --- | --- | --- |
 //! | `GET` | `/api/workspaces/:id/integrations` | Catalog + connection state |
@@ -20,6 +23,7 @@ mod config;
 mod crypto;
 mod models;
 mod oauth;
+pub mod proxy;
 mod routes;
 mod state;
 

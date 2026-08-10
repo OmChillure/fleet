@@ -3,6 +3,7 @@ use crate::orch::TickRunner;
 use crate::sandbox::{build_runtime, RuntimeBuildOpts};
 use crate::store::{connect, migrate, Store};
 use crate::sync::LogBoardSync;
+use anyhow::Context;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -22,7 +23,9 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
     let pool = connect(&cfg.database_url).await?;
     migrate(&pool).await?;
     let store = Store::new(pool);
-    let _ = tokio::fs::create_dir_all(&cfg.data_dir).await;
+    tokio::fs::create_dir_all(&cfg.data_dir)
+        .await
+        .with_context(|| format!("create DATA_DIR {}", cfg.data_dir.display()))?;
     let runtime = build_runtime(&RuntimeBuildOpts {
         backend: cfg.sandbox_backend.clone(),
         stub_duration: cfg.stub_duration,
@@ -30,7 +33,7 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
         worker_argv: cfg.process_worker_argv.clone(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
-    let orch_url = crate::config::public_orchestrator_url(&cfg.http_addr);
+    let orch_url = cfg.orchestrator_public_url.clone();
     // PR10: LogBoardSync adapter; per-project `auto_sync_external` gates tick calls.
     let board_sync = Arc::new(LogBoardSync);
     let tick = Arc::new(TickRunner::with_board_sync(

@@ -7,6 +7,7 @@ mod inbox;
 mod materialize_step;
 mod reap;
 mod rollup;
+mod session_context;
 mod spawn;
 mod stuck;
 mod tick;

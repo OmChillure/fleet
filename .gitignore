@@ -1,11 +1,17 @@
 /target
+**/target/
 /bin/
+bin/
 /data/
 data/
+**/*.rs.bk
 *.exe
 *.test
 *.out
 .DS_Store
+default.profraw
+*.db
+*.db-*
 .env
 .env.*
 .env.local
@@ -13,10 +19,20 @@ data/
 coverage.out
 vendor/
 *.pem
+.skills-data/
 
+# fleet-ui — npm leftover (dx serves assets/; optional local CSS tooling)
 # fleet-ui — npm install output (optional local CSS tooling; dx serves assets/)
 crates/fleet-ui/node_modules/
 crates/fleet-ui/package-lock.json
+
+# baked at dx serve / dx build / image build — never commit
+crates/fleet-ui/public/fleet-git-sha.txt
+
+# Python bytecode (must not move scripts/tree-id.sh)
+__pycache__/
+*.py[cod]
+*$py.class
 
 # accidental local ref / temp assets
 *.webp
@@ -25,3 +41,9 @@ crates/fleet-ui/toast-ref.*
 
 # fleet-dev.sh runtime (pids, nohup logs)
 .run/
+
+# install-full-suite-deps.sh scratch (ssh dummy key, cargo metadata, logs)
+.tmp/
+
+# Local proof/debug dumps (never commit)
+/tmp/

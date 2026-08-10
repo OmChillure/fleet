@@ -122,7 +122,7 @@ UPDATE project_configs SET auto_sync_external = true WHERE project_id = $1;
 
 ## Process sandbox (PR7)
 
-Uses a **real worker** binary (`fleet-worker`) that:
+Uses a **real worker** binary (`fleet-worker`, or `fleet-driver` for ACP) that:
 
 1. Authenticates with the session `FLEET_WORKER_TOKEN`
 2. POSTs `running` / heartbeats / terminal `success|failed|blocked` to `/v1/.../workers/{session}/…`
@@ -140,6 +140,8 @@ cargo run -p fleet-orchestrator
 ```
 
 Work dir: `$DATA_DIR/projects/{project}/sessions/{session}/` with `pid` file for reaping.
+
+To drive a coding agent over ACP instead of `fleet-worker`, set `PROCESS_WORKER_BIN` to `fleet-driver` (`FLEET_HARNESS=mock` for CI, `grok` for Grok Build). See [`crates/fleet-driver/README.md`](../fleet-driver/README.md).
 
 | Env | Role |
 |-----|------|

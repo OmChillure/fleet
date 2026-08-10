@@ -10,15 +10,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-fn db_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
+fn require_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "DATABASE_URL is required for this integration test. \
+                 Start Postgres (just db-up) and export DATABASE_URL."
+            )
+        })
 }
 
-async fn setup() -> Option<Store> {
-    let url = db_url()?;
+async fn setup() -> Store {
+    let url = require_database_url();
     let pool = connect(&url).await.expect("connect");
     migrate(&pool).await.expect("migrate");
-    Some(Store::new(pool))
+    Store::new(pool)
 }
 
 fn runner(store: Store, stub_ms: u64) -> TickRunner {
@@ -72,10 +80,7 @@ fn chain_plan(project_id: Uuid) -> WorkPlanBody {
 
 #[tokio::test]
 async fn tick_materializes_and_promotes_root_to_ready() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("tick-{}", Uuid::new_v4()), 3)
         .await
@@ -105,10 +110,7 @@ async fn tick_materializes_and_promotes_root_to_ready() {
 
 #[tokio::test]
 async fn tick_stub_completes_chain_end_to_end() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("tick-e2e-{}", Uuid::new_v4()), 3)
         .await
@@ -160,10 +162,7 @@ async fn tick_stub_completes_chain_end_to_end() {
 
 #[tokio::test]
 async fn tick_cancel_before_materialize_terminates_run() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("tick-c-{}", Uuid::new_v4()), 3)
         .await
@@ -191,10 +190,7 @@ async fn tick_cancel_before_materialize_terminates_run() {
 
 #[tokio::test]
 async fn tick_cancel_mid_run_drains_tasks() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("tick-mid-{}", Uuid::new_v4()), 3)
         .await
@@ -231,10 +227,7 @@ async fn tick_cancel_mid_run_drains_tasks() {
 
 #[tokio::test]
 async fn tick_inbox_status_success() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
     let project = store
         .create_project(&format!("tick-inbox-{}", Uuid::new_v4()), 3)
         .await

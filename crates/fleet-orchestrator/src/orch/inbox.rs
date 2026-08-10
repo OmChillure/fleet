@@ -100,14 +100,13 @@ pub async fn destroy_session_runtime(
     runtime: &Arc<dyn SandboxRuntime>,
     session_id: Uuid,
 ) -> Result<(), TickError> {
-    if let Some(s) = store.get_session(session_id).await? {
-        if let Some(h) = s.runtime_handle {
+    if let Some(s) = store.get_session(session_id).await?
+        && let Some(h) = s.runtime_handle {
             let handle = RuntimeHandle {
                 backend: s.runtime_backend,
                 id: h,
             };
             let _ = runtime.destroy(&handle).await;
         }
-    }
     Ok(())
 }

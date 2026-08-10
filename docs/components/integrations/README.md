@@ -27,7 +27,9 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 Other catalog entries (GitLab, Bitbucket, Confluence, …) may appear as
 **Coming soon** until OAuth is wired.
 
-If a provider’s client id/secret is unset, the UI shows **Not configured**.
+If a provider’s client id/secret is unset, **Connect** still starts the
+provider flow (GitHub App Manifest, or a one-time OAuth app form for Jira
+and others) and then the login + consent screen.
 
 ---
 
@@ -96,8 +98,19 @@ Callback to register on every provider:
 | Decrypt | Only via `credentials_for(..., &cfg.credentials_key)` on the control plane |
 | Sandboxes | Must not receive raw tokens (product rule) |
 | OAuth CSRF | Signed short-lived `state` JWT (`typ: oauth_state`) |
+| Live APIs | `fleet_integrations::proxy::invoke` — allowlisted ops for all OAuth apps; sanitized results only |
 
 Legacy plaintext rows still load until the user reconnects.
+
+### Chat proxy tools
+
+| Tool | Behavior |
+| --- | --- |
+| `integration_query` | Control-plane decrypt → provider API → sanitized JSON (no secrets) |
+| `launch_agent_plan` | Multi-task fan-out; optional `context_from` embeds proxy results into task specs |
+| `launch_agent_task` | Single task + multi-tick; sandboxes destroyed after exit |
+
+Ops (all via `integration_query`): GitHub read/write; Jira issues + transitions; Linear issues; Slack channels/messages; Figma files; Notion pages/DBs; Drive list/export; Teams chat/channel send; Discord identity + guilds. Coming soon (no OAuth): GitLab, Bitbucket, Confluence, Asana, Trello.
 
 ---
 

@@ -1,6 +1,7 @@
 -- Workspace OAuth *applications* (Fleet's client_id/secret at GitHub, Jira, …).
 -- Distinct from integration_connections (user tokens after consent).
 -- client_secret is stored as an AES-256-GCM envelope by fleet-integrations.
+-- Numbered 005: origin/main used 004 for chat_conversations.
 
 CREATE TABLE integration_oauth_apps (
     workspace_id     UUID NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,

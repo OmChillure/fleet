@@ -375,6 +375,9 @@ mod tests {
             work_dir: work_dir.clone(),
             env: HashMap::new(),
             timeout: Duration::from_secs(30),
+            task_title: None,
+            task_summary: None,
+            task_spec: None,
         };
         req.env = fleet_worker_env(&req, "http://127.0.0.1:8080");
         req

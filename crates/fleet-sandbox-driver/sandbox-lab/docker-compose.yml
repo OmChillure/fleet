@@ -1,0 +1,100 @@
+# Per-task sandbox: one compose project = one volume + workspace (+ redis) + driver.
+#
+# Do NOT share volumes across tasks. Use a unique project name per job:
+#   COMPOSE_PROJECT_NAME=fleet-task-<job_id_short> docker compose up -d redis workspace
+#
+# Host scripts talk to that project's redis via:
+#   docker compose -p fleet-task-… exec -T redis redis-cli …
+# (no host port publish — avoids collisions when many sandboxes run).
+#
+# Pinned image tags: workspace + driver use stable local names so each
+# COMPOSE_PROJECT_NAME=fleet-task-* reuses images (no project-scoped rebuild).
+# Build once from this directory:
+#   docker compose build workspace driver
+# Later orch spawn can --no-build --pull never after preflighting these refs.
+
+services:
+  redis:
+    image: redis:7-alpine
+    # Intentionally no host ports — isolation + parallel sandboxes.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  workspace:
+    # Stable tag shared across fleet-task-* projects (not project-scoped names).
+    image: ${COMPOSE_SANDBOX_WORKSPACE_IMAGE:-agent-fleet-sandbox-workspace:local}
+    build:
+      context: ./workspace
+      dockerfile: Dockerfile
+    volumes:
+      - sandbox-workspace:/workspace
+      - ${SSH_KEY_HOST_PATH:-../../../.tmp/ssh/id_ed25519}:/run/secrets/git_ssh_key:ro
+    environment:
+      FLEET_DIR: /workspace/.fleet
+      FLEET_UID: "1000"
+      FLEET_GID: "1000"
+      FLEET_HANDSHAKE_SECRET: ${FLEET_HANDSHAKE_SECRET:-dev-lab-handshake-not-for-prod}
+      PYTHONUNBUFFERED: "1"
+      HOME: /root
+      GIT_SSH_KEY_PATH: /run/secrets/git_ssh_key
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+
+  driver:
+    # Rebuild when DRIVER_BASE_IMAGE / harness changes; tag stays stable across projects.
+    image: ${COMPOSE_SANDBOX_DRIVER_IMAGE:-agent-fleet-sandbox-driver:local}
+    build:
+      context: ../../..
+      dockerfile: crates/fleet-sandbox-driver/sandbox-lab/driver/Dockerfile
+      args:
+        BASE_IMAGE: ${DRIVER_BASE_IMAGE:-agent-fleet-opencode:alpine}
+    depends_on:
+      redis:
+        condition: service_healthy
+      workspace:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      FLEET_JOBS_QUEUE: ${FLEET_JOBS_QUEUE:-fleet:jobs}
+      FLEET_RESULTS_QUEUE: ${FLEET_RESULTS_QUEUE:-fleet:results}
+      FLEET_PROVISION_MODE: ${FLEET_PROVISION_MODE:-volume}
+      FLEET_DIR: /workspace/.fleet
+      FLEET_HANDSHAKE_SECRET: ${FLEET_HANDSHAKE_SECRET:-dev-lab-handshake-not-for-prod}
+      HARNESS: ${HARNESS:-opencode}
+      MODEL: ${MODEL:-}
+      OPENCODE_PROVIDER_ID: ${OPENCODE_PROVIDER_ID:-}
+      OPENCODE_PROVIDER_NAME: ${OPENCODE_PROVIDER_NAME:-}
+      OPENCODE_PROVIDER_NPM: ${OPENCODE_PROVIDER_NPM:-@ai-sdk/openai-compatible}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROK_DEPLOYMENT_KEY: ${GROK_DEPLOYMENT_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      GIT_REPO_URL: ${GIT_REPO_URL:-}
+      GIT_REF: ${GIT_REF:-main}
+      ANALYZE_PROMPT: ${ANALYZE_PROMPT:-Analyze this repository briefly.}
+      JOB_TIMEOUT_SEC: ${JOB_TIMEOUT_SEC:-600}
+      AUTO_SEED_JOB: ${AUTO_SEED_JOB:-0}
+      FLEET_DRIVER_LOOP: ${FLEET_DRIVER_LOOP:-0}
+      GIT_SSH_KEY_PATH: /run/secrets/git_ssh_key
+      HOME: /home/fleet
+      XDG_CONFIG_HOME: /home/fleet/.config
+      XDG_DATA_HOME: /home/fleet/.local/share
+    volumes:
+      - ${SSH_KEY_HOST_PATH:-../../../.tmp/ssh/id_ed25519}:/run/secrets/git_ssh_key:ro
+      - sandbox-workspace:/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+
+volumes:
+  sandbox-workspace:

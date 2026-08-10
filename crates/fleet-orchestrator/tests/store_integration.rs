@@ -8,15 +8,23 @@ use fleet_orchestrator::domain::{
 use fleet_orchestrator::store::{connect, migrate, Store};
 use uuid::Uuid;
 
-fn db_url() -> Option<String> {
-    std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())
+fn require_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "DATABASE_URL is required for this integration test. \
+                 Start Postgres (just db-up) and export DATABASE_URL."
+            )
+        })
 }
 
-async fn setup() -> Option<Store> {
-    let url = db_url()?;
+async fn setup() -> Store {
+    let url = require_database_url();
     let pool = connect(&url).await.expect("connect");
     migrate(&pool).await.expect("migrate");
-    Some(Store::new(pool))
+    Store::new(pool)
 }
 
 fn sample_body(project_id: Uuid) -> WorkPlanBody {
@@ -67,15 +75,28 @@ fn sample_body(project_id: Uuid) -> WorkPlanBody {
 
 #[tokio::test]
 async fn create_project_and_materialize_idempotent() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
 
     let name = format!("proj-{}", Uuid::new_v4());
     let project = store.create_project(&name, 3).await.unwrap();
     let cfg = store.get_project_config(project.id).await.unwrap();
     assert_eq!(cfg.max_agents, 3);
+    assert!(cfg.repo_url.is_none());
+    assert_eq!(cfg.git_ref, "main");
+
+    let remote = fleet_orchestrator::domain::ProjectGitRemote {
+        url: "https://github.com/acme/app.git".into(),
+        git_ref: "develop".into(),
+    };
+    let cfg = store
+        .set_project_git_remote(project.id, Some(&remote))
+        .await
+        .unwrap();
+    assert_eq!(cfg.repo_url.as_deref(), Some("https://github.com/acme/app.git"));
+    assert_eq!(cfg.git_ref, "develop");
+    let cfg = store.set_project_git_remote(project.id, None).await.unwrap();
+    assert!(cfg.repo_url.is_none());
+    assert_eq!(cfg.git_ref, "main");
 
     let body = sample_body(project.id);
     let plan_id = body.plan_id;
@@ -102,10 +123,7 @@ async fn create_project_and_materialize_idempotent() {
 
 #[tokio::test]
 async fn cancel_before_materialize_yields_zero_cards() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
 
     let project = store
         .create_project(&format!("cancel-{}", Uuid::new_v4()), 2)
@@ -125,10 +143,7 @@ async fn cancel_before_materialize_yields_zero_cards() {
 
 #[tokio::test]
 async fn worker_report_inbox_idempotent_seq() {
-    let Some(store) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+    let store = setup().await;
 
     let project = store
         .create_project(&format!("rep-{}", Uuid::new_v4()), 2)

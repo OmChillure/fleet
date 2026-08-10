@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Human testing: launch the product and walk a person through it.
+# Agents record the MR demo video (do not ask the human to screen-record):
+#   ./scripts/human-test.sh record [scenes…]
+#
+# Does NOT install packages. Missing cargo/docker/dx → run
+#   crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+# (no flags; PROFILE/ENABLE_* in repo-root .env).
+#
+# Usage:
+#   ./scripts/human-test.sh              # launch if needed + interactive guide
+#   ./scripts/human-test.sh launch       # start Postgres + API + UI
+#   ./scripts/human-test.sh guide        # walkthrough only (stack must be up)
+#   ./scripts/human-test.sh record […]   # agent: Playwright .webm → .tmp/demos/
+#   ./scripts/human-test.sh record --list
+#   ./scripts/human-test.sh status
+#   ./scripts/human-test.sh stop
+#   ./scripts/human-test.sh --help
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+DEV="${ROOT}/scripts/fleet-dev.sh"
+REC="${ROOT}/tests/browser/record_demo.py"
+DOC="docs/human-testing.md"
+INSTALL="crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh"
+UI_URL="${FLEET_UI_URL:-http://localhost:3030}"
+API_URL="${FLEET_API_URL:-http://127.0.0.1:8080}"
+
+BLU=$'\033[0;34m'
+GRN=$'\033[0;32m'
+YLW=$'\033[0;33m'
+RED=$'\033[0;31m'
+RST=$'\033[0m'
+
+log()  { printf '%s%s%s\n' "$BLU" "$*" "$RST"; }
+ok()   { printf '%s%s%s\n' "$GRN" "$*" "$RST"; }
+warn() { printf '%s%s%s\n' "$YLW" "$*" "$RST"; }
+err()  { printf '%s%s%s\n' "$RED" "$*" "$RST" >&2; }
+
+usage() {
+  sed -n '2,22p' "$0" | sed 's/^# \?//'
+  echo
+  echo "Protocol: ${DOC}"
+  exit "${1:-0}"
+}
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    err "missing '${1}'."
+    err "Install is one command, no arguments:"
+    err "  ${INSTALL}"
+    err "Persist PROFILE/ENABLE_* in ${ROOT}/.env — do not pass flags."
+    return 1
+  fi
+}
+
+port_up() {
+  local port="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${port}" 2>/dev/null \
+      || curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${port}/health" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+open_browser() {
+  local url="$1"
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 || true
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+require_this_tree() {
+  python3 "${ROOT}/tests/browser/stack_identity.py"
+}
+
+cmd_launch() {
+  need_cmd docker
+  need_cmd cargo
+  need_cmd curl
+  need_cmd python3
+  if ! command -v dx >/dev/null 2>&1; then
+    err "dx (Dioxus CLI) is not on PATH — UI will not start."
+    err "Run ${INSTALL} (no arguments; PROFILE/ENABLE_* in repo-root .env)."
+    err "Do not treat Kind UI as a substitute for host dx."
+    exit 1
+  fi
+  export FLEET_GIT_SHA
+  FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")"
+  log "Starting stack via ./scripts/fleet-dev.sh start"
+  "${DEV}" start
+  require_this_tree || {
+    err "Launched stack is not this tree. Logs: ./scripts/fleet-dev.sh logs"
+    exit 1
+  }
+  ok "UI  ${UI_URL}"
+  ok "API ${API_URL}/health  git_sha=${FLEET_GIT_SHA}"
+}
+
+pause_step() {
+  local title="$1"
+  shift
+  echo
+  printf '%s▶ %s%s\n' "$GRN" "${title}" "$RST"
+  local line
+  for line in "$@"; do
+    echo "    ${line}"
+  done
+  if [[ ! -t 0 ]]; then
+    warn "stdin is not a TTY — not waiting. Re-run in a terminal for pauses."
+    return 0
+  fi
+  read -r -p "    Enter when this checks out (or type s to skip remaining)… " ans || true
+  if [[ "${ans}" == "s" || "${ans}" == "S" ]]; then
+    warn "Remaining steps skipped."
+    return 2
+  fi
+  return 0
+}
+
+cmd_guide() {
+  if ! require_this_tree; then
+    err "Live stack is not this tree (or is down). Run: $0 launch"
+    exit 1
+  fi
+
+  echo
+  ok "Human testing walkthrough  (${DOC})"
+  echo "    Use ${UI_URL} (localhost, not 127.0.0.1) so cookies work."
+  echo "    Throwaway accounts only: you@example.test — never real email/tokens."
+  echo "    Agents record the MR video separately: $0 record"
+  open_browser "${UI_URL}/"
+
+  pause_step "Landing  ${UI_URL}/" \
+    "Hero, Get started → signup, Log in → login." || return 0
+
+  pause_step "Signup  ${UI_URL}/signup" \
+    "Display name + email@example.test + password (≥ 8)." \
+    "Success goes to /login — signup does NOT log you in." || return 0
+
+  pause_step "Login  ${UI_URL}/login" \
+    "Same email/password → /{workspace-uuid}/dashboard." \
+    "Dashboard is still a stub (\"Fleet overview will live here.\")." || return 0
+
+  pause_step "Login wall" \
+    "Log out (user menu) or a private window." \
+    "Open ${UI_URL}/00000000-0000-0000-0000-000000000000/dashboard" \
+    "Must redirect to /login." || return 0
+
+  pause_step "Sidebar" \
+    "Chat: New chat, Chat history." \
+    "Monitoring: Dashboard, Fleet, Sandboxes." \
+    "Agents: All agents, Live sessions (same route as Chat history)." \
+    "Workspace (expand it): Integrations, Settings." || return 0
+
+  pause_step "Workspace switcher" \
+    "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
+
+  pause_step "Settings" \
+    "Git clone URL + ref (default main). Empty URL is valid (no clone)." \
+    "Save. Invalid URL should error." || return 0
+
+  pause_step "Agents" \
+    "Seed starters → eight persona cards. No LLM is called here." || return 0
+
+  pause_step "Integrations" \
+    "Catalog + search. Connect is enabled for available providers (GitHub, Jira, …)." \
+    "GitHub: new tab → github.com (first time creates a local GitHub App, then install/consent)." \
+    "Jira: new tab → one-time Atlassian OAuth app if needed, then Atlassian login + consent." || return 0
+
+  pause_step "Chat" \
+    "New chat: provider/model dropdown." \
+    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." || return 0
+
+  pause_step "Fleet" \
+    "Start 2-task run → Run tick (or Run until done)." \
+    "Default backend is stub — board should move. Ticker may also tick on its own." || return 0
+
+  pause_step "Sandboxes" \
+    "Same worker sessions as Fleet (status, backend, work dir)." || return 0
+
+  pause_step "Chat history" \
+    "/{ws}/sessions lists saved chats, not workers." \
+    "Worker live view is /{ws}/sessions/{session_id} from a Fleet card." || return 0
+
+  pause_step "User menu" \
+    "Theme Black ↔ White (not persisted). Log out → /login." || return 0
+
+  pause_step "This merge request" \
+    "Do the new thing this change added." \
+    "If this list has no step for it, add one in scripts/human-test.sh and a" \
+    "scene in tests/browser/record_demo.py in the same change." || return 0
+
+  echo
+  ok "Walkthrough done."
+  echo "    Reviewer: ask a peer on the GitLab MR (not a small-tweak exception)."
+  echo "    Agent demo: $0 record     → attach .tmp/demos/*.webm to the MR."
+  echo "    Stop stack: $0 stop"
+}
+
+cmd_record() {
+  need_cmd python3
+  if [[ "${1:-}" != "--list" ]]; then
+    if ! require_this_tree >/dev/null; then
+      warn "This-tree stack not up — launching first."
+      cmd_launch
+    fi
+  fi
+  exec python3 "${REC}" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ -n "${cmd}" ]]; then
+    shift || true
+  fi
+  case "${cmd}" in
+    ""|guide-all|walk)
+      if require_this_tree >/dev/null; then
+        ok "Stack already up (this tree)."
+      else
+        cmd_launch
+      fi
+      cmd_guide
+      ;;
+    launch|start) cmd_launch ;;
+    guide)        cmd_guide ;;
+    record)       cmd_record "$@" ;;
+    status)       "${DEV}" status ;;
+    stop)         "${DEV}" stop ;;
+    -h|--help|help) usage 0 ;;
+    *)
+      err "unknown command: ${cmd}"
+      usage 1
+      ;;
+  esac
+}
+
+main "$@"

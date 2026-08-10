@@ -574,6 +574,20 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Projects with at least one non-terminal run (for the local background ticker).
+    pub async fn list_open_project_ids(&self) -> Result<Vec<Uuid>> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT project_id
+            FROM work_runs
+            WHERE status NOT IN ('completed', 'failed', 'cancelled')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     pub async fn list_runs(&self, project_id: Uuid) -> Result<Vec<super::WorkRunRow>> {
         sqlx::query_as::<_, super::WorkRunRow>(
             r#"
@@ -748,5 +762,22 @@ impl Store {
 
         tx.commit().await?;
         Ok(project)
+    }
+
+    /// Raise project max_agents. Never lowers an existing cap (GREATEST).
+    pub async fn set_max_agents(&self, project_id: Uuid, max_agents: i32) -> Result<()> {
+        let max = max_agents.clamp(1, crate::domain::MAX_PROJECT_AGENTS);
+        sqlx::query(
+            r#"
+            UPDATE project_configs
+            SET max_agents = GREATEST(max_agents, $2)
+            WHERE project_id = $1
+            "#,
+        )
+        .bind(project_id)
+        .bind(max)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

@@ -4,7 +4,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use fleet_auth::{require_user, AppError, AppResult, AuthState};
@@ -21,6 +21,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/workspaces/{workspace_id}/fleet",
             get(get_fleet_project),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/config",
+            patch(patch_fleet_config),
         )
         .route(
             "/api/workspaces/{workspace_id}/fleet/runs/fixture",
@@ -41,6 +45,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/workspaces/{workspace_id}/fleet/sessions",
             get(get_sessions),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}",
+            get(get_session_detail),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/workers",
+            get(get_workers),
         )
         .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
@@ -116,38 +128,102 @@ async fn get_fleet_project(
         "config": {
             "max_agents": cfg.max_agents,
             "sandbox_backend": cfg.sandbox_backend,
+            "repo_url": cfg.repo_url,
+            "git_ref": cfg.git_ref,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchFleetConfigRequest {
+    pub repo_url: Option<String>,
+    pub git_ref: Option<String>,
+}
+
+async fn patch_fleet_config(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PatchFleetConfigRequest>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let existing = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+    let remote = match body.repo_url {
+        None => match existing.git_remote() {
+            Some(mut r) => {
+                if let Some(rf) = body.git_ref.as_deref() {
+                    r.git_ref = fleet_orchestrator::domain::normalize_git_ref(Some(rf))
+                        .map_err(|e| AppError::bad_request(e.to_string()))?;
+                }
+                Some(r)
+            }
+            None => {
+                if body.git_ref.is_some() {
+                    return Err(AppError::bad_request(
+                        "git_ref requires repo_url on this project",
+                    ));
+                }
+                None
+            }
+        },
+        Some(ref url) => fleet_orchestrator::domain::parse_project_git_remote(
+            Some(url.as_str()),
+            body.git_ref.as_deref().or(Some(existing.git_ref.as_str())),
+        )
+        .map_err(|e| AppError::bad_request(e.to_string()))?,
+    };
+    let cfg = state
+        .orch
+        .store
+        .set_project_git_remote(workspace_id, remote.as_ref())
+        .await
+        .map_err(|e| map_orch_err("set_project_git_remote", e))?;
+    Ok(Json(json!({
+        "project_id": workspace_id,
+        "config": {
+            "max_agents": cfg.max_agents,
+            "sandbox_backend": cfg.sandbox_backend,
+            "repo_url": cfg.repo_url,
+            "git_ref": cfg.git_ref,
         }
     })))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FixtureRequest {
-    /// Optional; default is two-task chain.
+    /// `chain` (default) or `diamond`.
     #[serde(default)]
-    #[allow(dead_code)]
     pub kind: Option<String>,
 }
 
-async fn post_fixture(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Path(workspace_id): Path<Uuid>,
-    Json(_body): Json<FixtureRequest>,
-) -> AppResult<(StatusCode, Json<Value>)> {
-    let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
-    ensure_project(&state, workspace_id, &name).await?;
-
-    let run_id = Uuid::new_v4();
-    let plan_id = Uuid::new_v4();
-    let plan = WorkPlanBody {
-        plan_id,
-        project_id: workspace_id,
-        run_id,
-        version: 1,
-        status: WorkPlanStatus::Accepted,
-        source: "ui".into(),
-        tasks: vec![
+fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
+    let coding = |id: &str, title: &str, deps: Vec<&str>, priority: i32| PlanTask {
+        plan_task_id: id.into(),
+        title: title.into(),
+        summary: String::new(),
+        spec_md: String::new(),
+        depends_on: deps.into_iter().map(str::to_string).collect(),
+        worker_profile: "coding".into(),
+        acceptance: vec![],
+        priority,
+        external_ref: None,
+        timeout_s: Some(3600),
+        max_retries: Some(1),
+    };
+    match kind {
+        "diamond" => vec![
+            coding("root", "Root", vec![], 100),
+            coding("left", "Left branch", vec!["root"], 50),
+            coding("right", "Right branch", vec!["root"], 50),
+            coding("join", "Join", vec!["left", "right"], 10),
+        ],
+        _ => vec![
             PlanTask {
                 plan_task_id: "t1".into(),
                 title: "Root task".into(),
@@ -175,6 +251,35 @@ async fn post_fixture(
                 max_retries: None,
             },
         ],
+    }
+}
+
+async fn post_fixture(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<FixtureRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let (user, _) = require_member(&state, &jar, workspace_id).await?;
+    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
+    ensure_project(&state, workspace_id, &name).await?;
+
+    let kind = body
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("chain");
+    let run_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let plan = WorkPlanBody {
+        plan_id,
+        project_id: workspace_id,
+        run_id,
+        version: 1,
+        status: WorkPlanStatus::Accepted,
+        source: "ui".into(),
+        tasks: fixture_tasks(kind),
         policy: PlanPolicy {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
@@ -199,6 +304,7 @@ async fn post_fixture(
             "plan_id": plan_row.id,
             "status": run.status,
             "project_id": workspace_id,
+            "kind": kind,
         })),
     ))
 }
@@ -312,6 +418,90 @@ async fn get_sessions(
     })))
 }
 
+async fn get_session_detail(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, session_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let session = state
+        .orch
+        .store
+        .get_session(session_id)
+        .await
+        .map_err(|e| map_orch_err("get_session", e))?
+        .ok_or_else(|| AppError::not_found("session"))?;
+    if session.project_id != workspace_id {
+        return Err(AppError::not_found("session"));
+    }
+    let work_dir = session.work_dir.clone().unwrap_or_default();
+    let live = read_live_events(&work_dir, 500);
+    let transcript = read_capped_file(
+        std::path::Path::new(&work_dir).join("artifacts/transcript.md"),
+        80_000,
+    );
+    let prompt = read_capped_file(std::path::Path::new(&work_dir).join("prompt.md"), 16_000);
+    let result = std::fs::read_to_string(std::path::Path::new(&work_dir).join("artifacts/result.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    Ok(Json(json!({
+        "session": {
+            "id": session.id,
+            "run_id": session.run_id,
+            "board_task_id": session.board_task_id,
+            "attempt": session.attempt,
+            "status": session.status,
+            "runtime_backend": session.runtime_backend,
+            "worker_profile": session.worker_profile,
+            "progress_pct": session.progress_pct,
+            "last_heartbeat_at": session.last_heartbeat_at,
+            "exit_reason": session.exit_reason,
+            "work_dir": session.work_dir,
+            "started_at": session.started_at,
+            "exited_at": session.exited_at,
+        },
+        "prompt": prompt,
+        "live": live,
+        "transcript": transcript,
+        "result": result,
+    })))
+}
+
+fn read_capped_file(path: impl AsRef<std::path::Path>, max: usize) -> String {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    if s.len() <= max {
+        return s;
+    }
+    s.chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn read_live_events(work_dir: &str, max: usize) -> Vec<Value> {
+    if work_dir.is_empty() {
+        return vec![];
+    }
+    let path = std::path::Path::new(work_dir).join("live.jsonl");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    let mut lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() > max {
+        lines = lines.split_off(lines.len() - max);
+    }
+    lines
+        .into_iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 async fn get_runs(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -337,9 +527,50 @@ async fn get_runs(
     })))
 }
 
+/// Worker sessions exposed as "sandboxes" for product language (stub backend = session).
+async fn get_workers(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let sessions = state
+        .orch
+        .store
+        .list_sessions_for_project(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("list_sessions_for_project", e))?;
+    let cfg = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+    Ok(Json(json!({
+        "sandbox_backend": cfg.sandbox_backend,
+        "sandboxes": sessions.iter().map(|s| json!({
+            "id": s.id,
+            "run_id": s.run_id,
+            "board_task_id": s.board_task_id,
+            "attempt": s.attempt,
+            "status": s.status,
+            "runtime_backend": s.runtime_backend,
+            "runtime_handle": s.runtime_handle,
+            "worker_profile": s.worker_profile,
+            "progress_pct": s.progress_pct,
+            "work_dir": s.work_dir,
+            "last_heartbeat_at": s.last_heartbeat_at,
+            "started_at": s.started_at,
+            "exited_at": s.exited_at,
+            "exit_reason": s.exit_reason,
+            "created_at": s.created_at,
+        })).collect::<Vec<_>>()
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CancelBody {
-    #[allow(dead_code)]
     pub reason: Option<String>,
 }
 
@@ -350,7 +581,9 @@ async fn post_cancel(
     body: Option<Json<CancelBody>>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
-    let _ = body;
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .filter(|s| !s.trim().is_empty());
     state
         .orch
         .store
@@ -360,7 +593,11 @@ async fn post_cancel(
             tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
             AppError::bad_request(e.to_string())
         })?;
-    Ok(Json(json!({ "run_id": run_id, "cancel_requested": true })))
+    Ok(Json(json!({
+        "run_id": run_id,
+        "cancel_requested": true,
+        "reason": reason,
+    })))
 }
 
 trait AuthFromApp {
