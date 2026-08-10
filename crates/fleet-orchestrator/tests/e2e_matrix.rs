@@ -68,6 +68,7 @@ fn single_task(project_id: Uuid, max_retries: i32) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            ..Default::default()
         },
     }
 }
@@ -112,6 +113,7 @@ fn chain_plan(project_id: Uuid) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            ..Default::default()
         },
     }
 }

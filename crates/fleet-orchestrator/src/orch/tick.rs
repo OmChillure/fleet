@@ -223,10 +223,14 @@ impl TickRunner {
             &self.orchestrator_url,
             cfg.default_task_timeout_s,
             repo.as_ref(),
+            &cfg.fleet_llm,
+            &cfg.fleet_llm_model,
         )
         .await?;
         report.spawned = spawn_out.spawned;
         report.spawn_failed = spawn_out.spawn_failed;
+        snap = self.store.load_board_snapshot(project_id).await?;
+        crate::sandbox::team::sync_team_boards(&self.data_dir, project_id, &snap).await;
 
         // Step 8 — stuck / stub completion / kill
         snap = self.store.load_board_snapshot(project_id).await?;
@@ -288,6 +292,7 @@ impl TickRunner {
 
         // Step 13 — orphan reap
         snap = self.store.load_board_snapshot(project_id).await?;
+        crate::sandbox::team::sync_team_boards(&self.data_dir, project_id, &snap).await;
         report.reaped = orphan_reap(&self.store, &self.runtime, project_id, &snap).await?;
 
         // Step 14 — external board sync (PR10), gated by project config
@@ -295,7 +300,7 @@ impl TickRunner {
         report.external_synced =
             sync_external_board(&self.board_sync, &snap, cfg.auto_sync_external).await;
 
-        // Step 15 — wipe workdirs after a grace window (SessionDetail/artifacts).
+        // Step 15 — wipe workdirs after a grace window (TEAM handoffs already archived).
         cleanup_terminal_session_dirs(&self.data_dir, project_id, &snap).await;
 
         Ok(())

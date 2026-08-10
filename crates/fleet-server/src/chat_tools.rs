@@ -96,7 +96,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "get_fleet_status",
-                "description": "Compact fleet snapshot: open runs, task status counts, active sandboxes.",
+                "description": "Fleet snapshot: open runs, sandboxes, max_agents, fleet_llm, effective_backend. Local coding does NOT need GitHub.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -122,11 +122,11 @@ pub fn tool_definitions() -> Value {
                         },
                         "worker_profile": {
                             "type": "string",
-                            "description": "Worker profile (default: coding)"
+                            "description": "Persona slug from list_agent_personas (default coding → backend architect). Each task can be a different specialist."
                         },
                         "max_agents": {
                             "type": "integer",
-                            "description": "Concurrent sandboxes (default 16, env FLEET_MAX_AGENTS). Extra tasks queue until a slot frees — no k8s required."
+                            "description": "Optional override of workspace Settings → concurrent agents. Default is the saved setting."
                         },
                         "context_from": {
                             "type": "array",
@@ -151,7 +151,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "launch_agent_plan",
-                "description": "Multi-agent fan-out: DAG of tasks (deps + parallel). Up to 1000 tasks; only FLEET_MAX_AGENTS run at once (rest queue). Sandboxes are local stub/process/docker — not k8s. Large plans return after the first wave; background ticks drain the queue.",
+                "description": "Launch local multi-agent work NOW. Workers use THIS chat's selected provider+model (Grok/Ollama/Claude later) — do not switch to Ollama. GitHub is NOT required. DAG of tasks (depends_on + parallel).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -161,7 +161,7 @@ pub fn tool_definitions() -> Value {
                         },
                         "max_agents": {
                             "type": "integer",
-                            "description": "Concurrent sandboxes (default 16). Remaining ready tasks wait for free slots."
+                            "description": "Optional override of workspace Settings → concurrent agents."
                         },
                         "context_from": {
                             "type": "array",
@@ -197,6 +197,48 @@ pub fn tool_definitions() -> Value {
                         }
                     },
                     "required": ["tasks"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "configure_fleet",
+                "description": "Enable or change workspace fleet workers: concurrent agents + local Fleet LLM (Ollama). Use this yourself when effective_backend is null so agents can actually code. Do not ask the user to open Settings first. Grok workers stay env-only (cannot set grok here).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_agents": {
+                            "type": "integer",
+                            "description": "Concurrent sandboxes (1–256)"
+                        },
+                        "fleet_llm": {
+                            "type": "string",
+                            "description": "off or ollama"
+                        },
+                        "fleet_llm_model": {
+                            "type": "string",
+                            "description": "Ollama tag e.g. llama3.2 or qwen2.5-coder"
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_agent_personas",
+                "description": "List specialist agent personas (agency-agents roster) to use as worker_profile on launch_agent_task / launch_agent_plan. Examples: engineering-frontend-developer, engineering-code-reviewer, engineering-backend-architect. Aliases: coding, frontend, reviewer, testing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "division": {
+                            "type": "string",
+                            "description": "Optional division filter e.g. engineering, testing, product, design"
+                        }
+                    },
                     "additionalProperties": false
                 }
             }
@@ -330,20 +372,20 @@ pub fn tool_definitions() -> Value {
 
 pub fn system_prompt_with_tools() -> &'static str {
     "You are the Agent Fleet assistant — a helpful AI embedded in a developer platform that runs fleets of sandboxed coding agents and connects to external developer tools.\n\n\
+Bias to action. A normal human request like “get a couple of agents to build a hello world” means: launch the plan now and say who is doing what. Do not wait for confirmation. Do not require Ollama or GitHub.\n\n\
+The model selected in this chat composer is used for YOU and for every sandbox worker (same provider + same model). If the user picked Grok, agents are Grok. Later Claude in the dropdown means Claude everywhere. Do not call configure_fleet to switch to Ollama.\n\n\
 You have tools for:\n\
 **Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or git credentials in sandbox specs)\n\
-- list_sandboxes / list_tasks / list_runs / get_fleet_status\n\
-- launch_agent_task / launch_agent_plan: local sandboxes (stub / local bash fences / docker / process=fleet-worker). Plans up to 1000 tasks; only FLEET_MAX_AGENTS run at once, the rest queue. ```bash fences run when SANDBOX_BACKEND is local or docker.\n\
-**Integrations — CONTROL PLANE only** (tokens decrypt on the server, never in sandboxes)\n\
-- list_integrations / get_integration (shows connected apps + allowlisted ops)\n\
-- integration_query: github, jira, linear, slack, figma, notion, google_drive, teams, discord\n\
-- github_commit_files: write/scaffold files + commit on a branch (use for Next.js stubs, README, etc.)\n\
-- github_create_pr: open a PR after commits\n\
-GitHub write flow: github_commit_files → github_create_pr. Report commit_sha and PR html_url to the user.\n\
-Slack HITL: post_message / get_channel_history. Teams: send_chat_message / send_channel_message.\n\
-Do NOT claim a git push or external write succeeded unless a control-plane tool returned ok.\n\
-If a provider is not connected, tell the user to open Workspace → Integrations and Connect.\n\
-Be concise. Summarize tool results with links/ids."
+- list_agent_personas then launch_agent_plan / launch_agent_task immediately\n\
+- get_fleet_status / list_sandboxes / list_tasks / list_runs for progress\n\
+- Local sandboxes do not need GitHub, Jira, or any integration.\n\
+**Integrations — CONTROL PLANE only** (only when the user asked to push/PR/ticket/message)\n\
+- list_integrations / get_integration / integration_query\n\
+- github_commit_files → github_create_pr\n\
+Do NOT claim a git push succeeded unless a tool returned ok.\n\
+Do NOT block local work because GitHub is disconnected. Only mention Connect if they explicitly wanted a remote repo/PR.\n\
+Multi-agent: split into complementary specialists (different worker_profile). Use depends_on so reviewers wait on implementers. Specs say what THIS agent owns vs others. After launch, one plain sentence: who is doing what + run id.\n\
+Be concise."
 }
 
 pub async fn system_prompt_for_workspace(state: &AppState, workspace_id: Uuid) -> String {
@@ -437,12 +479,20 @@ struct ListTasksArgs {
     status: Option<String>,
 }
 
+/// Provider + model selected in the chat composer. Workers use this exact pair.
+#[derive(Debug, Clone, Default)]
+pub struct ChatLlmContext {
+    pub provider: String,
+    pub model: String,
+}
+
 pub async fn execute_tool(
     state: &AppState,
     workspace_id: Uuid,
     user_id: Uuid,
     name: &str,
     arguments: &Value,
+    llm: &ChatLlmContext,
 ) -> (Value, ChatAction) {
     let result = match name {
         "list_sandboxes" => list_sandboxes(state, workspace_id).await,
@@ -463,14 +513,23 @@ pub async fn execute_tool(
         }
         "list_runs" => list_runs(state, workspace_id).await,
         "get_fleet_status" => get_fleet_status(state, workspace_id).await,
+        "configure_fleet" => configure_fleet_tool(state, workspace_id, arguments).await,
         "launch_agent_task" => match parse_launch_args(arguments) {
-            Ok(args) => launch_agent_task(state, workspace_id, user_id, args).await,
+            Ok(args) => launch_agent_task(state, workspace_id, user_id, args, llm).await,
             Err(e) => Err(AppError::bad_request(e)),
         },
         "launch_agent_plan" => match parse_launch_plan_args(arguments) {
-            Ok(args) => launch_agent_plan(state, workspace_id, user_id, args).await,
+            Ok(args) => launch_agent_plan(state, workspace_id, user_id, args, llm).await,
             Err(e) => Err(AppError::bad_request(e)),
         },
+        "list_agent_personas" => {
+            let div = arguments
+                .get("division")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty());
+            list_agent_personas_tool(div.as_deref()).await
+        }
         "list_integrations" => {
             let connected_only = arguments
                 .get("connected_only")
@@ -598,6 +657,17 @@ pub fn build_chat_plan(
     )
 }
 
+fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
+    let provider = llm.provider.trim();
+    let model = llm.model.trim();
+    if !provider.is_empty() {
+        plan.policy.llm_provider = Some(provider.to_ascii_lowercase());
+    }
+    if !model.is_empty() {
+        plan.policy.llm_model = Some(model.to_string());
+    }
+}
+
 pub fn build_multi_task_plan(
     workspace_id: Uuid,
     max_agents_override: Option<i32>,
@@ -617,6 +687,7 @@ pub fn build_multi_task_plan(
             max_agents_override,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            ..Default::default()
         },
     }
 }
@@ -869,6 +940,40 @@ async fn tick_until_run_settled(
     Ok((ticks, terminal))
 }
 
+async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, ChatAction)> {
+    let data_dir = std::env::var("DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
+    let mut personas = fleet_orchestrator::personas::list_personas(&data_dir).await;
+    if let Some(d) = division {
+        personas.retain(|p| p.division.eq_ignore_ascii_case(d));
+    }
+    let n = personas.len();
+    let content = json!({
+        "source": "https://github.com/msitarzewski/agency-agents",
+        "count": n,
+        "aliases": {
+            "coding": "engineering-backend-architect",
+            "frontend": "engineering-frontend-developer",
+            "reviewer": "engineering-code-reviewer",
+            "testing": "testing/* first match",
+        },
+        "personas": personas.iter().take(80).collect::<Vec<_>>(),
+        "hint": "Set worker_profile to a slug. Pick Fleet LLM (Ollama) in workspace Settings, or FLEET_AGENT_BACKEND=grok on the host.",
+    });
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "list_agent_personas".into(),
+            ok: true,
+            summary: format!("{n} persona(s)"),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
 async fn list_sandboxes(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, ChatAction)> {
     ensure_project(state, workspace_id).await?;
     let sessions = state
@@ -985,6 +1090,79 @@ async fn list_runs(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, Ch
     ))
 }
 
+async fn configure_fleet_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    ensure_project(state, workspace_id).await?;
+    let current = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let max = arguments
+        .get("max_agents")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32)
+        .unwrap_or(current.max_agents)
+        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
+
+    let llm = arguments
+        .get("fleet_llm")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(current.fleet_llm.as_str());
+    if !matches!(llm, "off" | "ollama") {
+        return Err(AppError::bad_request(
+            "fleet_llm must be off or ollama (Grok is env-only)",
+        ));
+    }
+    let model = arguments
+        .get("fleet_llm_model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| current.fleet_llm_model.clone());
+
+    let cfg = state
+        .orch
+        .store
+        .update_fleet_settings(workspace_id, max, llm, &model)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let llm_res = fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm(
+        &cfg.fleet_llm,
+        &cfg.fleet_llm_model,
+    );
+    let content = json!({
+        "max_agents": cfg.max_agents,
+        "fleet_llm": cfg.fleet_llm,
+        "fleet_llm_model": cfg.fleet_llm_model,
+        "effective_backend": llm_res.backend,
+        "effective_model": llm_res.model,
+        "grok_env": fleet_orchestrator::sandbox::agent_loop::grok_env_enabled(),
+    });
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "configure_fleet".into(),
+            ok: true,
+            summary: format!(
+                "fleet llm={} model={}",
+                llm_res.backend.as_deref().unwrap_or("off"),
+                llm_res.model.as_deref().unwrap_or("-")
+            ),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
 async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Value, ChatAction)> {
     ensure_project(state, workspace_id).await?;
     let runs = state
@@ -1041,6 +1219,15 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
     let content = json!({
         "sandbox_backend": cfg.sandbox_backend,
         "max_agents": cfg.max_agents,
+        "fleet_llm": cfg.fleet_llm,
+        "fleet_llm_model": cfg.fleet_llm_model,
+        "effective_backend": fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm(
+            &cfg.fleet_llm,
+            &cfg.fleet_llm_model,
+        )
+        .backend,
+        "grok_env": fleet_orchestrator::sandbox::agent_loop::grok_env_enabled(),
+        "hint": "Workers use this chat's provider+model. Just launch_agent_plan. GitHub is optional.",
         "open_runs": open_runs,
         "total_runs": runs.len(),
         "task_counts": task_counts,
@@ -1054,7 +1241,11 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
             tool: "get_fleet_status".into(),
             ok: true,
             summary: format!(
-                "{open_runs} open run(s), {active_sandboxes} active sandbox(es)"
+                "{open_runs} open run(s), {active_sandboxes} active sandbox(es), llm={}",
+                content
+                    .get("effective_backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("off")
             ),
             run_id: None,
             sandbox_ids: None,
@@ -1068,6 +1259,7 @@ async fn launch_agent_task(
     workspace_id: Uuid,
     user_id: Uuid,
     args: LaunchArgs,
+    llm: &ChatLlmContext,
 ) -> AppResult<(Value, ChatAction)> {
     let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
     ensure_project_capacity(state, workspace_id, max_agents).await?;
@@ -1098,7 +1290,8 @@ async fn launch_agent_task(
         spec.push_str(&format_context_markdown(&ctx));
     }
 
-    let plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
+    let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
+    stamp_plan_llm(&mut plan, llm);
     accept_and_drive_plan(state, workspace_id, plan, "launch_agent_task", &args.title, ctx).await
 }
 
@@ -1107,6 +1300,7 @@ async fn launch_agent_plan(
     workspace_id: Uuid,
     user_id: Uuid,
     args: LaunchPlanArgs,
+    llm: &ChatLlmContext,
 ) -> AppResult<(Value, ChatAction)> {
     let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
     ensure_project_capacity(state, workspace_id, max_agents).await?;
@@ -1168,7 +1362,8 @@ async fn launch_agent_plan(
         })
         .collect();
 
-    let plan = build_multi_task_plan(workspace_id, Some(max_agents), tasks);
+    let mut plan = build_multi_task_plan(workspace_id, args.max_agents, tasks);
+    stamp_plan_llm(&mut plan, llm);
     if let Err(e) = validate::validate_plan(&plan) {
         return Err(AppError::bad_request(e.to_string()));
     }
@@ -1532,6 +1727,8 @@ mod tests {
         assert!(names.contains(&"list_sandboxes"));
         assert!(names.contains(&"list_integrations"));
         assert!(names.contains(&"get_integration"));
+        assert!(names.contains(&"list_agent_personas"));
+        assert!(names.contains(&"configure_fleet"));
     }
 
     #[test]

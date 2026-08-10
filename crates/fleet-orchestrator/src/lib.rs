@@ -8,6 +8,7 @@ pub mod config;
 pub mod domain;
 pub mod notify;
 pub mod orch;
+pub mod personas;
 pub mod sandbox;
 pub mod store;
 pub mod sync;

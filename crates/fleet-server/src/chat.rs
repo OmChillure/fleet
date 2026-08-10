@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::chat_tools::{
     execute_tool, system_prompt_for_workspace, system_prompt_with_tools, tool_definitions,
+    ChatLlmContext,
     ChatAction, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
@@ -708,8 +709,12 @@ async fn chat_with_tools(
                 args = %args,
                 "chat tool call"
             );
+            let llm = ChatLlmContext {
+                provider: "ollama".into(),
+                model: model.to_string(),
+            };
             let (result_json, action) =
-                execute_tool(state, workspace_id, user_id, name, &args).await;
+                execute_tool(state, workspace_id, user_id, name, &args, &llm).await;
             actions.push(action);
 
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());

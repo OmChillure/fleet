@@ -26,6 +26,8 @@ pub async fn schedule_and_spawn(
     orchestrator_url: &str,
     default_timeout_s: i32,
     repo: Option<&crate::domain::ProjectGitRemote>,
+    fleet_llm: &str,
+    fleet_llm_model: &str,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -56,6 +58,7 @@ pub async fn schedule_and_spawn(
         spawned: 0,
         spawn_failed: 0,
     };
+    let mut plan_llms: HashMap<Uuid, crate::sandbox::agent_loop::WorkerLlm> = HashMap::new();
 
     for task in ready {
         if free <= 0 {
@@ -81,6 +84,14 @@ pub async fn schedule_and_spawn(
             .join("sessions")
             .join(assignment.session_id.to_string());
         let _ = tokio::fs::create_dir_all(&session_work).await;
+
+        crate::sandbox::team::prepare_agent_workspace(
+            data_dir,
+            &session_work,
+            task,
+            snap,
+        )
+        .await;
 
         // Vibe/Hermes pattern: optional isolated git checkout per worker.
         if let Ok(src) = std::env::var("FLEET_GIT_SOURCE") {
@@ -109,6 +120,21 @@ pub async fn schedule_and_spawn(
         }
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
+        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
+            cached.clone()
+        } else {
+            let plan = store.get_plan_body(task.plan_id).await.ok().flatten();
+            let resolved = crate::sandbox::agent_loop::resolve_worker_llm(
+                plan.as_ref()
+                    .and_then(|p| p.policy.llm_provider.as_deref()),
+                plan.as_ref().and_then(|p| p.policy.llm_model.as_deref()),
+                fleet_llm,
+                fleet_llm_model,
+            );
+            plan_llms.insert(task.plan_id, resolved.clone());
+            resolved
+        };
         let mut req = SpawnRequest {
             session_id: assignment.session_id,
             project_id,
@@ -124,6 +150,10 @@ pub async fn schedule_and_spawn(
             task_summary: Some(task.summary.clone()),
             // Full spec (may include integration context markdown + ```bash fences).
             task_spec: Some(task.spec_md.clone()),
+            persona_name: Some(persona.name.clone()),
+            persona_md: Some(persona.body.clone()),
+            agent_backend: llm.backend,
+            agent_model: llm.model,
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env

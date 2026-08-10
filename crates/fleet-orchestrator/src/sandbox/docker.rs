@@ -21,6 +21,7 @@ struct DockerEntry {
     handle: RuntimeHandle,
     container_id: String,
     work_dir: PathBuf,
+    agent: Option<super::agent_loop::AgentJob>,
     last_exit: Option<i32>,
     destroyed: bool,
 }
@@ -64,6 +65,33 @@ impl SandboxRuntime for DockerRuntime {
         ensure_docker().await?;
 
         materialize_workspace(&req).await?;
+
+        if req.agent_backend.is_some() {
+            let handle = RuntimeHandle {
+                backend: "docker".into(),
+                id: req.session_id.to_string(),
+            };
+            let job = super::agent_loop::AgentJob::start(&req);
+            let mut g = self.inner.lock().await;
+            g.insert(
+                handle.id.clone(),
+                DockerEntry {
+                    project_id: req.project_id,
+                    handle: handle.clone(),
+                    container_id: String::new(),
+                    work_dir: req.work_dir.clone(),
+                    agent: Some(job),
+                    last_exit: None,
+                    destroyed: false,
+                },
+            );
+            tracing::info!(
+                session_id = %req.session_id,
+                profile = %req.worker_profile,
+                "docker sandbox spawned (LLM agent loop on host)"
+            );
+            return Ok(handle);
+        }
 
         let work = req.work_dir.canonicalize().unwrap_or(req.work_dir.clone());
         let name = format!("fleet-sbx-{}", req.session_id);
@@ -136,6 +164,7 @@ impl SandboxRuntime for DockerRuntime {
                 handle: handle.clone(),
                 container_id: container_id.clone(),
                 work_dir: work.clone(),
+                agent: None,
                 last_exit: None,
                 destroyed: false,
             },
@@ -178,13 +207,18 @@ impl SandboxRuntime for DockerRuntime {
         if e.destroyed {
             return Ok(());
         }
+        if let Some(agent) = e.agent.take() {
+            agent.abort();
+        }
         if e.last_exit.is_none() {
             e.last_exit = read_fleet_exit(&e.work_dir);
         }
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &e.container_id])
-            .output()
-            .await;
+        if !e.container_id.is_empty() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &e.container_id])
+                .output()
+                .await;
+        }
         e.destroyed = true;
         tracing::debug!(id = %handle.id, container = %e.container_id, "docker sandbox destroyed");
         Ok(())
@@ -192,10 +226,18 @@ impl SandboxRuntime for DockerRuntime {
 
     async fn state(&self, handle: &RuntimeHandle) -> Result<SandboxState, SandboxError> {
         let (container_id, work_dir, destroyed, last_exit) = {
-            let g = self.inner.lock().await;
+            let mut g = self.inner.lock().await;
             let e = g
-                .get(&handle.id)
+                .get_mut(&handle.id)
                 .ok_or_else(|| SandboxError::NotFound(handle.id.clone()))?;
+            if let Some(agent) = e.agent.as_ref() {
+                if let Some(code) = agent.poll_exit() {
+                    e.last_exit = Some(code);
+                    e.agent = None;
+                    return Ok(SandboxState::Exited { code: Some(code) });
+                }
+                return Ok(SandboxState::Running);
+            }
             (
                 e.container_id.clone(),
                 e.work_dir.clone(),

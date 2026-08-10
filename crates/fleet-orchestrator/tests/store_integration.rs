@@ -69,6 +69,7 @@ fn sample_body(project_id: Uuid) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            ..Default::default()
         },
     }
 }

@@ -57,7 +57,7 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 | `/{workspace_id}/agents` | Roles, models, budgets | Empty placeholder |
 | `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
 | `/{workspace_id}/integrations` | Connect platforms via OAuth | Catalog + connect flow |
-| `/{workspace_id}/settings` | Workspace preferences | Empty placeholder |
+| `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM |
 
 ```text
 Marketing                          App shell

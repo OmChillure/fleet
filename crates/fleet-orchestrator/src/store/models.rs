@@ -28,6 +28,9 @@ pub struct ProjectConfigRow {
     pub repo_url: Option<String>,
     /// Branch, tag, or commit checked out after clone. Default `main`.
     pub git_ref: String,
+    /// `off` | `ollama` — Grok is env-only, never stored here.
+    pub fleet_llm: String,
+    pub fleet_llm_model: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -48,6 +51,8 @@ impl ProjectConfigRow {
             "sandbox_backend": self.sandbox_backend,
             "repo_url": self.repo_url,
             "git_ref": self.git_ref,
+            "fleet_llm": self.fleet_llm,
+            "fleet_llm_model": self.fleet_llm_model,
         })
     }
 

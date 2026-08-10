@@ -79,7 +79,8 @@ impl Store {
             SELECT project_id, max_agents, tick_interval_s, heartbeat_stale_s,
                    spawn_timeout_s, kill_grace_s, default_task_timeout_s,
                    default_max_retries, retry_backoff_s, on_task_fail,
-                   auto_sync_external, sandbox_backend, repo_url, git_ref, updated_at
+                   auto_sync_external, sandbox_backend, repo_url, git_ref,
+                   fleet_llm, fleet_llm_model, updated_at
             FROM project_configs
             WHERE project_id = $1
             "#,
@@ -135,6 +136,23 @@ impl Store {
             return Err(StoreError::NotFound(format!("project config {project_id}")));
         }
         Ok(())
+    }
+
+    pub async fn get_plan_body(&self, plan_id: Uuid) -> Result<Option<WorkPlanBody>> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            r#"
+            SELECT body FROM work_plans WHERE id = $1
+            "#,
+        )
+        .bind(plan_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((body,)) = row else {
+            return Ok(None);
+        };
+        let plan: WorkPlanBody = serde_json::from_value(body)
+            .map_err(|e| StoreError::Validation(format!("plan body: {e}")))?;
+        Ok(Some(plan))
     }
 
     pub async fn insert_accepted_plan(

@@ -72,8 +72,10 @@ dx serve --package fleet-ui --port 3030
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
-   The assistant can call **sandbox tools** (multi-agent `launch_agent_plan`, multi-tick until
-   ephemeral stub sandboxes complete and are destroyed) and **integration_query**
+   The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
+   specialist `worker_profile`s). Fleet LLM is **Settings** (Ollama model) or host env
+   `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run ```bash fences.
+   Also **integration_query**
    (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
    - `SANDBOX_BACKEND=stub` — fake timer (default)
@@ -118,7 +120,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
-| `/{workspace_id}/settings` | Settings |
+| `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),

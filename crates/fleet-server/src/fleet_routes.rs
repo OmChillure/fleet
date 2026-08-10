@@ -27,6 +27,14 @@ pub fn router() -> Router<AppState> {
             patch(patch_fleet_config),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/settings",
+            get(get_settings).patch(patch_settings),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/personas",
+            get(get_personas),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/fixture",
             post(post_fixture),
         )
@@ -125,12 +133,132 @@ async fn get_fleet_project(
         "workspace_id": workspace_id,
         "role": role,
         "sandbox_backend": state.orch.tick.runtime_backend(),
-        "config": {
-            "max_agents": cfg.max_agents,
-            "sandbox_backend": cfg.sandbox_backend,
-            "repo_url": cfg.repo_url,
-            "git_ref": cfg.git_ref,
+        "config": settings_json(&cfg),
+    })))
+}
+
+fn settings_json(cfg: &fleet_orchestrator::store::ProjectConfigRow) -> Value {
+    let llm = fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm(
+        &cfg.fleet_llm,
+        &cfg.fleet_llm_model,
+    );
+    let grok_env = fleet_orchestrator::sandbox::agent_loop::grok_env_enabled();
+    json!({
+        "max_agents": cfg.max_agents,
+        "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
+        "sandbox_backend": cfg.sandbox_backend,
+        "repo_url": cfg.repo_url,
+        "git_ref": cfg.git_ref,
+        "fleet_llm": cfg.fleet_llm,
+        "fleet_llm_model": cfg.fleet_llm_model,
+        "grok_env": grok_env,
+        "effective_backend": llm.backend,
+        "effective_model": llm.model,
+    })
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let cfg = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+    Ok(Json(settings_json(&cfg)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchSettingsBody {
+    pub max_agents: Option<i32>,
+    pub fleet_llm: Option<String>,
+    pub fleet_llm_model: Option<String>,
+}
+
+async fn patch_settings(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PatchSettingsBody>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let current = state
+        .orch
+        .store
+        .get_project_config(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("get_project_config", e))?;
+
+    let max = body.max_agents.unwrap_or(current.max_agents);
+    if max < 1 || max > fleet_orchestrator::domain::MAX_PROJECT_AGENTS {
+        return Err(AppError::bad_request(format!(
+            "max_agents must be 1–{}",
+            fleet_orchestrator::domain::MAX_PROJECT_AGENTS
+        )));
+    }
+    let llm = body
+        .fleet_llm
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(current.fleet_llm.as_str());
+    if !matches!(llm, "off" | "ollama") {
+        return Err(AppError::bad_request(
+            "fleet_llm must be off or ollama (Grok is env-only: FLEET_AGENT_BACKEND=grok)",
+        ));
+    }
+    let model = body
+        .fleet_llm_model
+        .clone()
+        .unwrap_or_else(|| current.fleet_llm_model.clone());
+
+    let cfg = state
+        .orch
+        .store
+        .update_fleet_settings(workspace_id, max, llm, &model)
+        .await
+        .map_err(|e| map_orch_err("update_fleet_settings", e))?;
+    Ok(Json(settings_json(&cfg)))
+}
+
+async fn get_personas(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let data_dir = std::env::var("DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
+    let personas = fleet_orchestrator::personas::list_personas(&data_dir).await;
+    let (effective, grok_env) = match state.orch.store.get_project_config(workspace_id).await {
+        Ok(cfg) => {
+            let llm = fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm(
+                &cfg.fleet_llm,
+                &cfg.fleet_llm_model,
+            );
+            (
+                llm.backend,
+                fleet_orchestrator::sandbox::agent_loop::grok_env_enabled(),
+            )
         }
+        Err(_) => (
+            fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm("off", "").backend,
+            fleet_orchestrator::sandbox::agent_loop::grok_env_enabled(),
+        ),
+    };
+    Ok(Json(json!({
+        "source": "https://github.com/msitarzewski/agency-agents",
+        "agent_backend": effective,
+        "grok_env": grok_env,
+        "count": personas.len(),
+        "personas": personas,
     })))
 }
 
@@ -284,6 +412,8 @@ async fn post_fixture(
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            llm_provider: None,
+            llm_model: None,
         },
     };
 

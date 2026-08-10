@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool, system_prompt_for_workspace, tool_definitions, ChatAction, MAX_TOOL_ROUNDS,
+    execute_tool, system_prompt_for_workspace, tool_definitions, ChatAction, ChatLlmContext,
+    MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -730,8 +731,12 @@ pub async fn chat_with_tools(
                 arg_keys = %arg_keys_preview(&args),
                 "grok tool call"
             );
+            let llm = ChatLlmContext {
+                provider: "grok".into(),
+                model: model.to_string(),
+            };
             let (result_json, action) =
-                execute_tool(state, workspace_id, user_id, name, &args).await;
+                execute_tool(state, workspace_id, user_id, name, &args, &llm).await;
             actions.push(action);
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
             messages.push(json!({

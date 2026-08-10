@@ -18,6 +18,7 @@ struct ProcessEntry {
     project_id: Uuid,
     handle: RuntimeHandle,
     child: Option<Child>,
+    agent: Option<super::agent_loop::AgentJob>,
     exit_code: Option<i32>,
     destroyed: bool,
 }
@@ -50,6 +51,33 @@ impl SandboxRuntime for ProcessRuntime {
     async fn spawn(&self, req: SpawnRequest) -> Result<RuntimeHandle, SandboxError> {
         materialize_workspace(&req).await?;
 
+        if req.agent_backend.is_some() {
+            let handle = RuntimeHandle {
+                backend: "process".into(),
+                id: req.session_id.to_string(),
+            };
+            let job = super::agent_loop::AgentJob::start(&req);
+            let mut g = self.inner.lock().await;
+            g.insert(
+                handle.id.clone(),
+                ProcessEntry {
+                    project_id: req.project_id,
+                    handle: handle.clone(),
+                    child: None,
+                    agent: Some(job),
+                    exit_code: None,
+                    destroyed: false,
+                },
+            );
+            tracing::info!(
+                session_id = %req.session_id,
+                profile = %req.worker_profile,
+                persona = ?req.persona_name,
+                "process sandbox spawned (LLM agent loop)"
+            );
+            return Ok(handle);
+        }
+
         let script = req.work_dir.join("fleet_worker.sh");
         let mut cmd = Command::new("bash");
         cmd.arg(&script)
@@ -59,10 +87,6 @@ impl SandboxRuntime for ProcessRuntime {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .env_clear();
-        #[cfg(unix)]
-        {
-            cmd.process_group(0);
-        }
 
         // Minimal env + FLEET_* only (no host secrets).
         cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()));
@@ -94,6 +118,7 @@ impl SandboxRuntime for ProcessRuntime {
                 project_id: req.project_id,
                 handle: handle.clone(),
                 child: Some(child),
+                agent: None,
                 exit_code: None,
                 destroyed: false,
             },
@@ -139,12 +164,11 @@ impl SandboxRuntime for ProcessRuntime {
             return Ok(());
         };
         if let Some(mut child) = e.child.take() {
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                let _ = nix_kill(pid, true);
-            }
             let _ = child.start_kill();
             let _ = child.wait().await;
+        }
+        if let Some(agent) = e.agent.take() {
+            agent.abort();
         }
         e.destroyed = true;
         e.exit_code = e.exit_code.or(Some(0));
@@ -165,6 +189,15 @@ impl SandboxRuntime for ProcessRuntime {
 
         if let Some(code) = e.exit_code {
             return Ok(SandboxState::Exited { code: Some(code) });
+        }
+
+        if let Some(agent) = e.agent.as_ref() {
+            if let Some(code) = agent.poll_exit() {
+                e.exit_code = Some(code);
+                e.agent = None;
+                return Ok(SandboxState::Exited { code: Some(code) });
+            }
+            return Ok(SandboxState::Running);
         }
 
         if let Some(child) = e.child.as_mut() {
@@ -212,17 +245,14 @@ impl SandboxRuntime for ProcessRuntime {
 
 #[cfg(unix)]
 fn nix_kill(pid: u32, kill: bool) -> std::io::Result<()> {
-    let sig = if kill { libc::SIGKILL } else { libc::SIGTERM };
-    let pg = -(pid as i32);
-    let rc = unsafe { libc::kill(pg, sig) };
-    if rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        return Ok(());
-    }
-    let rc2 = unsafe { libc::kill(pid as i32, sig) };
-    if rc2 == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+    let sig = if kill { "-9" } else { "-15" };
+    let status = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .status()?;
+    if status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error())
+        Err(std::io::Error::other("kill failed"))
     }
 }
 
@@ -265,6 +295,10 @@ echo hello-from-sandbox > out.txt
 "#
                 .into(),
             ),
+            persona_name: None,
+            persona_md: None,
+            agent_backend: None,
+            agent_model: None,
         };
         let h = rt.spawn(req).await.unwrap();
         assert_eq!(h.backend, "process");
@@ -307,6 +341,10 @@ echo hello-from-sandbox > out.txt
                 task_title: Some("probe".into()),
                 task_summary: None,
                 task_spec: Some("no commands".into()),
+                persona_name: None,
+                persona_md: None,
+                agent_backend: None,
+                agent_model: None,
             })
             .await
             .unwrap();

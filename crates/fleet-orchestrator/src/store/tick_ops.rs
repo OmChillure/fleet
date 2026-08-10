@@ -780,4 +780,41 @@ impl Store {
         .await?;
         Ok(())
     }
+
+    /// Workspace Settings: concurrent agents + local fleet LLM (Ollama). Not Grok.
+    pub async fn update_fleet_settings(
+        &self,
+        project_id: Uuid,
+        max_agents: i32,
+        fleet_llm: &str,
+        fleet_llm_model: &str,
+    ) -> Result<super::ProjectConfigRow> {
+        let max = max_agents.clamp(1, crate::domain::MAX_PROJECT_AGENTS);
+        let llm = match fleet_llm.trim().to_ascii_lowercase().as_str() {
+            "ollama" => "ollama",
+            _ => "off",
+        };
+        let model = if llm == "off" {
+            String::new()
+        } else {
+            fleet_llm_model.trim().chars().take(128).collect()
+        };
+        sqlx::query(
+            r#"
+            UPDATE project_configs
+            SET max_agents = $2,
+                fleet_llm = $3,
+                fleet_llm_model = $4,
+                updated_at = now()
+            WHERE project_id = $1
+            "#,
+        )
+        .bind(project_id)
+        .bind(max)
+        .bind(llm)
+        .bind(&model)
+        .execute(&self.pool)
+        .await?;
+        self.get_project_config(project_id).await
+    }
 }
