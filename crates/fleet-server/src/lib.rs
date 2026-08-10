@@ -162,9 +162,10 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
     if !db_ok {
         tracing::warn!("health check degraded: database down");
     }
-    let git_sha = std::env::var("FLEET_GIT_SHA")
-        .ok()
-        .map(|s| s.trim().to_string())
+    // Compile-time only (build.rs reruns on FLEET_GIT_SHA). Runtime ENV /
+    // `kubectl set env` must not be able to make an old binary look like HEAD.
+    let git_sha = option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
         .filter(|s| !s.is_empty());
     Json(json!({
         "status": if db_ok { "ok" } else { "degraded" },

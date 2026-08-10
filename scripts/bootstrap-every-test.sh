@@ -34,37 +34,40 @@ grep -qE '^JWT_SECRET=.{32,}' "${ROOT}/.env" || \
 ok ".env DATABASE_URL → compose :5433, ENABLE_BROWSER_E2E=1"
 
 if ! need dx; then
-  echo "==> cargo install dioxus-cli 0.7.3 (matches workspace dioxus pin)"
-  if ! cargo install dioxus-cli --version 0.7.3 --locked; then
-    echo "WARN: dx install failed (often OpenSSL 4 vs openssl-sys). Kind UI image is enough for e2e." >&2
-    echo "      Host UI: install libssl-dev matching OpenSSL 3, or use agent-fleet-ui:local." >&2
-  fi
+  echo "ERROR: dx (Dioxus CLI) is not on PATH." >&2
+  echo "       Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh" >&2
+  echo "       (no arguments; PROFILE/ENABLE_* in repo-root .env)." >&2
+  echo "       Do not WARN-and-continue. Do not use Kind UI as a substitute for host dx." >&2
+  exit 1
 fi
-if need dx; then
-  ok "dx $(dx --version 2>/dev/null || true)"
-else
-  echo "WARN: dx not on PATH — use Kind UI or fix openssl and re-run bootstrap" >&2
-fi
+ok "dx $(dx --version 2>/dev/null || true)"
 
-if ! python3 -c "from playwright.sync_api import sync_playwright" >/dev/null 2>&1; then
-  python3 -m pip install --user playwright || python3 -m pip install --user --break-system-packages playwright
-fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${ROOT}/.tmp/ms-playwright}"
-mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}"
 if ! python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()" >/dev/null 2>&1; then
-  echo "==> playwright install chromium → ${PLAYWRIGHT_BROWSERS_PATH}"
-  python3 -m playwright install chromium
+  echo "ERROR: playwright chromium is not ready." >&2
+  echo "       Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh" >&2
+  echo "       (no arguments; ENABLE_BROWSER_E2E=1 in repo-root .env). Do not pip/apt around it." >&2
+  exit 1
 fi
 ok "playwright chromium"
 
 if ! pg_isready -h 127.0.0.1 -p 5433 -U fleet -d fleet >/dev/null 2>&1; then
   echo "==> starting compose postgres"
-  docker compose up -d postgres
+  FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")" docker compose up -d postgres
+  ready=0
   for _ in $(seq 1 40); do
-    pg_isready -h 127.0.0.1 -p 5433 -U fleet -d fleet >/dev/null 2>&1 && break
+    if pg_isready -h 127.0.0.1 -p 5433 -U fleet -d fleet >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
     sleep 1
   done
+  if [[ "${ready}" -ne 1 ]]; then
+    echo "ERROR: postgres :5433 did not become ready after docker compose up." >&2
+    exit 1
+  fi
 fi
 ok "postgres :5433"
 
+python3 "${ROOT}/tests/browser/stack_identity.py" --tools
 echo "Bootstrap done. Next: rebuild Kind images (see run-every-test.sh --prepare-kind) then ./scripts/run-every-test.sh"

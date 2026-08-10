@@ -641,9 +641,15 @@ async fn ensure_project_capacity(
 ) -> AppResult<()> {
     let max = max_agents.clamp(1, chat_max_agents());
     ensure_project(state, workspace_id).await?;
-    if let Err(e) = state.orch.store.set_max_agents(workspace_id, max).await {
-        tracing::warn!(%workspace_id, error = %e, "set_max_agents failed (continuing)");
-    }
+    state
+        .orch
+        .store
+        .set_max_agents(workspace_id, max)
+        .await
+        .map_err(|e| {
+            tracing::error!(%workspace_id, error = %e, "set_max_agents failed");
+            AppError::internal(e.to_string())
+        })?;
     Ok(())
 }
 
@@ -848,7 +854,7 @@ async fn tick_until_run_settled(
             .store
             .list_tasks(workspace_id, Some(run_id), None)
             .await
-            .unwrap_or_default();
+            .map_err(|e| AppError::internal(e.to_string()))?;
         let active = tasks.iter().any(|t| {
             matches!(
                 t.status.as_str(),
@@ -1235,7 +1241,7 @@ async fn accept_and_drive_plan(
         .store
         .list_tasks(workspace_id, Some(run_id), None)
         .await
-        .unwrap_or_default();
+        .map_err(|e| AppError::internal(e.to_string()))?;
     let task_statuses: Vec<Value> = tasks
         .iter()
         .map(|t| {

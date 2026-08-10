@@ -116,7 +116,7 @@ async fn run() -> anyhow::Result<()> {
                     Ok(ids) => {
                         for id in ids {
                             if let Err(e) = orch_bg.tick.tick_project(id).await {
-                                tracing::debug!(project_id = %id, error = %e, "background tick");
+                                tracing::warn!(project_id = %id, error = %e, "background tick failed");
                             }
                         }
                     }

@@ -20,7 +20,7 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 | Unit | `#[cfg(test)]` next to Rust code (includes `fleet-chat-md`) | `just test` → `cargo test --workspace --lib --exclude fleet-ui --locked` | Never |
 | Process worker | `crates/fleet-driver/tests/` (`acp_mock`, `worker_protocol`) | same `just test` → `cargo test -p fleet-driver --locked` | Never (`acp_grok` is `#[ignore]`) |
 | Rust integration | `fleet-orchestrator` / `fleet-auth` / `fleet-server` / `fleet-db` `tests/` | `just test-integration` (needs Postgres via `just db-up`) | **Fail** if `DATABASE_URL` is unset |
-| Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | `skipUnless` only for optional kind / git-ssh |
+| Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | Skip only when the matching `ENABLE_*` is off; **fail** if the flag is on and the service is down |
 | Browser | `tests/browser/test_app_e2e.py` | suite stage when `ENABLE_BROWSER_E2E=1` (needs `:3030` + `:8080`; after kind when `ENABLE_KIND=1`) | Off unless enabled; then **fail** if the stack is down |
 | Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI |
 | MR demo video | `scripts/human-test.sh record` (agent, Playwright `.webm`) | attach to the GitLab MR | Agent records; never commit the file |
@@ -30,11 +30,17 @@ succeed" + the job never starts). Tests run on a developer or agent host:
 
 `ENABLE_BROWSER_E2E` defaults **on** only for `PROFILE=full` (kind publishes UI/API). `lab` and `minimal` default it off.
 
-Live `:3030`/`:8080` is **this tree** only when `/health.git_sha` equals
-`git rev-parse HEAD`. Kind extraPortMappings often own those ports with
-**old** images — port-up is not enough. `tests/browser/stack_identity.py`
-fails closed. `FLEET_ALLOW_FOREIGN_STACK=1` is an operator escape, not a
-way to go green. Kind videos filmed without a matching sha are not proof.
+Live `:3030`/`:8080` is **this worktree** only when **both** `/health.git_sha`
+and UI `/fleet-git-sha.txt` equal `scripts/tree-id.sh` (HEAD, or
+`HEAD-<dirty>` if you have uncommitted changes). The API sha is baked at
+compile time — `kubectl set env` cannot fake it. After any edit, run the
+install script or `./scripts/run-every-test.sh --prepare-kind` (and host
+`dx`) **before** verification; a run without that rebuild is not valid.
+Kind extraPortMappings often own those ports with **old** images — port-up
+is not enough. `tests/browser/stack_identity.py` fails closed. There is no
+green path via `FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx` is a fail
+(Kind UI is not a substitute). Kind videos filmed without matching API+UI
+ids are not proof. Contract: `tests/browser/test_fail_closed_contract.py`.
 
 ## Rules
 

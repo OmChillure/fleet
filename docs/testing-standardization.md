@@ -36,10 +36,25 @@ There is **no GitLab runner**. Do not add `.gitlab-ci.yml`.
 
 - Missing `DATABASE_URL` in a Postgres test **panics** with a one-line how-to.
 - Missing UI/API when browser e2e or `record` is requested **fails**.
+- Missing host `dx` **fails**. Kind UI is not a substitute. Do not
+  WARN-and-continue in bootstrap / fleet-dev / every-test.
+- Live identity is API **and** UI (`/health.git_sha` + `/fleet-git-sha.txt`).
+  API-only was how an old UI went green. Compile-time bake only — never
+  `kubectl set env FLEET_GIT_SHA`.
 - `SKIP_*` on the suite is for operators who cannot run compose/kind/LLM, not
-  to hide a red test.
-- `skipUnless` is only for optional kind / git-ssh / Ollama / `:1234`.
+  to hide a red test. `FLEET_ALLOW_FOREIGN_STACK` is not a green path.
+- Optional kind / git-ssh / Ollama / `:1234` skip only when the matching
+  `ENABLE_*` is off. If the flag is on and the service is down, **fail**.
 - Do not use `|| true` around `cargo test`.
+- Do not print EVERY-TEST OK with caveats. Contract:
+  `tests/browser/test_fail_closed_contract.py`.
+- In-process orchestrator tests set `Config.orchestrator_public_url` to
+  **this test's listener**. `API_PUBLIC_BASE` from repo-root `.env` is Kind
+  `:8080` — if spawn re-reads it, process workers heartbeat at the foreign
+  stack and the run goes `failed`.
+- Live/e2e/every-test is valid only after the install script or
+  `--prepare-kind` (+ host `dx`) baked `scripts/tree-id.sh` into the
+  running stack. A green run on yesterday's images is not verification.
 
 ## Future tests (checklist)
 
@@ -62,10 +77,12 @@ Before you write a test, pick the row in the table. Then:
 | --- | --- |
 | `run-host-e2e.py` under `scripts/` | `sandbox-lab/tests/test_host_e2e.py` (unittest) |
 | `run-protocol-tests.sh` duplicates the suite | thin wrapper; prefer `run-full-suite.sh` |
-| `test_host_services` skipped Postgres | `:5433` fails if down; Ollama/:1234 still skip |
+| `test_host_services` skipped Postgres | `:5433` always fails if down; Ollama/:1234 fail when `ENABLE_*=1`, skip only when the flag is off |
 | `fleet-ui` markdown tests never run | `fleet-chat-md` on `just test` |
 | `fleet-db` had zero tests | `crates/fleet-db/tests/repos_integration.rs` |
 | `fleet-auth` only persona units | password / JWT / cookie / config `#[cfg(test)]` |
 | Server HTTP repeated orch tick matrix | one cookie BFF fixture+tick; orch keeps the matrix |
 | Human/demo scripts unproven | films only after `/health.git_sha` matches HEAD; lab uses absolute `file://` |
 | Live `:3030`/`:8080` stolen by Kind | `stack_identity.py` fail-closed; old `.webm`s are not proof |
+| Host `dx` missing / Kind UI used as substitute | install installs `dx` or exits 1; bootstrap/every-test fail closed |
+| `/health.git_sha` faked via `kubectl set env` | compile-time `option_env!`; UI `/fleet-git-sha.txt`; image label |

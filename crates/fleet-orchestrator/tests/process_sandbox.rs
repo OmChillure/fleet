@@ -51,6 +51,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         admin_token: "test-admin".into(),
         auth_mode: AuthMode::Token,
         http_addr: addr.to_string(),
+        orchestrator_public_url: format!("http://{addr}"),
         data_dir: data_dir.path().to_path_buf(),
         tick_interval: Duration::from_secs(5),
         max_agents: 3,
@@ -70,6 +71,13 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         leadership_mode: "single_process".into(),
         project_filter: None,
     };
+
+    // Repo-root .env sets these to Kind :8080. Spawn must use
+    // cfg.orchestrator_public_url, not public_orchestrator_url() at tick time.
+    unsafe {
+        std::env::set_var("API_PUBLIC_BASE", "http://127.0.0.1:1");
+        std::env::set_var("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:1");
+    }
 
     let state = build_app_state(&cfg).await.expect("state");
     assert_eq!(state.tick.runtime_backend(), "process");
@@ -150,10 +158,19 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert_eq!(
-        last_status, "completed",
-        "run did not complete via process worker"
-    );
+    if last_status != "completed" {
+        let tasks: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT plan_task_id, status, failure_reason FROM board_tasks WHERE run_id = $1 ORDER BY plan_task_id",
+        )
+        .bind(run_id)
+        .fetch_all(store.pool())
+        .await
+        .unwrap_or_default();
+        panic!(
+            "run did not complete via process worker: status={last_status} tasks={tasks:?} \
+             (workers must call this test's listener, not API_PUBLIC_BASE / Kind :8080)"
+        );
+    }
 
     let tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT plan_task_id, status FROM board_tasks WHERE run_id = $1 ORDER BY plan_task_id",

@@ -35,10 +35,13 @@ pub fn clear_auth_cookies(headers: &mut HeaderMap, cfg: &AuthConfig) {
 }
 
 fn append_set_cookie(headers: &mut HeaderMap, cookie: &Cookie<'_>) {
-    // cookie crate Display produces a valid Set-Cookie value
-    if let Ok(val) = HeaderValue::from_str(&cookie.to_string()) {
-        headers.append(SET_COOKIE, val);
-    }
+    // cookie crate Display produces a valid Set-Cookie value. Dropping it
+    // would make login look successful with no session cookie.
+    let raw = cookie.to_string();
+    let val = HeaderValue::from_str(&raw).unwrap_or_else(|e| {
+        panic!("Set-Cookie header is invalid ({e}): {raw}");
+    });
+    headers.append(SET_COOKIE, val);
 }
 
 /// Prefer explicit SameSite::None only when secure (browsers require it).

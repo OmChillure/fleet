@@ -182,13 +182,21 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
     if result.ok {
         result.data = sanitize_value(&result.data);
     } else if result.error_code.as_deref() == Some("token_expired") {
-        let _ = fleet_db::repos::integrations::mark_error(
+        if let Err(e) = fleet_db::repos::integrations::mark_error(
             pool,
             req.workspace_id,
             &provider,
             &result.summary,
         )
-        .await;
+        .await
+        {
+            tracing::error!(
+                workspace_id = %req.workspace_id,
+                provider = %provider,
+                error = %e,
+                "failed to persist token_expired on connection"
+            );
+        }
     }
 
     if contains_secret_keys(&result.data) {

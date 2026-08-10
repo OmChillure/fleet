@@ -79,6 +79,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         admin_token: TEST_ADMIN_TOKEN.into(),
         auth_mode: AuthMode::Token,
         http_addr: "127.0.0.1:0".into(),
+        orchestrator_public_url: "http://127.0.0.1:0".into(),
         data_dir,
         tick_interval: Duration::from_secs(5),
         max_agents: 3,
@@ -467,7 +468,7 @@ async fn health_ok_healthz_ok_api_index_lists_auth_and_fleet() {
     }
     assert!(
         health.body.get("git_sha").is_some(),
-        "health must expose git_sha (null in oneshot tests): {}",
+        "health must expose git_sha (null when FLEET_GIT_SHA unset at compile): {}",
         health.body
     );
 

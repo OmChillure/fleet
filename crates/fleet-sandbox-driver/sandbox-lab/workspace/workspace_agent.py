@@ -100,8 +100,8 @@ def write_json(path, obj, mode=0o664):
     try:
         os.chmod(path, mode)
         os.chown(path, 0, FLEET_GID)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'write_json chmod/chown failed {path}: {e}')
 
 
 def status(job_id, phase, ok=True, message='', **extra):
@@ -301,8 +301,8 @@ def write_tools(work_dir, tools):
     write_json(path, out, mode=0o444)
     try:
         os.chmod(path, 0o444)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'chmod 0444 {path} failed: {e}')
     lines = ["# Fleet workspace tools (allowlisted)", "", "Use only:", ""]
     for name, spec in sorted(out.items()):
         lines.append(f"- `fleet-wsexec {name}` -> `{' '.join(spec['argv'])}`")
@@ -367,8 +367,8 @@ def handle_provision(req):
     try:
         os.chmod(tools_path, 0o444)
         os.chown(tools_path, 0, 0)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'lock tools file {tools_path} failed: {e}')
     job_root = work_dir.parent if work_dir.name == "repo" else work_dir
     chown_tree(job_root)
     mile("ready")
@@ -507,15 +507,15 @@ def ensure_shared_permissions():
         log(f"chmod warning: {e}")
     try:
         os.chown(jobs, FLEET_UID, FLEET_GID)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f'chown jobs {jobs} failed: {e}')
     # Optional lab default root — never required when FLEET_JOBS_ROOT is overridden.
     default_root = Path("/workspace")
     if default_root.exists():
         try:
             os.chmod(default_root, 0o755)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'chmod {default_root} failed: {e}')
 
 
 def pick_request():
@@ -533,8 +533,8 @@ def main():
     for pth in FLEET.glob("request*.json"):
         try:
             pth.unlink()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'unlink leftover {pth.name}: {e}')
     try:
         (FLEET / "agent.alive").write_text(str(time.time()), encoding="utf-8")
         os.chmod(FLEET / "agent.alive", 0o640)
@@ -552,8 +552,8 @@ def main():
             log(f"bad request {req_path.name}: {e}")
             try:
                 req_path.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                log(f'unlink bad request {req_path.name}: {e}')
             continue
         claimed = req_path.with_suffix(".claimed")
         try:
@@ -565,8 +565,8 @@ def main():
         handle_request(req)
         try:
             claimed.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            log(f'unlink claimed {claimed.name}: {e}')
 
 
 if __name__ == "__main__":

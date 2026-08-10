@@ -395,10 +395,11 @@ async fn load_cli_auth(cfg: &GrokConfig) -> Result<AuthSource, String> {
         }
     }
 
+    // Team / org name only — never the operator's email (that leaked into chat status).
     let label = entry
-        .email
+        .team_name
         .clone()
-        .or(entry.team_name.clone())
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "CLI".into());
 
     Ok(AuthSource::Cli {

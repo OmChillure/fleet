@@ -271,7 +271,9 @@ async fn drive_session(
         .await
         {
             Ok(_) => info!(%method_id, "ACP authenticated"),
-            Err(e) => warn!(error = %e, %method_id, "ACP authenticate failed (continuing)"),
+            Err(e) => {
+                anyhow::bail!("ACP authenticate failed for {method_id}: {e}");
+            }
         }
     }
 
@@ -346,11 +348,7 @@ async fn drive_session(
         .and_then(|u| u.get("modelId").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
 
-    let ok = match stop_reason.as_deref() {
-        Some("end_turn") | Some("done") | Some("") | None => true,
-        Some("cancelled") | Some("timeout") | Some("refusal") | Some("error") => false,
-        Some(_) => true, // unknown but completed
-    };
+    let ok = session_succeeded(stop_reason.as_deref());
 
     let _ = rpc(
         stdin,
@@ -853,6 +851,39 @@ fn msg_id(msg: &Value) -> Option<u64> {
     }
 }
 
+/// ACP `stopReason` that means the agent refused / was policy-blocked.
+pub fn is_blocked_stop(stop: &str) -> bool {
+    let s = stop.trim().to_ascii_lowercase();
+    s == "blocked"
+        || s == "denied"
+        || s == "reject"
+        || s == "rejected"
+        || s.contains("blocked")
+        || s.contains("denied")
+        || s.contains("reject")
+}
+
+/// Whether a completed prompt counts as success.
+///
+/// Unknown reasons stay successful (agent finished). Block/deny/reject and the
+/// known failure tokens do not — even when the transcript is non-empty.
+pub fn session_succeeded(stop_reason: Option<&str>) -> bool {
+    let Some(raw) = stop_reason else {
+        return true;
+    };
+    let s = raw.trim();
+    if s.is_empty() {
+        return true;
+    }
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "end_turn" | "done" => true,
+        "cancelled" | "canceled" | "timeout" | "refusal" | "error" => false,
+        other if is_blocked_stop(other) => false,
+        _ => true,
+    }
+}
+
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -888,5 +919,30 @@ mod tests {
             "content": {"type": "text", "text": "hello"}
         });
         assert_eq!(format_session_update(&u).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn blocked_stop_is_not_success() {
+        assert!(!session_succeeded(Some("blocked")));
+        assert!(!session_succeeded(Some("Blocked")));
+        assert!(!session_succeeded(Some("permission_denied")));
+        assert!(!session_succeeded(Some("rejected")));
+        assert!(is_blocked_stop("blocked"));
+        assert!(is_blocked_stop("policy-blocked"));
+    }
+
+    #[test]
+    fn known_fail_and_success_stops() {
+        assert!(session_succeeded(Some("end_turn")));
+        assert!(session_succeeded(Some("done")));
+        assert!(session_succeeded(None));
+        assert!(session_succeeded(Some("")));
+        assert!(session_succeeded(Some("max_tokens")));
+        assert!(!session_succeeded(Some("cancelled")));
+        assert!(!session_succeeded(Some("timeout")));
+        assert!(!session_succeeded(Some("error")));
+        assert!(!session_succeeded(Some("refusal")));
+        assert!(!is_blocked_stop("refusal"));
+        assert!(!is_blocked_stop("end_turn"));
     }
 }

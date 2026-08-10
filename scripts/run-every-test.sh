@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run every test on this checkout. Report-then-fail (no || true on cargo).
-# No SKIP_* defaults. Kind :8080 must be THIS tree (git_sha == HEAD).
+# No SKIP_* defaults. No WARN-and-continue. Missing host dx / foreign stack = fail.
+# Live :8080/:3030 must be THIS worktree (scripts/tree-id.sh baked into API+UI).
+# After code changes: install script or --prepare-kind first. Without that,
+# this run is not a valid verification.
 #
 #   ./scripts/bootstrap-every-test.sh
 #   ./scripts/run-every-test.sh --prepare-kind   # rebuild/load api+ui+operator
@@ -36,30 +39,58 @@ run_step() {
   return 0
 }
 
+write_ui_git_sha() {
+  local sha="$1"
+  local dest="${ROOT}/crates/fleet-ui/public/fleet-git-sha.txt"
+  mkdir -p "$(dirname "${dest}")"
+  printf '%s\n' "${sha}" >"${dest}"
+}
+
+host_dx_build() {
+  local sha public
+  sha="$(bash "${ROOT}/scripts/tree-id.sh")"
+  export FLEET_GIT_SHA="${sha}"
+  write_ui_git_sha "${sha}"
+  dx build --package fleet-ui --platform web
+  html="$(find "${CARGO_TARGET_DIR}" "${ROOT}/target" -type f -path '*/web/public/index.html' 2>/dev/null | head -1)"
+  public=""
+  if [[ -n "${html}" ]]; then
+    public="$(dirname "${html}")"
+  fi
+  if [[ -z "${public}" ]]; then
+    echo "ERROR: dx build produced no web/public/index.html" >&2
+    return 1
+  fi
+  printf '%s\n' "${sha}" >"${public}/fleet-git-sha.txt"
+  test "$(tr -d '[:space:]' <"${public}/fleet-git-sha.txt")" = "${sha}"
+}
+
 prepare_kind() {
   local sha
-  sha="$(git -C "${ROOT}" rev-parse HEAD)"
+  sha="$(bash "${ROOT}/scripts/tree-id.sh")"
   export FLEET_GIT_SHA="${sha}"
+  write_ui_git_sha "${sha}"
   log "==== docker build api/ui/operator FLEET_GIT_SHA=${sha} ===="
   docker build --build-arg "FLEET_GIT_SHA=${sha}" \
     -t agent-fleet-api:local -f "${ROOT}/Dockerfile" "${ROOT}"
-  docker build -t agent-fleet-ui:local -f "${ROOT}/Dockerfile.ui" "${ROOT}"
-  docker build -t agent-fleet-operator:local -f "${ROOT}/Dockerfile.operator" "${ROOT}"
+  docker build --build-arg "FLEET_GIT_SHA=${sha}" \
+    -t agent-fleet-ui:local -f "${ROOT}/Dockerfile.ui" "${ROOT}"
+  docker build --build-arg "FLEET_GIT_SHA=${sha}" \
+    -t agent-fleet-operator:local -f "${ROOT}/Dockerfile.operator" "${ROOT}"
   kind load docker-image agent-fleet-api:local agent-fleet-ui:local agent-fleet-operator:local \
     --name agent-fleet
   kubectl --context kind-agent-fleet -n agent-fleet rollout restart deploy/api deploy/ui deploy/fleet-operator
   kubectl --context kind-agent-fleet -n agent-fleet rollout status deploy/api --timeout=300s
   kubectl --context kind-agent-fleet -n agent-fleet rollout status deploy/ui --timeout=300s
-  # Wait host publish
   local i
   for i in $(seq 1 60); do
     if python3 "${ROOT}/tests/browser/stack_identity.py"; then
-      log "Kind host :8080 is this tree"
+      log "Kind host :8080/:3030 is this tree (API + UI sha)"
       return 0
     fi
     sleep 3
   done
-  log "ERROR: Kind host :8080 still not this tree after rebuild"
+  log "ERROR: Kind host :8080/:3030 still not this tree after rebuild"
   return 1
 }
 
@@ -76,11 +107,27 @@ if [[ -f "${ROOT}/.env" ]]; then
   . "${ROOT}/.env"
   set +a
 fi
+if [[ "${FLEET_ALLOW_FOREIGN_STACK:-}" == "1" ]]; then
+  echo "ERROR: FLEET_ALLOW_FOREIGN_STACK is not a green path. Unset it." >&2
+  exit 1
+fi
+unset FLEET_ALLOW_FOREIGN_STACK || true
 export DATABASE_URL="${DATABASE_URL:-postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable}"
 export JWT_SECRET="${JWT_SECRET:-dev-change-me-to-a-long-random-secret-at-least-32-chars}"
 export ADMIN_TOKEN="${ADMIN_TOKEN:-test-admin}"
-export FLEET_GIT_SHA="${FLEET_GIT_SHA:-$(git -C "${ROOT}" rev-parse HEAD)}"
+# Always this worktree. Do not let .env / kubectl leftovers override the bake.
+export FLEET_GIT_SHA
+FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")"
 
+if ! python3 "${ROOT}/tests/browser/stack_identity.py" --tools; then
+  echo "ERROR: required tools missing (host dx included). Run the install script." >&2
+  echo "EVERY-TEST FAILED" | tee "${SUM}"
+  exit 1
+fi
+
+run_step fail-closed-contract \
+  python3 -m unittest tests.browser.test_fail_closed_contract -q
+run_step host-dx-build host_dx_build
 run_step stack-identity python3 "${ROOT}/tests/browser/stack_identity.py"
 run_step cargo-workspace-lib \
   cargo test --workspace --lib --exclude fleet-ui --locked

@@ -72,8 +72,8 @@ class BrowserE2ETests(unittest.TestCase):
             raise RuntimeError(
                 f"Chromium launch failed ({e}). Need OS libraries "
                 "(nss, atk, gtk, gbm, asound, …) and a browser under "
-                ".tmp/ms-playwright. Re-run install-full-suite-deps.sh as root "
-                "with ENABLE_BROWSER_E2E=1 (`python3 -m playwright install-deps chromium`)."
+                ".tmp/ms-playwright. Re-run install-full-suite-deps.sh "
+                "with ENABLE_BROWSER_E2E=1 in repo-root .env."
             ) from e
         cls._context = cls._browser.new_context(
             base_url=UI,
@@ -194,6 +194,9 @@ class BrowserE2ETests(unittest.TestCase):
             self.assertIn(name, apis, f"health.apis missing {name}: {apis}")
         sha = body.get("git_sha")
         self.assertTrue(sha, f"health.git_sha must be this tree: {body}")
+        ui = self.page.request.get(f"{UI}/fleet-git-sha.txt")
+        self.assertEqual(ui.status, 200, ui.text()[:300])
+        self.assertEqual(ui.text().strip(), sha)
 
     def test_06_sidebar_has_fleet_and_integrations(self) -> None:
         base = getattr(type(self), "workspace_url", None)

@@ -181,8 +181,11 @@ class RecordDemoContractTests(unittest.TestCase):
         ident = (REPO / "tests" / "browser" / "stack_identity.py").read_text(encoding="utf-8")
         self.assertIn("FLEET_GIT_SHA", ident)
         self.assertIn("git_sha", ident)
+        self.assertIn("fleet-git-sha.txt", ident)
         self.assertIn("extraPortMappings", ident)
         self.assertIn('"chat"', ident)
+        self.assertNotIn("FLEET_ALLOW_FOREIGN_STACK", ident)
+        self.assertNotIn("continuing", ident.lower())
         # require_stack must gate recording (called before launch), not only defined.
         self.assertRegex(
             src,

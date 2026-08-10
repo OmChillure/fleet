@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout,
     me,
@@ -491,8 +492,17 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                             menu_open.set(false);
                             let navigator = navigator.clone();
                             spawn(async move {
-                                let _ = logout().await;
-                                navigator.replace(Route::Login {});
+                                match logout().await {
+                                    Ok(()) => {
+                                        let _ = navigator.replace(Route::Login {});
+                                    }
+                                    Err(e) => {
+                                        show_toast().error(format!(
+                                            "Log out failed: {}",
+                                            e.message()
+                                        ));
+                                    }
+                                }
                             });
                         },
                         "Log out"

@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# OS libraries for headless Chromium. Needs root on Linux.
-# Run: sudo ./scripts/sudo-playwright-deps.sh
-set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${ROOT}/.tmp/ms-playwright}"
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "re-run as root: sudo $0" >&2
-  exit 2
-fi
-python3 -m playwright install-deps chromium
-echo "playwright OS deps installed"
+# Not a second install. Chromium OS libs are in the one install script.
+echo "ERROR: do not run $0." >&2
+echo "Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh" >&2
+echo "(no arguments; ENABLE_BROWSER_E2E=1 in repo-root .env)." >&2
+exit 2

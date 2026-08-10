@@ -80,9 +80,9 @@ impl CredentialsKey {
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
-        let ct = cipher.encrypt(nonce, bytes.as_ref()).map_err(|_| {
+        let ct = cipher.encrypt(&nonce, bytes.as_ref()).map_err(|_| {
             tracing::error!("credentials encrypt failed");
             anyhow::anyhow!("credentials encrypt failed")
         })?;
@@ -121,10 +121,14 @@ impl CredentialsKey {
             tracing::error!(error = %e, "credentials nonce hex decode failed");
             anyhow::anyhow!("credentials nonce hex: {e}")
         })?;
-        if nonce_bytes.len() != NONCE_LEN {
-            tracing::error!(len = nonce_bytes.len(), expected = NONCE_LEN, "bad credentials nonce length");
-            anyhow::bail!("credentials nonce must be {NONCE_LEN} bytes");
-        }
+        let nonce_arr: [u8; NONCE_LEN] = nonce_bytes.as_slice().try_into().map_err(|_| {
+            tracing::error!(
+                len = nonce_bytes.len(),
+                expected = NONCE_LEN,
+                "bad credentials nonce length"
+            );
+            anyhow::anyhow!("credentials nonce must be {NONCE_LEN} bytes")
+        })?;
         let ct = hex::decode(ct_hex).map_err(|e| {
             tracing::error!(error = %e, "credentials ct hex decode failed");
             anyhow::anyhow!("credentials ct hex: {e}")
@@ -134,9 +138,9 @@ impl CredentialsKey {
             tracing::error!(error = %e, "aes key init failed (decrypt)");
             anyhow::anyhow!("aes key init: {e}")
         })?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_arr);
 
-        let plain = cipher.decrypt(nonce, ct.as_ref()).map_err(|_| {
+        let plain = cipher.decrypt(&nonce, ct.as_ref()).map_err(|_| {
             tracing::error!(
                 "credentials decrypt failed (wrong INTEGRATIONS_ENCRYPTION_KEY or corrupt data)"
             );

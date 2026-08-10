@@ -26,6 +26,14 @@ vendor/
 crates/fleet-ui/node_modules/
 crates/fleet-ui/package-lock.json
 
+# baked at dx serve / dx build / image build — never commit
+crates/fleet-ui/public/fleet-git-sha.txt
+
+# Python bytecode (must not move scripts/tree-id.sh)
+__pycache__/
+*.py[cod]
+*$py.class
+
 # accidental local ref / temp assets
 *.webp
 !docs/**/*.webp

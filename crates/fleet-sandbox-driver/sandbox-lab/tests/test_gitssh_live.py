@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from lab_env import env_flag
+
 LAB = Path(__file__).resolve().parents[1]
 REPO = LAB.parents[2]
 AGENT = LAB / "workspace" / "workspace_agent.py"
@@ -24,9 +26,26 @@ def _port_open(host: str, port: int) -> bool:
         return False
 
 
-@unittest.skipUnless(KEY.is_file(), "dummy SSH key not installed (.tmp/ssh)")
-@unittest.skipUnless(_port_open("127.0.0.1", 2222), "git-ssh :2222 not listening")
 class GitSshLiveTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        key_ok = KEY.is_file()
+        port_ok = _port_open("127.0.0.1", 2222)
+        if key_ok and port_ok:
+            return
+        if env_flag("ENABLE_GITSSH"):
+            missing = []
+            if not key_ok:
+                missing.append("dummy SSH key .tmp/ssh/id_ed25519")
+            if not port_ok:
+                missing.append("git-ssh :2222")
+            raise AssertionError(
+                "ENABLE_GITSSH=1 but missing: " + ", ".join(missing)
+            )
+        if not key_ok:
+            raise unittest.SkipTest("dummy SSH key not installed (.tmp/ssh)")
+        raise unittest.SkipTest("git-ssh :2222 not listening")
+
     def test_workspace_agent_clones_local_gitssh(self):
         spec = importlib.util.spec_from_file_location("wa_gitssh", AGENT)
         wa = importlib.util.module_from_spec(spec)

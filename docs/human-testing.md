@@ -55,10 +55,12 @@ Use `http://localhost:3030` (not `127.0.0.1`) so cookies match CORS.
 
 **Port-up is not this tree.** Kind often binds host `:8080`/`:3030` to old
 `agent-fleet-*:local` images. `human-test.sh` / `record` / browser e2e
-require `GET /health` → `git_sha` == `git rev-parse HEAD` and `apis`
-contains `chat`. Existing `.webm`s filmed on Kind before this check are
-**not** MR proof — discard them. `FLEET_ALLOW_FOREIGN_STACK=1` warns and
-continues (operators only).
+require `GET /health` → `git_sha` == `scripts/tree-id.sh`, UI
+`/fleet-git-sha.txt` == that id, and `apis` contains `chat`. After code
+changes, re-run the install script or rebuild before filming. Existing
+`.webm`s filmed without that pair are **not** MR proof — discard them.
+There is no green path via `FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx`
+is a fail (Kind UI is not a substitute).
 
 Throwaway accounts only: `*@example.test`. Do not type real emails, tokens,
 or customer data. Do not persist OAuth against a personal GitHub in a shared
@@ -112,8 +114,8 @@ You record. The human reviews the MR (and may replay the walkthrough).
 ```
 
 Output: `.tmp/demos/<utc>-<scenes>.webm` (gitignored). Playwright Chromium
-must already be installed (`ENABLE_BROWSER_E2E=1` on the install script, or
-`python3 -m playwright install chromium` after the OS deps).
+must already be installed (`ENABLE_BROWSER_E2E=1` in repo-root `.env`, then
+the one install script). Do not pip/apt around a missing browser.
 
 Attach the `.webm` to the GitLab MR (upload / comment). Write one sentence
 in the MR description: what the clip shows. Do **not** `git add` videos.

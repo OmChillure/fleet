@@ -166,10 +166,20 @@ async fn cleanup(sb: &FleetSandbox, ctx: &Context) -> Result<Action> {
 
     if pods.get_opt(&pod_name).await?.is_some() {
         info!(sandbox = %name, pod = %pod_name, "deleting sandbox pod");
-        let _ = pods.delete(&pod_name, &DeleteParams::default()).await;
+        if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
+            if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
+                warn!(sandbox = %name, pod = %pod_name, error = %e, "pod delete failed");
+                return Err(e.into());
+            }
+        }
     }
     if nps.get_opt(&np_name).await?.is_some() {
-        let _ = nps.delete(&np_name, &DeleteParams::default()).await;
+        if let Err(e) = nps.delete(&np_name, &DeleteParams::default()).await {
+            if !matches!(&e, kube::Error::Api(ae) if ae.code == 404) {
+                warn!(sandbox = %name, np = %np_name, error = %e, "networkpolicy delete failed");
+                return Err(e.into());
+            }
+        }
     }
     Ok(Action::await_change())
 }

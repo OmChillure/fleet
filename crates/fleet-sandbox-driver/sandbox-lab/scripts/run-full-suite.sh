@@ -22,6 +22,20 @@ if [[ -f "${ROOT_ENV}" ]]; then
   set +a
 fi
 
+if [[ "${FLEET_ALLOW_FOREIGN_STACK:-}" == "1" ]]; then
+  echo "ERROR: FLEET_ALLOW_FOREIGN_STACK is not a green path. Unset it." >&2
+  exit 1
+fi
+unset FLEET_ALLOW_FOREIGN_STACK || true
+
+echo "==== fail-closed contract (no substitute / no fake sha) ===="
+if python3 -m unittest tests.browser.test_fail_closed_contract -q; then
+  echo "PASS  fail-closed-contract"
+else
+  echo "FAIL  fail-closed-contract"
+  exit 1
+fi
+
 SKIP_LLM="${SKIP_LLM:-0}"
 SKIP_COMPOSE="${SKIP_COMPOSE:-0}"
 SKIP_KIND="${SKIP_KIND:-0}"
@@ -111,7 +125,11 @@ fi
 if [[ "${ENABLE_BROWSER_E2E}" == "1" && "${SKIP_BROWSER}" != "1" ]]; then
   echo "==== headless browser e2e (needs :3030 UI + :8080 API) ===="
   export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${FLEET_TMP}/ms-playwright}"
-  if python3 "${REPO}/tests/browser/test_app_e2e.py" -q; then
+  if ! python3 "${REPO}/tests/browser/stack_identity.py" --tools; then
+    fail browser-e2e-tools
+  elif ! python3 "${REPO}/tests/browser/stack_identity.py"; then
+    fail browser-e2e-identity
+  elif python3 "${REPO}/tests/browser/test_app_e2e.py" -q; then
     pass browser-e2e
   else
     fail browser-e2e

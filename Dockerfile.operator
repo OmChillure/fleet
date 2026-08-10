@@ -9,6 +9,9 @@ COPY crates ./crates
 RUN cargo build --release -p fleet-operator --locked --bin fleet-operator
 
 FROM debian:bookworm-slim AS runtime
+ARG FLEET_GIT_SHA
+RUN test -n "${FLEET_GIT_SHA}" || (echo "ERROR: --build-arg FLEET_GIT_SHA=\$(git rev-parse HEAD) is required" && exit 1)
+LABEL fleet.git_sha=${FLEET_GIT_SHA}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

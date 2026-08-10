@@ -384,8 +384,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"Chromium launch failed ({e}). Need OS libraries "
                 "(nss, atk, gtk, gbm, asound, …) and a browser under "
-                ".tmp/ms-playwright. Re-run install-full-suite-deps.sh as root "
-                "with ENABLE_BROWSER_E2E=1."
+                ".tmp/ms-playwright. Re-run install-full-suite-deps.sh "
+                "with ENABLE_BROWSER_E2E=1 in repo-root .env."
             ) from e
         context = browser.new_context(
             base_url=UI,

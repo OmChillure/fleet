@@ -160,12 +160,19 @@ else
   dc up -d redis workspace >/dev/null 2>&1
 fi
 
+alive=0
 for _ in $(seq 1 60); do
   if dc exec -T workspace test -f /workspace/.fleet/agent.alive 2>/dev/null; then
+    alive=1
     break
   fi
   sleep 0.25
 done
+if [[ "${alive}" -ne 1 ]]; then
+  echo "ERROR: workspace agent never wrote /workspace/.fleet/agent.alive" >&2
+  dc logs workspace >&2 || true
+  exit 1
+fi
 
 dc exec -T redis redis-cli DEL "${FLEET_JOBS_QUEUE:-fleet:jobs}" >/dev/null 2>&1 || true
 python3 "$SCRIPTS/_publish_lab_job.py"
@@ -175,11 +182,18 @@ log "driver…"
 if [[ "$VERBOSE" == "1" ]]; then
   dc run --rm -e RUST_LOG -e "HARNESS=$HARNESS" driver
 else
-  set +o pipefail
-  dc run --rm -e RUST_LOG -e "HARNESS=$HARNESS" driver 2>&1 | grep -E \
-    '=== job ===|provision complete|ACP prompt complete|ACP done|published result|ERROR|job failed|WARN' \
-    || true
-  set -o pipefail
+  driver_log="${FLEET_TMP}/driver-run.log"
+  set +e
+  dc run --rm -e RUST_LOG -e "HARNESS=$HARNESS" driver >"${driver_log}" 2>&1
+  driver_rc=$?
+  set -e
+  grep -E '=== job ===|provision complete|ACP prompt complete|ACP done|published result|ERROR|job failed|WARN' \
+    "${driver_log}" || true
+  if [[ "${driver_rc}" -ne 0 ]]; then
+    echo "ERROR: driver exited ${driver_rc}" >&2
+    tail -40 "${driver_log}" >&2
+    exit "${driver_rc}"
+  fi
 fi
 
 # Snapshot result while this task's redis is still up (before teardown trap)

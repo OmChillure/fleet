@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use fleet_driver::acp::{self, AcpRun};
+use fleet_driver::acp::{self, AcpRun, is_blocked_stop};
 use fleet_driver::config::DriverConfig;
 use fleet_driver::harness;
 use fleet_driver::orch::{OrchClient, truncate_reason};
@@ -104,7 +104,6 @@ async fn run() -> Result<()> {
 
 enum WorkError {
     Failed(String),
-    #[allow(dead_code)]
     Blocked(String),
 }
 
@@ -195,7 +194,11 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
         warn!(error = %e, "failed to write artifacts");
     }
 
-    if outcome.ok {
+    let blocked = outcome
+        .stop_reason
+        .as_deref()
+        .is_some_and(is_blocked_stop);
+    if outcome.ok && !blocked {
         Ok(format!(
             "acp ok harness={} stop={} elapsed={:.2}s chars={}",
             spec.name,
@@ -218,6 +221,10 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
             reason.push_str(" — stderr: ");
             reason.push_str(&tail);
         }
-        Err(WorkError::Failed(reason))
+        if blocked {
+            Err(WorkError::Blocked(reason))
+        } else {
+            Err(WorkError::Failed(reason))
+        }
     }
 }

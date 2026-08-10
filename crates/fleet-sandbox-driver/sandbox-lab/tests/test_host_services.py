@@ -2,7 +2,8 @@
 """Host services the install script is supposed to leave running.
 
 Postgres :5433 is required (fail if down). Ollama :11434 and the OpenAI-compat
-proxy :1234 soft-skip when absent.
+proxy :1234 skip only when the matching ENABLE_* flag is off. When the flag is
+on, a down port is a fail.
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import socket
 import subprocess
 import urllib.request
 import unittest
+
+from lab_env import env_flag
 
 
 def _port(port: int) -> bool:
@@ -25,6 +28,8 @@ def _port(port: int) -> bool:
 class HostServiceTests(unittest.TestCase):
     def test_ollama_or_skip(self):
         if not _port(11434):
+            if env_flag("ENABLE_OLLAMA"):
+                self.fail("ENABLE_OLLAMA=1 but ollama :11434 is not listening")
             self.skipTest("ollama :11434 not listening")
         with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
             data = json.loads(r.read().decode())
@@ -33,6 +38,8 @@ class HostServiceTests(unittest.TestCase):
 
     def test_openai_compat_proxy_or_skip(self):
         if not _port(1234):
+            if env_flag("ENABLE_LMSTUDIO_PROXY"):
+                self.fail("ENABLE_LMSTUDIO_PROXY=1 but :1234 proxy is not listening")
             self.skipTest(":1234 proxy not listening")
         with urllib.request.urlopen("http://127.0.0.1:1234/v1/models", timeout=3) as r:
             data = json.loads(r.read().decode())

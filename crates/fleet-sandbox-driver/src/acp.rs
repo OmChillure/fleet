@@ -13,6 +13,17 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
 
+fn is_blocked_stop(stop: &str) -> bool {
+    let s = stop.trim().to_ascii_lowercase();
+    s == "blocked"
+        || s == "denied"
+        || s == "reject"
+        || s == "rejected"
+        || s.contains("blocked")
+        || s.contains("denied")
+        || s.contains("reject")
+}
+
 pub struct AcpOutcome {
     pub ok: bool,
     pub session_id: Option<String>,
@@ -187,7 +198,9 @@ pub async fn run_session(
             .await
             {
                 Ok(_) => info!(%method_id, "ACP authenticated"),
-                Err(e) => warn!(error = %e, "ACP authenticate failed"),
+                Err(e) => {
+                    anyhow::bail!("ACP authenticate failed for {method_id}: {e}");
+                }
             }
         }
 
@@ -252,10 +265,16 @@ pub async fn run_session(
 
     let outcome = match run.await {
         Ok((session_id, stop_reason, text, agent_info)) => {
-            let ok = !text.trim().is_empty()
-                || stop_reason.as_ref().is_some_and(|s| {
-                    !s.to_lowercase().contains("error") && !s.to_lowercase().contains("cancel")
-                });
+            let stop_lc = stop_reason.as_deref().unwrap_or("").to_ascii_lowercase();
+            let blocked = stop_reason.as_deref().is_some_and(is_blocked_stop);
+            let failed_stop = stop_lc.contains("error")
+                || stop_lc.contains("cancel")
+                || stop_lc.contains("timeout")
+                || stop_lc.contains("refusal");
+            let ok = !blocked
+                && !failed_stop
+                && (!text.trim().is_empty()
+                    || stop_reason.as_ref().is_some_and(|s| !s.trim().is_empty()));
             AcpOutcome {
                 ok,
                 session_id: Some(session_id),

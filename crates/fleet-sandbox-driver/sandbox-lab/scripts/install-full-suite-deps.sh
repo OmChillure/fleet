@@ -3,7 +3,8 @@
 # Agent Fleet — host install (ONLY source of truth for install)
 # =============================================================================
 # Path: crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
-# Does NOT run tests. Re-run is safe (skips existing image tags unless FORCE_REBUILD=1).
+# Does NOT run tests. Re-run is safe (skips api/ui/operator :local tags only when
+# image label fleet.git_sha matches this HEAD; FORCE_REBUILD=1 always rebuilds).
 #
 # An agent reading this file should:
 #   1) Detect OS / RAM / disk (hints below).
@@ -17,6 +18,27 @@
 # Linux elevates itself with sudo. macOS/Git Bash run as the current user
 # (Homebrew must not be root; script uses SUDO_USER / $USER for brew).
 # Windows: WSL2 Ubuntu (preferred) or Git Bash + Docker Desktop. Not cmd/PS.
+#
+# -----------------------------------------------------------------------------
+# Compatible systems — supported vs tested
+# -----------------------------------------------------------------------------
+# The script has a package path for each row. "tested" means a human ran this
+# file to completion on that OS. Do not mark a row tested from reading code.
+#
+#   OS / PM                         Status
+#   Linux  dnf    Fedora            TESTED (this checkout, 2026-08-09)
+#   Linux  dnf    RHEL / CentOS     not tested
+#   Linux  apt    Debian / Ubuntu   not tested
+#   Linux  pacman Arch / Manjaro    not tested
+#   Linux  zypper openSUSE          not tested
+#   Linux  apk    Alpine            not tested
+#   macOS         Homebrew          not tested
+#   Windows WSL2  (as Linux)        not tested
+#   Windows Git Bash                not tested (no package manager step)
+#   Windows cmd / PowerShell        not supported
+#
+# When you complete a first install on another OS, change that row to TESTED
+# and date it. Keep the OS-matrix section below in sync with the case arms.
 #
 # -----------------------------------------------------------------------------
 # Capacity — agent evaluation
@@ -47,7 +69,10 @@
 #   ENABLE_LMSTUDIO_PROXY      TCP :1234 → :11434 so LM Studio job URLs work
 #   ENABLE_GITSSH              local git+ssh container :2222 (tiny)
 #   ENABLE_BROWSER_E2E         pip playwright + Chromium under <repo>/.tmp/ms-playwright
-#                              + Linux OS libs (`playwright install-deps chromium`).
+#                              + OS libs via this script's matrix (dnf/apt/pacman/
+#                              zypper/apk; brew/darwin uses Playwright's own
+#                              Chromium). Never call `playwright install-deps`
+#                              except on apt hosts — it shells out to apt-get.
 #                              Headless UI e2e in run-full-suite.sh. Default on
 #                              only for PROFILE=full (kind publishes :3030/:8080).
 # FORCE_REBUILD=1              rebuild docker tags even if they exist
@@ -64,16 +89,19 @@
 # -----------------------------------------------------------------------------
 # Linux + systemd     packages via dnf|apt|pacman|zypper|apk; docker.sock ACL;
 #                     ollama.service drop-in OLLAMA_HOST=0.0.0.0:11434
+#                     Playwright libs: same PM (never apt-get on dnf/apk/…).
 # Linux, no systemd   same packages; ollama/socat via setsid (not a child of this
 #                     script — otherwise bash never exits)
 # macOS               Homebrew as the login user (never brew-as-root). Docker
 #                     Desktop or Colima must already run. launchd/brew services
 #                     or setsid for ollama + :1234 proxy. No docker.sock chmod.
+#                     Playwright uses its bundled Chromium (no extra brew libs).
 # Windows + WSL2      treat as Linux (install docker-ce or use Docker Desktop
 #                     WSL integration).
 # Windows + Git Bash  no pacman/apt. Require docker, git, python3, curl, ssh
 #                     already on PATH (Docker Desktop). Skip systemd, chown if
 #                     it fails, usermod, setfacl. ENABLE_KIND default 0.
+#                     ENABLE_BROWSER_E2E: Playwright's win Chromium, or use WSL2.
 # Windows cmd/PS      not supported — tell the user to open WSL2 or Git Bash.
 #
 # Rust: workspace rust-version (Cargo.toml) must match Dockerfile FROM rust:<ver>.
@@ -89,6 +117,16 @@ LAB="$(cd "${SCRIPT_DIR}/.." && pwd)"
 AGENTS="$(cd "${LAB}/../agents" && pwd)"
 REPO="$(cd "${LAB}/../../.." && pwd)"
 ROOT_ENV="${REPO}/.env"
+# Caller may be in a deleted worktree (/tmp/…). Never inherit that cwd.
+# rustup/cargo/docker fail with getcwd if PWD is gone.
+if ! cd "${REPO}"; then
+  echo "ERROR: cannot cd to ${REPO}" >&2
+  exit 1
+fi
+# Compose interpolates this for every `docker compose` invoke (including
+# `up postgres`). Dockerfiles still reject an empty SHA at image build.
+export FLEET_GIT_SHA
+FLEET_GIT_SHA="$(bash "${REPO}/scripts/tree-id.sh")"
 
 if [[ $# -gt 0 ]]; then
   echo "ERROR: this script takes no arguments." >&2
@@ -105,6 +143,9 @@ if [[ -f "${ROOT_ENV}" ]]; then
   . "${ROOT_ENV}"
   set +a
 fi
+# .env must not leave a blank/stale SHA for compose interpolation.
+FLEET_GIT_SHA="$(bash "${REPO}/scripts/tree-id.sh")"
+export FLEET_GIT_SHA
 
 # --- identity / OS ----------------------------------------------------------
 UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
@@ -280,15 +321,41 @@ esac
 
 have_image() { docker image inspect "$1" >/dev/null 2>&1; }
 
+# Registry 502/timeouts are not a missing dep if the tag is already local.
+docker_pull_or_have() {
+  local ref="$1"
+  local i
+  for i in 1 2 3; do
+    if docker pull "${ref}"; then
+      return 0
+    fi
+    echo "    docker pull ${ref} failed (attempt ${i}/3)"
+    sleep $((i * 3))
+  done
+  if have_image "${ref}"; then
+    echo "==> ${ref} already local; registry refresh failed, continuing"
+    return 0
+  fi
+  echo "ERROR: docker pull ${ref} failed and no local image." >&2
+  echo "       Re-run this script when the registry is up. Do not retag a random image." >&2
+  exit 1
+}
+
 docker_build_if_needed() {
   local tag="$1"
   shift
+  local sha have
+  sha="$(bash "${REPO}/scripts/tree-id.sh")"
   if [[ "${FORCE_REBUILD}" != "1" ]] && have_image "${tag}"; then
-    echo "==> skip ${tag} (exists; FORCE_REBUILD=1 to rebuild)"
-    return 0
+    have="$(docker image inspect -f '{{index .Config.Labels "fleet.git_sha"}}' "${tag}" 2>/dev/null || true)"
+    if [[ "${have}" == "${sha}" ]]; then
+      echo "==> skip ${tag} (fleet.git_sha=${sha})"
+      return 0
+    fi
+    echo "==> rebuild ${tag}: image fleet.git_sha=${have:-unset} != HEAD ${sha}"
   fi
-  echo "==> docker build ${tag}"
-  docker build -t "${tag}" "$@"
+  echo "==> docker build ${tag} FLEET_GIT_SHA=${sha}"
+  docker build -t "${tag}" --build-arg "FLEET_GIT_SHA=${sha}" "$@"
 }
 
 dc() {
@@ -348,8 +415,8 @@ install_packages() {
       exit 1
     fi
     echo "==> brew install (as ${REAL_USER})"
-    as_user_sh "brew install git python3 curl wget jq socat cmake pkg-config openssl libpq || true"
-    as_user_sh "brew install kind kubectl || true"
+    as_user_sh "brew install git python3 curl wget jq socat cmake pkg-config openssl libpq"
+    as_user_sh "brew install kind kubectl" || true
     return 0
   fi
 
@@ -362,38 +429,39 @@ install_packages() {
 
   if need_cmd dnf; then
     pkgs=""
-    rpm -q moby-engine >/dev/null 2>&1 || rpm -q docker >/dev/null 2>&1 || pkgs="${pkgs} moby-engine"
     rpm -q docker-cli >/dev/null 2>&1 || pkgs="${pkgs} docker-cli"
     for p in git python3 python3-pip python3-devel python3-redis curl wget \
              openssl openssl-devel pkgconf-pkg-config gcc gcc-c++ make cmake \
              jq socat acl openssh-clients postgresql libpq-devel; do
       rpm -q "$p" >/dev/null 2>&1 || pkgs="${pkgs} $p"
     done
-    rpm -q redis >/dev/null 2>&1 || rpm -q valkey-compat-redis >/dev/null 2>&1 || pkgs="${pkgs} valkey-compat-redis"
-    if ! docker compose version >/dev/null 2>&1 && ! need_cmd docker-compose; then
-      pkgs="${pkgs} docker-compose docker-compose-plugin"
-    fi
     if [[ -n "${pkgs}" ]]; then
       echo "==> dnf install:${pkgs}"
       # shellcheck disable=SC2086
-      dnf install -y --skip-unavailable ${pkgs}
+      # Unique NEVRAs only. Do not --skip-unavailable (drops required rpms).
+      dnf install -y ${pkgs}
     else
-      echo "==> dnf: required rpms already installed"
+      echo "==> dnf: unique rpms already installed"
+    fi
+    # Aliases: first name that exists in this distro. Complementary, not a dump.
+    _pm_install dnf moby-engine docker
+    _pm_install dnf valkey-compat-redis redis
+    if ! docker compose version >/dev/null 2>&1 && ! need_cmd docker-compose; then
+      _pm_install dnf docker-compose-plugin docker-compose
     fi
   elif need_cmd apt-get; then
     apt-get update -y
+    # docker-compose-v2 (bookworm+) or docker-compose (older). Fail if neither.
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-v2; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      docker.io docker-compose-v2 \
+      docker.io \
       git python3 python3-pip python3-dev python3-venv python3-redis \
       curl wget openssl pkg-config libssl-dev libpq-dev \
       build-essential cmake make gcc g++ \
       jq socat acl openssh-client postgresql-client \
-      redis-server || \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      docker.io docker-compose \
-      git python3 python3-pip python3-dev \
-      curl wget openssl pkg-config libssl-dev \
-      build-essential cmake jq socat openssh-client
+      redis-server
   elif need_cmd pacman; then
     pacman -Sy --noconfirm --needed \
       docker docker-compose git python python-pip python-redis \
@@ -402,7 +470,7 @@ install_packages() {
     zypper --non-interactive install -y \
       docker docker-compose git python3 python3-pip python3-devel \
       curl wget openssl libopenssl-devel gcc gcc-c++ make cmake jq socat \
-      openssh postgresql-devel || true
+      openssh postgresql-devel
   elif need_cmd apk; then
     apk add --no-cache \
       docker docker-cli-compose git python3 py3-pip py3-redis \
@@ -413,6 +481,135 @@ install_packages() {
     echo "       Install docker, git, python3, curl, gcc, make, jq, socat, openssh manually." >&2
     exit 1
   fi
+}
+
+# Install the first alias this PM accepts. Extra args are the same package
+# under another name (Ubuntu t64, openSUSE mozilla-*, Alpine gtk+3.0).
+# Complementary packages are separate calls — do not list them as aliases.
+_pm_install() {
+  local optional=0
+  if [[ "${1:-}" == --optional ]]; then
+    optional=1
+    shift
+  fi
+  local pm="$1"
+  shift
+  local name
+  [[ "$#" -ge 1 ]] || return 1
+  for name in "$@"; do
+    case "${pm}" in
+      dnf)
+        rpm -q "${name}" >/dev/null 2>&1 && return 0
+        dnf install -y "${name}" && return 0
+        ;;
+      apt)
+        dpkg -s "${name}" >/dev/null 2>&1 && return 0
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${name}" && return 0
+        ;;
+      pacman)
+        pacman -Q "${name}" >/dev/null 2>&1 && return 0
+        pacman -S --noconfirm --needed "${name}" && return 0
+        ;;
+      zypper)
+        rpm -q "${name}" >/dev/null 2>&1 && return 0
+        zypper --non-interactive install -y "${name}" && return 0
+        ;;
+      apk)
+        apk info -e "${name}" >/dev/null 2>&1 && return 0
+        apk add --no-cache "${name}" && return 0
+        ;;
+      *)
+        echo "ERROR: _pm_install: unknown package manager '${pm}'" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [[ "${optional}" -eq 1 ]]; then
+    echo "    optional not in repos: $*"
+    return 0
+  fi
+  echo "ERROR: could not install any of: $*" >&2
+  return 1
+}
+
+# OS shared libraries Playwright's bundled Chromium dlopens.
+# `python3 -m playwright install-deps` is Debian/Ubuntu only (apt-get).
+install_playwright_os_libs() {
+  case "${OS_FAMILY}" in
+    darwin)
+      echo "==> macOS: Playwright ships Chromium frameworks (no apt/dnf libs)"
+      return 0
+      ;;
+    windows)
+      echo "==> Windows/Git Bash: no OS-lib step. ENABLE_BROWSER_E2E needs WSL2 if smoke fails."
+      return 0
+      ;;
+    linux) ;;
+    *)
+      echo "ERROR: playwright OS libs: unsupported OS_FAMILY=${OS_FAMILY}" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "ERROR: headless Chromium OS libs need root. Re-run this script (it self-sudos)." >&2
+    exit 1
+  fi
+
+  local pm=""
+  if need_cmd apt-get; then
+    pm=apt
+  elif need_cmd dnf; then
+    pm=dnf
+  elif need_cmd pacman; then
+    pm=pacman
+  elif need_cmd zypper; then
+    pm=zypper
+  elif need_cmd apk; then
+    pm=apk
+  else
+    echo "ERROR: no package manager for Chromium OS libs (dnf/apt/pacman/zypper/apk)." >&2
+    exit 1
+  fi
+  echo "==> playwright OS libraries via ${pm}"
+
+  # Fast path only where install-deps can actually run apt-get.
+  if [[ "${pm}" == apt ]]; then
+    local user_site
+    user_site="$(as_user python3 -c 'import site; print(site.getusersitepackages())')"
+    if PYTHONPATH="${user_site}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m playwright install-deps chromium; then
+      return 0
+    fi
+    echo "==> playwright install-deps failed; installing distro packages by name"
+  fi
+
+  # Optional: distro chromium pulls many of the same .so files.
+  _pm_install --optional "${pm}" chromium chromium-browser chromium-stable
+
+  _pm_install "${pm}" nss mozilla-nss libnss3
+  _pm_install "${pm}" nspr mozilla-nspr libnspr4
+  _pm_install "${pm}" atk libatk1.0-0t64 libatk1.0-0
+  _pm_install "${pm}" at-spi2-atk libatk-bridge2.0-0t64 libatk-bridge2.0-0 at-spi2-core
+  _pm_install "${pm}" at-spi2-core libatspi2.0-0t64 libatspi2.0-0 at-spi2-atk
+  _pm_install "${pm}" cups-libs libcups2t64 libcups2 cups
+  _pm_install "${pm}" libdrm libdrm2
+  _pm_install "${pm}" libxkbcommon libxkbcommon0 libxkbcommon-0
+  _pm_install "${pm}" libXcomposite libxcomposite libxcomposite1
+  _pm_install "${pm}" libXdamage libxdamage libxdamage1
+  _pm_install "${pm}" libXfixes libxfixes libxfixes3
+  _pm_install "${pm}" libXrandr libxrandr libxrandr2
+  _pm_install "${pm}" mesa-libgbm Mesa-libgbm1 mesa-gbm libgbm1
+  _pm_install "${pm}" alsa-lib libasound2t64 libasound2
+  _pm_install "${pm}" pango libpango-1.0-0
+  _pm_install "${pm}" cairo libcairo2
+  _pm_install "${pm}" gtk3 gtk+3.0 libgtk-3-0t64 libgtk-3-0
+  _pm_install "${pm}" libX11 libx11 libX11-6 libx11-6
+  _pm_install "${pm}" libxcb libxcb1
+  _pm_install "${pm}" libXext libxext libXext6 libxext6
+  _pm_install "${pm}" libXi libxi libXi6 libxi6
+  _pm_install "${pm}" dbus-libs libdbus-1-3 dbus-1 dbus
+  _pm_install "${pm}" libxshmfence libxshmfence1
+  _pm_install "${pm}" liberation-fonts liberation-sans-fonts fonts-liberation \
+    ttf-liberation font-liberation ttf-dejavu font-freefont
 }
 
 install_packages
@@ -430,15 +627,21 @@ echo "==> docker ok"
 
 if [[ "${OS_FAMILY}" == linux ]] && [[ "$(id -u)" -eq 0 ]]; then
   if need_cmd systemctl; then
+    # Persist docker across reboot. Daemon already passed `docker info`.
     systemctl enable --now docker 2>/dev/null || true
   fi
-  getent group docker >/dev/null 2>&1 || groupadd docker 2>/dev/null || true
-  usermod -aG docker "${REAL_USER}" 2>/dev/null || true
+  getent group docker >/dev/null 2>&1 || groupadd docker
+  usermod -aG docker "${REAL_USER}"
   if need_cmd setfacl && [[ -S /var/run/docker.sock ]]; then
-    setfacl -m "u:${REAL_USER}:rw" /var/run/docker.sock || true
+    setfacl -m "u:${REAL_USER}:rw" /var/run/docker.sock
   fi
   # Do not chmod 666 docker.sock (world-writable = root). Group + ACL is enough.
   # New shells need `newgrp docker` / re-login if only usermod ran.
+  if ! as_user docker info >/dev/null 2>&1; then
+    echo "ERROR: ${REAL_USER} cannot talk to docker.sock after group+ACL." >&2
+    echo "       Re-login or run: newgrp docker. Do not chmod 666 the socket." >&2
+    exit 1
+  fi
 fi
 
 # --- kubectl + kind (upstream binaries; brew already tried on mac) ----------
@@ -479,9 +682,9 @@ for bin in kubectl kind; do
     ln -sfn "${src}" "/usr/local/bin/${bin}" 2>/dev/null || true
   fi
 done
-as_user kubectl version --client=true || true
+as_user kubectl version --client=true
 if [[ "${ENABLE_KIND}" == "1" ]]; then
-  as_user kind version || true
+  as_user kind version
 fi
 
 # --- rustc ------------------------------------------------------------------
@@ -490,6 +693,58 @@ if ! as_user_sh "command -v rustup >/dev/null"; then
   as_user_sh "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_TOOLCHAIN}"
 fi
 as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; rustup toolchain install ${RUST_TOOLCHAIN} && rustup default ${RUST_TOOLCHAIN} && rustc --version && cargo --version"
+
+# --- dioxus-cli (dx). Required. No WARN. Kind UI is not a substitute. ----------
+# Host OpenSSL 4 cannot build openssl-sys (dioxus-cli 0.7.x). Do not tell the
+# developer to cargo-install around that — this function is the only path.
+install_dx() {
+  local ver out_bin host_ssl
+  ver="$(sed -n 's/^dioxus[[:space:]]*=[[:space:]]*"=\?\([^"]*\)".*/\1/p' "${REPO}/Cargo.toml" | head -1)"
+  if [[ -z "${ver}" ]]; then
+    echo "ERROR: could not read workspace dioxus pin from ${REPO}/Cargo.toml" >&2
+    exit 1
+  fi
+  echo "==> wasm32-unknown-unknown + dioxus-cli ${ver} (dx)"
+  as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; rustup target add wasm32-unknown-unknown"
+  if as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null && dx --version 2>/dev/null | grep -q '${ver}'"; then
+    echo "    dx already ${ver}"
+    return 0
+  fi
+  out_bin="$(as_user_sh 'printf %s "${HOME}/.cargo/bin"')"
+  mkdir -p "${out_bin}"
+  chown "${REAL_UID}:${REAL_GID}" "${out_bin}" 2>/dev/null || true
+  host_ssl="$(openssl version 2>/dev/null || true)"
+  # openssl-sys accepts 1.0.2–1.1.1 or 3.x only. Skip the doomed host compile.
+  if [[ "${host_ssl}" != *OpenSSL\ 4* && "${host_ssl}" != *OpenSSL\ 5* ]]; then
+    echo "==> cargo install dioxus-cli --version ${ver} --locked"
+    if as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; cargo install dioxus-cli --version ${ver} --locked"; then
+      return 0
+    fi
+    echo "==> host cargo install dx failed; falling back to ${RUST_IMAGE}"
+  else
+    echo "==> host ${host_ssl} cannot build openssl-sys; installing dx inside ${RUST_IMAGE}"
+  fi
+  # Root in the image so PATH has /usr/local/cargo/bin. bash -l as uid 1000
+  # drops that PATH ("cargo: command not found"). Copy dx out and chown.
+  docker run --rm \
+    -v "${out_bin}:/out" \
+    -e PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    -e RUSTUP_HOME=/usr/local/rustup \
+    -e CARGO_HOME=/usr/local/cargo \
+    "${RUST_IMAGE}" \
+    bash -c "set -euo pipefail
+      command -v cargo
+      cargo --version
+      cargo install dioxus-cli --version ${ver} --locked
+      install -m 755 /usr/local/cargo/bin/dx /out/dx
+      chown ${REAL_UID}:${REAL_GID} /out/dx"
+  if ! as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null && dx --version 2>/dev/null | grep -q '${ver}'"; then
+    echo "ERROR: dx ${ver} not on PATH after ${RUST_IMAGE} install. Re-run this script; do not cargo-install on the host." >&2
+    exit 1
+  fi
+  echo "    dx $(as_user_sh 'source "$HOME/.cargo/env" 2>/dev/null; dx --version')"
+}
+install_dx
 
 echo "==> preflight: Cargo.lock vs rustc ${RUST_TOOLCHAIN}"
 PRE_DIR="${TMP_ROOT}/install-preflight"
@@ -576,25 +831,15 @@ if [[ "${ENABLE_BROWSER_E2E}" == "1" ]]; then
     echo "ERROR: python3 cannot import playwright (pip install playwright)" >&2
     exit 1
   fi
-  # Headless Chromium needs OS libs (nss, atk, gtk, gbm, asound, …) that
-  # `playwright install chromium` does not install.
-  if [[ "${OS_FAMILY}" == linux && "$(id -u)" -eq 0 ]]; then
-    echo "==> playwright OS libraries (install-deps chromium)"
-    USER_SITE="$(as_user python3 -c 'import site; print(site.getusersitepackages())')"
-    if ! PYTHONPATH="${USER_SITE}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m playwright install-deps chromium; then
-      echo "ERROR: playwright install-deps chromium failed." >&2
-      echo "       Headless Chromium needs nss, atk, gtk, gbm, asound, and related libs." >&2
-      exit 1
-    fi
-  elif [[ "${OS_FAMILY}" == linux ]]; then
-    echo "WARN: not root; skipping playwright install-deps. Chromium may fail without nss/atk/gbm/asound." >&2
-  fi
+  # Headless Chromium needs OS libs (nss, atk, gtk, gbm, asound, …).
+  # `python3 -m playwright install-deps` shells out to apt-get (Debian only).
+  install_playwright_os_libs
   as_user_sh "PLAYWRIGHT_BROWSERS_PATH='${PW_BROWSERS}' python3 -m playwright install chromium"
   echo "==> playwright chromium headless smoke"
   if ! as_user_sh "PLAYWRIGHT_BROWSERS_PATH='${PW_BROWSERS}' python3 -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()'"; then
     echo "ERROR: playwright chromium headless launch failed." >&2
     echo "       Missing OS libraries (nss, atk, gtk, gbm, asound, …) or browser files under ${PW_BROWSERS}." >&2
-    echo "       Re-run this script as root with ENABLE_BROWSER_E2E=1." >&2
+    echo "       Re-run this script (no flags; ENABLE_BROWSER_E2E=1 in repo-root .env)." >&2
     exit 1
   fi
 fi
@@ -606,6 +851,48 @@ ollama_listen() {
   elif need_cmd netstat; then
     netstat -an 2>/dev/null | awk '/11434/ && /LISTEN/ {print $4; exit}'
   fi
+}
+
+# Lab needs 0.0.0.0 / * so compose/kind can use host.docker.internal:11434.
+ollama_listen_is_public() {
+  case "${1:-}" in
+    0.0.0.0:11434|\[::\]:11434|\*:11434) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ollama_tags_ok() {
+  curl -sf --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null
+}
+
+ollama_write_host_dropin() {
+  mkdir -p /etc/systemd/system/ollama.service.d
+  cat >/etc/systemd/system/ollama.service.d/fleet-lab.conf <<'EOF'
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+EOF
+}
+
+# systemd Restart=always + a leftover `ollama serve` on :11434 hits
+# start-limit-hit (hundreds of failed binds). Do not bounce a healthy public
+# listener. reset-failed before any start.
+ollama_systemd_start() {
+  systemctl reset-failed ollama.service 2>/dev/null || true
+  systemctl daemon-reload
+  systemctl enable ollama.service
+  if systemctl start ollama.service; then
+    return 0
+  fi
+  echo "==> ollama.service start failed; reset-failed and retry"
+  systemctl reset-failed ollama.service 2>/dev/null || true
+  sleep 1
+  systemctl start ollama.service
+}
+
+ollama_start_detached() {
+  echo "==> starting detached ollama serve as ${REAL_USER}"
+  as_user_sh "cd / && (command -v setsid >/dev/null && setsid -f env OLLAMA_HOST=0.0.0.0:11434 ollama serve >'${TMP_ROOT}/ollama-serve.log' 2>&1) || (nohup env OLLAMA_HOST=0.0.0.0:11434 ollama serve >'${TMP_ROOT}/ollama-serve.log' 2>&1 &)"
+  sleep 2
 }
 
 if [[ "${ENABLE_OLLAMA}" == "1" ]]; then
@@ -620,59 +907,72 @@ if [[ "${ENABLE_OLLAMA}" == "1" ]]; then
       curl -fsSL https://ollama.com/install.sh | sh
     fi
   fi
-
-  LISTEN_NOW="$(ollama_listen || true)"
-  case "${LISTEN_NOW}" in
-    0.0.0.0:11434|\[::\]:11434|\*:11434) ;;
-    *)
-      if [[ "${OS_FAMILY}" == linux ]]; then
-        pkill -x ollama 2>/dev/null || true
-        sleep 0.5
-      fi
-      ;;
-  esac
-
-  if have_systemd && [[ "${OS_FAMILY}" == linux ]]; then
-    mkdir -p /etc/systemd/system/ollama.service.d
-    cat >/etc/systemd/system/ollama.service.d/fleet-lab.conf <<'EOF'
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-EOF
-    if systemctl cat ollama.service >/dev/null 2>&1; then
-      systemctl daemon-reload
-      systemctl enable --now ollama
-      systemctl restart ollama
-    else
-      echo "==> no ollama.service; setsid ollama serve as ${REAL_USER}"
-      as_user_sh "cd / && setsid -f env OLLAMA_HOST=0.0.0.0:11434 ollama serve >'${TMP_ROOT}/ollama-serve.log' 2>&1"
-      sleep 2
-    fi
-  else
-    echo "==> starting detached ollama serve (no systemd) as ${REAL_USER}"
-    # macOS brew services often ignore OLLAMA_HOST — prefer setsid serve.
-    as_user_sh "cd / && (command -v setsid >/dev/null && setsid -f env OLLAMA_HOST=0.0.0.0:11434 ollama serve >'${TMP_ROOT}/ollama-serve.log' 2>&1) || (nohup env OLLAMA_HOST=0.0.0.0:11434 ollama serve >'${TMP_ROOT}/ollama-serve.log' 2>&1 &)"
-    sleep 2
+  if ! need_cmd ollama && ! as_user command -v ollama >/dev/null 2>&1; then
+    echo "ERROR: ollama is not on PATH after install." >&2
+    exit 1
   fi
 
+  LISTEN_NOW="$(ollama_listen || true)"
+  if ollama_tags_ok && ollama_listen_is_public "${LISTEN_NOW}"; then
+    echo "==> ollama already listening ${LISTEN_NOW} — not restarting"
+    if have_systemd && [[ "${OS_FAMILY}" == linux ]] && [[ "$(id -u)" -eq 0 ]]; then
+      ollama_write_host_dropin
+      systemctl daemon-reload || true
+      if systemctl is-failed --quiet ollama.service; then
+        systemctl reset-failed ollama.service || true
+      fi
+    fi
+  else
+    # Only kill a loopback/dead instance we are about to replace.
+    if [[ "${OS_FAMILY}" == linux ]] && ! ollama_listen_is_public "${LISTEN_NOW}"; then
+      pkill -x ollama 2>/dev/null || true
+      sleep 0.5
+    fi
+    if have_systemd && [[ "${OS_FAMILY}" == linux ]] && [[ "$(id -u)" -eq 0 ]]; then
+      ollama_write_host_dropin
+      if systemctl cat ollama.service >/dev/null 2>&1; then
+        if ! ollama_systemd_start; then
+          echo "==> ollama.service still failed after reset-failed; detached serve"
+          ollama_start_detached
+        fi
+      else
+        echo "==> no ollama.service; setsid ollama serve as ${REAL_USER}"
+        ollama_start_detached
+      fi
+    else
+      ollama_start_detached
+    fi
+  fi
+
+  tags_ok=0
   for _ in $(seq 1 40); do
-    curl -sf --max-time 1 http://127.0.0.1:11434/api/tags >/dev/null && break
+    if ollama_tags_ok; then
+      tags_ok=1
+      break
+    fi
     sleep 0.5
   done
-  curl -sf http://127.0.0.1:11434/api/tags >/dev/null
+  if [[ "${tags_ok}" -ne 1 ]]; then
+    echo "ERROR: ENABLE_OLLAMA=1 but http://127.0.0.1:11434/api/tags is not up." >&2
+    if have_systemd && [[ "${OS_FAMILY}" == linux ]]; then
+      systemctl status ollama.service --no-pager >&2 || true
+    fi
+    exit 1
+  fi
 
   LISTEN="$(ollama_listen || true)"
   echo "==> ollama listen ${LISTEN:-unknown}"
-  case "${LISTEN}" in
-    127.0.0.1:*|\[::1\]:*)
-      echo "ERROR: ollama still loopback-only; containers cannot use host.docker.internal:11434" >&2
-      exit 1
-      ;;
-  esac
+  if ! ollama_listen_is_public "${LISTEN}"; then
+    echo "ERROR: ollama listen ${LISTEN:-unknown} is not 0.0.0.0/*:11434; containers cannot use host.docker.internal:11434" >&2
+    exit 1
+  fi
 
   echo "==> pulling ollama model ${OLLAMA_MODEL}"
   as_user ollama pull "${OLLAMA_MODEL}" || as_user_sh "ollama pull ${OLLAMA_MODEL}"
-  curl -sf http://127.0.0.1:11434/v1/models | head -c 120 || true
-  echo
+  if ! curl -sf --max-time 5 http://127.0.0.1:11434/v1/models >/dev/null; then
+    echo "ERROR: ollama /api/tags is up but /v1/models failed (needed for :1234 proxy)." >&2
+    exit 1
+  fi
 fi
 
 # --- :1234 OpenAI-compat proxy ----------------------------------------------
@@ -702,9 +1002,18 @@ EOF
   else
     as_user_sh "cd / && (command -v setsid >/dev/null && setsid -f '${SOCAT_BIN}' TCP-LISTEN:1234,fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:11434) || (nohup '${SOCAT_BIN}' TCP-LISTEN:1234,fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:11434 >/dev/null 2>&1 &)"
   fi
-  sleep 0.3
-  curl -sf --max-time 2 http://127.0.0.1:1234/v1/models | head -c 80 || true
-  echo
+  proxy_ok=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -sf --max-time 2 http://127.0.0.1:1234/v1/models >/dev/null; then
+      proxy_ok=1
+      break
+    fi
+    sleep 0.3
+  done
+  if [[ "${proxy_ok}" -ne 1 ]]; then
+    echo "ERROR: ENABLE_LMSTUDIO_PROXY=1 but http://127.0.0.1:1234/v1/models is not up." >&2
+    exit 1
+  fi
   echo "==> :1234 -> :11434 proxy"
 fi
 
@@ -782,11 +1091,9 @@ OLD_OPENAI="$(env_get OPENAI_API_KEY)"
 OLD_CODEX="$(env_get CODEX_API_KEY)"
 OLD_GROK="$(env_get GROK_DEPLOYMENT_KEY)"
 OLD_ANTHROPIC="$(env_get ANTHROPIC_API_KEY)"
-if [[ -f "${REAL_HOME}/.grok/auth.json" ]]; then
-  cp -a "${REAL_HOME}/.grok/auth.json" "${LAB}/.grok-auth.json"
-  chown "${REAL_UID}:${REAL_GID}" "${LAB}/.grok-auth.json" 2>/dev/null || true
-  echo "==> copied host ~/.grok/auth.json -> sandbox-lab/.grok-auth.json (gitignored)"
-fi
+# Do not copy host ~/.grok/auth.json into the repo (live OIDC + email).
+# Grok CLI / fleet-server already read REAL_HOME/.grok/auth.json in place.
+rm -f "${LAB}/.grok-auth.json"
 
 cat >"${ENV_FILE}" <<EOF
 REDIS_URL=redis://redis:6379/0
@@ -823,32 +1130,45 @@ echo "==> wrote ${ENV_FILE}"
 
 # --- images -----------------------------------------------------------------
 echo "==> pulling base images (needed ones only)"
-docker pull redis:7-alpine
-docker pull python:3.13-bookworm
-docker pull alpine:3.21
+docker_pull_or_have redis:7-alpine
+docker_pull_or_have python:3.13-bookworm
+docker_pull_or_have alpine:3.21
 if [[ "${ENABLE_SANDBOX_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
-  docker pull "${RUST_IMAGE}"
+  docker_pull_or_have "${RUST_IMAGE}"
+  docker_pull_or_have postgres:16-alpine
 fi
-if [[ "${ENABLE_SANDBOX_LAB}" == "1" || "${ENABLE_FULL_IMAGES}" == "1" ]]; then
-  docker pull postgres:16-alpine
-fi
+
+harness_src_hash() {
+  local file="$1"
+  # base + this harness Dockerfile; skip rebuild only when both match the image.
+  cat "${AGENTS}/base/Dockerfile" "${AGENTS}/${file}/Dockerfile" 2>/dev/null | sha256sum | awk '{print $1}'
+}
 
 build_one_harness() {
   local name="$1" file="$2"
   local tag="agent-fleet-${name}:alpine"
+  local src have
+  src="$(harness_src_hash "${file}")"
   if [[ "${FORCE_REBUILD}" != "1" ]] && have_image "${tag}"; then
-    echo "==> skip ${tag}"
-    return 0
+    have="$(docker image inspect -f '{{index .Config.Labels "fleet.harness_src"}}' "${tag}" 2>/dev/null || true)"
+    if [[ -n "${src}" && "${have}" == "${src}" ]]; then
+      echo "==> skip ${tag} (fleet.harness_src=${src:0:12}…)"
+      return 0
+    fi
+    echo "==> rebuild ${tag}: fleet.harness_src=${have:-unset} != Dockerfile hash"
   fi
   if ! have_image agent-fleet-base:alpine || [[ "${FORCE_REBUILD}" == "1" && "${name}" != base ]]; then
     if [[ "${name}" != base ]]; then
-      as_user docker build -t agent-fleet-base:alpine -f "${AGENTS}/base/Dockerfile" "${AGENTS}/base"
+      as_user docker build --label "fleet.harness_src=$(harness_src_hash base)" \
+        -t agent-fleet-base:alpine -f "${AGENTS}/base/Dockerfile" "${AGENTS}/base"
     fi
   fi
   if [[ "${name}" == base ]]; then
-    as_user docker build -t agent-fleet-base:alpine -f "${AGENTS}/base/Dockerfile" "${AGENTS}/base"
+    as_user docker build --label "fleet.harness_src=${src}" \
+      -t agent-fleet-base:alpine -f "${AGENTS}/base/Dockerfile" "${AGENTS}/base"
   else
-    as_user docker build -t "${tag}" --build-arg BASE_IMAGE=agent-fleet-base:alpine \
+    as_user docker build --label "fleet.harness_src=${src}" \
+      -t "${tag}" --build-arg BASE_IMAGE=agent-fleet-base:alpine \
       -f "${AGENTS}/${file}/Dockerfile" "${AGENTS}/${file}"
   fi
 }
@@ -908,9 +1228,7 @@ fi
 
 if [[ "${ENABLE_FULL_IMAGES}" == "1" ]]; then
   echo "==> full-stack images (api + ui + operator) — several minutes each"
-  docker_build_if_needed agent-fleet-api:local \
-    --build-arg "FLEET_GIT_SHA=$(git -C "${REPO}" rev-parse HEAD)" \
-    -f "${REPO}/Dockerfile" "${REPO}"
+  docker_build_if_needed agent-fleet-api:local -f "${REPO}/Dockerfile" "${REPO}"
   docker_build_if_needed agent-fleet-ui:local -f "${REPO}/Dockerfile.ui" "${REPO}"
   docker_build_if_needed agent-fleet-operator:local -f "${REPO}/Dockerfile.operator" "${REPO}"
 fi
@@ -936,10 +1254,19 @@ if [[ "${ENABLE_KIND}" == "1" ]]; then
     agent-fleet-operator:local \
     --name "${KIND_CLUSTER}"
   as_user kubectl apply -k "${REPO}/infra/overlays/kind"
-  echo "==> waiting for agent-fleet pods"
-  if ! as_user kubectl -n agent-fleet wait --for=condition=Ready pods --all --timeout=180s; then
-    as_user kubectl -n agent-fleet get pods,svc >&2 || true
-    echo "ERROR: kind pods not Ready" >&2
+  # Same tag :local + imagePullPolicy IfNotPresent does not recreate pods.
+  # `wait Ready` on the old UI/API is how a new image looked installed.
+  echo "==> rollout api/ui/operator so nodes run the images just loaded"
+  as_user kubectl --context "kind-${KIND_CLUSTER}" -n agent-fleet \
+    rollout restart deploy/api deploy/ui deploy/fleet-operator
+  if ! as_user kubectl --context "kind-${KIND_CLUSTER}" -n agent-fleet \
+        rollout status deploy/api --timeout=300s \
+     || ! as_user kubectl --context "kind-${KIND_CLUSTER}" -n agent-fleet \
+        rollout status deploy/ui --timeout=300s \
+     || ! as_user kubectl --context "kind-${KIND_CLUSTER}" -n agent-fleet \
+        rollout status deploy/fleet-operator --timeout=180s; then
+    as_user kubectl --context "kind-${KIND_CLUSTER}" -n agent-fleet get pods,svc >&2 || true
+    echo "ERROR: kind rollout did not finish" >&2
     exit 1
   fi
   # In-cluster NodePort (works even if host publish is weird).
@@ -950,24 +1277,32 @@ if [[ "${ENABLE_KIND}" == "1" ]]; then
     exit 1
   fi
   # Host extraPortMappings (blocked if api-ingress netpol omits node/host).
-  if curl -sf --max-time 5 http://127.0.0.1:8080/health >/dev/null; then
-    echo "    host :8080 /health ok"
-  else
-    echo "ERROR: host :8080 /health failed (kind extraPortMappings / NetworkPolicy)." >&2
-    echo "       In-cluster API is up; host publish is not. Check overlays/kind/api-nodeport-netpol.yaml" >&2
-    exit 1
-  fi
-  if curl -sf --max-time 5 -o /dev/null http://127.0.0.1:3030/; then
-    echo "    host :3030 UI ok"
-  else
-    echo "ERROR: host :3030 UI failed" >&2
+  # Port-up is not this tree — API baked sha AND UI /fleet-git-sha.txt must match HEAD.
+  # First probe can time out while the new UI pod takes the extraPortMapping.
+  ident_ok=0
+  for _ in $(seq 1 20); do
+    if as_user python3 "${REPO}/tests/browser/stack_identity.py"; then
+      ident_ok=1
+      break
+    fi
+    sleep 3
+  done
+  if [[ "${ident_ok}" -ne 1 ]]; then
+    echo "ERROR: kind host :8080/:3030 is not this tree after install." >&2
+    echo "       Rebuild api+ui (install script or ./scripts/run-every-test.sh --prepare-kind)." >&2
+    echo "       Do not patch a running pod env to fake identity (sha is baked)." >&2
     exit 1
   fi
 fi
 
 echo
+if ! as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null"; then
+  echo "ERROR: dx still not on PATH after install. Refusing to finish green." >&2
+  exit 1
+fi
+
 echo "==> install complete for ${REAL_USER}  os=${OS_FAMILY}  PROFILE=${PROFILE}"
-echo "    rustc ${RUST_TOOLCHAIN}  tmp ${TMP_ROOT}  env ${ENV_FILE}"
+echo "    rustc ${RUST_TOOLCHAIN}  dx $(as_user_sh 'source "$HOME/.cargo/env" 2>/dev/null; dx --version 2>/dev/null || echo missing')  tmp ${TMP_ROOT}  env ${ENV_FILE}"
 [[ "${ENABLE_OLLAMA}" == "1" ]] && echo "    ollama ${OLLAMA_MODEL}"
 [[ "${ENABLE_LMSTUDIO_PROXY}" == "1" ]] && echo "    proxy :1234 -> :11434"
 [[ "${ENABLE_GITSSH}" == "1" ]] && echo "    git-ssh :2222  key ${SSH_DIR}/id_ed25519"

@@ -15,6 +15,10 @@ _REPO = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(_REPO / "tests" / "browser"))
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
+_LAB_TESTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(_LAB_TESTS))
+from lab_env import env_flag  # noqa: E402
+
 
 def _kubectl(*args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
@@ -74,8 +78,17 @@ class KindSmokeContractTests(unittest.TestCase):
         self.assertNotIn("/health", src)
 
 
-@unittest.skipUnless(_cluster(), "kind/agent-fleet namespace not available")
 class KindSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if _cluster():
+            return
+        if env_flag("ENABLE_KIND"):
+            raise AssertionError(
+                "ENABLE_KIND=1 but kind/agent-fleet namespace is not available"
+            )
+        raise unittest.SkipTest("kind/agent-fleet namespace not available")
+
     def test_control_plane_deployments_ready(self):
         for name in ("api", "ui", "postgres", "fleet-operator"):
             r = _kubectl(
@@ -97,20 +110,36 @@ class KindSmokeTests(unittest.TestCase):
 
     def test_host_api_health(self):
         try:
-            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=False)
+            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
         except ForeignStackError as e:
             self.fail(
-                f"host :8080 is not this tree: {e}. "
-                "Rebuild agent-fleet-api:local with FLEET_GIT_SHA or SKIP_KIND=1. "
-                "FLEET_ALLOW_FOREIGN_STACK=1 skips identity (operator only)."
+                f"host :8080/:3030 is not this tree: {e}. "
+                "Rebuild agent-fleet-api:local and agent-fleet-ui:local "
+                "(install script or ./scripts/run-every-test.sh --prepare-kind). "
+                "Do not kubectl set env FLEET_GIT_SHA. SKIP_KIND=1 only if there is no cluster."
             )
 
     def test_host_ui(self):
         try:
+            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
+        except ForeignStackError as e:
+            self.fail(f"host :3030 is not this tree: {e}")
+        try:
             with urllib.request.urlopen("http://127.0.0.1:3030/", timeout=5) as resp:
                 self.assertEqual(resp.status, 200)
+            with urllib.request.urlopen(
+                "http://127.0.0.1:3030/fleet-git-sha.txt", timeout=5
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+                sha = resp.read().decode().strip()
         except (urllib.error.URLError, TimeoutError) as e:
             self.fail(f"host :3030: {e}")
+        want = subprocess.check_output(
+            ["bash", str(_REPO / "scripts" / "tree-id.sh")],
+            text=True,
+            cwd=str(_REPO),
+        ).strip()
+        self.assertEqual(sha, want, f"UI /fleet-git-sha.txt={sha!r} != tree-id {want}")
 
 
 if __name__ == "__main__":

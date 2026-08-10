@@ -58,6 +58,8 @@ usage() {
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     err "missing required command: $1"
+    err "Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh"
+    err "(no arguments; PROFILE/ENABLE_* in repo-root .env). Do not patch around it."
     return 1
   fi
 }
@@ -67,6 +69,7 @@ mkdir_run() {
 }
 
 compose() {
+  export_git_sha
   if docker compose version >/dev/null 2>&1; then
     docker compose -f "$COMPOSE_FILE" "$@"
   else
@@ -173,9 +176,9 @@ ensure_env() {
     echo "DATA_DIR=./data" >>"$ROOT/.env"
   fi
 
-  # Ensure JWT_SECRET length note is satisfied (example already is).
   if ! grep -qE '^JWT_SECRET=.{32,}' "$ROOT/.env"; then
-    warn "JWT_SECRET should be ≥ 32 characters (see .env)"
+    err "JWT_SECRET must be ≥ 32 characters (set it in .env). Refusing to start."
+    return 1
   fi
 
   # Optional ADMIN_TOKEN for demo-orch.sh — leave commented unless present.
@@ -241,17 +244,13 @@ cmd_setup() {
   need_cmd cargo
   need_cmd curl
   need_cmd docker
-
-  if ! command -v dx >/dev/null 2>&1; then
-    warn "dx (Dioxus CLI) not found — UI will not start."
-    warn "  Install a 0.7.x CLI matching the workspace dioxus pin, e.g.:"
-    warn "    cargo install dioxus-cli --version 0.7.3 --locked"
-  fi
+  need_cmd dx
 
   start_postgres
 
   if [[ "${FLEET_SKIP_BUILD:-0}" != "1" ]]; then
-    log "Building fleet-server (first time can take a while)…"
+    export_git_sha
+    log "Building fleet-server (FLEET_GIT_SHA=${FLEET_GIT_SHA}; first time can take a while)…"
     cargo build -p fleet-server
     ok "  fleet-server built"
   else
@@ -268,10 +267,16 @@ cmd_setup() {
 }
 
 export_git_sha() {
-  if [[ -z "${FLEET_GIT_SHA:-}" ]]; then
-    FLEET_GIT_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
-  fi
+  # Always this worktree. A leftover FLEET_GIT_SHA in the environment must not
+  # bake an old value into fleet-server (compile-time option_env!).
+  FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")"
   export FLEET_GIT_SHA
+}
+
+write_ui_git_sha() {
+  local dest="${ROOT}/crates/fleet-ui/public/fleet-git-sha.txt"
+  mkdir -p "$(dirname "${dest}")"
+  printf '%s\n' "${FLEET_GIT_SHA}" >"${dest}"
 }
 
 start_server() {
@@ -310,14 +315,17 @@ start_ui() {
     warn "Skipping UI (FLEET_SKIP_UI=1)"
     return 0
   fi
-  if ! command -v dx >/dev/null 2>&1; then
-    warn "dx not found — skip UI. Install: cargo install dioxus-cli --version 0.7.3 --locked"
-    return 0
-  fi
+  need_cmd dx || exit 1
+  export_git_sha
+  write_ui_git_sha
   if [[ -n "$(port_pids "$UI_PORT")" ]]; then
-    # UI port alone is not identity; API probe already ran in start_server / cmd_start.
-    warn "Port $UI_PORT already in use — not starting fleet-ui"
-    return 0
+    if python3 "${ROOT}/tests/browser/stack_identity.py"; then
+      warn "Port $UI_PORT already in use and UI/API match this tree — not starting"
+      return 0
+    fi
+    err "Port $UI_PORT is in use but is not this checkout (old Kind UI?)."
+    err "Free :3030 or rebuild agent-fleet-ui:local from this commit."
+    exit 1
   fi
   local pid
   pid="$(read_pid "$PID_UI")"
@@ -329,6 +337,7 @@ start_ui() {
   log "Starting fleet-ui on :$UI_PORT (nohup)…"
   nohup env \
     CARGO_TERM_COLOR=never \
+    FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
     dx serve --package fleet-ui --port "$UI_PORT" \
     >>"$LOG_UI" 2>&1 &
   echo $! >"$PID_UI"
@@ -340,6 +349,9 @@ cmd_start() {
   ensure_env
   need_cmd cargo
   need_cmd curl
+  if [[ "${FLEET_SKIP_UI:-0}" != "1" ]]; then
+    need_cmd dx || exit 1
+  fi
 
   # Postgres first
   if ! compose ps --status running 2>/dev/null | grep -q postgres; then
@@ -349,7 +361,8 @@ cmd_start() {
   fi
 
   if [[ "${FLEET_SKIP_BUILD:-0}" != "1" ]]; then
-    log "Ensuring fleet-server is built…"
+    export_git_sha
+    log "Ensuring fleet-server is built (FLEET_GIT_SHA=${FLEET_GIT_SHA})…"
     cargo build -p fleet-server
   fi
 
@@ -359,10 +372,27 @@ cmd_start() {
   load_dotenv
   local port="${PORT:-$API_PORT}"
   log "Waiting for services…"
-  wait_http "http://127.0.0.1:${port}/health" "fleet-server" 90 || true
-  if [[ "${FLEET_SKIP_UI:-0}" != "1" ]] && command -v dx >/dev/null 2>&1; then
+  wait_http "http://127.0.0.1:${port}/health" "fleet-server" 90 || {
+    err "fleet-server did not become ready. Logs: ./scripts/fleet-dev.sh logs"
+    exit 1
+  }
+  if [[ "${FLEET_SKIP_UI:-0}" != "1" ]]; then
     # dx may take longer (wasm compile); longer timeout
-    wait_http "http://127.0.0.1:${UI_PORT}" "fleet-ui" 180 || true
+    wait_http "http://127.0.0.1:${UI_PORT}" "fleet-ui" 180 || {
+      err "fleet-ui did not become ready. Logs: ./scripts/fleet-dev.sh logs"
+      exit 1
+    }
+  fi
+  if [[ "${FLEET_SKIP_UI:-0}" == "1" ]]; then
+    python3 "${ROOT}/tests/browser/stack_identity.py" --api-only || {
+      err "Started API is not this tree. See tests/browser/stack_identity.py"
+      exit 1
+    }
+  else
+    python3 "${ROOT}/tests/browser/stack_identity.py" || {
+      err "Started ports are not this tree. See tests/browser/stack_identity.py"
+      exit 1
+    }
   fi
 
   ok "Started."

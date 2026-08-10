@@ -43,8 +43,11 @@ class InfraKustomizeTests(unittest.TestCase):
 
     def test_kind_overlay_builds(self):
         r = _kustomize(INFRA / "overlays" / "kind")
-        if r.returncode == 127:
-            self.skipTest("kubectl/kustomize not on PATH")
+        self.assertNotEqual(
+            r.returncode,
+            127,
+            "kubectl/kustomize not on PATH (run install-full-suite-deps.sh)",
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         out = r.stdout
         self.assertIn("kind: Namespace", out)
@@ -58,8 +61,11 @@ class InfraKustomizeTests(unittest.TestCase):
 
     def test_base_infra_builds(self):
         r = _kustomize(INFRA)
-        if r.returncode == 127:
-            self.skipTest("kubectl/kustomize not on PATH")
+        self.assertNotEqual(
+            r.returncode,
+            127,
+            "kubectl/kustomize not on PATH (run install-full-suite-deps.sh)",
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("kind: CustomResourceDefinition", r.stdout)
 

@@ -86,10 +86,12 @@ cmd_launch() {
   need_cmd python3
   if ! command -v dx >/dev/null 2>&1; then
     err "dx (Dioxus CLI) is not on PATH — UI will not start."
-    err "Run ${INSTALL} (or: cargo install dioxus-cli --version 0.7.3 --locked)"
+    err "Run ${INSTALL} (no arguments; PROFILE/ENABLE_* in repo-root .env)."
+    err "Do not treat Kind UI as a substitute for host dx."
     exit 1
   fi
-  export FLEET_GIT_SHA="${FLEET_GIT_SHA:-$(git -C "${ROOT}" rev-parse HEAD)}"
+  export FLEET_GIT_SHA
+  FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")"
   log "Starting stack via ./scripts/fleet-dev.sh start"
   "${DEV}" start
   require_this_tree || {

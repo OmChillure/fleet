@@ -18,8 +18,8 @@ static SECRET: Mutex<Option<String>> = Mutex::new(None);
 fn stored_secret() -> Option<String> {
     SECRET
         .lock()
-        .ok()
-        .and_then(|g| g.clone())
+        .expect("handshake secret mutex poisoned")
+        .clone()
         .filter(|s| !s.is_empty())
 }
 
@@ -31,9 +31,10 @@ pub fn init_from_env() -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        if let Ok(mut g) = SECRET.lock() {
-            *g = Some(s);
-        }
+        let mut g = SECRET
+            .lock()
+            .map_err(|_| anyhow::anyhow!("handshake secret mutex poisoned"))?;
+        *g = Some(s);
     }
     // Zero the value in the original environ strings *before* unsetenv.
     // `/proc/self/environ` is the execve block and is not updated by unsetenv.
