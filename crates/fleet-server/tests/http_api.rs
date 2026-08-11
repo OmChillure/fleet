@@ -64,6 +64,7 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         google_drive: None,
         teams: None,
         discord: None,
+        trello: None,
     }
 }
 
@@ -880,8 +881,13 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         .iter()
         .find(|i| i["id"] == "bitbucket")
         .unwrap_or_else(|| panic!("bitbucket missing: {}", list.body));
+    let trello = items
+        .iter()
+        .find(|i| i["id"] == "trello")
+        .unwrap_or_else(|| panic!("trello missing: {}", list.body));
     assert_eq!(github["availability"], "available", "{github}");
     assert_eq!(gitlab["availability"], "available", "{gitlab}");
+    assert_eq!(trello["availability"], "available", "{trello}");
     assert_eq!(bitbucket["availability"], "coming_soon", "{bitbucket}");
     assert_eq!(
         github["oauth_start_path"],
@@ -955,6 +961,22 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         gl_start.raw.contains("client_id") && gl_start.raw.contains("client_secret"),
         "GitLab start should ask for an OAuth app: {}",
         gl_start.raw
+    );
+
+    // Trello authorize lands on a fragment-token capture page when no code is present.
+    let tr_cb = call(
+        &app,
+        "GET",
+        "/api/integrations/oauth/callback/trello",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(tr_cb.status, StatusCode::OK, "{}", tr_cb.raw);
+    assert!(
+        tr_cb.raw.contains("location.hash") && tr_cb.raw.contains("token"),
+        "Trello callback without code should lift #token into ?code=: {}",
+        tr_cb.raw
     );
 
     let gh_start = call(

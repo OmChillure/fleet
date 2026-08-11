@@ -79,6 +79,17 @@ pub fn authorize_url(
             "https://discord.com/api/oauth2/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}",
             scope = urlencoding("identify guilds"),
         ),
+        "trello" => {
+            // Trello's authorize flow returns the user token in the URL fragment.
+            // Callback HTML lifts `#token=` into `?code=` for the shared exchange path.
+            let return_url = format!("{}?state={state_enc}", cfg.callback_url("trello"));
+            format!(
+                "https://trello.com/1/authorize?expiration=never&name={name}&scope={scope}&response_type=token&key={client_id}&return_url={return_enc}&callback_method=fragment",
+                name = urlencoding("Agent Fleet"),
+                scope = urlencoding("read,write,account"),
+                return_enc = urlencoding(&return_url),
+            )
+        }
         _ => {
             return Err(AppError::bad_request(format!(
                 "OAuth is not supported for {provider}"
@@ -106,6 +117,7 @@ pub async fn exchange_code(
         "google_drive" => exchange_google_drive(cfg, client, code).await,
         "teams" => exchange_teams(cfg, client, code).await,
         "discord" => exchange_discord(cfg, client, code).await,
+        "trello" => exchange_trello(client, code).await,
         _ => Err(AppError::bad_request(format!(
             "OAuth is not supported for {provider}"
         ))),
@@ -861,6 +873,48 @@ async fn fetch_discord_username(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
     Some(global.unwrap_or(username).to_string())
+}
+
+async fn exchange_trello(client: &OAuthClientConfig, code: &str) -> AppResult<TokenBundle> {
+    // Trello authorize returns the user token directly (no code exchange).
+    let access_token = code.trim();
+    if access_token.is_empty() {
+        return Err(AppError::bad_request("Trello did not return a token"));
+    }
+    let http = http_client()?;
+    let account_label = fetch_trello_username(&http, &client.client_id, access_token)
+        .await
+        .or_else(|| Some("Trello".into()));
+
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "token_type": "trello",
+        }),
+        config: json!({
+            "provider": "trello",
+            "api_key": client.client_id,
+        }),
+        account_label,
+    })
+}
+
+async fn fetch_trello_username(
+    http: &reqwest::Client,
+    api_key: &str,
+    token: &str,
+) -> Option<String> {
+    let res = http
+        .get("https://api.trello.com/1/members/me")
+        .query(&[("key", api_key), ("token", token), ("fields", "username,fullName")])
+        .send()
+        .await
+        .ok()?;
+    let body: Value = res.json().await.ok()?;
+    body.get("username")
+        .or_else(|| body.get("fullName"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn http_client() -> AppResult<reqwest::Client> {

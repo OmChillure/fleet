@@ -42,6 +42,7 @@ pub struct IntegrationsConfig {
     pub google_drive: Option<OAuthClientConfig>,
     pub teams: Option<OAuthClientConfig>,
     pub discord: Option<OAuthClientConfig>,
+    pub trello: Option<OAuthClientConfig>,
 }
 
 impl IntegrationsConfig {
@@ -79,6 +80,7 @@ impl IntegrationsConfig {
             google_drive: optional_oauth("GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET")?,
             teams: optional_oauth("TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET")?,
             discord: optional_oauth("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET")?,
+            trello: optional_oauth("TRELLO_CLIENT_ID", "TRELLO_CLIENT_SECRET")?,
         })
     }
 
@@ -94,6 +96,7 @@ impl IntegrationsConfig {
             "google_drive" => self.google_drive.as_ref(),
             "teams" => self.teams.as_ref(),
             "discord" => self.discord.as_ref(),
+            "trello" => self.trello.as_ref(),
             _ => None,
         }
     }

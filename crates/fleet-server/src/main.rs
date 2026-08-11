@@ -68,6 +68,7 @@ async fn run() -> anyhow::Result<()> {
         ("google_drive", config.integrations.google_drive.is_some()),
         ("teams", config.integrations.teams.is_some()),
         ("discord", config.integrations.discord.is_some()),
+        ("trello", config.integrations.trello.is_some()),
     ]
     .into_iter()
     .filter_map(|(id, ok)| ok.then_some(id))

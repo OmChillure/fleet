@@ -10,6 +10,7 @@ pub mod linear;
 pub mod notion;
 pub mod slack;
 pub mod teams;
+pub mod trello;
 
 use serde_json::Value;
 
@@ -27,6 +28,7 @@ pub fn supported_providers() -> &'static [&'static str] {
         "google_drive",
         "teams",
         "discord",
+        "trello",
     ]
 }
 
@@ -42,6 +44,7 @@ pub fn operations_for(provider: &str) -> &'static [&'static str] {
         "google_drive" => google_drive::OPERATIONS,
         "teams" => teams::OPERATIONS,
         "discord" => discord::OPERATIONS,
+        "trello" => trello::OPERATIONS,
         _ => &[],
     }
 }
@@ -71,6 +74,13 @@ pub async fn dispatch(
         "google_drive" => google_drive::invoke(http, access_token, operation, args).await,
         "teams" => teams::invoke(http, access_token, operation, args).await,
         "discord" => discord::invoke(http, access_token, operation, args).await,
+        "trello" => {
+            let api_key = config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            trello::invoke(http, access_token, api_key, operation, args).await
+        }
         _ => ProxyResult::err(provider, operation, "unknown_provider", "unsupported", None),
     }
 }
@@ -83,10 +93,11 @@ mod tests {
     #[test]
     fn supported_providers_has_unique_ids() {
         let ids = supported_providers();
-        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.len(), 11);
         let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), 10);
+        assert_eq!(unique.len(), 11);
         assert!(ids.contains(&"gitlab"));
+        assert!(ids.contains(&"trello"));
     }
 
     #[test]

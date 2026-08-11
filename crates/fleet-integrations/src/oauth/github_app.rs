@@ -221,6 +221,7 @@ mod tests {
             google_drive: None,
             teams: None,
             discord: None,
+            trello: None,
         }
     }
 

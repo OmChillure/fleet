@@ -216,10 +216,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "trello".into(),
             name: "Trello".into(),
-            description: "Boards and cards for lightweight task control. Coming soon.".into(),
+            description: "Connect Trello so agents can read boards and move cards as they work.".into(),
             category: IntegrationCategory::TaskControl,
             category_label: "Tasks".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "trello".into(),
             docs_url: Some("https://developer.atlassian.com/cloud/trello/guides/rest-api/authorization/".into()),
             auth_method: AuthMethod::Oauth,
@@ -271,6 +271,7 @@ pub fn oauth_app_create_url(provider: &str) -> Option<&'static str> {
         "google_drive" => "https://console.cloud.google.com/apis/credentials",
         "teams" => "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
         "discord" => "https://discord.com/developers/applications",
+        "trello" => "https://trello.com/power-ups/admin",
         _ => return None,
     })
 }
@@ -305,6 +306,16 @@ mod tests {
         let g = find_provider("gitlab").expect("gitlab");
         assert_eq!(g.availability, IntegrationAvailability::Available);
         assert_eq!(oauth_app_create_url("gitlab"), Some("https://gitlab.com/-/user_settings/applications"));
+    }
+
+    #[test]
+    fn trello_is_available() {
+        let t = find_provider("trello").expect("trello");
+        assert_eq!(t.availability, IntegrationAvailability::Available);
+        assert_eq!(
+            oauth_app_create_url("trello"),
+            Some("https://trello.com/power-ups/admin")
+        );
     }
 
     #[test]

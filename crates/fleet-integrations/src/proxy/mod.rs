@@ -275,7 +275,9 @@ mod tests {
         assert!(operations_for("google_drive").contains(&"list_files"));
         assert!(operations_for("teams").contains(&"send_chat_message"));
         assert!(operations_for("discord").contains(&"list_guilds"));
-        assert_eq!(supported_providers().len(), 10);
+        assert!(operations_for("trello").contains(&"list_boards"));
+        assert!(operations_for("trello").contains(&"create_card"));
+        assert_eq!(supported_providers().len(), 11);
     }
 
     #[test]
