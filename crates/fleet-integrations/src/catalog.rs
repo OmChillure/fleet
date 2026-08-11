@@ -80,10 +80,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "gitlab".into(),
             name: "GitLab".into(),
-            description: "OAuth connect for merge requests and pipelines. Coming soon.".into(),
+            description: "Sign in with GitLab so agents can work with issues, merge requests, and commits on your projects.".into(),
             category: IntegrationCategory::CodeVersioning,
             category_label: "Source control".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "gitlab".into(),
             docs_url: Some("https://docs.gitlab.com/ee/api/oauth2.html".into()),
             auth_method: AuthMethod::Oauth,
@@ -262,6 +262,7 @@ pub fn is_known_provider(id: &str) -> bool {
 pub fn oauth_app_create_url(provider: &str) -> Option<&'static str> {
     Some(match provider {
         "github" => "https://github.com/settings/applications/new",
+        "gitlab" => "https://gitlab.com/-/user_settings/applications",
         "jira" => "https://developer.atlassian.com/console/myapps/",
         "slack" => "https://api.slack.com/apps?new_app=1",
         "linear" => "https://linear.app/settings/api",
@@ -285,6 +286,7 @@ mod tests {
         let ids: HashSet<_> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids.len(), list.len());
         assert!(ids.contains("github"));
+        assert!(ids.contains("gitlab"));
         assert!(ids.contains("slack"));
         assert!(ids.contains("figma"));
         assert!(ids.contains("teams"));
@@ -296,6 +298,13 @@ mod tests {
         for i in catalog() {
             assert_eq!(i.auth_method, AuthMethod::Oauth);
         }
+    }
+
+    #[test]
+    fn gitlab_is_available() {
+        let g = find_provider("gitlab").expect("gitlab");
+        assert_eq!(g.availability, IntegrationAvailability::Available);
+        assert_eq!(oauth_app_create_url("gitlab"), Some("https://gitlab.com/-/user_settings/applications"));
     }
 
     #[test]

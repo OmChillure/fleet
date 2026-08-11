@@ -262,6 +262,9 @@ mod tests {
         assert!(operations_for("github").contains(&"list_prs"));
         assert!(operations_for("github").contains(&"commit_files"));
         assert!(operations_for("github").contains(&"get_file"));
+        assert!(operations_for("gitlab").contains(&"list_mrs"));
+        assert!(operations_for("gitlab").contains(&"commit_files"));
+        assert!(operations_for("gitlab").contains(&"create_mr"));
         assert!(operations_for("jira").contains(&"get_issue"));
         assert!(operations_for("jira").contains(&"create_issue"));
         assert!(operations_for("linear").contains(&"list_issues"));
@@ -272,7 +275,7 @@ mod tests {
         assert!(operations_for("google_drive").contains(&"list_files"));
         assert!(operations_for("teams").contains(&"send_chat_message"));
         assert!(operations_for("discord").contains(&"list_guilds"));
-        assert_eq!(supported_providers().len(), 9);
+        assert_eq!(supported_providers().len(), 10);
     }
 
     #[test]

@@ -1,9 +1,9 @@
-//! Integrations — users **OAuth-connect** GitHub, Slack, Jira, Linear, Figma,
+//! Integrations — users **OAuth-connect** GitHub, GitLab, Slack, Jira, Linear, Figma,
 //! Notion, Google Drive, Teams, Discord, … to a workspace.
 //! Credentials stay in the control plane for AI use; never enter sandboxes.
 //! OAuth tokens are encrypted at rest (AES-256-GCM) before Postgres storage.
 //!
-//! Outbound product APIs (GitHub, Jira, Linear, Slack, Figma, Notion, Drive, Teams, Discord) go through [`proxy`] —
+//! Outbound product APIs (GitHub, GitLab, Jira, Linear, Slack, Figma, Notion, Drive, Teams, Discord) go through [`proxy`] —
 //! decrypt in-process, allowlisted ops only, sanitized results.
 //!
 //! | Method | Path | Role |

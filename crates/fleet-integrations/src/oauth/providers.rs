@@ -42,6 +42,10 @@ pub fn authorize_url(
                 )
             }
         }
+        "gitlab" => format!(
+            "https://gitlab.com/oauth/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}",
+            scope = urlencoding("api"),
+        ),
         "slack" => format!(
             "https://slack.com/oauth/v2/authorize?client_id={client_id}&scope={scope}&redirect_uri={redirect_enc}&state={state_enc}",
             scope = urlencoding(
@@ -93,6 +97,7 @@ pub async fn exchange_code(
     tracing::debug!(provider = %provider, "oauth token exchange starting");
     let result = match provider {
         "github" => exchange_github(cfg, client, code).await,
+        "gitlab" => exchange_gitlab(cfg, client, code).await,
         "slack" => exchange_slack(cfg, client, code).await,
         "linear" => exchange_linear(cfg, client, code).await,
         "jira" => exchange_jira(cfg, client, code).await,
@@ -189,6 +194,85 @@ async fn fetch_github_login(http: &reqwest::Client, token: &str) -> Option<Strin
         .ok()?;
     let body: Value = res.json().await.ok()?;
     body.get("login")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+async fn exchange_gitlab(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://gitlab.com/oauth/token")
+        .form(&[
+            ("client_id", client.client_id.as_str()),
+            ("client_secret", client.client_secret.as_str()),
+            ("code", code),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", &cfg.callback_url("gitlab")),
+        ])
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("GitLab token request failed: {e}")))?;
+
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("GitLab token parse failed: {e}")))?;
+
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        let desc = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(err);
+        return Err(AppError::bad_request(format!("GitLab OAuth: {desc}")));
+    }
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("GitLab did not return an access token"))?
+        .to_string();
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expires_in = body.get("expires_in").cloned();
+    let scope = body.get("scope").cloned();
+    let token_type = body
+        .get("token_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Bearer")
+        .to_string();
+
+    let account_label = fetch_gitlab_username(&http, &access_token)
+        .await
+        .or_else(|| Some("GitLab".into()));
+
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": token_type,
+            "expires_in": expires_in,
+            "scope": scope,
+        }),
+        config: json!({ "provider": "gitlab" }),
+        account_label,
+    })
+}
+
+async fn fetch_gitlab_username(http: &reqwest::Client, token: &str) -> Option<String> {
+    let res = http
+        .get("https://gitlab.com/api/v4/user")
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .ok()?;
+    let body: Value = res.json().await.ok()?;
+    body.get("username")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }

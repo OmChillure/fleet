@@ -55,6 +55,7 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         state_secret: jwt_secret.to_string(),
         credentials_key: CredentialsKey::from_secret(jwt_secret).expect("credentials key"),
         github: None,
+        gitlab: None,
         slack: None,
         linear: None,
         jira: None,
@@ -854,7 +855,7 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
-    // Catalog: github available, gitlab coming_soon (matches fleet_integrations catalog).
+    // Catalog: github + gitlab available; bitbucket still coming_soon.
     let list = call(
         &app,
         "GET",
@@ -875,8 +876,13 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         .iter()
         .find(|i| i["id"] == "gitlab")
         .unwrap_or_else(|| panic!("gitlab missing: {}", list.body));
+    let bitbucket = items
+        .iter()
+        .find(|i| i["id"] == "bitbucket")
+        .unwrap_or_else(|| panic!("bitbucket missing: {}", list.body));
     assert_eq!(github["availability"], "available", "{github}");
-    assert_eq!(gitlab["availability"], "coming_soon", "{gitlab}");
+    assert_eq!(gitlab["availability"], "available", "{gitlab}");
+    assert_eq!(bitbucket["availability"], "coming_soon", "{bitbucket}");
     assert_eq!(
         github["oauth_start_path"],
         format!("/api/workspaces/{ws}/integrations/github/oauth/start"),
@@ -884,15 +890,20 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     );
     assert_eq!(
         gitlab["oauth_start_path"],
+        format!("/api/workspaces/{ws}/integrations/gitlab/oauth/start"),
+        "available providers always expose oauth/start (app can bootstrap): {gitlab}"
+    );
+    assert_eq!(
+        bitbucket["oauth_start_path"],
         serde_json::Value::Null,
-        "coming-soon providers must not expose oauth/start: {gitlab}"
+        "coming-soon providers must not expose oauth/start: {bitbucket}"
     );
 
-    // OAuth start without client id → 4xx (not 500 / not 302).
+    // Coming-soon OAuth start → 4xx (not 500 / not 302).
     let start = call(
         &app,
         "GET",
-        &format!("/api/workspaces/{ws}/integrations/gitlab/oauth/start"),
+        &format!("/api/workspaces/{ws}/integrations/bitbucket/oauth/start"),
         Some(&jar),
         None,
     )
@@ -912,6 +923,38 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
             .contains("not available"),
         "coming-soon start should say not available: {}",
         start.body
+    );
+
+    // GitLab without a server client serves the one-time OAuth app form.
+    let gl_start = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/integrations/gitlab/oauth/start"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        gl_start.status,
+        StatusCode::OK,
+        "GitLab without a server client must serve the bootstrap form, not 4xx/302: {} {}",
+        gl_start.status,
+        gl_start.raw
+    );
+    let gl_ct = gl_start
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        gl_ct.contains("text/html"),
+        "expected HTML bootstrap form, content-type={gl_ct:?} body={}",
+        gl_start.raw
+    );
+    assert!(
+        gl_start.raw.contains("client_id") && gl_start.raw.contains("client_secret"),
+        "GitLab start should ask for an OAuth app: {}",
+        gl_start.raw
     );
 
     let gh_start = call(

@@ -3,6 +3,7 @@
 pub mod discord;
 pub mod figma;
 pub mod github;
+pub mod gitlab;
 pub mod google_drive;
 pub mod jira;
 pub mod linear;
@@ -17,6 +18,7 @@ use crate::proxy::types::ProxyResult;
 pub fn supported_providers() -> &'static [&'static str] {
     &[
         "github",
+        "gitlab",
         "jira",
         "linear",
         "slack",
@@ -31,6 +33,7 @@ pub fn supported_providers() -> &'static [&'static str] {
 pub fn operations_for(provider: &str) -> &'static [&'static str] {
     match provider {
         "github" => github::OPERATIONS,
+        "gitlab" => gitlab::OPERATIONS,
         "jira" => jira::OPERATIONS,
         "linear" => linear::OPERATIONS,
         "slack" => slack::OPERATIONS,
@@ -53,6 +56,7 @@ pub async fn dispatch(
 ) -> ProxyResult {
     match provider {
         "github" => github::invoke(http, access_token, operation, args).await,
+        "gitlab" => gitlab::invoke(http, access_token, operation, args).await,
         "jira" => {
             let cloud_id = config
                 .get("cloud_id")
@@ -77,11 +81,12 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn supported_providers_has_nine_unique_ids() {
+    fn supported_providers_has_unique_ids() {
         let ids = supported_providers();
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 10);
         let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), 9);
+        assert_eq!(unique.len(), 10);
+        assert!(ids.contains(&"gitlab"));
     }
 
     #[test]
