@@ -65,6 +65,7 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         teams: None,
         discord: None,
         trello: None,
+        asana: None,
     }
 }
 
@@ -885,9 +886,14 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         .iter()
         .find(|i| i["id"] == "trello")
         .unwrap_or_else(|| panic!("trello missing: {}", list.body));
+    let asana = items
+        .iter()
+        .find(|i| i["id"] == "asana")
+        .unwrap_or_else(|| panic!("asana missing: {}", list.body));
     assert_eq!(github["availability"], "available", "{github}");
     assert_eq!(gitlab["availability"], "available", "{gitlab}");
     assert_eq!(trello["availability"], "available", "{trello}");
+    assert_eq!(asana["availability"], "available", "{asana}");
     assert_eq!(bitbucket["availability"], "coming_soon", "{bitbucket}");
     assert_eq!(
         github["oauth_start_path"],

@@ -1,5 +1,6 @@
 //! Per-provider apps. Add: `apps/<name>/{client,tools}` + register here + OAuth.
 
+pub mod asana;
 pub mod discord;
 pub mod figma;
 pub mod github;
@@ -29,6 +30,7 @@ pub fn supported_providers() -> &'static [&'static str] {
         "teams",
         "discord",
         "trello",
+        "asana",
     ]
 }
 
@@ -45,6 +47,7 @@ pub fn operations_for(provider: &str) -> &'static [&'static str] {
         "teams" => teams::OPERATIONS,
         "discord" => discord::OPERATIONS,
         "trello" => trello::OPERATIONS,
+        "asana" => asana::OPERATIONS,
         _ => &[],
     }
 }
@@ -81,6 +84,7 @@ pub async fn dispatch(
                 .unwrap_or("");
             trello::invoke(http, access_token, api_key, operation, args).await
         }
+        "asana" => asana::invoke(http, access_token, operation, args).await,
         _ => ProxyResult::err(provider, operation, "unknown_provider", "unsupported", None),
     }
 }
@@ -93,11 +97,12 @@ mod tests {
     #[test]
     fn supported_providers_has_unique_ids() {
         let ids = supported_providers();
-        assert_eq!(ids.len(), 11);
+        assert_eq!(ids.len(), 12);
         let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), 11);
+        assert_eq!(unique.len(), 12);
         assert!(ids.contains(&"gitlab"));
         assert!(ids.contains(&"trello"));
+        assert!(ids.contains(&"asana"));
     }
 
     #[test]

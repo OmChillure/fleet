@@ -222,6 +222,7 @@ mod tests {
             teams: None,
             discord: None,
             trello: None,
+            asana: None,
         }
     }
 

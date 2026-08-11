@@ -199,10 +199,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "asana".into(),
             name: "Asana".into(),
-            description: "Connect Asana projects so agents can pick up tasks. Coming soon.".into(),
+            description: "Connect Asana so agents can pick up tasks and keep project progress in sync.".into(),
             category: IntegrationCategory::TaskControl,
             category_label: "Tasks".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "asana".into(),
             docs_url: Some("https://developers.asana.com/docs/oauth".into()),
             auth_method: AuthMethod::Oauth,
@@ -272,6 +272,7 @@ pub fn oauth_app_create_url(provider: &str) -> Option<&'static str> {
         "teams" => "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
         "discord" => "https://discord.com/developers/applications",
         "trello" => "https://trello.com/power-ups/admin",
+        "asana" => "https://app.asana.com/0/my-apps",
         _ => return None,
     })
 }
@@ -315,6 +316,16 @@ mod tests {
         assert_eq!(
             oauth_app_create_url("trello"),
             Some("https://trello.com/power-ups/admin")
+        );
+    }
+
+    #[test]
+    fn asana_is_available() {
+        let a = find_provider("asana").expect("asana");
+        assert_eq!(a.availability, IntegrationAvailability::Available);
+        assert_eq!(
+            oauth_app_create_url("asana"),
+            Some("https://app.asana.com/0/my-apps")
         );
     }
 

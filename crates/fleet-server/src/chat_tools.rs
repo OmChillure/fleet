@@ -240,13 +240,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "integration_query",
-                "description": "Call a connected integration on the CONTROL PLANE (decrypt there; tokens never enter sandboxes). Providers: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello. Use get_integration for the allowlisted ops. GitHub: list_repos/issues/prs, get_file, list_commits, commit_files, create_pr/issue, add_comment. GitLab: list_repos/issues/mrs, get_file, list_commits, commit_files, create_mr/issue, add_comment. Jira: search/create/transition issues, comments. Linear: list/create/update issues. Slack: list_channels/users, post_message, history. Figma: get_file/nodes/comments. Notion: search/pages/databases. Drive: list/get/export files (readonly). Teams: chats/teams/channels + send messages. Discord: get_me, list_guilds. Trello: list_boards/lists/cards, create/update cards, comments. Do NOT put tokens in sandbox specs.",
+                "description": "Call a connected integration on the CONTROL PLANE (decrypt there; tokens never enter sandboxes). Providers: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana. Use get_integration for the allowlisted ops. GitHub: list_repos/issues/prs, get_file, list_commits, commit_files, create_pr/issue, add_comment. GitLab: list_repos/issues/mrs, get_file, list_commits, commit_files, create_mr/issue, add_comment. Jira: search/create/transition issues, comments. Linear: list/create/update issues. Slack: list_channels/users, post_message, history. Figma: get_file/nodes/comments. Notion: search/pages/databases. Drive: list/get/export files (readonly). Teams: chats/teams/channels + send messages. Discord: get_me, list_guilds. Trello: list_boards/lists/cards, create/update cards, comments. Asana: list workspaces/projects/tasks, create/update tasks, comments. Do NOT put tokens in sandbox specs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "description": "github | gitlab | jira | linear | slack | figma | notion | google_drive | teams | discord | trello"
+                            "description": "github | gitlab | jira | linear | slack | figma | notion | google_drive | teams | discord | trello | asana"
                         },
                         "operation": {
                             "type": "string",
@@ -336,7 +336,7 @@ You have tools for:\n\
 - launch_agent_task / launch_agent_plan: local sandboxes (stub / local bash fences / docker / process=fleet-worker). Plans up to 1000 tasks; only FLEET_MAX_AGENTS run at once, the rest queue. ```bash fences run when SANDBOX_BACKEND is local or docker.\n\
 **Integrations — CONTROL PLANE only** (tokens decrypt on the server, never in sandboxes)\n\
 - list_integrations / get_integration (shows connected apps + allowlisted ops)\n\
-- integration_query: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello\n\
+- integration_query: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana\n\
 - github_commit_files: write/scaffold files + commit on a branch (use for Next.js stubs, README, etc.)\n\
 - github_create_pr: open a PR after commits\n\
 GitHub write flow: github_commit_files → github_create_pr. Report commit_sha and PR html_url to the user.\n\
@@ -1358,6 +1358,7 @@ fn provider_capabilities(provider: &str) -> &'static str {
         }
         "discord" => "get_me, list_guilds (user OAuth; no channel posts)",
         "trello" => "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment",
+        "asana" => "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment",
         _ => "OAuth connect only — no proxy tools yet.",
     }
 }

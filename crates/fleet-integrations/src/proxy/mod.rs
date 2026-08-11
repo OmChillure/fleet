@@ -277,7 +277,9 @@ mod tests {
         assert!(operations_for("discord").contains(&"list_guilds"));
         assert!(operations_for("trello").contains(&"list_boards"));
         assert!(operations_for("trello").contains(&"create_card"));
-        assert_eq!(supported_providers().len(), 11);
+        assert!(operations_for("asana").contains(&"list_tasks"));
+        assert!(operations_for("asana").contains(&"create_task"));
+        assert_eq!(supported_providers().len(), 12);
     }
 
     #[test]

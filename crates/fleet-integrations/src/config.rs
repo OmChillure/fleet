@@ -43,6 +43,7 @@ pub struct IntegrationsConfig {
     pub teams: Option<OAuthClientConfig>,
     pub discord: Option<OAuthClientConfig>,
     pub trello: Option<OAuthClientConfig>,
+    pub asana: Option<OAuthClientConfig>,
 }
 
 impl IntegrationsConfig {
@@ -81,6 +82,7 @@ impl IntegrationsConfig {
             teams: optional_oauth("TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET")?,
             discord: optional_oauth("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET")?,
             trello: optional_oauth("TRELLO_CLIENT_ID", "TRELLO_CLIENT_SECRET")?,
+            asana: optional_oauth("ASANA_CLIENT_ID", "ASANA_CLIENT_SECRET")?,
         })
     }
 
@@ -97,6 +99,7 @@ impl IntegrationsConfig {
             "teams" => self.teams.as_ref(),
             "discord" => self.discord.as_ref(),
             "trello" => self.trello.as_ref(),
+            "asana" => self.asana.as_ref(),
             _ => None,
         }
     }

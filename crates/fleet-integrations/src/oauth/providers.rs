@@ -79,6 +79,12 @@ pub fn authorize_url(
             "https://discord.com/api/oauth2/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}",
             scope = urlencoding("identify guilds"),
         ),
+        "asana" => format!(
+            "https://app.asana.com/-/oauth_authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&state={state_enc}&scope={scope}",
+            scope = urlencoding(
+                "workspaces:read projects:read projects:write tasks:read tasks:write stories:read stories:write users:read"
+            ),
+        ),
         "trello" => {
             // Trello's authorize flow returns the user token in the URL fragment.
             // Callback HTML lifts `#token=` into `?code=` for the shared exchange path.
@@ -118,6 +124,7 @@ pub async fn exchange_code(
         "teams" => exchange_teams(cfg, client, code).await,
         "discord" => exchange_discord(cfg, client, code).await,
         "trello" => exchange_trello(client, code).await,
+        "asana" => exchange_asana(cfg, client, code).await,
         _ => Err(AppError::bad_request(format!(
             "OAuth is not supported for {provider}"
         ))),
@@ -873,6 +880,73 @@ async fn fetch_discord_username(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
     Some(global.unwrap_or(username).to_string())
+}
+
+async fn exchange_asana(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://app.asana.com/-/oauth_token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client.client_id.as_str()),
+            ("client_secret", client.client_secret.as_str()),
+            ("redirect_uri", &cfg.callback_url("asana")),
+            ("code", code),
+        ])
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("Asana token request failed: {e}")))?;
+
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("Asana token parse failed: {e}")))?;
+
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        let desc = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(err);
+        return Err(AppError::bad_request(format!("Asana OAuth: {desc}")));
+    }
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("Asana did not return an access token"))?
+        .to_string();
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expires_in = body.get("expires_in").cloned();
+    let token_type = body
+        .get("token_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Bearer")
+        .to_string();
+
+    let account_label = body
+        .pointer("/data/name")
+        .or_else(|| body.pointer("/data/email"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| Some("Asana".into()));
+
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": token_type,
+            "expires_in": expires_in,
+        }),
+        config: json!({ "provider": "asana" }),
+        account_label,
+    })
 }
 
 async fn exchange_trello(client: &OAuthClientConfig, code: &str) -> AppResult<TokenBundle> {
