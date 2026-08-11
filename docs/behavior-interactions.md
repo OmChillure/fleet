@@ -365,6 +365,7 @@ If a provider is not connected, the tool returns an error; the system prompt tel
 | Provider | Operations |
 | --- | --- |
 | github | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits`, `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
+| gitlab | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment` |
 | jira | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
 | linear | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
 | slack | `list_channels`, `list_users`, `post_message`, `get_channel_history` |
@@ -373,6 +374,8 @@ If a provider is not connected, the tool returns an error; the system prompt tel
 | google_drive | `list_files`, `get_file`, `export_file` (readonly) |
 | teams | `get_me`, `list_chats`, `list_teams`, `list_channels`, `list_chat_messages`, `send_chat_message`, `send_channel_message` |
 | discord | `get_me`, `list_guilds` |
+| trello | `list_boards`, `list_lists`, `list_cards`, `get_card`, `create_card`, `update_card`, `add_comment` |
+| asana | `list_workspaces`, `list_projects`, `list_tasks`, `get_task`, `create_task`, `update_task`, `add_comment` |
 
 Unknown op / disconnected / decrypt failure → tool `ok: false` with message. Results are sanitized (no token echo).
 
@@ -497,11 +500,11 @@ Custom personas: same fields. `is_default` is stored; spawn does not read it yet
 | figma | Available | yes | yes |
 | notion | Available | yes | yes |
 | google_drive | Available | yes | yes (readonly) |
-| gitlab | Coming soon | no | no |
+| gitlab | Available | yes | yes (read+write) |
 | bitbucket | Coming soon | no | no |
 | confluence | Coming soon | no | no |
-| asana | Coming soon | no | no |
-| trello | Coming soon | no | no |
+| asana | Available | yes | yes |
+| trello | Available | yes | yes |
 
 OAuth start issues a signed state JWT (user, workspace, provider). Callback verifies state, membership, provider match, then encrypts credentials with `INTEGRATIONS_CREDENTIALS_KEY`.
 

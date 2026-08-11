@@ -11,7 +11,7 @@ Rust workspace (see root `Cargo.toml`).
 | --- | --- | --- |
 | [`fleet-server`](crates/fleet-server/) | `crates/fleet-server` | **Unified API** — `cargo run` entrypoint |
 | [`fleet-auth`](crates/fleet-auth/) | `crates/fleet-auth` | Auth + workspaces library (mounted by server) |
-| [`fleet-integrations`](crates/fleet-integrations/) | `crates/fleet-integrations` | OAuth integrations (GitHub, Slack, Notion, …) + encrypted tokens |
+| [`fleet-integrations`](crates/fleet-integrations/) | `crates/fleet-integrations` | OAuth integrations (GitHub, GitLab, Trello, Asana, Slack, Notion, …) + encrypted tokens |
 | [`fleet-db`](crates/fleet-db/) | `crates/fleet-db` | Postgres — migrations, pool, models, repos |
 | [`fleet-ui`](crates/fleet-ui/) | `crates/fleet-ui` | Web UI (Dioxus) |
 | [`agent-fleet-contracts`](crates/agent-fleet-contracts/) | `crates/agent-fleet-contracts` | Shared command/event types |
@@ -117,7 +117,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/sessions/{session_id}` | Live worker session stream |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Live worker sessions |
-| `/{workspace_id}/integrations` | OAuth connect (GitHub, Slack, Notion, …) |
+| `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Settings |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
