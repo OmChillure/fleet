@@ -879,8 +879,13 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     assert_eq!(gitlab["availability"], "coming_soon", "{gitlab}");
     assert_eq!(
         github["oauth_start_path"],
+        format!("/api/workspaces/{ws}/integrations/github/oauth/start"),
+        "available providers always expose oauth/start (app can bootstrap): {github}"
+    );
+    assert_eq!(
+        gitlab["oauth_start_path"],
         serde_json::Value::Null,
-        "OAuth start must be omitted when the server has no GitHub client: {github}"
+        "coming-soon providers must not expose oauth/start: {gitlab}"
     );
 
     // OAuth start without client id → 4xx (not 500 / not 302).
@@ -917,23 +922,28 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         None,
     )
     .await;
-    assert!(
-        gh_start.status.is_client_error(),
-        "unconfigured GitHub OAuth must be 4xx not {}: {}",
-        gh_start.status,
-        gh_start.body
-    );
     assert_eq!(
         gh_start.status,
-        StatusCode::BAD_REQUEST,
-        "unconfigured GitHub OAuth must not 302/5xx: {}",
-        gh_start.body
+        StatusCode::OK,
+        "GitHub without a server client must serve the App Manifest form, not 4xx/302: {} {}",
+        gh_start.status,
+        gh_start.raw
     );
-    let gh_err = gh_start.body["error"].as_str().unwrap_or("").to_ascii_lowercase();
+    let ct = gh_start
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     assert!(
-        gh_err.contains("not configured") || gh_err.contains("client"),
-        "expected unconfigured OAuth message, got {}",
-        gh_start.body
+        ct.contains("text/html"),
+        "expected HTML manifest form, content-type={ct:?} body={}",
+        gh_start.raw
+    );
+    assert!(
+        gh_start.raw.contains("github.com/settings/apps/new")
+            && gh_start.raw.contains("name=\"manifest\""),
+        "GitHub start should POST an App Manifest to github.com: {}",
+        gh_start.raw
     );
 
     let unknown_start = call(

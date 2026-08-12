@@ -11,7 +11,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
-use crate::models::IntegrationConnection;
+use crate::models::{IntegrationConnection, IntegrationOAuthApp};
 use crate::pool::map_query_err;
 
 const COLS: &str = r#"
@@ -194,4 +194,75 @@ pub async fn mark_error(
         )));
     }
     Ok(())
+}
+
+pub async fn list_oauth_apps(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<IntegrationOAuthApp>> {
+    sqlx::query_as::<_, IntegrationOAuthApp>(
+        r#"
+        SELECT workspace_id, provider, client_id, client_secret, created_by, created_at, updated_at
+        FROM integration_oauth_apps
+        WHERE workspace_id = $1
+        ORDER BY provider
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn get_oauth_app(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+) -> DbResult<Option<IntegrationOAuthApp>> {
+    sqlx::query_as::<_, IntegrationOAuthApp>(
+        r#"
+        SELECT workspace_id, provider, client_id, client_secret, created_by, created_at, updated_at
+        FROM integration_oauth_apps
+        WHERE workspace_id = $1 AND provider = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn upsert_oauth_app(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    client_id: &str,
+    client_secret: &Value,
+    created_by: Option<Uuid>,
+    at: DateTime<Utc>,
+) -> DbResult<IntegrationOAuthApp> {
+    sqlx::query_as::<_, IntegrationOAuthApp>(
+        r#"
+        INSERT INTO integration_oauth_apps (
+            workspace_id, provider, client_id, client_secret, created_by, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $6)
+        ON CONFLICT (workspace_id, provider)
+        DO UPDATE SET
+            client_id = EXCLUDED.client_id,
+            client_secret = EXCLUDED.client_secret,
+            updated_at = EXCLUDED.updated_at
+        RETURNING workspace_id, provider, client_id, client_secret, created_by, created_at, updated_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .bind(client_id)
+    .bind(client_secret)
+    .bind(created_by)
+    .bind(at)
+    .fetch_one(pool)
+    .await
+    .map_err(map_query_err)
 }

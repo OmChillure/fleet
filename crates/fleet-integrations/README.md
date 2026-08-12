@@ -42,7 +42,8 @@ Callback URL to register on each platform:
 {API_PUBLIC_BASE}/api/integrations/oauth/callback/{provider}
 ```
 
-If client id/secret are missing, the UI shows **Not configured** (server still runs).
+If client id/secret are missing, Connect still starts the provider flow
+(GitHub App Manifest, or a one-time app form for Jira and others).
 
 ## API
 

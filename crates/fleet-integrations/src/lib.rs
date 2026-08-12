@@ -9,7 +9,10 @@
 //! | Method | Path | Role |
 //! | --- | --- | --- |
 //! | `GET` | `/api/workspaces/:id/integrations` | Catalog + connection state |
-//! | `GET` | `/api/workspaces/:id/integrations/:provider/oauth/start` | 302 → provider |
+//! | `PUT` | `/api/workspaces/:id/integrations/:provider/oauth-app` | Save OAuth app (client id/secret) |
+//! | `GET` | `/api/workspaces/:id/integrations/:provider/oauth/start` | 302 → provider login + consent |
+//! | `POST` | `/api/workspaces/:id/integrations/:provider/oauth/start` | First-time app + 302 to provider |
+//! | `GET` | `/api/integrations/oauth/github/manifest/callback` | GitHub App Manifest convert |
 //! | `GET` | `/api/integrations/oauth/callback/:provider` | Code exchange → store → UI |
 //! | `DELETE` | `/api/workspaces/:id/integrations/:provider` | Disconnect |
 
@@ -24,7 +27,7 @@ pub mod proxy;
 mod routes;
 mod state;
 
-pub use catalog::{catalog, find_provider, is_known_provider};
+pub use catalog::{catalog, find_provider, is_known_provider, oauth_app_create_url};
 pub use config::{IntegrationsConfig, OAuthClientConfig};
 pub use crypto::CredentialsKey;
 pub use models::{

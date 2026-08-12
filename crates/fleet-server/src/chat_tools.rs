@@ -1753,10 +1753,8 @@ async fn get_integration(
         "capabilities": provider_capabilities(provider),
         "connect_hint": if connected {
             "Already connected for this workspace."
-        } else if oauth_configured {
-            "Not connected — user can Connect on the Integrations page."
         } else {
-            "OAuth app not configured on the server (missing CLIENT_ID/SECRET)."
+            "Not connected — user can Connect on the Integrations page (provider login + consent)."
         },
     });
     Ok((

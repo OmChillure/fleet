@@ -169,7 +169,9 @@ cmd_guide() {
     "Seed starters → eight persona cards. No LLM is called here." || return 0
 
   pause_step "Integrations" \
-    "Catalog + search. Connect only if this MR is OAuth and .env has secrets." || return 0
+    "Catalog + search. Connect is enabled for available providers (GitHub, Jira, …)." \
+    "GitHub: new tab → github.com (first time creates a local GitHub App, then install/consent)." \
+    "Jira: new tab → one-time Atlassian OAuth app if needed, then Atlassian login + consent." || return 0
 
   pause_step "Chat" \
     "New chat: provider/model dropdown." \

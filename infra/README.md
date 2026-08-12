@@ -23,8 +23,10 @@ orchestrator, not long-lived cloud keys.
 infra/
   crds/fleetsandboxes.yaml     # FleetSandbox CRD
   base/                        # namespace, postgres, api, ui, operator, RBAC, NPs
+  overlays/k3d/                # NodePorts for k3d loadbalancer
   overlays/kind/               # NodePorts for kind extraPortMappings
   samples/fleetsandbox.yaml    # example CR
+  k3d.yaml                     # k3d cluster + host ports 8080/3030
   kind.yaml                    # kind cluster + host ports 8080/3030
   Makefile
 ```
@@ -33,8 +35,37 @@ Operator source: [`crates/fleet-operator`](../crates/fleet-operator/).
 
 ## Prereqs
 
-- Docker, `kubectl`, `kind` (or any cluster + StorageClass)
-- Images built from the repo Dockerfiles
+- Docker, `kubectl`
+- **k3d** (preferred local) or `kind`
+- Images built from the repo Dockerfiles (`make images` passes `FLEET_GIT_SHA`)
+
+## k3d quickstart (recommended)
+
+```bash
+# from repo root — 1 server, no agents, Traefik disabled
+brew install k3d            # once
+make -C infra k3d-create
+make -C infra k3d-load      # docker build + import into the cluster
+make -C infra apply-k3d
+
+kubectl -n agent-fleet get pods
+```
+
+Host ports (see `infra/k3d.yaml`):
+
+- UI  http://localhost:3030
+- API http://localhost:8080
+
+```bash
+kubectl -n agent-fleet apply -f infra/samples/fleetsandbox.yaml
+kubectl -n agent-fleet get fsb,pods -l app.kubernetes.io/component=sandbox
+```
+
+Tear down:
+
+```bash
+make -C infra k3d-delete
+```
 
 ## kind quickstart
 
@@ -105,5 +136,5 @@ half of that path.
 
 ```bash
 make -C infra uninstall
-kind delete cluster --name agent-fleet
+make -C infra k3d-delete          # or: kind delete cluster --name agent-fleet
 ```

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::pages::auth::api::{auth_base_url, refresh_session};
 
@@ -91,6 +92,10 @@ pub struct Integration {
     pub oauth_configured: bool,
     #[serde(default)]
     pub oauth_start_path: Option<String>,
+    #[serde(default)]
+    pub oauth_callback_url: Option<String>,
+    #[serde(default)]
+    pub oauth_app_create_url: Option<String>,
     pub connected: bool,
     #[serde(default)]
     pub connection: Option<ConnectionPublic>,
@@ -162,6 +167,49 @@ pub fn oauth_start_url(workspace_id: &str, provider: &str) -> String {
     api_url(&format!(
         "/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"
     ))
+}
+
+async fn authorized_put_json(
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, IntegrationsError> {
+    let first = with_credentials(client().put(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session()
+        .await
+        .map_err(|e| IntegrationsError::Message(e.message()))?;
+    with_credentials(client().put(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
+}
+
+/// Save workspace OAuth app credentials, then start the provider consent flow.
+pub async fn save_oauth_app(
+    workspace_id: &str,
+    provider: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<(), IntegrationsError> {
+    let path = format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth-app");
+    let res = authorized_put_json(
+        &path,
+        &json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }),
+    )
+    .await?;
+    if res.status().is_success() {
+        return Ok(());
+    }
+    parse_json_or_error::<ErrorBody>(res).await?;
+    Ok(())
 }
 
 /// `DELETE /api/workspaces/{id}/integrations/{provider}`

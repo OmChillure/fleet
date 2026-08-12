@@ -27,7 +27,9 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 Other catalog entries (GitLab, Bitbucket, Confluence, …) may appear as
 **Coming soon** until OAuth is wired.
 
-If a provider’s client id/secret is unset, the UI shows **Not configured**.
+If a provider’s client id/secret is unset, **Connect** still starts the
+provider flow (GitHub App Manifest, or a one-time OAuth app form for Jira
+and others) and then the login + consent screen.
 
 ---
 

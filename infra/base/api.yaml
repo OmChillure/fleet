@@ -50,9 +50,12 @@ spec:
             - name: PROCESS_WORKER_BIN
               value: /usr/local/bin/fleet-worker
             - name: API_PUBLIC_BASE
-              value: http://api.agent-fleet.svc.cluster.local:8080
+              value: http://localhost:8080
             - name: UI_PUBLIC_BASE
-              value: http://ui.agent-fleet.svc.cluster.local:3030
+              value: http://localhost:3030
+            # In-cluster workers still reach the API via service DNS:
+            - name: ORCHESTRATOR_PUBLIC_URL
+              value: http://api.agent-fleet.svc.cluster.local:8080
             - name: CORS_ORIGINS
               value: http://localhost:3030,http://127.0.0.1:3030
             - name: COOKIE_SECURE

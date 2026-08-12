@@ -41,6 +41,23 @@ class InfraKustomizeTests(unittest.TestCase):
         self.assertIn("api-nodeport-netpol.yaml", k)
         self.assertIn("nodeport.yaml", k)
 
+    def test_k3d_overlay_builds(self):
+        k = (INFRA / "overlays" / "k3d" / "kustomization.yaml").read_text(encoding="utf-8")
+        self.assertIn("../../crds", k)
+        self.assertIn("nodeport.yaml", k)
+        r = _kustomize(INFRA / "overlays" / "k3d")
+        self.assertNotEqual(
+            r.returncode,
+            127,
+            "kubectl/kustomize not on PATH (run install-full-suite-deps.sh)",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        self.assertIn("kind: CustomResourceDefinition", out)
+        self.assertIn("name: api-node", out)
+        self.assertIn("nodePort: 30080", out)
+        self.assertIn("nodePort: 30303", out)
+
     def test_kind_overlay_builds(self):
         r = _kustomize(INFRA / "overlays" / "kind")
         self.assertNotEqual(

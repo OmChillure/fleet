@@ -2,9 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::api::{
-    Integration, disconnect_integration, list_integrations, oauth_start_url,
-};
+use super::api::{Integration, disconnect_integration, list_integrations, oauth_start_url};
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
 
@@ -274,7 +272,6 @@ pub fn Integrations(workspace_id: String) -> Element {
                             let ws_connect = workspace_id.clone();
                             let available = integ.availability == "available";
                             let connected = integ.connected;
-                            let configured = integ.oauth_configured;
                             let is_connecting =
                                 connecting_provider().as_deref() == Some(integ.id.as_str());
                             let is_busy = busy_provider().as_deref() == Some(integ.id.as_str());
@@ -290,8 +287,6 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 "Connecting…".to_string()
                             } else if !available {
                                 "Coming soon".to_string()
-                            } else if !configured {
-                                "Not configured".to_string()
                             } else {
                                 integ.category_label.clone()
                             };
@@ -300,7 +295,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 "bg-emerald-400"
                             } else if is_connecting {
                                 "bg-amber-400 animate-pulse"
-                            } else if available && configured {
+                            } else if available {
                                 "bg-neutral-500"
                             } else {
                                 "bg-neutral-600"
@@ -334,7 +329,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                             }
                                         }
 
-                                        if available && configured && !connected {
+                                        if available && !connected {
                                             button {
                                                 class: "inline-flex min-w-[5.5rem] shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs font-semibold text-[var(--app-fg)] transition hover:bg-white/5 disabled:cursor-wait disabled:opacity-80",
                                                 r#type: "button",
@@ -342,7 +337,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 title: if is_connecting {
                                                     "Waiting for authorization in the other tab…"
                                                 } else {
-                                                    "Connect (opens in a new tab)"
+                                                    "Sign in with the provider and grant permissions"
                                                 },
                                                 onclick: move |_| {
                                                     if connecting_provider().as_deref() == Some(provider_connect.as_str()) {
@@ -373,7 +368,6 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                         "Authorize {name} in the new tab. This page will update when done."
                                                     ));
 
-                                                    // spawn is called from a Dioxus event — runtime is active.
                                                     spawn(async move {
                                                         poll_until_connected(
                                                             &ws,
@@ -391,7 +385,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                     span { "Connect" }
                                                 }
                                             }
-                                        } else if available && configured && connected {
+                                        } else if available && connected {
                                             button {
                                                 class: "shrink-0 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/15 disabled:opacity-50",
                                                 r#type: "button",
@@ -443,6 +437,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                     }
                 }
             }
+
         }
     }
 }
