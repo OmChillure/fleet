@@ -33,7 +33,7 @@ pub fn Agents(workspace_id: String) -> Element {
                 "Agents"
             }
             p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                "Specialist personas. Launch a plan with different slugs — each agent sees TEAM.md (who is doing what) and handoffs from finished teammates. "
+                "Specialist personas. Launch a plan with different slugs — each agent sees TEAM.md, talks mid-run, shares `work/`, and reviewers can send work back. "
                 if let Some(b) = backend() {
                     "LLM backend: {b}."
                 } else {

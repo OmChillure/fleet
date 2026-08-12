@@ -365,6 +365,63 @@ impl Store {
         Ok(())
     }
 
+    /// Bounce a finished (or live) task back to `ready` with reviewer notes.
+    pub async fn reopen_task_for_changes(
+        &self,
+        task_id: Uuid,
+        reason: &str,
+        notes_append: &str,
+    ) -> Result<()> {
+        let notes = notes_append.chars().take(4000).collect::<String>();
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET status = 'ready',
+                claimed_session_id = NULL,
+                terminal_at = NULL,
+                failure_reason = $2,
+                hitl_notes = CASE
+                    WHEN hitl_notes IS NULL OR hitl_notes = '' THEN $3
+                    ELSE hitl_notes || E'\n\n' || $3
+                END,
+                spec_md = CASE
+                    WHEN length(spec_md) > 56000 THEN spec_md
+                    ELSE spec_md || E'\n\n' || $3
+                END,
+                updated_at = now()
+            WHERE id = $1
+              AND status NOT IN ('cancelled', 'done_failed')
+            "#,
+        )
+        .bind(task_id)
+        .bind(reason)
+        .bind(notes)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Put a task back on the dependency queue (reviewer waits on bounced deps).
+    pub async fn requeue_task_waiting(&self, task_id: Uuid, reason: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET status = 'queued',
+                claimed_session_id = NULL,
+                terminal_at = NULL,
+                failure_reason = $2,
+                updated_at = now()
+            WHERE id = $1
+              AND status NOT IN ('cancelled', 'done_failed')
+            "#,
+        )
+        .bind(task_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_task_done_failed(&self, task_id: Uuid, reason: &str) -> Result<()> {
         sqlx::query(
             r#"
@@ -603,6 +660,36 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(Into::into)
+    }
+
+    /// UI/ticker list — skips bulky spec_md so Neon polls stay cheap.
+    pub async fn list_tasks_slim(
+        &self,
+        project_id: Uuid,
+        run_id: Option<Uuid>,
+    ) -> Result<Vec<super::BoardTaskRow>> {
+        let tasks = sqlx::query_as::<_, super::BoardTaskRow>(
+            r#"
+            SELECT id, project_id, run_id, plan_id, plan_task_id, title, summary,
+                   ''::text AS spec_md,
+                   status, depends_on, priority, worker_profile, acceptance, external_ref,
+                   timeout_s, max_retries, attempt, claimed_session_id, last_report_seq,
+                   progress_pct, block_reason, hitl_notes,
+                   NULL::jsonb AS hitl_artifacts,
+                   hitl_resume_requested_at, hitl_notified_at, hitl_resolved_at,
+                   failure_reason, artifacts, retry_not_before,
+                   assigned_at, started_at, terminal_at, created_at, updated_at
+            FROM board_tasks
+            WHERE project_id = $1
+              AND ($2::uuid IS NULL OR run_id = $2)
+            ORDER BY priority DESC, created_at ASC
+            "#,
+        )
+        .bind(project_id)
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(tasks)
     }
 
     pub async fn list_tasks(

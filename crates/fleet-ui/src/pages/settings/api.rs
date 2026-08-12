@@ -1,8 +1,6 @@
-//! Workspace fleet settings (max agents + local fleet LLM + git remote).
+//! Workspace fleet settings (max agents + local fleet LLM).
 
 use serde::{Deserialize, Serialize};
-
-pub use crate::pages::fleet::api::{ensure_fleet, update_fleet_config};
 
 use crate::pages::auth::api::{auth_base_url, refresh_session};
 

@@ -1246,6 +1246,10 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
             "spec": "Settle under stub sandbox without a live LLM.",
             "worker_profile": "coding"
         }),
+        &fleet_server::chat_tools::ChatLlmContext {
+            provider: "grok".into(),
+            model: "grok-4.5".into(),
+        },
     )
     .await;
 
@@ -1365,4 +1369,234 @@ async fn fleet_requires_membership() {
         "other member must not read session detail: {}",
         stolen.body
     );
+}
+
+// ── 12. leftover: fleet settings + agency-agents personas ───────────────────
+
+#[tokio::test]
+async fn fleet_settings_get_patch_and_rejects_grok_store() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let got = call(&app, "GET", &fleet(&ws, "/settings"), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["fleet_llm"], "off", "{}", got.body);
+    assert_eq!(got.body["grok_env"], false, "unit/http tests force grok env off");
+    assert!(
+        got.body["max_agents_cap"].as_i64().unwrap_or(0) >= 16,
+        "{}",
+        got.body
+    );
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        Some(&jar),
+        Some(json!({
+            "max_agents": 4,
+            "fleet_llm": "ollama",
+            "fleet_llm_model": "llama3.2"
+        })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(patched.body["max_agents"], 4, "{}", patched.body);
+    assert_eq!(patched.body["fleet_llm"], "ollama", "{}", patched.body);
+    assert_eq!(patched.body["fleet_llm_model"], "llama3.2", "{}", patched.body);
+    assert_eq!(patched.body["effective_backend"], "ollama", "{}", patched.body);
+
+    let grok = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        Some(&jar),
+        Some(json!({ "fleet_llm": "grok" })),
+    )
+    .await;
+    assert_eq!(grok.status, StatusCode::BAD_REQUEST, "{}", grok.body);
+
+    let project = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    assert_eq!(project.status, StatusCode::OK, "{}", project.body);
+    assert_eq!(
+        project.body["config"]["fleet_llm"], "ollama",
+        "GET /fleet should include settings: {}",
+        project.body
+    );
+}
+
+#[tokio::test]
+async fn fleet_personas_lists_builtin_or_roster() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let out = call(&app, "GET", &fleet(&ws, "/personas"), Some(&jar), None).await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    let personas = out.body["personas"]
+        .as_array()
+        .unwrap_or_else(|| panic!("personas array: {}", out.body));
+    assert!(
+        !personas.is_empty(),
+        "expected builtin or cloned roster: {}",
+        out.body
+    );
+    assert!(
+        personas.iter().any(|p| p["slug"]
+            .as_str()
+            .unwrap_or("")
+            .contains("backend")
+            || p["slug"].as_str().unwrap_or("").contains("reviewer")
+            || p["name"].as_str().is_some()),
+        "{}",
+        out.body
+    );
+}
+
+#[tokio::test]
+async fn chat_tool_list_agent_personas_and_launch_plan_stamps_llm() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    let user_id = Uuid::parse_str(me.body["user"]["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(&ws).unwrap();
+    let llm = fleet_server::chat_tools::ChatLlmContext {
+        provider: "grok".into(),
+        model: "grok-4.5-internal".into(),
+    };
+
+    let (listed, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "list_agent_personas",
+        &json!({}),
+        &llm,
+    )
+    .await;
+    assert!(action.ok, "{action:?} {listed}");
+    assert_eq!(action.tool, "list_agent_personas");
+    assert!(
+        listed["count"].as_u64().unwrap_or(0) >= 1,
+        "{listed}"
+    );
+
+    let (content, launched) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "launch_agent_plan",
+        &json!({
+            "tasks": [
+                { "id": "impl", "title": "Implement", "spec": "do it", "worker_profile": "coding" },
+                { "id": "rev", "title": "Review", "spec": "review it", "worker_profile": "reviewer", "depends_on": ["impl"] }
+            ]
+        }),
+        &llm,
+    )
+    .await;
+    assert!(launched.ok, "{launched:?} {content}");
+    assert_eq!(content["task_count"], 2, "{content}");
+    let run_id = launched.run_id.as_deref().expect("run_id");
+    let run_uuid = Uuid::parse_str(run_id).unwrap();
+    let snap = state
+        .orch
+        .store
+        .load_board_snapshot(workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        snap.tasks.iter().filter(|t| t.run_id == run_uuid).count(),
+        2
+    );
+    let plan_id = snap
+        .tasks
+        .iter()
+        .find(|t| t.run_id == run_uuid)
+        .unwrap()
+        .plan_id;
+    let body = state
+        .orch
+        .store
+        .get_plan_body(plan_id)
+        .await
+        .unwrap()
+        .expect("plan");
+    assert_eq!(body.policy.llm_provider.as_deref(), Some("grok"));
+    assert_eq!(body.policy.llm_model.as_deref(), Some("grok-4.5-internal"));
+}
+
+#[tokio::test]
+async fn chat_tools_human_can_talk_on_team_channel() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    let user_id = Uuid::parse_str(me.body["user"]["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(&ws).unwrap();
+    let llm = fleet_server::chat_tools::ChatLlmContext {
+        provider: "grok".into(),
+        model: "grok-4.5".into(),
+    };
+
+    let (content, launched) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "launch_agent_plan",
+        &json!({
+            "tasks": [
+                { "id": "t1", "title": "API", "spec": "build it", "worker_profile": "coding" }
+            ]
+        }),
+        &llm,
+    )
+    .await;
+    assert!(launched.ok, "{launched:?} {content}");
+    let run_id = launched.run_id.as_deref().expect("run_id");
+
+    let (sent, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "send_team_message",
+        &json!({ "run_id": run_id, "to": "t1", "body": "use port 9090" }),
+        &llm,
+    )
+    .await;
+    assert!(action.ok, "{action:?} {sent}");
+    assert_eq!(sent["to"], "t1", "{sent}");
+    assert_eq!(sent["from"], "human", "{sent}");
+
+    let (read, read_action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "read_team_chat",
+        &json!({ "run_id": run_id }),
+        &llm,
+    )
+    .await;
+    assert!(read_action.ok, "{read_action:?} {read}");
+    assert_eq!(read["count"], 1, "{read}");
+    assert!(
+        read["transcript"]
+            .as_str()
+            .unwrap_or("")
+            .contains("use port 9090"),
+        "{read}"
+    );
+
+    let overview = call(
+        &app,
+        "GET",
+        &fleet(&ws, "/overview"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
+    assert!(
+        overview.body["total_runs"].as_u64().unwrap_or(0) >= 1,
+        "{}",
+        overview.body
+    );
+    assert_eq!(overview.body["chat"].as_array().map(|a| a.len()), Some(1));
 }

@@ -6,7 +6,9 @@
 pub mod agent_loop;
 mod docker;
 pub(crate) mod git_isolate;
+pub mod share;
 pub mod team;
+pub mod team_chat;
 mod worker_script;
 
 pub use docker::{docker_runtime, DockerRuntime};

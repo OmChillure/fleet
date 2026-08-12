@@ -73,8 +73,11 @@ dx serve --package fleet-ui --port 3030
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
    The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
-   specialist `worker_profile`s). Fleet LLM is **Settings** (Ollama model) or host env
-   `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run ```bash fences.
+   specialist `worker_profile`s, `read_team_chat` / `send_team_message`). Live workers
+   message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
+   and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
+   (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
+   bash fences from the task spec.
    Also **integration_query**
    (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:

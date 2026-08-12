@@ -251,6 +251,14 @@ class Demo:
         p.goto(f"{base}/sessions", wait_until="networkidle")
         pause(p, 1500)
 
+    def scene_dashboard(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/dashboard", wait_until="networkidle")
+        p.get_by_text("Dashboard", exact=True).first.wait_for(timeout=15_000)
+        p.get_by_text("Open runs").first.wait_for(timeout=10_000)
+        pause(p, 1500)
+
     def scene_lab(self) -> None:
         """Film a host protocol run (no Docker/LLM) as a local HTML page."""
         html_path = self.out_dir.resolve() / "lab-protocol.html"
@@ -318,6 +326,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
     "sessions": Demo.scene_sessions,
+    "dashboard": Demo.scene_dashboard,
     "lab": Demo.scene_lab,
     "kind": Demo.scene_kind,
 }
@@ -335,6 +344,7 @@ CORE = [
     "integrations",
     "settings",
     "sessions",
+    "dashboard",
 ]
 
 

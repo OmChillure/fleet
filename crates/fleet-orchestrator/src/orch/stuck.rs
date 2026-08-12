@@ -1,13 +1,19 @@
 //! Step 8 — stuck detection, kill, retry; stub exit → success.
 
 use crate::domain::{ExitReason, WorkerSessionStatus};
+use crate::sandbox::share::{
+    archive_session_tree, read_changes_request, sync_session_repo_back,
+};
+use crate::sandbox::team::archive_session_result;
 use crate::sandbox::{RuntimeHandle, SandboxRuntime, SandboxState, Signal};
 use crate::store::{BoardSnapshot, Store};
 use chrono::{Duration as ChronoDuration, Utc};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::review::apply_review_bounce;
 use super::spawn::apply_retry_after_failure;
 use super::tick::TickError;
 
@@ -15,6 +21,7 @@ pub struct StuckOutcome {
     pub killed: usize,
     pub completed_via_runtime: usize,
     pub retried: usize,
+    pub reviews_bounced: usize,
 }
 
 pub async fn process_sessions(
@@ -27,11 +34,13 @@ pub async fn process_sessions(
     kill_grace_s: i32,
     default_task_timeout_s: i32,
     cancel_by_run: &HashMap<Uuid, bool>,
+    data_dir: &Path,
 ) -> Result<StuckOutcome, TickError> {
     let mut out = StuckOutcome {
         killed: 0,
         completed_via_runtime: 0,
         retried: 0,
+        reviews_bounced: 0,
     };
     let now = Utc::now();
     let tasks: HashMap<Uuid, _> = snap.tasks.iter().map(|t| (t.id, t)).collect();
@@ -81,6 +90,38 @@ pub async fn process_sessions(
                 }
                 if code.unwrap_or(0) == 0 {
                     let _ = runtime.destroy(h).await;
+                    let work = session_work_dir(data_dir, session, project_id);
+                    if let Some(task) = task {
+                        if work.exists() {
+                            archive_session_result(
+                                data_dir,
+                                project_id,
+                                session.run_id,
+                                &task.plan_task_id,
+                                &work,
+                            )
+                            .await;
+                            archive_session_tree(
+                                data_dir,
+                                project_id,
+                                session.run_id,
+                                &task.plan_task_id,
+                                &work,
+                            );
+                            sync_session_repo_back(data_dir, &work, task);
+                        }
+                        if let Some(req) = read_changes_request(&work) {
+                            let n = apply_review_bounce(
+                                store, snap, session.board_task_id, &req, data_dir,
+                            )
+                            .await?;
+                            store
+                                .free_session_claim(session.board_task_id, session.id, "changes_requested")
+                                .await?;
+                            out.reviews_bounced += n;
+                            continue;
+                        }
+                    }
                     store
                         .apply_task_terminal(
                             session.board_task_id,
@@ -249,7 +290,21 @@ pub async fn process_sessions(
                 }
             }
         }
-        let _ = project_id;
     }
     Ok(out)
+}
+
+fn session_work_dir(
+    data_dir: &Path,
+    session: &crate::store::WorkerSessionRow,
+    project_id: Uuid,
+) -> PathBuf {
+    if let Some(w) = session.work_dir.as_deref().filter(|s| !s.is_empty()) {
+        return PathBuf::from(w);
+    }
+    data_dir
+        .join("projects")
+        .join(project_id.to_string())
+        .join("sessions")
+        .join(session.id.to_string())
 }

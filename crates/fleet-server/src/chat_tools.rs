@@ -96,7 +96,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "get_fleet_status",
-                "description": "Fleet snapshot: open runs, sandboxes, max_agents, fleet_llm, effective_backend. Local coding does NOT need GitHub.",
+                "description": "Fleet snapshot: open runs, sandboxes, max_agents, fleet_llm, effective_backend. Integrations are optional.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -108,7 +108,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "launch_agent_task",
-                "description": "Create a single-task agent run, multi-tick until the stub sandbox finishes, then destroy it. Prefer launch_agent_plan for multi-agent fan-out. Optional context_from prefetches GitHub/Jira/Linear into the task spec (tokens stay on the control plane).",
+                "description": "Create a single-task agent run, multi-tick until the stub sandbox finishes, then destroy it. Prefer launch_agent_plan for multi-agent fan-out. Optional context_from prefetches a connected integration into the task spec (tokens stay on the control plane).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -122,7 +122,7 @@ pub fn tool_definitions() -> Value {
                         },
                         "worker_profile": {
                             "type": "string",
-                            "description": "Persona slug from list_agent_personas (default coding → backend architect). Each task can be a different specialist."
+                            "description": "Persona slug from list_agent_personas (default generalist). Each task can be a different specialist."
                         },
                         "max_agents": {
                             "type": "integer",
@@ -151,7 +151,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "launch_agent_plan",
-                "description": "Launch local multi-agent work NOW. Workers use THIS chat's selected provider+model (Grok/Ollama/Claude later) — do not switch to Ollama. GitHub is NOT required. DAG of tasks (depends_on + parallel).",
+                "description": "Launch local multi-agent work NOW. Workers use THIS chat's selected provider+model. No integration is required. DAG of tasks (depends_on + parallel).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -205,7 +205,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "configure_fleet",
-                "description": "Enable or change workspace fleet workers: concurrent agents + local Fleet LLM (Ollama). Use this yourself when effective_backend is null so agents can actually code. Do not ask the user to open Settings first. Grok workers stay env-only (cannot set grok here).",
+                "description": "Enable or change workspace fleet workers: concurrent agents + local Fleet LLM (Ollama). Use this yourself when effective_backend is null so workers can use an LLM. Do not ask the user to open Settings first. Grok workers stay env-only (cannot set grok here).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -230,7 +230,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "list_agent_personas",
-                "description": "List specialist agent personas (agency-agents roster) to use as worker_profile on launch_agent_task / launch_agent_plan. Examples: engineering-frontend-developer, engineering-code-reviewer, engineering-backend-architect. Aliases: coding, frontend, reviewer, testing.",
+                "description": "List specialist agent personas to use as worker_profile on launch_agent_task / launch_agent_plan. Any roster slug works (engineering, marketing, finance, healthcare, …). Default if omitted: generalist. Optional shortcuts: coding, frontend, reviewer, testing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -239,6 +239,50 @@ pub fn tool_definitions() -> Value {
                             "description": "Optional division filter e.g. engineering, testing, product, design"
                         }
                     },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_team_chat",
+                "description": "Read the live team chat for a fleet run — what the specialist agents said to each other. Defaults to the latest open run.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {
+                            "type": "string",
+                            "description": "Optional run UUID. Omit to use the latest open run."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max messages to return (default 40)"
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_team_message",
+                "description": "Send a message into a live fleet run as the human. Agents see it on their next thinking round. to='*' broadcasts; or use a plan task id (t1).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "body": { "type": "string", "description": "Message text" },
+                        "to": {
+                            "type": "string",
+                            "description": "Teammate plan task id, or * / team (default *)"
+                        },
+                        "run_id": {
+                            "type": "string",
+                            "description": "Optional run UUID. Omit to use the latest open run."
+                        }
+                    },
+                    "required": ["body"],
                     "additionalProperties": false
                 }
             }
@@ -303,88 +347,25 @@ pub fn tool_definitions() -> Value {
                     "additionalProperties": false
                 }
             }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "github_commit_files",
-                "description": "CONTROL PLANE: commit one or more text files to a GitHub branch using the workspace OAuth token (never sent to sandboxes). Creates the branch from default if missing. Use for scaffolding (README, package.json, etc.). Max 40 files, 512KB each.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string", "description": "Repo name or owner/name" },
-                        "branch": {
-                            "type": "string",
-                            "description": "Target branch (default agent-fleet/changes)"
-                        },
-                        "message": { "type": "string", "description": "Commit message" },
-                        "base_branch": {
-                            "type": "string",
-                            "description": "Branch to fork from if target is new"
-                        },
-                        "files": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "path": { "type": "string" },
-                                    "content": { "type": "string" }
-                                },
-                                "required": ["path", "content"]
-                            }
-                        }
-                    },
-                    "required": ["owner", "repo", "files"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "github_create_pr",
-                "description": "CONTROL PLANE: open a GitHub pull request using workspace OAuth. Call after github_commit_files. Returns PR number and html_url.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string" },
-                        "title": { "type": "string" },
-                        "head": {
-                            "type": "string",
-                            "description": "Branch with commits (e.g. agent-fleet/changes)"
-                        },
-                        "base": {
-                            "type": "string",
-                            "description": "Target branch (default repo default)"
-                        },
-                        "body": { "type": "string" },
-                        "draft": { "type": "boolean" }
-                    },
-                    "required": ["owner", "repo", "title", "head"],
-                    "additionalProperties": false
-                }
-            }
         }
     ])
 }
 
 pub fn system_prompt_with_tools() -> &'static str {
-    "You are the Agent Fleet assistant — a helpful AI embedded in a developer platform that runs fleets of sandboxed coding agents and connects to external developer tools.\n\n\
-Bias to action. A normal human request like “get a couple of agents to build a hello world” means: launch the plan now and say who is doing what. Do not wait for confirmation. Do not require Ollama or GitHub.\n\n\
+    "You are the Agent Fleet assistant — you run fleets of sandboxed specialist agents that collaborate on whatever the user asked (software, research, ops, writing, support, …).\n\n\
+Bias to action. A request like “get a couple of agents on this” means: pick personas, launch the plan now, and say who is doing what. Do not wait for confirmation. Do not require a connected app.\n\n\
 The model selected in this chat composer is used for YOU and for every sandbox worker (same provider + same model). If the user picked Grok, agents are Grok. Later Claude in the dropdown means Claude everywhere. Do not call configure_fleet to switch to Ollama.\n\n\
 You have tools for:\n\
-**Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or git credentials in sandbox specs)\n\
+**Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or credentials in sandbox specs)\n\
 - list_agent_personas then launch_agent_plan / launch_agent_task immediately\n\
 - get_fleet_status / list_sandboxes / list_tasks / list_runs for progress\n\
-- Local sandboxes do not need GitHub, Jira, or any integration.\n\
-**Integrations — CONTROL PLANE only** (only when the user asked to push/PR/ticket/message)\n\
-- list_integrations / get_integration / integration_query\n\
-- github_commit_files → github_create_pr\n\
-Do NOT claim a git push succeeded unless a tool returned ok.\n\
-Do NOT block local work because GitHub is disconnected. Only mention Connect if they explicitly wanted a remote repo/PR.\n\
-Multi-agent: split into complementary specialists (different worker_profile). Use depends_on so reviewers wait on implementers. Specs say what THIS agent owns vs others. After launch, one plain sentence: who is doing what + run id.\n\
+- read_team_chat / send_team_message — agents talk to each other mid-run; you can listen in and reply\n\
+- Local sandboxes do not need any integration.\n\
+**Integrations — CONTROL PLANE only** (only when the user asked to act in an external app)\n\
+- list_integrations / get_integration / integration_query (GitHub, Jira, Slack, Linear, Notion, … — same tool for every provider)\n\
+Do NOT claim an external write succeeded unless integration_query returned ok.\n\
+Do NOT block local work because an app is disconnected. Only mention Connect if they explicitly wanted that app.\n\
+Multi-agent: split into complementary specialists (different worker_profile). Default persona is generalist if they did not name one. Use depends_on so reviewers wait on implementers. Specs say what THIS agent owns vs others. After launch, one plain sentence: who is doing what + run id. Live agents share `work/`, message each other, and reviewers bounce bad work with request_changes. Use read_team_chat if the user asks what they said.\n\
 Be concise."
 }
 
@@ -530,6 +511,8 @@ pub async fn execute_tool(
                 .filter(|s| !s.is_empty());
             list_agent_personas_tool(div.as_deref()).await
         }
+        "read_team_chat" => read_team_chat_tool(state, workspace_id, arguments).await,
+        "send_team_message" => send_team_message_tool(state, workspace_id, arguments).await,
         "list_integrations" => {
             let connected_only = arguments
                 .get("connected_only")
@@ -550,12 +533,6 @@ pub async fn execute_tool(
             }
         }
         "integration_query" => integration_query(state, workspace_id, user_id, arguments).await,
-        "github_commit_files" => {
-            github_tool(state, workspace_id, user_id, "commit_files", arguments).await
-        }
-        "github_create_pr" => {
-            github_tool(state, workspace_id, user_id, "create_pr", arguments).await
-        }
         other => Err(AppError::bad_request(format!("unknown tool `{other}`"))),
     };
 
@@ -785,31 +762,6 @@ async fn integration_query(
     .await
 }
 
-async fn github_tool(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    operation: &str,
-    arguments: &Value,
-) -> AppResult<(Value, ChatAction)> {
-    let args = parse_json_args(arguments).map_err(AppError::bad_request)?;
-    let tool_name = if operation == "create_pr" {
-        "github_create_pr"
-    } else {
-        "github_commit_files"
-    };
-    proxy_tool_result(
-        state,
-        workspace_id,
-        user_id,
-        tool_name,
-        "github",
-        operation,
-        args,
-    )
-    .await
-}
-
 async fn proxy_tool_result(
     state: &AppState,
     workspace_id: Uuid,
@@ -952,14 +904,16 @@ async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, C
     let content = json!({
         "source": "https://github.com/msitarzewski/agency-agents",
         "count": n,
+        "default": "generalist",
         "aliases": {
-            "coding": "engineering-backend-architect",
-            "frontend": "engineering-frontend-developer",
-            "reviewer": "engineering-code-reviewer",
-            "testing": "testing/* first match",
+            "generalist": "generalist",
+            "coding": "engineering-backend-architect (optional shortcut)",
+            "frontend": "engineering-frontend-developer (optional shortcut)",
+            "reviewer": "any *reviewer* slug (optional shortcut)",
+            "testing": "testing/* first match (optional shortcut)",
         },
         "personas": personas.iter().take(80).collect::<Vec<_>>(),
-        "hint": "Set worker_profile to a slug. Pick Fleet LLM (Ollama) in workspace Settings, or FLEET_AGENT_BACKEND=grok on the host.",
+        "hint": "Set worker_profile to any slug. Omit it for generalist. Fleet LLM is Settings Ollama or host FLEET_AGENT_BACKEND=grok.",
     });
     Ok((
         content.clone(),
@@ -968,6 +922,153 @@ async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, C
             ok: true,
             summary: format!("{n} persona(s)"),
             run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+fn orch_data_dir(state: &AppState) -> std::path::PathBuf {
+    state.orch.tick.data_dir().to_path_buf()
+}
+
+async fn resolve_chat_run(
+    state: &AppState,
+    workspace_id: Uuid,
+    run_id: Option<&str>,
+) -> AppResult<Uuid> {
+    ensure_project(state, workspace_id).await?;
+    if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return Uuid::parse_str(raw)
+            .map_err(|_| AppError::bad_request("run_id must be a UUID"));
+    }
+    let runs = state
+        .orch
+        .store
+        .list_runs(workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let open = runs.iter().find(|r| {
+        !matches!(
+            r.status.as_str(),
+            "completed" | "failed" | "cancelled"
+        )
+    });
+    open.or(runs.first())
+        .map(|r| r.id)
+        .ok_or_else(|| AppError::bad_request("no fleet runs yet"))
+}
+
+async fn read_team_chat_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let run_id = resolve_chat_run(
+        state,
+        workspace_id,
+        arguments.get("run_id").and_then(|v| v.as_str()),
+    )
+    .await?;
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(40)
+        .clamp(1, 200) as usize;
+    let talk = fleet_orchestrator::sandbox::team_chat::TeamTalk::from_spawn(
+        &orch_data_dir(state),
+        workspace_id,
+        run_id,
+        "human",
+        "human",
+    );
+    let mut msgs = fleet_orchestrator::sandbox::team_chat::list_messages(&talk).await;
+    if msgs.len() > limit {
+        msgs = msgs.split_off(msgs.len() - limit);
+    }
+    let items: Vec<Value> = msgs
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "seq": m.seq,
+                "ts": m.ts,
+                "from": m.from,
+                "from_profile": m.from_profile,
+                "to": m.to,
+                "kind": m.kind,
+                "in_reply_to": m.in_reply_to,
+                "body": m.body,
+            })
+        })
+        .collect();
+    let n = items.len();
+    let content = json!({
+        "run_id": run_id,
+        "count": n,
+        "messages": items,
+        "transcript": fleet_orchestrator::sandbox::team_chat::render_team_chat_md(&msgs),
+    });
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "read_team_chat".into(),
+            ok: true,
+            summary: format!("{n} team message(s) on run {run_id}"),
+            run_id: Some(run_id.to_string()),
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+async fn send_team_message_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let body = arguments
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::bad_request("body is required"))?;
+    let to = arguments
+        .get("to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*");
+    let run_id = resolve_chat_run(
+        state,
+        workspace_id,
+        arguments.get("run_id").and_then(|v| v.as_str()),
+    )
+    .await?;
+    let talk = fleet_orchestrator::sandbox::team_chat::TeamTalk::from_spawn(
+        &orch_data_dir(state),
+        workspace_id,
+        run_id,
+        "human",
+        "human",
+    );
+    let msg = fleet_orchestrator::sandbox::team_chat::post_message(&talk, to, "say", body, None)
+        .await
+        .map_err(AppError::bad_request)?;
+    let content = json!({
+        "run_id": run_id,
+        "id": msg.id,
+        "seq": msg.seq,
+        "from": msg.from,
+        "to": msg.to,
+        "kind": msg.kind,
+        "body": msg.body,
+    });
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "send_team_message".into(),
+            ok: true,
+            summary: format!("sent to `{}` on run {run_id}", msg.to),
+            run_id: Some(run_id.to_string()),
             sandbox_ids: None,
             detail: Some(content),
         },
@@ -1227,7 +1328,7 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
         )
         .backend,
         "grok_env": fleet_orchestrator::sandbox::agent_loop::grok_env_enabled(),
-        "hint": "Workers use this chat's provider+model. Just launch_agent_plan. GitHub is optional.",
+        "hint": "Workers use this chat's provider+model. Just launch_agent_plan. Integrations are optional.",
         "open_runs": open_runs,
         "total_runs": runs.len(),
         "task_counts": task_counts,
@@ -1269,7 +1370,7 @@ async fn launch_agent_task(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("coding");
+        .unwrap_or("generalist");
     let mut spec = args
         .spec
         .as_deref()
@@ -1351,7 +1452,7 @@ async fn launch_agent_plan(
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .unwrap_or("coding")
+                    .unwrap_or("generalist")
                     .to_string(),
                 acceptance: vec![],
                 priority: t.priority.unwrap_or(100),
@@ -1680,14 +1781,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stamp_plan_llm_writes_provider_and_model() {
+        let mut plan = build_chat_plan(Uuid::nil(), "T", "S", "coding");
+        stamp_plan_llm(
+            &mut plan,
+            &ChatLlmContext {
+                provider: "Grok".into(),
+                model: "grok-4.5".into(),
+            },
+        );
+        assert_eq!(plan.policy.llm_provider.as_deref(), Some("grok"));
+        assert_eq!(plan.policy.llm_model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn parse_launch_plan_rejects_empty_and_blank_ids() {
+        assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": " ", "title": "X" }]
+        }))
+        .is_err());
+        let ok = parse_launch_plan_args(&json!({
+            "tasks": [
+                { "id": "a", "title": "API", "worker_profile": "frontend" },
+                { "id": "b", "title": "Review", "depends_on": ["a"] }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(ok.tasks.len(), 2);
+        assert_eq!(ok.tasks[0].worker_profile.as_deref(), Some("frontend"));
+    }
+
+    #[test]
     fn build_chat_plan_sets_chat_source_and_single_task() {
         let ws = Uuid::new_v4();
-        let plan = build_chat_plan(ws, "Fix flaky tests", "Investigate CI flake", "coding");
+        let plan = build_chat_plan(ws, "Fix flaky tests", "Investigate CI flake", "generalist");
         assert_eq!(plan.project_id, ws);
         assert_eq!(plan.source, "chat");
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].title, "Fix flaky tests");
-        assert_eq!(plan.tasks[0].worker_profile, "coding");
+        assert_eq!(plan.tasks[0].worker_profile, "generalist");
         assert!(plan.tasks[0].depends_on.is_empty());
     }
 
@@ -1722,13 +1855,15 @@ mod tests {
         assert!(names.contains(&"launch_agent_task"));
         assert!(names.contains(&"launch_agent_plan"));
         assert!(names.contains(&"integration_query"));
-        assert!(names.contains(&"github_commit_files"));
-        assert!(names.contains(&"github_create_pr"));
+        assert!(!names.contains(&"github_commit_files"));
+        assert!(!names.contains(&"github_create_pr"));
         assert!(names.contains(&"list_sandboxes"));
         assert!(names.contains(&"list_integrations"));
         assert!(names.contains(&"get_integration"));
         assert!(names.contains(&"list_agent_personas"));
         assert!(names.contains(&"configure_fleet"));
+        assert!(names.contains(&"read_team_chat"));
+        assert!(names.contains(&"send_team_message"));
     }
 
     #[test]

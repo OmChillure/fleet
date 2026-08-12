@@ -87,8 +87,12 @@ pub fn render_team_md(you: &str, members: &[TeamMember]) -> String {
     out.push_str(
         "## How to work together\n\
          - Do **only your** task. Do not redo a teammate’s job.\n\
-         - If someone is `in progress`, assume they own that slice — wait or use their handoff when they finish.\n\
-         - If you depend on others, read `handoff/` before writing code.\n\
+         - **Talk to live teammates.** Use `send_message` (to=`t1` or to=`*` for everyone) and `ask_teammate` when you need a contract, path, or decision *now*. They see it on their next thinking round.\n\
+         - If someone asks you a question, reply with `send_message` and `reply_to` set to their message id. Do not ignore asks.\n\
+         - **Shared artifacts live in `work/`.** That is the same folder the whole team is building. Read it before writing. Dependents inherit those files.\n\
+         - Reviewers: if the work is not good enough, call `request_changes` (they get sent back with your notes). Do not rubber-stamp.\n\
+         - If someone is `in progress`, ask them — do not silently redo their slice.\n\
+         - If you depend on others, read `work/`, `handoff/`, and `TEAM_CHAT.md` before continuing.\n\
          - End with `result.md` so the next specialist can pick up.\n\
          - Re-read `TEAM.md`; the control plane refreshes it as statuses change.\n",
     );
@@ -252,6 +256,23 @@ pub async fn prepare_agent_workspace(
         });
     write_team_md(work_dir, &task.plan_task_id, &members).await;
     copy_dep_handoffs(work_dir, &you, data_dir, task).await;
+    let talk = crate::sandbox::team_chat::TeamTalk::from_spawn(
+        data_dir,
+        task.project_id,
+        task.run_id,
+        &task.plan_task_id,
+        &task.worker_profile,
+    );
+    crate::sandbox::team_chat::write_team_talk(work_dir, &talk).await;
+    crate::sandbox::team_chat::copy_team_chat_into(work_dir, &talk).await;
+    crate::sandbox::share::hydrate_session_files(
+        data_dir,
+        work_dir,
+        task,
+        snap,
+        &you.depends_on,
+    )
+    .await;
 }
 
 /// Refresh TEAM.md in every live session + archive result.md before wipe.
@@ -298,6 +319,15 @@ pub async fn sync_team_boards(data_dir: &Path, project_id: uuid::Uuid, snap: &Bo
         if let Some(you) = members.iter().find(|m| m.plan_task_id == task.plan_task_id) {
             copy_dep_handoffs(&dir, you, data_dir, task).await;
         }
+        let talk = crate::sandbox::team_chat::TeamTalk::from_spawn(
+            data_dir,
+            project_id,
+            task.run_id,
+            &task.plan_task_id,
+            &task.worker_profile,
+        );
+        crate::sandbox::team_chat::write_team_talk(&dir, &talk).await;
+        crate::sandbox::team_chat::copy_team_chat_into(&dir, &talk).await;
     }
 }
 
@@ -339,5 +369,150 @@ mod tests {
         assert!(md.contains("Added PATCH /settings"));
         assert!(md.contains("reviewer"));
         assert!(md.contains("Do **only your** task"));
+        assert!(md.contains("Talk to live teammates"));
+        assert!(md.contains("work/"));
+        assert!(md.contains("request_changes"));
+        assert!(md.contains("You wait on / use output from: `t1`"));
+    }
+
+    #[test]
+    fn excerpt_truncates_long_handoffs() {
+        let long = "x".repeat(EXCERPT_CHARS + 50);
+        let out = excerpt_text(&long);
+        assert!(out.contains("truncated"));
+        assert!(out.chars().count() < long.chars().count());
+        assert_eq!(excerpt_text("  short  "), "short");
+    }
+
+    #[tokio::test]
+    async fn archive_and_copy_dep_handoffs() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let session = root.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        tokio::fs::write(session.join("result.md"), "implemented API\n")
+            .await
+            .unwrap();
+
+        archive_session_result(root.path(), project, run, "t1", &session).await;
+        let durable = run_handoffs_dir(root.path(), project, run).join("t1.md");
+        assert_eq!(
+            tokio::fs::read_to_string(&durable).await.unwrap().trim(),
+            "implemented API"
+        );
+
+        let dest = root.path().join("next");
+        let you = TeamMember {
+            plan_task_id: "t2".into(),
+            title: "UI".into(),
+            worker_profile: "frontend".into(),
+            status: "ready".into(),
+            depends_on: vec!["t1".into()],
+            result_excerpt: None,
+        };
+        let task = BoardTaskRow {
+            id: uuid::Uuid::now_v7(),
+            project_id: project,
+            run_id: run,
+            plan_id: uuid::Uuid::now_v7(),
+            plan_task_id: "t2".into(),
+            title: "UI".into(),
+            summary: String::new(),
+            spec_md: String::new(),
+            status: "ready".into(),
+            depends_on: vec![],
+            priority: 1,
+            worker_profile: "frontend".into(),
+            acceptance: serde_json::json!([]),
+            external_ref: None,
+            timeout_s: None,
+            max_retries: 0,
+            attempt: 0,
+            claimed_session_id: None,
+            last_report_seq: 0,
+            progress_pct: 0,
+            block_reason: None,
+            hitl_notes: None,
+            hitl_artifacts: None,
+            hitl_resume_requested_at: None,
+            hitl_notified_at: None,
+            hitl_resolved_at: None,
+            failure_reason: None,
+            artifacts: None,
+            retry_not_before: None,
+            assigned_at: None,
+            started_at: None,
+            terminal_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        copy_dep_handoffs(&dest, &you, root.path(), &task).await;
+        let copied = dest.join("handoff/t1.md");
+        assert_eq!(
+            tokio::fs::read_to_string(copied).await.unwrap().trim(),
+            "implemented API"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_writes_team_md() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let task_id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let task = BoardTaskRow {
+            id: task_id,
+            project_id: project,
+            run_id: run,
+            plan_id: uuid::Uuid::now_v7(),
+            plan_task_id: "t1".into(),
+            title: "API".into(),
+            summary: String::new(),
+            spec_md: String::new(),
+            status: "ready".into(),
+            depends_on: vec![],
+            priority: 10,
+            worker_profile: "coding".into(),
+            acceptance: serde_json::json!([]),
+            external_ref: None,
+            timeout_s: None,
+            max_retries: 0,
+            attempt: 0,
+            claimed_session_id: None,
+            last_report_seq: 0,
+            progress_pct: 0,
+            block_reason: None,
+            hitl_notes: None,
+            hitl_artifacts: None,
+            hitl_resume_requested_at: None,
+            hitl_notified_at: None,
+            hitl_resolved_at: None,
+            failure_reason: None,
+            artifacts: None,
+            retry_not_before: None,
+            assigned_at: None,
+            started_at: None,
+            terminal_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let snap = BoardSnapshot {
+            tasks: vec![task.clone()],
+            sessions: vec![],
+        };
+        let work = root.path().join("work");
+        tokio::fs::create_dir_all(&work).await.unwrap();
+        prepare_agent_workspace(root.path(), &work, &task, &snap).await;
+        let md = tokio::fs::read_to_string(work.join("TEAM.md"))
+            .await
+            .unwrap();
+        assert!(md.contains("`t1`"));
+        assert!(md.contains("API"));
+        let talk = crate::sandbox::team_chat::load_team_talk(&work).expect("talk file");
+        assert_eq!(talk.me, "t1");
+        assert_eq!(talk.run_id, run);
+        assert!(work.join("TEAM_CHAT.md").exists());
     }
 }

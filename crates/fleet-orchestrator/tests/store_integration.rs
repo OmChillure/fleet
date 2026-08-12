@@ -111,6 +111,12 @@ async fn create_project_and_materialize_idempotent() {
     let n2 = store.materialize_plan(project.id, plan_id).await.unwrap();
     assert_eq!(n2, 0, "second materialize is no-op");
 
+    assert_eq!(cfg.fleet_llm, "off");
+    assert_eq!(cfg.fleet_llm_model, "");
+    let loaded = store.get_plan_body(plan_id).await.unwrap().expect("plan body");
+    assert_eq!(loaded.plan_id, plan_id);
+    assert_eq!(loaded.tasks.len(), 2);
+
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     assert_eq!(snap.tasks.len(), 2);
 
@@ -212,4 +218,33 @@ async fn worker_report_inbox_idempotent_seq() {
 
     let reports = store.list_unapplied_reports(project.id).await.unwrap();
     assert_eq!(reports.len(), 1);
+}
+
+#[tokio::test]
+async fn update_fleet_settings_ollama_and_rejects_unknown_as_off() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("llm-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+
+    let cfg = store
+        .update_fleet_settings(project.id, 8, "ollama", "qwen2.5-coder")
+        .await
+        .unwrap();
+    assert_eq!(cfg.max_agents, 8);
+    assert_eq!(cfg.fleet_llm, "ollama");
+    assert_eq!(cfg.fleet_llm_model, "qwen2.5-coder");
+
+    let cfg = store
+        .update_fleet_settings(project.id, 0, "grok", "should-clear")
+        .await
+        .unwrap();
+    assert_eq!(cfg.max_agents, 1, "clamp low");
+    assert_eq!(cfg.fleet_llm, "off", "Grok is env-only, store stays off");
+    assert_eq!(cfg.fleet_llm_model, "");
+
+    let again = store.get_project_config(project.id).await.unwrap();
+    assert_eq!(again.fleet_llm, "off");
+    assert_eq!(again.max_agents, 1);
 }

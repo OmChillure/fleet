@@ -92,6 +92,10 @@ impl TickRunner {
         self.runtime.backend_name()
     }
 
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Convenience for tests: stub runtime, temp data dir, noop board sync.
     pub fn with_store_and_runtime(store: Store, runtime: Arc<dyn SandboxRuntime>) -> Self {
         Self::new(
@@ -212,7 +216,6 @@ impl TickRunner {
         snap = self.store.load_board_snapshot(project_id).await?;
 
         // Step 6–7 — spawn
-        let repo = cfg.git_remote();
         let spawn_out = schedule_and_spawn(
             &self.store,
             &self.runtime,
@@ -222,7 +225,6 @@ impl TickRunner {
             &self.data_dir,
             &self.orchestrator_url,
             cfg.default_task_timeout_s,
-            repo.as_ref(),
             &cfg.fleet_llm,
             &cfg.fleet_llm_model,
         )
@@ -254,6 +256,7 @@ impl TickRunner {
             cfg.kill_grace_s,
             cfg.default_task_timeout_s,
             &cancel_by_run,
+            &self.data_dir,
         )
         .await?;
         report.killed = stuck_out.killed;

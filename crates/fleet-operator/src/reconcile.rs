@@ -229,7 +229,7 @@ pub fn build_pod(sb: &FleetSandbox, pod_name: &str, cfg: &OperatorConfig) -> Pod
         env_kv("FLEET_API_BASE", &cfg.api_service_url),
         env_kv("FLEET_SESSION_ID", &sb.spec.session_id),
         env_kv("FLEET_PROJECT_ID", &sb.spec.project_id),
-        env_kv("FLEET_WORKER_PROFILE", sb.spec.worker_profile.as_deref().unwrap_or("coding")),
+        env_kv("FLEET_WORKER_PROFILE", sb.spec.worker_profile.as_deref().unwrap_or("generalist")),
     ];
     if let Some(v) = &sb.spec.run_id {
         env.push(env_kv("FLEET_RUN_ID", v));

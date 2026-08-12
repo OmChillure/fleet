@@ -50,14 +50,14 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 
 | Path | Purpose | UI status |
 | --- | --- | --- |
-| `/{workspace_id}/dashboard` | Fleet overview | Empty placeholder |
+| `/{workspace_id}/dashboard` | Fleet overview | Live team board + chat |
 | `/{workspace_id}/chat` | Talk to the fleet | Composer + local messages |
 | `/{workspace_id}/fleet` | Orchestrator control plane | Live control UI |
 | `/{workspace_id}/sessions` | Chat history / sessions | Empty placeholder |
 | `/{workspace_id}/agents` | Roles, models, budgets | Empty placeholder |
 | `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
 | `/{workspace_id}/integrations` | Connect platforms via OAuth | Catalog + connect flow |
-| `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM |
+| `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM (no git URL) |
 
 ```text
 Marketing                          App shell

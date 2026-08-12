@@ -1,6 +1,7 @@
 //! Live sandbox list (worker sessions via cookie fleet API).
 
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 
 use super::api::{list_sandboxes, SandboxRow};
 
@@ -59,6 +60,24 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                 }
             }
             busy.set(false);
+        });
+    });
+
+    let ws_poll = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_poll.clone();
+        spawn(async move {
+            loop {
+                TimeoutFuture::new(2500).await;
+                if let Ok(resp) = list_sandboxes(&ws).await {
+                    rows.set(resp.sandboxes);
+                    backend.set(if resp.sandbox_backend.is_empty() {
+                        "stub".into()
+                    } else {
+                        resp.sandbox_backend
+                    });
+                }
+            }
         });
     });
 

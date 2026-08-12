@@ -126,5 +126,5 @@ let result = invoke(
 | `discord` | `get_me`, `list_guilds` |
 
 Decrypt path: `credentials_for` → provider HTTP → `sanitize_value` → chat/agent.  
-**Writes run only on the control plane** (chat tools `github_commit_files` / `github_create_pr`).  
+**Writes run only on the control plane** (`integration_query` with `provider=github`, `operation=commit_files` or `create_pr`).  
 Sandboxes never receive OAuth tokens. Arbitrary HTTP proxy is not allowed.

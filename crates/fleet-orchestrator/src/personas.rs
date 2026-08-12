@@ -143,22 +143,29 @@ pub async fn resolve(profile: &str, data_dir: &Path) -> Persona {
             scanned
         }
     };
-    pick(&all, profile).unwrap_or_else(|| fallback_coding())
+    pick(&all, profile).unwrap_or_else(fallback_persona)
 }
 
 fn pick(all: &[Persona], profile: &str) -> Option<Persona> {
     let key = normalize(profile);
-    if key.is_empty() || key == "coding" || key == "default" || key == "worker" {
+    if key.is_empty() || key == "default" || key == "worker" || key == "generalist" || key == "specialist" {
+        return all
+            .iter()
+            .find(|p| p.slug == "generalist")
+            .cloned()
+            .or_else(|| all.first().cloned());
+    }
+    // Optional shortcuts — not defaults. Explicit "coding" still maps to an engineer.
+    if key == "coding" || key == "engineer" || key == "backend" {
         return all
             .iter()
             .find(|p| p.slug.contains("backend-architect") || p.slug.contains("ai-engineer"))
-            .cloned()
-            .or_else(|| all.first().cloned());
+            .cloned();
     }
     if key == "reviewer" || key == "code-reviewer" || key == "review" {
         return all
             .iter()
-            .find(|p| p.slug.contains("code-reviewer"))
+            .find(|p| p.slug.contains("reviewer"))
             .cloned();
     }
     if key == "frontend" || key == "ui" {
@@ -296,23 +303,21 @@ fn title_case(stem: &str) -> String {
         .join(" ")
 }
 
-fn fallback_coding() -> Persona {
-    builtin_personas()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| Persona {
-            slug: "coding".into(),
-            name: "Software Engineer".into(),
-            description: "Generalist implementer".into(),
-            division: "engineering".into(),
-            emoji: "•".into(),
-            vibe: "Ships working code.".into(),
-            body: BUILTIN_CODING.into(),
-        })
+fn fallback_persona() -> Persona {
+    Persona {
+        slug: "generalist".into(),
+        name: "Specialist".into(),
+        description: "Completes the assigned task with teammates".into(),
+        division: "specialized".into(),
+        emoji: "•".into(),
+        vibe: "Does the job, stays in lane, hands off clearly.".into(),
+        body: BUILTIN_GENERALIST.into(),
+    }
 }
 
 fn builtin_personas() -> Vec<Persona> {
     vec![
+        fallback_persona(),
         Persona {
             slug: "engineering-backend-architect".into(),
             name: "Backend Architect".into(),
@@ -343,6 +348,18 @@ fn builtin_personas() -> Vec<Persona> {
     ]
 }
 
+const BUILTIN_GENERALIST: &str = r#"# Specialist
+
+You are a competent specialist on a multi-agent team. Read the assigned task,
+inspect the shared workspace, do only your slice, and coordinate with teammates
+when you need something they own.
+
+## Rules
+- Stay inside the assigned work directory
+- Use `work/` for shared artifacts the next agent will inherit
+- Write `result.md` summarizing what you did and what is still open
+"#;
+
 const BUILTIN_CODING: &str = r#"# Backend / software engineer
 
 You are a senior software engineer. Read the task spec, inspect the workspace,
@@ -350,7 +367,7 @@ implement the smallest correct change, and verify with tests or a dry run.
 
 ## Rules
 - Stay inside the assigned work directory
-- Prefer existing patterns in the repo
+- Prefer existing patterns in the workspace
 - Write `result.md` summarizing what you did
 "#;
 
@@ -386,5 +403,66 @@ mod tests {
         assert!(pick(&all, "reviewer").unwrap().slug.contains("reviewer"));
         assert!(pick(&all, "frontend").unwrap().slug.contains("frontend"));
         assert!(pick(&all, "coding").is_some());
+        assert_eq!(pick(&all, "default").unwrap().slug, "generalist");
+        assert_eq!(pick(&all, "").unwrap().slug, "generalist");
+        assert_eq!(pick(&all, "generalist").unwrap().slug, "generalist");
+        assert_eq!(
+            pick(&all, "engineering-code-reviewer").unwrap().slug,
+            "engineering-code-reviewer"
+        );
+        assert!(pick(&all, "no-such-persona").is_none());
+    }
+
+    #[test]
+    fn title_case_slug() {
+        assert_eq!(title_case("engineering-backend-architect"), "Engineering Backend Architect");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn scan_dir_reads_frontmatter_and_skips_readme() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = dir.path().join("engineering");
+        std::fs::create_dir_all(&eng).unwrap();
+        std::fs::write(
+            eng.join("engineering-backend-architect.md"),
+            "---\nname: Backend Architect\ndescription: APIs\nemoji: x\nvibe: ships\n---\n\n# Body\n",
+        )
+        .unwrap();
+        std::fs::write(eng.join("README.md"), "# ignore me\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("examples")).unwrap();
+        std::fs::write(dir.path().join("examples").join("sample.md"), "# no\n").unwrap();
+
+        let all = scan_dir(dir.path());
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].slug, "engineering-backend-architect");
+        assert_eq!(all[0].name, "Backend Architect");
+        assert_eq!(all[0].division, "engineering");
+        assert!(all[0].body.contains("# Body"));
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_personas_dir_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        let testing = dir.path().join("testing");
+        std::fs::create_dir_all(&testing).unwrap();
+        std::fs::write(
+            testing.join("qa-specialist.md"),
+            "---\nname: QA Specialist\n---\n\nTest everything.\n",
+        )
+        .unwrap();
+
+        let prev = std::env::var("FLEET_PERSONAS_DIR").ok();
+        // SAFETY: test-only env; restored below.
+        unsafe { std::env::set_var("FLEET_PERSONAS_DIR", dir.path()) };
+        let p = resolve("tester", dir.path()).await;
+        match prev {
+            Some(v) => unsafe { std::env::set_var("FLEET_PERSONAS_DIR", v) },
+            None => unsafe { std::env::remove_var("FLEET_PERSONAS_DIR") },
+        }
+        assert_eq!(p.slug, "qa-specialist");
+        assert_eq!(p.division, "testing");
+        assert!(p.body.contains("Test everything"));
     }
 }

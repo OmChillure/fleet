@@ -63,6 +63,10 @@ pub fn router() -> Router<AppState> {
             get(get_workers),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/overview",
+            get(get_overview),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
@@ -482,6 +486,132 @@ async fn post_tick(
     })))
 }
 
+async fn get_overview(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let runs = state
+        .orch
+        .store
+        .list_runs(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("list_runs", e))?;
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .map_err(|e| map_orch_err("list_tasks", e))?;
+    let sessions = state
+        .orch
+        .store
+        .list_sessions_for_project(workspace_id)
+        .await
+        .map_err(|e| map_orch_err("list_sessions", e))?;
+
+    let open_run = runs.iter().find(|r| {
+        !matches!(
+            r.status.as_str(),
+            "completed" | "failed" | "cancelled"
+        )
+    });
+    let focus = open_run.or(runs.first());
+    let run_id = focus.map(|r| r.id);
+
+    let mut chat = Vec::new();
+    if let Some(rid) = run_id {
+        let talk = fleet_orchestrator::sandbox::team_chat::TeamTalk::from_spawn(
+            state.orch.tick.data_dir(),
+            workspace_id,
+            rid,
+            "human",
+            "human",
+        );
+        chat = fleet_orchestrator::sandbox::team_chat::list_messages(&talk).await;
+    }
+
+    let replied: std::collections::HashSet<uuid::Uuid> = chat
+        .iter()
+        .filter_map(|m| m.in_reply_to)
+        .collect();
+    let waiting: Vec<Value> = chat
+        .iter()
+        .filter(|m| m.kind == "ask" && !replied.contains(&m.id))
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "from": m.from,
+                "from_profile": m.from_profile,
+                "to": m.to,
+                "body": m.body,
+                "ts": m.ts,
+            })
+        })
+        .collect();
+
+    let live_agents = sessions
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status.as_str(),
+                "spawning" | "healthy" | "stuck" | "killing"
+            )
+        })
+        .count();
+    let in_progress = tasks
+        .iter()
+        .filter(|t| matches!(t.status.as_str(), "assigned" | "in_progress"))
+        .count();
+    let changes = tasks
+        .iter()
+        .filter(|t| t.failure_reason.as_deref() == Some("changes_requested"))
+        .count();
+
+    Ok(Json(json!({
+        "sandbox_backend": state.orch.tick.runtime_backend(),
+        "open_runs": runs.iter().filter(|r| {
+            !matches!(r.status.as_str(), "completed" | "failed" | "cancelled")
+        }).count(),
+        "total_runs": runs.len(),
+        "live_agents": live_agents,
+        "tasks_in_progress": in_progress,
+        "changes_requested": changes,
+        "focus_run_id": run_id,
+        "runs": runs.iter().take(8).map(|r| json!({
+            "id": r.id,
+            "status": r.status,
+            "source": r.source,
+            "created_at": r.created_at,
+        })).collect::<Vec<_>>(),
+        "tasks": tasks.iter().filter(|t| run_id.map(|id| t.run_id == id).unwrap_or(true)).take(40).map(|t| json!({
+            "id": t.id,
+            "run_id": t.run_id,
+            "plan_task_id": t.plan_task_id,
+            "title": t.title,
+            "status": t.status,
+            "worker_profile": t.worker_profile,
+            "failure_reason": t.failure_reason,
+            "attempt": t.attempt,
+        })).collect::<Vec<_>>(),
+        "waiting": waiting,
+        "activity": collect_activity(&sessions, 40),
+        "chat": chat.iter().rev().take(30).rev().map(|m| json!({
+            "id": m.id,
+            "seq": m.seq,
+            "ts": m.ts,
+            "from": m.from,
+            "from_profile": m.from_profile,
+            "to": m.to,
+            "kind": m.kind,
+            "in_reply_to": m.in_reply_to,
+            "body": m.body,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
 async fn get_tasks(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -492,7 +622,7 @@ async fn get_tasks(
     let tasks = state
         .orch
         .store
-        .list_tasks(workspace_id, None, None)
+        .list_tasks_slim(workspace_id, None)
         .await
         .map_err(|e| map_orch_err("list_tasks", e))?;
     Ok(Json(json!({
@@ -567,10 +697,13 @@ async fn get_session_detail(
     }
     let work_dir = session.work_dir.clone().unwrap_or_default();
     let live = read_live_events(&work_dir, 500);
-    let transcript = read_capped_file(
+    let mut transcript = read_capped_file(
         std::path::Path::new(&work_dir).join("artifacts/transcript.md"),
         80_000,
     );
+    if transcript.trim().is_empty() {
+        transcript = read_capped_file(std::path::Path::new(&work_dir).join("stdout.log"), 80_000);
+    }
     let prompt = read_capped_file(std::path::Path::new(&work_dir).join("prompt.md"), 16_000);
     let result = std::fs::read_to_string(std::path::Path::new(&work_dir).join("artifacts/result.json"))
         .ok()
@@ -612,6 +745,46 @@ fn read_capped_file(path: impl AsRef<std::path::Path>, max: usize) -> String {
         .chars()
         .rev()
         .collect()
+}
+
+fn collect_activity(
+    sessions: &[fleet_orchestrator::store::WorkerSessionRow],
+    max: usize,
+) -> Vec<Value> {
+    let mut live_sess: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status.as_str(),
+                "spawning" | "healthy" | "stuck" | "killing" | "exited"
+            )
+        })
+        .collect();
+    live_sess.sort_by_key(|s| std::cmp::Reverse(s.started_at.or(Some(s.created_at))));
+    let mut out = Vec::new();
+    for s in live_sess.into_iter().take(8) {
+        let dir = s.work_dir.clone().unwrap_or_default();
+        for ev in read_live_events(&dir, 8).into_iter().rev() {
+            let text = ev
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if text.is_empty() {
+                continue;
+            }
+            out.push(json!({
+                "session_id": s.id,
+                "profile": s.worker_profile,
+                "status": s.status,
+                "kind": ev.get("kind").and_then(|v| v.as_str()).unwrap_or("think"),
+                "text": text,
+                "ts": ev.get("ts").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    out.truncate(max);
+    out
 }
 
 fn read_live_events(work_dir: &str, max: usize) -> Vec<Value> {

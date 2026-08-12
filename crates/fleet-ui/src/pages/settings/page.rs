@@ -2,9 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::api::{
-    ensure_fleet, fetch_settings, save_settings, update_fleet_config, FleetSettingsPatch,
-};
+use super::api::{fetch_settings, save_settings, FleetSettingsPatch};
 use crate::components::toast::show_toast;
 use crate::pages::chat::{fetch_chat_status, ChatModelInfo};
 
@@ -25,8 +23,6 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
     let mut ollama_error = use_signal(|| None::<String>);
-    let mut repo_url = use_signal(String::new);
-    let mut git_ref = use_signal(|| "main".to_string());
 
     let ws_load = workspace_id.clone();
     use_effect(move || {
@@ -43,24 +39,6 @@ pub fn Settings(workspace_id: String) -> Element {
                     error.set(None);
                 }
                 Err(e) => error.set(Some(e)),
-            }
-            match ensure_fleet(&ws).await {
-                Ok(v) => {
-                    repo_url.set(
-                        v["config"]["repo_url"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                    );
-                    git_ref.set(
-                        v["config"]["git_ref"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("main")
-                            .to_string(),
-                    );
-                }
-                Err(e) => error.set(Some(e.message())),
             }
             match fetch_chat_status(&ws).await {
                 Ok(st) => {
@@ -93,10 +71,8 @@ pub fn Settings(workspace_id: String) -> Element {
         let n = max_agents();
         let llm = fleet_llm();
         let model = fleet_model();
-        let url = repo_url.read().trim().to_string();
-        let rf = git_ref.read().trim().to_string();
         spawn(async move {
-            let llm_res = save_settings(
+            let s = match save_settings(
                 &ws,
                 &FleetSettingsPatch {
                     max_agents: n,
@@ -104,14 +80,8 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm_model: model,
                 },
             )
-            .await;
-            let git_res = update_fleet_config(
-                &ws,
-                if url.is_empty() { None } else { Some(url.as_str()) },
-                if rf.is_empty() { None } else { Some(rf.as_str()) },
-            )
-            .await;
-            let s = match llm_res {
+            .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     show_toast().error(e.clone());
@@ -120,13 +90,6 @@ pub fn Settings(workspace_id: String) -> Element {
                     return;
                 }
             };
-            if let Err(e) = git_res {
-                let msg = e.message();
-                show_toast().error(msg.clone());
-                error.set(Some(msg));
-                saving.set(false);
-                return;
-            }
             max_agents.set(s.max_agents);
             fleet_llm.set(s.fleet_llm);
             fleet_model.set(s.fleet_llm_model);
@@ -147,7 +110,7 @@ pub fn Settings(workspace_id: String) -> Element {
                 "Settings"
             }
             p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                "How many agents run at once. The chat composer model (Grok, later Claude) is what every worker uses. Ollama below is only a fallback if a run has no chat model."
+                "How many agents run at once. They share a workspace and talk to each other — no git URL to set. Connect apps under Integrations only if you want the fleet to act there (GitHub, Slack, …)."
             }
 
             if loading() {
@@ -189,35 +152,6 @@ pub fn Settings(workspace_id: String) -> Element {
                                 max_agents.set(n.clamp(1, max_cap()));
                             }
                         },
-                    }
-                }
-
-                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Project git remote"
-                    }
-                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Optional clone URL for worker sandboxes."
-                    }
-                    label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                        "Repo URL"
-                    }
-                    input {
-                        class: field_class(),
-                        r#type: "text",
-                        placeholder: "https://github.com/org/repo.git",
-                        value: "{repo_url}",
-                        oninput: move |e| repo_url.set(e.value()),
-                    }
-                    label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                        "Git ref"
-                    }
-                    input {
-                        class: field_class(),
-                        r#type: "text",
-                        placeholder: "main",
-                        value: "{git_ref}",
-                        oninput: move |e| git_ref.set(e.value()),
                     }
                 }
 
