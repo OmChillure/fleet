@@ -170,17 +170,7 @@ pub(crate) async fn get_block_children(
     let items: Vec<Value> = body
         .get("results")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|b| {
-                    json!({
-                        "id": b.get("id"),
-                        "type": b.get("type"),
-                        "has_children": b.get("has_children"),
-                    })
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().map(map_block).collect())
         .unwrap_or_default();
     let n = items.len();
     ProxyResult::ok_result(
@@ -201,11 +191,13 @@ pub(crate) async fn create_page(http: &reqwest::Client, token: &str, args: &Valu
         .unwrap_or("Untitled");
     let parent_page = args
         .get("parent_page_id")
+        .or_else(|| args.get("page_id"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let parent_db = args
         .get("parent_database_id")
+        .or_else(|| args.get("database_id"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -238,8 +230,8 @@ pub(crate) async fn create_page(http: &reqwest::Client, token: &str, args: &Valu
             }
         });
     }
-    if let Some(text) = args.get("content").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        payload["children"] = json!([rich_text_paragraph(text)]);
+    if let Some(text) = write_text_from_args(args) {
+        payload["children"] = children_payload(&text);
     }
     let (status, body) =
         notion_post(http, token, "https://api.notion.com/v1/pages", &payload).await;
@@ -271,25 +263,16 @@ pub(crate) async fn append_blocks(
         Ok(i) => i,
         Err(e) => return ProxyResult::err("notion", "append_blocks", "bad_args", e, None),
     };
-    let text = match args
-        .get("text")
-        .or_else(|| args.get("content"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(t) => t,
-        None => {
-            return ProxyResult::err(
-                "notion",
-                "append_blocks",
-                "bad_args",
-                "text is required",
-                None,
-            );
-        }
+    let Some(text) = write_text_from_args(args) else {
+        return ProxyResult::err(
+            "notion",
+            "append_blocks",
+            "bad_args",
+            "text is required — pass args.text (the Slack messages). Do not send children: null.",
+            None,
+        );
     };
-    let payload = json!({ "children": [rich_text_paragraph(text)] });
+    let payload = json!({ "children": children_payload(&text) });
     let url = format!("https://api.notion.com/v1/blocks/{id}/children");
     let (status, body) = notion_patch(http, token, &url, &payload).await;
     if !(200..300).contains(&status) {

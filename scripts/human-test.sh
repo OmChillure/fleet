@@ -145,7 +145,7 @@ cmd_guide() {
 
   pause_step "Login  ${UI_URL}/login" \
     "Same email/password → /{workspace-uuid}/dashboard." \
-    "Dashboard shows Open runs / Live agents / Team board (empty is OK)." || return 0
+    "Dashboard shows Open runs / Live agents / Team board / Tickets (empty is OK)." || return 0
 
   pause_step "Login wall" \
     "Log out (user menu) or a private window." \
@@ -175,7 +175,8 @@ cmd_guide() {
 
   pause_step "Chat" \
     "New chat: provider/model dropdown." \
-    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." || return 0
+    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." \
+    "@fleet monitor watches connected GitHub/Jira/Linear. @fleet finish KEY launches implementer + reviewer." || return 0
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \

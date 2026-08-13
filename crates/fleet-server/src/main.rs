@@ -141,6 +141,17 @@ async fn run() -> anyhow::Result<()> {
         grok: config.grok.clone(),
     };
 
+    {
+        let ticket_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
+            }
+        });
+        tracing::info!("background ticket monitor started");
+    }
+
     let app = build_http_app(state, orch, &config)?;
 
     let addr: SocketAddr = config.bind;

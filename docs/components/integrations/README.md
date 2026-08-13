@@ -27,6 +27,14 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 Other catalog entries (GitLab, Bitbucket, Confluence, …) may appear as
 **Coming soon** until OAuth is wired.
 
+### Ticket ingest (chat)
+
+`@fleet monitor` starts a workspace watch on connected **GitHub / Jira / Linear**.
+Open issues land in an inbox (`GET /api/workspaces/{id}/fleet/tickets`, Dashboard
+→ Tickets). `@fleet finish ENG-123` (or `owner/repo#12`) launches implementer +
+reviewer against that ticket. The background ticker re-polls about once a minute.
+Tokens stay on the control plane.
+
 If a provider’s client id/secret is unset, **Connect** still starts the
 provider flow (GitHub App Manifest, or a one-time OAuth app form for Jira
 and others) and then the login + consent screen.
@@ -110,7 +118,11 @@ Legacy plaintext rows still load until the user reconnects.
 | `launch_agent_plan` | Multi-task fan-out; optional `context_from` embeds proxy results into task specs |
 | `launch_agent_task` | Single task + multi-tick; sandboxes destroyed after exit |
 
-Ops (all via `integration_query`): GitHub read/write; Jira issues + transitions; Linear issues; Slack channels/messages; Figma files; Notion pages/DBs; Drive list/export; Teams chat/channel send; Discord identity + guilds. Coming soon (no OAuth): GitLab, Bitbucket, Confluence, Asana, Trello.
+Ops (all via `integration_query` — the model invents the workflow, we do not
+register playbooks): GitHub read/write; Slack channels/messages/threads; Notion
+search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
+Drive list/export; Teams chat/channel send; Discord identity + guilds.
+Coming soon (no OAuth): GitLab, Bitbucket, Confluence, Asana, Trello.
 
 ---
 

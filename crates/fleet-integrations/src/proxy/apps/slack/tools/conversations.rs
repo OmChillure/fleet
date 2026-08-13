@@ -213,3 +213,66 @@ pub(crate) async fn get_channel_history(
         Some(status),
     )
 }
+
+pub(crate) async fn get_thread(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let channel = match req_str(args, "channel") {
+        Ok(c) => c,
+        Err(e) => return ProxyResult::err("slack", "get_thread", "bad_args", e, None),
+    };
+    let ts = match args
+        .get("thread_ts")
+        .or_else(|| args.get("ts"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(t) => t.to_string(),
+        None => {
+            return ProxyResult::err(
+                "slack",
+                "get_thread",
+                "bad_args",
+                "thread_ts is required",
+                None,
+            );
+        }
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let url = format!(
+        "https://slack.com/api/conversations.replies?channel={channel}&ts={ts}&limit={limit}"
+    );
+    let (status, body) = slack_get(http, token, &url).await;
+    if let Err(e) = slack_ok(status, &body, "get_thread") {
+        return e;
+    }
+    let items: Vec<Value> = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|m| {
+                    json!({
+                        "ts": m.get("ts"),
+                        "user": m.get("user"),
+                        "text": truncate_str(
+                            m.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                            1500,
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let n = items.len();
+    ProxyResult::ok_result(
+        "slack",
+        "get_thread",
+        format!("Fetched {n} Slack replies"),
+        json!({ "channel": channel, "thread_ts": ts, "count": n, "items": items }),
+        Some(status),
+    )
+}

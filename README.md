@@ -73,7 +73,10 @@ dx serve --package fleet-ui --port 3030
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
    The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
-   specialist `worker_profile`s, `read_team_chat` / `send_team_message`). Live workers
+   specialist `worker_profile`s, `read_team_chat` / `send_team_message`,
+   `monitor_tickets` / `finish_ticket`). `@fleet monitor` watches connected
+   GitHub / Jira / Linear; `@fleet finish ENG-123` launches implementer + reviewer.
+   Live workers
    message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
    and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
    (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
@@ -108,6 +111,7 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):

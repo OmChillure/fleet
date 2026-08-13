@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool, system_prompt_for_workspace, system_prompt_with_tools, tool_definitions,
+    execute_tool_with_retry, system_prompt_for_workspace, system_prompt_with_tools, tool_definitions,
     ChatLlmContext,
     ChatAction, MAX_TOOL_ROUNDS,
 };
@@ -560,6 +560,18 @@ async fn ollama_chat(
     messages: &[Value],
     with_tools: bool,
 ) -> AppResult<OllamaChatResponse> {
+    crate::retry::retry_provider("ollama", || {
+        ollama_chat_once(cfg, model, messages, with_tools)
+    })
+    .await
+}
+
+async fn ollama_chat_once(
+    cfg: &OllamaConfig,
+    model: &str,
+    messages: &[Value],
+    with_tools: bool,
+) -> AppResult<OllamaChatResponse> {
     let client = http_client(cfg.timeout)?;
     let url = format!("{}/api/chat", cfg.base_url);
 
@@ -579,18 +591,13 @@ async fn ollama_chat(
         "ollama chat request"
     );
 
-    let res = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, %url, "ollama chat request failed");
-            AppError::bad_request(format!(
-                "cannot reach Ollama at {}: {e}. Start it with `ollama serve`.",
-                cfg.base_url
-            ))
-        })?;
+    let res = client.post(&url).json(&body).send().await.map_err(|e| {
+        tracing::error!(error = %e, %url, "ollama chat request failed");
+        AppError::bad_request(format!(
+            "cannot reach Ollama at {}: {e}. Start it with `ollama serve`.",
+            cfg.base_url
+        ))
+    })?;
 
     let status = res.status();
     let text = res.text().await.map_err(|e| {
@@ -668,7 +675,9 @@ async fn chat_with_tools(
     let mut actions: Vec<ChatAction> = Vec::new();
     let mut used_model = model.to_string();
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    let mut max_rounds = MAX_TOOL_ROUNDS;
+    let mut round = 0usize;
+    while round < max_rounds {
         let parsed = ollama_chat(cfg, &used_model, &history, true).await?;
         if !parsed.model.is_empty() {
             used_model = parsed.model;
@@ -713,8 +722,20 @@ async fn chat_with_tools(
                 provider: "ollama".into(),
                 model: model.to_string(),
             };
-            let (result_json, action) =
-                execute_tool(state, workspace_id, user_id, name, &args, &llm).await;
+            let prior: Vec<Value> = actions
+                .iter()
+                .filter_map(|a| a.detail.clone())
+                .collect();
+            let (result_json, action) = execute_tool_with_retry(
+                state,
+                workspace_id,
+                user_id,
+                name,
+                &args,
+                &llm,
+                &prior,
+            )
+            .await;
             actions.push(action);
 
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
@@ -731,6 +752,19 @@ async fn chat_with_tools(
             tool_msg["name"] = json!(name);
             history.push(tool_msg);
         }
+        let n = parsed.message.tool_calls.len();
+        let failed: Vec<&ChatAction> = actions.iter().rev().take(n).filter(|a| !a.ok).collect();
+        if !failed.is_empty() {
+            history.push(json!({
+                "role": "system",
+                "content": crate::retry::fail_nudge(&failed),
+            }));
+            let extra = max_rounds - MAX_TOOL_ROUNDS;
+            if extra < crate::retry::EXTRA_ROUNDS_ON_FAIL {
+                max_rounds += 1;
+            }
+        }
+        round += 1;
     }
 
     // Max rounds hit — one last call without tools for a user-facing summary.

@@ -63,4 +63,6 @@ Handoffs + the board still matter for finished work. Chat is for “I need your 
 
 Chat: `list_agent_personas` then `launch_agent_plan` with different `worker_profile` per task. Omit the profile for **generalist**. Optional shortcuts: `coding`, `frontend`, `reviewer`, `testing`.
 
+Tickets: `@fleet monitor` then `@fleet finish KEY` (`monitor_tickets` / `finish_ticket`). Same plan shape (implementer + reviewer) with `external_ref` back to the issue.
+
 Roster is cloned on first use into `DATA_DIR/agency-agents`. UI: `/{workspace}/agents`.

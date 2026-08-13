@@ -45,6 +45,8 @@ pub struct Overview {
     pub activity: Vec<Value>,
     #[serde(default)]
     pub chat: Vec<Value>,
+    #[serde(default)]
+    pub tickets: Vec<Value>,
 }
 
 fn client() -> reqwest::Client {

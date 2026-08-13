@@ -75,7 +75,7 @@ same change. The walkthrough is allowed to go stale only if the product did.
 1. **Landing** `/` — hero, Get started, Log in.
 2. **Signup** — valid account; you land on login, not inside the app.
 3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Shows open
-   runs, live agents, team board, and team chat (empty until a run).
+   runs, live agents, team board, tickets, and team chat (empty until a run).
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
@@ -88,6 +88,8 @@ same change. The walkthrough is allowed to go stale only if the product did.
    are in `.env`.
 10. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
     actually up. Otherwise still open the page (empty composer is success).
+    `@fleet monitor` watches connected GitHub / Jira / Linear. `@fleet finish KEY`
+    launches implementer + reviewer on that ticket.
 11. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
     backend is `stub` (fine). Board columns move; background ticker may also
     tick. With Fleet LLM on, agents talk mid-run (`TEAM_CHAT.md`; chat

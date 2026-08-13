@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool, system_prompt_for_workspace, tool_definitions, ChatAction, ChatLlmContext,
+    execute_tool_with_retry, system_prompt_for_workspace, tool_definitions, ChatAction,
+    ChatLlmContext,
     MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
@@ -569,6 +570,19 @@ async fn chat_completions(
     messages: &[Value],
     with_tools: bool,
 ) -> AppResult<CompletionsResponse> {
+    crate::retry::retry_provider("grok", || {
+        chat_completions_once(cfg, bearer, model, messages, with_tools)
+    })
+    .await
+}
+
+async fn chat_completions_once(
+    cfg: &GrokConfig,
+    bearer: &str,
+    model: &str,
+    messages: &[Value],
+    with_tools: bool,
+) -> AppResult<CompletionsResponse> {
     let client = http_client()?;
     let url = format!("{}/chat/completions", cfg.api_base);
 
@@ -692,7 +706,9 @@ pub async fn chat_with_tools(
     let mut actions: Vec<ChatAction> = Vec::new();
     let mut used_model = model.to_string();
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    let mut max_rounds = MAX_TOOL_ROUNDS;
+    let mut round = 0usize;
+    while round < max_rounds {
         let parsed = chat_completions(cfg, bearer, model, &messages, true).await?;
         if !parsed.model.is_empty() {
             used_model = parsed.model.clone();
@@ -735,8 +751,20 @@ pub async fn chat_with_tools(
                 provider: "grok".into(),
                 model: model.to_string(),
             };
-            let (result_json, action) =
-                execute_tool(state, workspace_id, user_id, name, &args, &llm).await;
+            let prior: Vec<Value> = actions
+                .iter()
+                .filter_map(|a| a.detail.clone())
+                .collect();
+            let (result_json, action) = execute_tool_with_retry(
+                state,
+                workspace_id,
+                user_id,
+                name,
+                &args,
+                &llm,
+                &prior,
+            )
+            .await;
             actions.push(action);
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
             messages.push(json!({
@@ -745,6 +773,19 @@ pub async fn chat_with_tools(
                 "content": content,
             }));
         }
+        let n = msg.tool_calls.len();
+        let failed: Vec<&ChatAction> = actions.iter().rev().take(n).filter(|a| !a.ok).collect();
+        if !failed.is_empty() {
+            messages.push(json!({
+                "role": "system",
+                "content": crate::retry::fail_nudge(&failed),
+            }));
+            let extra = max_rounds - MAX_TOOL_ROUNDS;
+            if extra < crate::retry::EXTRA_ROUNDS_ON_FAIL {
+                max_rounds += 1;
+            }
+        }
+        round += 1;
     }
 
     let parsed = chat_completions(cfg, bearer, model, &messages, false).await?;

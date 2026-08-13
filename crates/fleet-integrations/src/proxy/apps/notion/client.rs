@@ -72,6 +72,8 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
         .unwrap_or("upstream error");
     let code = if status == 401 || status == 403 {
         "token_expired"
+    } else if status == 400 {
+        "bad_args"
     } else {
         "upstream"
     };
@@ -125,6 +127,125 @@ fn extract_title(item: &Value) -> Value {
         }
     }
     Value::Null
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_plain_text_reads_paragraph() {
+        let block = json!({
+            "id": "b1",
+            "type": "paragraph",
+            "has_children": false,
+            "paragraph": {
+                "rich_text": [{ "plain_text": "Hello from Notion" }]
+            }
+        });
+        assert_eq!(block_plain_text(&block), "Hello from Notion");
+        assert_eq!(map_block(&block)["text"], "Hello from Notion");
+    }
+
+    #[test]
+    fn write_text_accepts_children_strings_and_text() {
+        let a = json!({ "text": "hello" });
+        assert_eq!(write_text_from_args(&a).as_deref(), Some("hello"));
+        let b = json!({ "children": ["a", "b"] });
+        assert_eq!(write_text_from_args(&b).as_deref(), Some("a\n\nb"));
+        let c = json!({ "children": Value::Null });
+        assert!(write_text_from_args(&c).is_none());
+    }
+}
+
+pub(crate) fn block_plain_text(block: &Value) -> String {
+    let ty = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let rich = block
+        .get(ty)
+        .and_then(|v| v.get("rich_text").or_else(|| v.get("text")))
+        .and_then(|v| v.as_array());
+    let Some(arr) = rich else {
+        if ty == "child_page" || ty == "child_database" {
+            return block
+                .pointer(&format!("/{ty}/title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+        }
+        return String::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            t.get("plain_text")
+                .or_else(|| t.pointer("/text/content"))
+                .and_then(|v| v.as_str())
+        })
+        .collect()
+}
+
+pub(crate) fn map_block(block: &Value) -> Value {
+    json!({
+        "id": block.get("id"),
+        "type": block.get("type"),
+        "has_children": block.get("has_children"),
+        "text": block_plain_text(block),
+    })
+}
+
+/// Pull page body from the shapes models actually send (`text`, `content`,
+/// `body`, `message`, `children` as a string or list of strings/blocks).
+pub(crate) fn write_text_from_args(args: &Value) -> Option<String> {
+    for key in ["text", "content", "body", "message", "summary"] {
+        if let Some(s) = args.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    let children = args.get("children")?;
+    if let Some(s) = children.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(s.to_string());
+    }
+    let arr = children.as_array()?;
+    let mut parts: Vec<String> = Vec::new();
+    for item in arr {
+        if let Some(s) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(s.to_string());
+            continue;
+        }
+        if let Some(s) = item
+            .get("text")
+            .or_else(|| item.get("content"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parts.push(s.to_string());
+            continue;
+        }
+        let t = block_plain_text(item);
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+pub(crate) fn children_payload(text: &str) -> Value {
+    let chunks: Vec<Value> = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(50)
+        .map(rich_text_paragraph)
+        .collect();
+    if chunks.is_empty() {
+        json!([rich_text_paragraph(text)])
+    } else {
+        Value::Array(chunks)
+    }
 }
 
 pub(crate) fn rich_text_paragraph(text: &str) -> Value {

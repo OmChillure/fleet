@@ -8,7 +8,7 @@ mod common;
 use chrono::{Duration, Utc};
 use fleet_db::error::DbError;
 use fleet_db::models::NewAuthSession;
-use fleet_db::repos::{chats, sessions, users, workspaces};
+use fleet_db::repos::{chats, sessions, tickets, users, workspaces};
 use fleet_db::repos::users::NewUser;
 use uuid::Uuid;
 
@@ -314,4 +314,90 @@ async fn live_unique_violation_through_map_query_err_is_unique() {
         "is_unique_violation must be true after from_sqlx mapping — otherwise \
          fleet-auth workspaces/personas custom conflict messages never fire"
     );
+}
+
+#[tokio::test]
+async fn ticket_monitor_and_inbox_upsert_and_launch() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let mon = tickets::upsert_monitor(
+        &pool,
+        &tickets::UpsertMonitor {
+            workspace_id,
+            enabled: true,
+            providers: vec!["linear".into(), "jira".into()],
+            github_repos: vec![],
+            jira_jql: None,
+            started_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("upsert monitor");
+    assert!(mon.enabled);
+    assert_eq!(mon.providers.len(), 2);
+
+    let enabled = tickets::list_enabled_workspace_ids(&pool)
+        .await
+        .expect("enabled");
+    assert!(enabled.contains(&workspace_id));
+
+    let first = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One".into(),
+            url: None,
+            summary: "first".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox 1");
+    assert_eq!(first.state, "open");
+
+    let again = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One updated".into(),
+            url: None,
+            summary: "second".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox upsert");
+    assert_eq!(again.title, "One updated");
+    assert_eq!(again.summary, "second");
+    assert_eq!(again.state, "open");
+
+    let run = Uuid::now_v7();
+    let launched = tickets::mark_launched(&pool, workspace_id, "linear", "ENG-1", run)
+        .await
+        .expect("launch")
+        .expect("row");
+    assert_eq!(launched.state, "launched");
+    assert_eq!(launched.run_id, Some(run));
+
+    let after_close = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One closed".into(),
+            url: None,
+            summary: "should keep launched summary".into(),
+            provider_closed: true,
+        },
+    )
+    .await
+    .expect("closed upsert");
+    assert_eq!(after_close.state, "launched");
+    assert_eq!(after_close.summary, "second");
 }

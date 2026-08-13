@@ -1610,3 +1610,136 @@ async fn chat_tools_human_can_talk_on_team_channel() {
     );
     assert_eq!(overview.body["chat"].as_array().map(|a| a.len()), Some(1));
 }
+
+#[tokio::test]
+async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    let user_id = Uuid::parse_str(me.body["user"]["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(&ws).unwrap();
+    let llm = fleet_server::chat_tools::ChatLlmContext {
+        provider: "grok".into(),
+        model: "grok-4.5".into(),
+    };
+
+    let (denied, deny_action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "monitor_tickets",
+        &json!({}),
+        &llm,
+    )
+    .await;
+    assert!(!deny_action.ok, "{deny_action:?} {denied}");
+    let err = denied["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("Connect") || err.contains("connected"),
+        "{denied}"
+    );
+
+    fleet_db::repos::tickets::upsert_inbox(
+        &state.db,
+        &fleet_db::repos::tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-42".into(),
+            title: "Ship the inbox".into(),
+            url: Some("https://linear.app/eng-42".into()),
+            summary: "Do the thing described on the ticket.".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("seed inbox");
+
+    let listed = call(
+        &app,
+        "GET",
+        &fleet(&ws, "/tickets"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["count"], 1, "{}", listed.body);
+    assert_eq!(listed.body["tickets"][0]["key"], "ENG-42");
+
+    let prepared = fleet_server::tickets::prepare_finish(
+        &state,
+        workspace_id,
+        user_id,
+        fleet_server::tickets::FinishTicketArgs {
+            ticket: Some("ENG-42".into()),
+            provider: None,
+            key: None,
+        },
+    )
+    .await
+    .expect("prepare");
+    assert_eq!(prepared.item.external_key, "ENG-42");
+    assert_eq!(prepared.tasks.len(), 2);
+    assert_eq!(
+        prepared.tasks[0].external_ref.as_ref().map(|e| e.key.as_str()),
+        Some("ENG-42")
+    );
+    assert_eq!(prepared.tasks[1].worker_profile, "reviewer");
+
+    let run_id = Uuid::now_v7();
+    fleet_server::tickets::mark_ticket_launched(
+        &state,
+        workspace_id,
+        "linear",
+        "ENG-42",
+        run_id,
+    )
+    .await
+    .expect("mark launched");
+
+    let again = call(
+        &app,
+        "GET",
+        &fleet(&ws, "/tickets"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(again.body["tickets"][0]["state"], "launched", "{}", again.body);
+    assert_eq!(
+        again.body["tickets"][0]["run_id"].as_str(),
+        Some(run_id.to_string().as_str()),
+        "{}",
+        again.body
+    );
+
+    let overview = call(
+        &app,
+        "GET",
+        &fleet(&ws, "/overview"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
+    let tickets = overview.body["tickets"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{}", overview.body));
+    assert!(
+        tickets.iter().any(|t| t["key"] == "ENG-42"),
+        "{}",
+        overview.body
+    );
+
+    let (replay, replay_action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "finish_ticket",
+        &json!({ "ticket": "ENG-42" }),
+        &llm,
+    )
+    .await;
+    assert!(replay_action.ok, "{replay_action:?} {replay}");
+    assert_eq!(replay["already_launched"], true, "{replay}");
+}

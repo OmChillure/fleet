@@ -67,6 +67,10 @@ pub fn router() -> Router<AppState> {
             get(get_overview),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/tickets",
+            get(get_tickets),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
@@ -598,6 +602,7 @@ async fn get_overview(
         })).collect::<Vec<_>>(),
         "waiting": waiting,
         "activity": collect_activity(&sessions, 40),
+        "tickets": crate::tickets::inbox_json_for_overview(&state, workspace_id).await,
         "chat": chat.iter().rev().take(30).rev().map(|m| json!({
             "id": m.id,
             "seq": m.seq,
@@ -610,6 +615,16 @@ async fn get_overview(
             "body": m.body,
         })).collect::<Vec<_>>(),
     })))
+}
+
+async fn get_tickets(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let content = crate::tickets::list_tickets(&state, workspace_id, None).await?;
+    Ok(Json(content))
 }
 
 async fn get_tasks(
