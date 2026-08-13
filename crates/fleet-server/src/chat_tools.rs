@@ -420,6 +420,108 @@ pub fn tool_definitions() -> Value {
                     "additionalProperties": false
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "start_case",
+                "description": "Start a durable CASE: backend owns status/stage/wake schedule; policy_md is natural language. Wakes in the background until complete/fail/cancel. Integrations optional later. Prefer this for long-running watch→decide→act flows (not one-shot agent plans).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Short case title" },
+                        "policy_md": {
+                            "type": "string",
+                            "description": "Natural-language policy: when to wait, what counts as done, what to do on new facts"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "Optional kind label (generic, outreach, ticket, …)"
+                        },
+                        "stage": {
+                            "type": "string",
+                            "description": "Optional starting stage string (default start)"
+                        },
+                        "wake_in_s": {
+                            "type": "integer",
+                            "description": "Seconds until first wake (default 0 = soon)"
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Optional initial JSON facts (no secrets)"
+                        }
+                    },
+                    "required": ["title", "policy_md"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_cases",
+                "description": "List durable cases for this workspace (status, stage, next_wake).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "description": "Optional filter: open, waiting, deciding, acting, completed, failed, cancelled"
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_case",
+                "description": "Get one case with recent events (stage, context, decisions).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": { "type": "string", "description": "Case UUID" }
+                    },
+                    "required": ["case_id"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "observe_case",
+                "description": "Inject a human/external fact into a case (e.g. they replied / confirmed a time) and wake the backend engine.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": { "type": "string" },
+                        "note": { "type": "string", "description": "Observation text" },
+                        "wake": {
+                            "type": "boolean",
+                            "description": "Wake soon (default true)"
+                        }
+                    },
+                    "required": ["case_id", "note"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cancel_case",
+                "description": "Cancel a durable case (terminal).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": { "type": "string" }
+                    },
+                    "required": ["case_id"],
+                    "additionalProperties": false
+                }
+            }
         }
     ])
 }
@@ -431,6 +533,10 @@ The model selected in this chat composer is used for YOU and for every sandbox w
 Invent the workflow. Do not look up a saved playbook and do not ask anyone to define one. Read the ask, pick personas, call apps, launch a plan.\n\
 If a tool fails (network, bad args, Slack not_in_channel, Notion 400, …), retry the same user task — call the tool again with fixed params or another approach. Do not stop after one error.\n\n\
 You have tools for:\n\
+**Cases (durable backend state)** — for long-running watch→decide→act policies\n\
+- start_case(title, policy_md) — backend wakes on a schedule; LLM/heuristic decides; status lives in DB\n\
+- list_cases / get_case / observe_case (inject facts) / cancel_case\n\
+- Integrations are optional tools later; human observations work today via observe_case\n\
 **Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or credentials in sandbox specs)\n\
 - list_agent_personas then launch_agent_plan / launch_agent_task immediately\n\
 - get_fleet_status / list_sandboxes / list_tasks / list_runs for progress\n\
@@ -623,6 +729,18 @@ pub async fn execute_tool(
             list_tickets_tool(state, workspace_id, filter).await
         }
         "finish_ticket" => finish_ticket_tool(state, workspace_id, user_id, arguments, llm).await,
+        "start_case" => start_case_tool(state, workspace_id, user_id, arguments).await,
+        "list_cases" => {
+            let filter = arguments
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            list_cases_tool(state, workspace_id, filter).await
+        }
+        "get_case" => get_case_tool(state, workspace_id, arguments).await,
+        "observe_case" => observe_case_tool(state, workspace_id, arguments).await,
+        "cancel_case" => cancel_case_tool(state, workspace_id, arguments).await,
         other => Err(AppError::bad_request(format!("unknown tool `{other}`"))),
     };
 
@@ -1475,6 +1593,185 @@ async fn finish_ticket_tool(
         );
     }
     Ok((content, action))
+}
+
+async fn start_case_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let obj = parse_json_args(arguments).map_err(AppError::bad_request)?;
+    let title = obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::bad_request("title is required"))?
+        .to_string();
+    let policy_md = obj
+        .get("policy_md")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let stage = obj
+        .get("stage")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let wake_in_s = obj.get("wake_in_s").and_then(|v| v.as_i64());
+    let context = obj.get("context").cloned();
+    let case = crate::cases::create_case(
+        state,
+        workspace_id,
+        Some(user_id),
+        crate::cases::CreateCaseBody {
+            title: title.clone(),
+            kind,
+            policy_md: Some(policy_md),
+            stage,
+            context,
+            wake_in_s,
+        },
+    )
+    .await?;
+    let content = crate::cases::case_json(&case, None);
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "start_case".into(),
+            ok: true,
+            summary: format!(
+                "Case {} started (stage={}, status={}) — backend will wake and decide",
+                case.id, case.stage, case.status
+            ),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+async fn list_cases_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    status_filter: Option<&str>,
+) -> AppResult<(Value, ChatAction)> {
+    let rows =
+        fleet_db::repos::cases::list_for_workspace(&state.db, workspace_id, status_filter, 50)
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?;
+    let content = json!({
+        "count": rows.len(),
+        "cases": rows.iter().map(|c| crate::cases::case_json(c, None)).collect::<Vec<_>>(),
+    });
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "list_cases".into(),
+            ok: true,
+            summary: format!("{} case(s)", rows.len()),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+async fn get_case_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let id = arguments
+        .get("case_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("case_id is required"))?;
+    let case_id = Uuid::parse_str(id.trim())
+        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let case = fleet_db::repos::cases::get(&state.db, workspace_id, case_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::not_found("case not found"))?;
+    let events = fleet_db::repos::cases::list_events(&state.db, case_id, 40)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let content = crate::cases::case_json(&case, Some(&events));
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "get_case".into(),
+            ok: true,
+            summary: format!("Case {} — {} / {}", case.id, case.status, case.stage),
+            run_id: case.run_id.map(|r| r.to_string()),
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+async fn observe_case_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let id = arguments
+        .get("case_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("case_id is required"))?;
+    let case_id = Uuid::parse_str(id.trim())
+        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let note = arguments
+        .get("note")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let wake = arguments
+        .get("wake")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let case = crate::cases::observe_case(state, workspace_id, case_id, &note, wake).await?;
+    let content = crate::cases::case_json(&case, None);
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "observe_case".into(),
+            ok: true,
+            summary: format!("Observed case {} (wake={wake})", case.id),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+async fn cancel_case_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    arguments: &Value,
+) -> AppResult<(Value, ChatAction)> {
+    let id = arguments
+        .get("case_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("case_id is required"))?;
+    let case_id = Uuid::parse_str(id.trim())
+        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let case = crate::cases::cancel_case(state, workspace_id, case_id).await?;
+    let content = crate::cases::case_json(&case, None);
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "cancel_case".into(),
+            ok: true,
+            summary: format!("Case {} cancelled", case.id),
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
 }
 
 async fn read_team_chat_tool(
@@ -2384,6 +2681,11 @@ mod tests {
         assert!(names.contains(&"monitor_tickets"));
         assert!(names.contains(&"list_tickets"));
         assert!(names.contains(&"finish_ticket"));
+        assert!(names.contains(&"start_case"));
+        assert!(names.contains(&"list_cases"));
+        assert!(names.contains(&"get_case"));
+        assert!(names.contains(&"observe_case"));
+        assert!(names.contains(&"cancel_case"));
     }
 
     #[test]

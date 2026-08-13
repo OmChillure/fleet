@@ -152,6 +152,21 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!("background ticket monitor started");
     }
 
+    {
+        let case_state = state.clone();
+        let interval = fleet_server::cases::wake_interval();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                fleet_server::cases::process_due(&case_state, 20).await;
+            }
+        });
+        tracing::info!(
+            interval_s = interval.as_secs(),
+            "background case wake loop started (CASE_AUTO_DECIDE, CASE_WAKE_INTERVAL_S)"
+        );
+    }
+
     let app = build_http_app(state, orch, &config)?;
 
     let addr: SocketAddr = config.bind;

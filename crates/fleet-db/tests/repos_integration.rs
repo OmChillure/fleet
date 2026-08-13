@@ -8,7 +8,8 @@ mod common;
 use chrono::{Duration, Utc};
 use fleet_db::error::DbError;
 use fleet_db::models::NewAuthSession;
-use fleet_db::repos::{chats, sessions, tickets, users, workspaces};
+use fleet_db::repos::{cases, chats, sessions, tickets, users, workspaces};
+use serde_json::json;
 use fleet_db::repos::users::NewUser;
 use uuid::Uuid;
 
@@ -400,4 +401,82 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
     .expect("closed upsert");
     assert_eq!(after_close.state, "launched");
     assert_eq!(after_close.summary, "second");
+}
+
+// ---------------------------------------------------------------------------
+// cases: create → claim wake → patch complete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn case_create_claim_and_complete() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let id = Uuid::now_v7();
+    let past = Utc::now() - Duration::seconds(5);
+    let case = cases::insert(
+        &pool,
+        &cases::NewCase {
+            id,
+            workspace_id,
+            kind: "outreach".into(),
+            title: "Reply watch".into(),
+            policy_md: "If observed reply, wait for confirm; then complete.".into(),
+            stage: "start".into(),
+            context: json!({}),
+            next_wake_at: Some(past),
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("insert case");
+    assert_eq!(case.status, "open");
+    assert_eq!(case.stage, "start");
+
+    let _ = cases::append_event(
+        &pool,
+        id,
+        workspace_id,
+        "created",
+        json!({ "ok": true }),
+    )
+    .await
+    .expect("event");
+
+    let claimed = cases::claim_due(&pool, 10).await.expect("claim");
+    assert!(
+        claimed.iter().any(|c| c.id == id),
+        "case should be claimed when next_wake_at is past"
+    );
+    let claimed_row = claimed.into_iter().find(|c| c.id == id).unwrap();
+    assert_eq!(claimed_row.status, "deciding");
+
+    let done = cases::apply_patch(
+        &pool,
+        workspace_id,
+        id,
+        &cases::CasePatch {
+            status: "completed".into(),
+            stage: "booked".into(),
+            context: json!({ "force_complete": true }),
+            next_wake_at: None,
+            last_error: None,
+            run_id: None,
+            clear_run_id: false,
+            bump_decision: true,
+            expected_version: claimed_row.version,
+        },
+    )
+    .await
+    .expect("complete");
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.stage, "booked");
+    assert_eq!(done.decision_count, 1);
+
+    let listed = cases::list_for_workspace(&pool, workspace_id, Some("completed"), 20)
+        .await
+        .expect("list");
+    assert!(listed.iter().any(|c| c.id == id));
+
+    let events = cases::list_events(&pool, id, 10).await.expect("events");
+    assert!(!events.is_empty());
 }

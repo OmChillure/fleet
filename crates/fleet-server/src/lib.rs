@@ -3,6 +3,7 @@
 //! Auth + workspaces + integrations + orchestrator control plane on one process.
 //! The binary (`src/main.rs`) binds a port; tests use [`build_http_app`] without serving.
 
+pub mod cases;
 pub mod chat;
 pub mod chat_tools;
 pub mod config;
@@ -45,6 +46,8 @@ pub fn build_router() -> Router<AppState> {
         .merge(fleet_integrations::router::<AppState>())
         // Workspace chat → Grok (xAI) + Ollama
         .merge(chat::router())
+        // Durable general-purpose cases (state machine + wake loop)
+        .merge(cases::router())
         // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
 }
@@ -174,7 +177,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
         "git_sha": git_sha,
-        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator"],
     }))
 }
 
@@ -213,6 +216,14 @@ pub async fn api_index() -> Json<Value> {
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
                 "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
                 "workers": "GET /api/workspaces/{workspace_id}/fleet/workers",
+            },
+            "cases": {
+                "list": "GET /api/workspaces/{workspace_id}/cases",
+                "create": "POST /api/workspaces/{workspace_id}/cases",
+                "get": "GET /api/workspaces/{workspace_id}/cases/{case_id}",
+                "observe": "POST /api/workspaces/{workspace_id}/cases/{case_id}/observe",
+                "cancel": "POST /api/workspaces/{workspace_id}/cases/{case_id}/cancel",
+                "decide": "POST /api/workspaces/{workspace_id}/cases/{case_id}/decide",
             },
             "chat": {
                 "status": "GET /api/workspaces/{workspace_id}/chat/status",

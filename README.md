@@ -81,6 +81,8 @@ dx serve --package fleet-ui --port 3030
    and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
    (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
    bash fences from the task spec.
+   **Cases** (`start_case` / `observe_case`): durable backend state machine for
+   long-running policies (wake loop owns status/stage; integrations optional later).
    Also **integration_query**
    (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
@@ -112,6 +114,9 @@ dx serve --package fleet-ui --port 3030
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
+| `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
+| `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
+| `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):

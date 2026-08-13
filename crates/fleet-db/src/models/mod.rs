@@ -1,4 +1,5 @@
 mod audit;
+mod case;
 mod chat;
 mod integration;
 mod persona;
@@ -9,6 +10,7 @@ mod work_claim;
 mod workspace;
 
 pub use audit::*;
+pub use case::*;
 pub use chat::*;
 pub use integration::*;
 pub use persona::*;
