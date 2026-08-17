@@ -139,6 +139,7 @@ pub async fn list_sessions(workspace_id: &str) -> Result<Value, FleetError> {
     parse(res).await
 }
 
+#[allow(dead_code)]
 pub async fn update_fleet_config(
     workspace_id: &str,
     repo_url: Option<&str>,

@@ -40,6 +40,12 @@ pub async fn materialize_workspace(req: &SpawnRequest) -> Result<(), SandboxErro
     )
     .await?;
 
+    if let Some(body) = req.persona_md.as_deref().filter(|s| !s.trim().is_empty()) {
+        let name = req.persona_name.as_deref().unwrap_or("agent");
+        let md = format!("# Persona: {name}\n\n{body}\n");
+        write_file(req.work_dir.join("PERSONA.md"), &md).await?;
+    }
+
     let cmds = extract_bash_blocks(spec);
     if !cmds.is_empty() {
         let mut body = String::from("#!/usr/bin/env bash\nset -euo pipefail\n\n");

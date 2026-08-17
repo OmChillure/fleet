@@ -144,6 +144,32 @@ async fn run() -> anyhow::Result<()> {
         grok: config.grok.clone(),
     };
 
+    {
+        let ticket_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
+            }
+        });
+        tracing::info!("background ticket monitor started");
+    }
+
+    {
+        let case_state = state.clone();
+        let interval = fleet_server::cases::wake_interval();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                fleet_server::cases::process_due(&case_state, 20).await;
+            }
+        });
+        tracing::info!(
+            interval_s = interval.as_secs(),
+            "background case wake loop started (CASE_AUTO_DECIDE, CASE_WAKE_INTERVAL_S)"
+        );
+    }
+
     let app = build_http_app(state, orch, &config)?;
 
     let addr: SocketAddr = config.bind;

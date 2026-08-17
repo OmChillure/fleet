@@ -20,11 +20,11 @@ dx serve --package fleet-ui --port 3030
 ```
 
 1. Signup / login  
-2. Sidebar → **Settings** → set the workspace git clone URL (one repo per project) and default ref  
+2. Sidebar → **Settings** → concurrent agents + optional Ollama fallback  
 3. Sidebar → **Fleet**  
 4. **Start 2-task run** → **Run until done** (or **Run tick** a few times)  
 
-If no repo is set, tasks still run; `fleet-driver` skips clone and uses the empty session dir (fine for mock). With a URL, the driver clones into `sessions/<id>/repo` and the agent cwd is that checkout.
+Agents share a run workspace (`work/`). They do not clone a Settings git URL. If you want a PR on GitHub, connect GitHub under **Integrations** and ask Chat — `integration_query` with `provider=github`.
 
 Cookie auth on `/api/workspaces/{id}/fleet/*`. **No ADMIN_TOKEN required.**
 

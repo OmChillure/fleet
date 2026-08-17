@@ -6,6 +6,7 @@ mod deps_step;
 mod inbox;
 mod materialize_step;
 mod reap;
+mod review;
 mod rollup;
 mod session_context;
 mod spawn;

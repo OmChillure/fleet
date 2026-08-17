@@ -74,23 +74,26 @@ same change. The walkthrough is allowed to go stale only if the product did.
 
 1. **Landing** `/` — hero, Get started, Log in.
 2. **Signup** — valid account; you land on login, not inside the app.
-3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Dashboard is
-   still a stub (“Fleet overview will live here.”).
+3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Shows open
+   runs, live agents, team board, tickets, and team chat (empty until a run).
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
    Sandboxes), Agents (All agents, Live sessions), Workspace (Integrations,
    Settings). Expand collapsed sections.
 6. **Workspace switcher** — list; create a second workspace; switch.
-7. **Settings** — git URL + ref. Empty URL is valid (no clone).
+7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
 8. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
 9. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
    are in `.env`.
 10. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
     actually up. Otherwise still open the page (empty composer is success).
+    `@fleet monitor` watches connected GitHub / Jira / Linear. `@fleet finish KEY`
+    launches implementer + reviewer on that ticket.
 11. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
     backend is `stub` (fine). Board columns move; background ticker may also
-    tick.
+    tick. With Fleet LLM on, agents talk mid-run (`TEAM_CHAT.md`; chat
+    tools `read_team_chat` / `send_team_message`).
 12. **Sandboxes** — same worker sessions as Fleet.
 13. **Chat history** — `/{ws}/sessions` lists **chats**, not workers.
 14. **User menu** — theme Black/White (not persisted), Log out → `/login`.
@@ -142,13 +145,14 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-server` `/health`, `/`, `/api` | `api` | browser opens API `/health` JSON (`status: ok`, `apis` includes auth/fleet/chat) |
 | `crates/fleet-server` chat, `chat_tools`, `grok` | `chat` | New chat composer + provider/model. Send only if a provider is live |
 | `crates/fleet-db` chats repo | `chat` + `sessions` | new thread appears under Chat history |
-| `crates/fleet-orchestrator` tick, plans, store | `fleet` | Start 2-task run, Run tick, cards change column |
+| `crates/fleet-orchestrator` tick, plans, store, team chat | `fleet` | Start 2-task run, Run tick, cards change column. LLM workers use TEAM_CHAT.md |
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
 | `crates/fleet-driver`, `fleet-worker`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
-| `crates/fleet-server` + UI settings / git remote | `settings` | repo URL + ref form |
+| `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
+| `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
 | `sandbox-lab/workspace/workspace_agent.py` | `lab` | same |

@@ -25,7 +25,8 @@ pub async fn schedule_and_spawn(
     data_dir: &PathBuf,
     orchestrator_url: &str,
     default_timeout_s: i32,
-    repo: Option<&crate::domain::ProjectGitRemote>,
+    fleet_llm: &str,
+    fleet_llm_model: &str,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -56,6 +57,7 @@ pub async fn schedule_and_spawn(
         spawned: 0,
         spawn_failed: 0,
     };
+    let mut plan_llms: HashMap<Uuid, crate::sandbox::agent_loop::WorkerLlm> = HashMap::new();
 
     for task in ready {
         if free <= 0 {
@@ -82,33 +84,41 @@ pub async fn schedule_and_spawn(
             .join(assignment.session_id.to_string());
         let _ = tokio::fs::create_dir_all(&session_work).await;
 
-        // Vibe/Hermes pattern: optional isolated git checkout per worker.
-        if let Ok(src) = std::env::var("FLEET_GIT_SOURCE") {
-            let src = src.trim().to_string();
-            if !src.is_empty() {
-                let project_dir = data_dir.join("projects").join(project_id.to_string());
-                match crate::sandbox::git_isolate::attach_worktree(
-                    &project_dir,
-                    &session_work,
-                    &src,
-                )
-                .await
-                {
-                    Ok(repo) => tracing::info!(
-                        session_id = %assignment.session_id,
-                        repo = %repo.display(),
-                        "git worktree attached"
-                    ),
-                    Err(e) => tracing::warn!(
-                        session_id = %assignment.session_id,
-                        error = %e,
-                        "git worktree skipped (sandbox still runs)"
-                    ),
-                }
-            }
-        }
+        // Shared empty workspace — agents collaborate here. GitHub/GitLab is an
+        // *action* via control-plane tools if the user connected Integrations.
+        crate::sandbox::share::ensure_run_workspace(
+            data_dir,
+            project_id,
+            task.run_id,
+            None,
+            None,
+        )
+        .await;
+
+        crate::sandbox::team::prepare_agent_workspace(
+            data_dir,
+            &session_work,
+            task,
+            snap,
+        )
+        .await;
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
+        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
+            cached.clone()
+        } else {
+            let plan = store.get_plan_body(task.plan_id).await.ok().flatten();
+            let resolved = crate::sandbox::agent_loop::resolve_worker_llm(
+                plan.as_ref()
+                    .and_then(|p| p.policy.llm_provider.as_deref()),
+                plan.as_ref().and_then(|p| p.policy.llm_model.as_deref()),
+                fleet_llm,
+                fleet_llm_model,
+            );
+            plan_llms.insert(task.plan_id, resolved.clone());
+            resolved
+        };
         let mut req = SpawnRequest {
             session_id: assignment.session_id,
             project_id,
@@ -124,17 +134,15 @@ pub async fn schedule_and_spawn(
             task_summary: Some(task.summary.clone()),
             // Full spec (may include integration context markdown + ```bash fences).
             task_spec: Some(task.spec_md.clone()),
+            persona_name: Some(persona.name.clone()),
+            persona_md: Some(persona.body.clone()),
+            agent_backend: llm.backend,
+            agent_model: llm.model,
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
-        if let Some(repo) = repo {
-            req.env
-                .insert("FLEET_REPO_URL".into(), repo.url.clone());
-            req.env
-                .insert("FLEET_GIT_REF".into(), repo.git_ref.clone());
-        }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
         }
@@ -145,7 +153,7 @@ pub async fn schedule_and_spawn(
             req.env.insert("FLEET_WORK_CMD".into(), cmd);
         }
         if let Err(e) =
-            super::session_context::write_session_context(&req.work_dir, task, timeout_s, repo)
+            super::session_context::write_session_context(&req.work_dir, task, timeout_s, None)
         {
             tracing::warn!(
                 error = %e,

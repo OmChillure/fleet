@@ -55,7 +55,7 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                         progress_pct: t["progress_pct"].as_i64().unwrap_or(0),
                         worker_profile: t["worker_profile"]
                             .as_str()
-                            .unwrap_or("coding")
+                            .unwrap_or("generalist")
                             .to_string(),
                     })
                 })
@@ -149,7 +149,6 @@ pub fn Fleet(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading workspace fleet…".to_string());
     let mut project_name = use_signal(|| String::new());
     let mut sandbox_backend = use_signal(|| "stub".to_string());
-    let mut repo_label = use_signal(|| String::new());
     let mut tasks = use_signal(|| Vec::<TaskCard>::new());
     let mut runs = use_signal(|| Vec::<RunCard>::new());
     let mut sessions = use_signal(|| Vec::<SessionCard>::new());
@@ -193,13 +192,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                     if let Some(b) = v["sandbox_backend"].as_str() {
                         sandbox_backend.set(b.to_string());
                     }
-                    let url = v["config"]["repo_url"].as_str().unwrap_or("");
-                    let git_ref = v["config"]["git_ref"].as_str().unwrap_or("main");
-                    repo_label.set(if url.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{url}@{git_ref}")
-                    });
                     status_line.set(format!(
                         "Fleet ready · {} sandbox · project {}",
                         v["sandbox_backend"].as_str().unwrap_or("stub"),
@@ -224,6 +216,25 @@ pub fn Fleet(workspace_id: String) -> Element {
         });
     });
 
+    let ws_poll = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_poll.clone();
+        spawn(async move {
+            loop {
+                TimeoutFuture::new(2500).await;
+                if let Ok(t) = list_tasks(&ws).await {
+                    tasks.set(parse_tasks(&t));
+                }
+                if let Ok(r) = list_runs(&ws).await {
+                    runs.set(parse_runs(&r));
+                }
+                if let Ok(s) = list_sessions(&ws).await {
+                    sessions.set(parse_sessions(&s));
+                }
+            }
+        });
+    });
+
     let columns = ["Ready", "In progress", "Blocked", "Done", "Failed"];
 
     rsx! {
@@ -240,13 +251,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
                         "workspace {workspace_id} · sandbox {sandbox_backend}"
-                    }
-                    p { class: "mt-0.5 text-xs text-[var(--app-muted)]",
-                        if repo_label().is_empty() {
-                            "No git repo bound — set it in Settings"
-                        } else {
-                            "repo {repo_label}"
-                        }
                     }
                 }
                 div { class: "flex flex-wrap gap-2",

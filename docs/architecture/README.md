@@ -26,6 +26,10 @@ Related component folders (stubs for deeper specs):
 (Postgres). UI on `:3030` talks to the API with cookie credentials.
 Orchestrator tick + process sandbox (`fleet-worker`) and the Kubernetes
 `FleetSandbox` operator are on `main`. OAuth connect is live.
+**Cases (general durable workflows):** workspace-scoped `cases` + `case_events`
+with backend wake loop and free-form stages — see
+[`docs/components/cases/`](../components/cases/). Agent fleets remain the
+executor for coding plans; cases are the long-lived state machine.
 **Sandbox driver:** [`crates/fleet-sandbox-driver`](../../crates/fleet-sandbox-driver/)
 runs OpenCode/Pi over ACP in a per-task compose sandbox (see
 [`sandbox-workspace.md`](./sandbox-workspace.md)). Not `PROCESS_WORKER_BIN`

@@ -11,6 +11,7 @@ pub const OPERATIONS: &[&str] = &[
     "list_users",
     "post_message",
     "get_channel_history",
+    "get_thread",
 ];
 
 pub async fn invoke(
@@ -24,6 +25,7 @@ pub async fn invoke(
         "list_users" => conversations::list_users(http, token, args).await,
         "post_message" => conversations::post_message(http, token, args).await,
         "get_channel_history" => conversations::get_channel_history(http, token, args).await,
+        "get_thread" => conversations::get_thread(http, token, args).await,
         other => ProxyResult::err(
             "slack",
             other,

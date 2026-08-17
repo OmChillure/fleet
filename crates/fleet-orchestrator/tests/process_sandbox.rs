@@ -135,6 +135,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            ..Default::default()
         },
     };
     let run_id = plan.run_id;

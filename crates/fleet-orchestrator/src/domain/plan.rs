@@ -51,6 +51,12 @@ pub struct PlanPolicy {
     pub on_task_fail: OnTaskFailPolicy,
     #[serde(default)]
     pub auto_sync_external: bool,
+    /// Chat composer provider (`grok`, `ollama`, later `claude`). Workers use this.
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    /// Exact model id selected in chat (not a random default).
+    #[serde(default)]
+    pub llm_model: Option<String>,
 }
 
 fn default_on_task_fail() -> OnTaskFailPolicy {
@@ -63,6 +69,8 @@ impl Default for PlanPolicy {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            llm_provider: None,
+            llm_model: None,
         }
     }
 }

@@ -78,7 +78,7 @@ All app routes are **workspace-scoped**.
 | `/{workspace_id}/agents` | `src/pages/agents/` | Empty placeholder |
 | `/{workspace_id}/sandboxes` | `src/pages/sandboxes/` | Empty placeholder |
 | `/{workspace_id}/integrations` | `src/pages/integrations/` | OAuth catalog + connect |
-| `/{workspace_id}/settings` | `src/pages/settings/` | Empty placeholder |
+| `/{workspace_id}/settings` | `src/pages/settings/` | Concurrent agents + local fleet LLM (Ollama). Grok is env-only. |
 
 Routes are defined in `src/main.rs`. Folder names organize code only.
 

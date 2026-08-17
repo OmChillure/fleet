@@ -8,7 +8,8 @@ mod common;
 use chrono::{Duration, Utc};
 use fleet_db::error::DbError;
 use fleet_db::models::NewAuthSession;
-use fleet_db::repos::{chats, sessions, users, workspaces};
+use fleet_db::repos::{cases, chats, sessions, tickets, users, workspaces};
+use serde_json::json;
 use fleet_db::repos::users::NewUser;
 use uuid::Uuid;
 
@@ -314,4 +315,168 @@ async fn live_unique_violation_through_map_query_err_is_unique() {
         "is_unique_violation must be true after from_sqlx mapping — otherwise \
          fleet-auth workspaces/personas custom conflict messages never fire"
     );
+}
+
+#[tokio::test]
+async fn ticket_monitor_and_inbox_upsert_and_launch() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let mon = tickets::upsert_monitor(
+        &pool,
+        &tickets::UpsertMonitor {
+            workspace_id,
+            enabled: true,
+            providers: vec!["linear".into(), "jira".into()],
+            github_repos: vec![],
+            jira_jql: None,
+            started_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("upsert monitor");
+    assert!(mon.enabled);
+    assert_eq!(mon.providers.len(), 2);
+
+    let enabled = tickets::list_enabled_workspace_ids(&pool)
+        .await
+        .expect("enabled");
+    assert!(enabled.contains(&workspace_id));
+
+    let first = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One".into(),
+            url: None,
+            summary: "first".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox 1");
+    assert_eq!(first.state, "open");
+
+    let again = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One updated".into(),
+            url: None,
+            summary: "second".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox upsert");
+    assert_eq!(again.title, "One updated");
+    assert_eq!(again.summary, "second");
+    assert_eq!(again.state, "open");
+
+    let run = Uuid::now_v7();
+    let launched = tickets::mark_launched(&pool, workspace_id, "linear", "ENG-1", run)
+        .await
+        .expect("launch")
+        .expect("row");
+    assert_eq!(launched.state, "launched");
+    assert_eq!(launched.run_id, Some(run));
+
+    let after_close = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "One closed".into(),
+            url: None,
+            summary: "should keep launched summary".into(),
+            provider_closed: true,
+        },
+    )
+    .await
+    .expect("closed upsert");
+    assert_eq!(after_close.state, "launched");
+    assert_eq!(after_close.summary, "second");
+}
+
+// ---------------------------------------------------------------------------
+// cases: create → claim wake → patch complete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn case_create_claim_and_complete() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let id = Uuid::now_v7();
+    let past = Utc::now() - Duration::seconds(5);
+    let case = cases::insert(
+        &pool,
+        &cases::NewCase {
+            id,
+            workspace_id,
+            kind: "outreach".into(),
+            title: "Reply watch".into(),
+            policy_md: "If observed reply, wait for confirm; then complete.".into(),
+            stage: "start".into(),
+            context: json!({}),
+            next_wake_at: Some(past),
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("insert case");
+    assert_eq!(case.status, "open");
+    assert_eq!(case.stage, "start");
+
+    let _ = cases::append_event(
+        &pool,
+        id,
+        workspace_id,
+        "created",
+        json!({ "ok": true }),
+    )
+    .await
+    .expect("event");
+
+    let claimed = cases::claim_due(&pool, 10).await.expect("claim");
+    assert!(
+        claimed.iter().any(|c| c.id == id),
+        "case should be claimed when next_wake_at is past"
+    );
+    let claimed_row = claimed.into_iter().find(|c| c.id == id).unwrap();
+    assert_eq!(claimed_row.status, "deciding");
+
+    let done = cases::apply_patch(
+        &pool,
+        workspace_id,
+        id,
+        &cases::CasePatch {
+            status: "completed".into(),
+            stage: "booked".into(),
+            context: json!({ "force_complete": true }),
+            next_wake_at: None,
+            last_error: None,
+            run_id: None,
+            clear_run_id: false,
+            bump_decision: true,
+            expected_version: claimed_row.version,
+        },
+    )
+    .await
+    .expect("complete");
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.stage, "booked");
+    assert_eq!(done.decision_count, 1);
+
+    let listed = cases::list_for_workspace(&pool, workspace_id, Some("completed"), 20)
+        .await
+        .expect("list");
+    assert!(listed.iter().any(|c| c.id == id));
+
+    let events = cases::list_events(&pool, id, 10).await.expect("events");
+    assert!(!events.is_empty());
 }

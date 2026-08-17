@@ -3,8 +3,12 @@
 //!
 //! `process` is main's fleet-worker. `local`/`shell` is Om's `bash fleet_worker.sh`.
 
+pub mod agent_loop;
 mod docker;
 pub(crate) mod git_isolate;
+pub mod share;
+pub mod team;
+pub mod team_chat;
 mod worker_script;
 
 pub use docker::{docker_runtime, DockerRuntime};
@@ -39,6 +43,14 @@ pub struct SpawnRequest {
     pub task_summary: Option<String>,
     /// Full task spec markdown; ```bash fences become commands.sh.
     pub task_spec: Option<String>,
+    /// Agency-agents persona name (display).
+    pub persona_name: Option<String>,
+    /// Full persona markdown written to PERSONA.md.
+    pub persona_md: Option<String>,
+    /// Resolved worker LLM: `grok` (env) or `ollama` (settings). None = bash worker.
+    pub agent_backend: Option<String>,
+    /// Model id for the worker LLM (e.g. grok-4.5, llama3.2).
+    pub agent_model: Option<String>,
 }
 
 /// Opaque handle returned by a successful spawn (pid, container id, stub key, …).
@@ -282,6 +294,10 @@ mod tests {
             task_title: None,
             task_summary: None,
             task_spec: None,
+            persona_name: None,
+            persona_md: None,
+            agent_backend: None,
+            agent_model: None,
         }
     }
 

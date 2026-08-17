@@ -145,7 +145,7 @@ cmd_guide() {
 
   pause_step "Login  ${UI_URL}/login" \
     "Same email/password → /{workspace-uuid}/dashboard." \
-    "Dashboard is still a stub (\"Fleet overview will live here.\")." || return 0
+    "Dashboard shows Open runs / Live agents / Team board / Tickets (empty is OK)." || return 0
 
   pause_step "Login wall" \
     "Log out (user menu) or a private window." \
@@ -162,8 +162,8 @@ cmd_guide() {
     "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
 
   pause_step "Settings" \
-    "Git clone URL + ref (default main). Empty URL is valid (no clone)." \
-    "Save. Invalid URL should error." || return 0
+    "Number of agents + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
+    "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0
@@ -176,11 +176,13 @@ cmd_guide() {
 
   pause_step "Chat" \
     "New chat: provider/model dropdown." \
-    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." || return 0
+    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." \
+    "@fleet monitor watches connected GitHub/Jira/Linear. @fleet finish KEY launches implementer + reviewer." || return 0
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \
-    "Default backend is stub — board should move. Ticker may also tick on its own." || return 0
+    "Default backend is stub — board should move. Ticker may also tick on its own." \
+    "With Fleet LLM on, live agents message each other (TEAM_CHAT.md / chat read_team_chat)." || return 0
 
   pause_step "Sandboxes" \
     "Same worker sessions as Fleet (status, backend, work dir)." || return 0

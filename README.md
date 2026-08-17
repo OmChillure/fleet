@@ -72,9 +72,19 @@ dx serve --package fleet-ui --port 3030
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
-   The assistant can call **sandbox tools** (multi-agent `launch_agent_plan`, multi-tick until
-   ephemeral stub sandboxes complete and are destroyed) and **integration_query**
-   (GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord via control-plane proxy — tokens never enter sandboxes).
+   The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
+   specialist `worker_profile`s, `read_team_chat` / `send_team_message`,
+   `monitor_tickets` / `finish_ticket`). `@fleet monitor` watches connected
+   GitHub / Jira / Linear; `@fleet finish ENG-123` launches implementer + reviewer.
+   Live workers
+   message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
+   and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
+   (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
+   bash fences from the task spec.
+   **Cases** (`start_case` / `observe_case`): durable backend state machine for
+   long-running policies (wake loop owns status/stage; integrations optional later).
+   Also **integration_query**
+   (GitHub/GitLab/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord/Trello/Asana via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
    - `SANDBOX_BACKEND=stub` — fake timer (default)
    - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
@@ -103,6 +113,10 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
+| `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
+| `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
+| `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -118,7 +132,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
-| `/{workspace_id}/settings` | Settings |
+| `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),

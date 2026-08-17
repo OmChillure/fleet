@@ -113,6 +113,19 @@ mod tests {
     }
 
     #[test]
+    fn slack_and_notion_have_test_trio_ops() {
+        let slack = operations_for("slack");
+        assert!(slack.contains(&"list_channels"));
+        assert!(slack.contains(&"post_message"));
+        assert!(slack.contains(&"get_thread"));
+        let notion = operations_for("notion");
+        assert!(notion.contains(&"search"));
+        assert!(notion.contains(&"get_block_children"));
+        assert!(notion.contains(&"create_page"));
+        assert!(notion.contains(&"append_blocks"));
+    }
+
+    #[test]
     fn unknown_provider_has_no_operations() {
         assert!(operations_for("unknown").is_empty());
     }

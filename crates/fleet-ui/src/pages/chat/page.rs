@@ -648,7 +648,9 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             class: "flex flex-wrap items-center gap-2 border-t border-[var(--app-border)]/60 px-2.5 py-2",
                             // Provider
                             div { class: "flex min-w-0 items-center gap-1.5",
-                                span { class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
+                                span {
+                                    class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
+                                    title: "Fleet agents use this same provider and model",
                                     "Provider"
                                 }
                                 select {
