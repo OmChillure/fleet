@@ -15,6 +15,7 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 | Provider | Env | Status |
 | --- | --- | --- |
 | GitHub | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | OAuth implemented |
+| GitLab | `GITLAB_CLIENT_ID` / `GITLAB_CLIENT_SECRET` | OAuth implemented |
 | Slack | `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | OAuth implemented |
 | Jira | `JIRA_CLIENT_ID` / `JIRA_CLIENT_SECRET` | OAuth implemented |
 | Linear | `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` | OAuth implemented |
@@ -23,8 +24,10 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 | Google Drive | `GOOGLE_DRIVE_CLIENT_ID` / `GOOGLE_DRIVE_CLIENT_SECRET` | OAuth implemented |
 | Microsoft Teams | `TEAMS_CLIENT_ID` / `TEAMS_CLIENT_SECRET` | OAuth implemented |
 | Discord | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | OAuth implemented |
+| Trello | `TRELLO_CLIENT_ID` / `TRELLO_CLIENT_SECRET` | OAuth implemented (API key + user token) |
+| Asana | `ASANA_CLIENT_ID` / `ASANA_CLIENT_SECRET` | OAuth implemented |
 
-Other catalog entries (GitLab, Bitbucket, Confluence, …) may appear as
+Other catalog entries (Bitbucket, Confluence, …) may appear as
 **Coming soon** until OAuth is wired.
 
 ### Ticket ingest (chat)
@@ -119,10 +122,11 @@ Legacy plaintext rows still load until the user reconnects.
 | `launch_agent_task` | Single task + multi-tick; sandboxes destroyed after exit |
 
 Ops (all via `integration_query` — the model invents the workflow, we do not
-register playbooks): GitHub read/write; Slack channels/messages/threads; Notion
-search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
-Drive list/export; Teams chat/channel send; Discord identity + guilds.
-Coming soon (no OAuth): GitLab, Bitbucket, Confluence, Asana, Trello.
+register playbooks): GitHub and GitLab read/write; Slack channels/messages/threads;
+Notion search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
+Drive list/export; Teams chat/channel send; Discord identity + guilds;
+Trello boards/cards; Asana tasks.
+Coming soon (no OAuth): Bitbucket, Confluence.
 
 ---
 

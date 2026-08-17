@@ -33,6 +33,7 @@ pub struct IntegrationsConfig {
     pub credentials_key: CredentialsKey,
 
     pub github: Option<OAuthClientConfig>,
+    pub gitlab: Option<OAuthClientConfig>,
     pub slack: Option<OAuthClientConfig>,
     pub linear: Option<OAuthClientConfig>,
     pub jira: Option<OAuthClientConfig>,
@@ -41,6 +42,8 @@ pub struct IntegrationsConfig {
     pub google_drive: Option<OAuthClientConfig>,
     pub teams: Option<OAuthClientConfig>,
     pub discord: Option<OAuthClientConfig>,
+    pub trello: Option<OAuthClientConfig>,
+    pub asana: Option<OAuthClientConfig>,
 }
 
 impl IntegrationsConfig {
@@ -69,6 +72,7 @@ impl IntegrationsConfig {
             state_secret,
             credentials_key,
             github: optional_oauth("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")?,
+            gitlab: optional_oauth("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")?,
             slack: optional_oauth("SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET")?,
             linear: optional_oauth("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")?,
             jira: optional_oauth("JIRA_CLIENT_ID", "JIRA_CLIENT_SECRET")?,
@@ -77,12 +81,15 @@ impl IntegrationsConfig {
             google_drive: optional_oauth("GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET")?,
             teams: optional_oauth("TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET")?,
             discord: optional_oauth("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET")?,
+            trello: optional_oauth("TRELLO_CLIENT_ID", "TRELLO_CLIENT_SECRET")?,
+            asana: optional_oauth("ASANA_CLIENT_ID", "ASANA_CLIENT_SECRET")?,
         })
     }
 
     pub fn oauth_for(&self, provider: &str) -> Option<&OAuthClientConfig> {
         match provider {
             "github" => self.github.as_ref(),
+            "gitlab" => self.gitlab.as_ref(),
             "slack" => self.slack.as_ref(),
             "linear" => self.linear.as_ref(),
             "jira" => self.jira.as_ref(),
@@ -91,6 +98,8 @@ impl IntegrationsConfig {
             "google_drive" => self.google_drive.as_ref(),
             "teams" => self.teams.as_ref(),
             "discord" => self.discord.as_ref(),
+            "trello" => self.trello.as_ref(),
+            "asana" => self.asana.as_ref(),
             _ => None,
         }
     }

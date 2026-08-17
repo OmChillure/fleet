@@ -169,8 +169,9 @@ cmd_guide() {
     "Seed starters → eight persona cards. No LLM is called here." || return 0
 
   pause_step "Integrations" \
-    "Catalog + search. Connect is enabled for available providers (GitHub, Jira, …)." \
+    "Catalog + search. Connect is enabled for available providers (GitHub, GitLab, Jira, Trello, Asana, …)." \
     "GitHub: new tab → github.com (first time creates a local GitHub App, then install/consent)." \
+    "GitLab / Trello / Asana: new tab → one-time OAuth app form if needed, then provider consent." \
     "Jira: new tab → one-time Atlassian OAuth app if needed, then Atlassian login + consent." || return 0
 
   pause_step "Chat" \

@@ -399,13 +399,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "integration_query",
-                "description": "Call a connected integration on the CONTROL PLANE (decrypt there; tokens never enter sandboxes). Providers: github, jira, linear, slack, figma, notion, google_drive, teams, discord. Use get_integration for the allowlisted ops. GitHub: list_repos/issues/prs, get_file, list_commits, commit_files, create_pr/issue, add_comment. Jira: search/create/transition issues, comments. Linear: list/create/update issues. Slack: list_channels/users, post_message, history. Figma: get_file/nodes/comments. Notion: search/pages/databases. Drive: list/get/export files (readonly). Teams: chats/teams/channels + send messages. Discord: get_me, list_guilds. Do NOT put tokens in sandbox specs.",
+                "description": "Call a connected integration on the CONTROL PLANE (decrypt there; tokens never enter sandboxes). Providers: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana. Use get_integration for the allowlisted ops. GitHub: list_repos/issues/prs, get_file, list_commits, commit_files, create_pr/issue, add_comment. GitLab: list_repos/issues/mrs, get_file, list_commits, commit_files, create_mr/issue, add_comment. Jira: search/create/transition issues, comments. Linear: list/create/update issues. Slack: list_channels/users, post_message, history. Figma: get_file/nodes/comments. Notion: search/pages/databases. Drive: list/get/export files (readonly). Teams: chats/teams/channels + send messages. Discord: get_me, list_guilds. Trello: list_boards/lists/cards, create/update cards, comments. Asana: list workspaces/projects/tasks, create/update tasks, comments. Do NOT put tokens in sandbox specs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "description": "github | jira | linear | slack | figma | notion | google_drive | teams | discord"
+                            "description": "github | gitlab | jira | linear | slack | figma | notion | google_drive | teams | discord | trello | asana"
                         },
                         "operation": {
                             "type": "string",
@@ -543,11 +543,14 @@ You have tools for:\n\
 - read_team_chat / send_team_message — agents talk to each other mid-run; you can listen in and reply\n\
 - Local sandboxes do not need any integration.\n\
 **Integrations — CONTROL PLANE only** (same tool for every app)\n\
-- Test trio: GitHub, Slack, Notion. Also Jira, Linear, Figma, Drive, Teams, Discord.\n\
-- list_integrations / get_integration (returns operations) / integration_query(provider, operation, args)\n\
+- integration_query(provider, operation, args): github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana\n\
+- list_integrations / get_integration (returns operations)\n\
 - GitHub: list_repos/issues/prs, get_file, commit_files, create_pr/issue, add_comment\n\
+- GitLab: list_repos/issues/mrs, get_file, commit_files, create_mr/issue, add_comment\n\
 - Slack: list_channels/users, post_message, get_channel_history, get_thread\n\
 - Notion: search, get_page, get_block_children (includes text), query_database, create_page, append_blocks\n\
+- Trello: list_boards/lists/cards, create/update card, add_comment\n\
+- Asana: list_workspaces/projects/tasks, create/update task, add_comment\n\
 - @fleet monitor → monitor_tickets. @fleet finish KEY → finish_ticket. Shortcuts, not the only workflows.\n\
 Do NOT claim an external write succeeded unless integration_query returned ok.\n\
 Do NOT block local work because an app is disconnected. Only mention Connect if they explicitly wanted that app.\n\
@@ -2447,6 +2450,9 @@ fn provider_capabilities(provider: &str) -> &'static str {
         "github" => {
             "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, put_file, commit_files, create_branch, create_pr, create_issue, add_comment"
         }
+        "gitlab" => {
+            "list_repos, list_issues, get_issue, list_mrs, get_mr, get_file, list_commits, commit_files, create_branch, create_mr, create_issue, add_comment"
+        }
         "jira" => {
             "search_issues, get_issue, list_projects, create_issue, add_comment, list_transitions, transition_issue"
         }
@@ -2465,6 +2471,8 @@ fn provider_capabilities(provider: &str) -> &'static str {
             "get_me, list_chats, list_teams, list_channels, list_chat_messages, send_chat_message, send_channel_message"
         }
         "discord" => "get_me, list_guilds (user OAuth; no channel posts)",
+        "trello" => "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment",
+        "asana" => "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment",
         _ => "OAuth connect only — no proxy tools yet.",
     }
 }

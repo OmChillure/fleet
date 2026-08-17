@@ -212,6 +212,7 @@ mod tests {
             )
             .expect("key"),
             github: None,
+            gitlab: None,
             slack: None,
             linear: None,
             jira: None,
@@ -220,6 +221,8 @@ mod tests {
             google_drive: None,
             teams: None,
             discord: None,
+            trello: None,
+            asana: None,
         }
     }
 

@@ -466,6 +466,12 @@ async fn oauth_callback(
     Path(provider): Path<String>,
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Response {
+    let provider = provider.trim().to_lowercase();
+    // Trello puts the user token in the URL fragment. Serve a tiny page that
+    // copies `#token=` into `?code=` so the shared callback can store it.
+    if provider == "trello" && q.code.is_none() && q.error.is_none() {
+        return trello_token_capture_html();
+    }
     let ui_origin = state.config.ui_public_base.clone();
     match oauth_callback_inner(&state, &provider, q).await {
         Ok(provider_id) => oauth_popup_close_html(&ui_origin, Some(&provider_id), None),
@@ -639,6 +645,35 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn trello_token_capture_html() -> Response {
+    let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Connecting Trello</title>
+</head>
+<body>
+<p>Finishing Trello authorization…</p>
+<script>
+(function () {
+  var h = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+  var token = h.get("token") || h.get("access_token");
+  var u = new URL(location.href);
+  u.hash = "";
+  if (token) {
+    u.searchParams.set("code", token);
+  } else {
+    u.searchParams.set("error", "access_denied");
+    u.searchParams.set("error_description", "Trello did not return a token");
+  }
+  location.replace(u.toString());
+})();
+</script>
+</body>
+</html>"#;
+    html_page(html.to_string())
 }
 
 fn html_page(html: String) -> Response {

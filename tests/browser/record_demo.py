@@ -237,6 +237,10 @@ class Demo:
         search = p.locator("input[type='search'], input[placeholder*='Search' i]")
         if search.count():
             search.first.fill("git")
+            pause(p, 1000)
+            search.first.fill("trello")
+            pause(p, 800)
+            search.first.fill("asana")
             pause(p, 1200)
 
     def scene_settings(self) -> None:

@@ -1,7 +1,7 @@
 # fleet-integrations
 
-Users **OAuth-connect** platforms (GitHub, Slack, Jira, Linear, Figma, Notion,
-Google Drive, Teams, Discord, …) in the browser.
+Users **OAuth-connect** platforms (GitHub, GitLab, Slack, Jira, Linear, Figma, Notion,
+Google Drive, Teams, Discord, Trello, Asana, …) in the browser.
 Access tokens are stored per workspace for the control plane / AI — never PATs
 pasted into the UI, never secrets inside sandboxes.
 
@@ -27,6 +27,7 @@ UI "Connect with GitHub" (new tab)
 | `JWT_SECRET` | Signs session JWTs **and** OAuth `state` (min 32 chars) |
 | `INTEGRATIONS_ENCRYPTION_KEY` | AES-256 key for OAuth tokens at rest (min 32 chars; prefer `openssl rand -hex 32`). Falls back to `JWT_SECRET` if unset |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth App |
+| `GITLAB_CLIENT_ID` / `GITLAB_CLIENT_SECRET` | GitLab OAuth app |
 | `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | Slack app |
 | `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` | Linear OAuth |
 | `JIRA_CLIENT_ID` / `JIRA_CLIENT_SECRET` | Atlassian OAuth 2.0 (3LO) |
@@ -35,6 +36,8 @@ UI "Connect with GitHub" (new tab)
 | `GOOGLE_DRIVE_CLIENT_ID` / `GOOGLE_DRIVE_CLIENT_SECRET` | Google OAuth (Drive) |
 | `TEAMS_CLIENT_ID` / `TEAMS_CLIENT_SECRET` | Microsoft Entra app (Teams/Graph) |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth2 app |
+| `TRELLO_CLIENT_ID` / `TRELLO_CLIENT_SECRET` | Trello API key + secret |
+| `ASANA_CLIENT_ID` / `ASANA_CLIENT_SECRET` | Asana OAuth app |
 
 Callback URL to register on each platform:
 
@@ -79,6 +82,7 @@ proxy/
   apps/
     mod.rs         # register providers
     github/        client + tools/{reads,writes}
+    gitlab/        client + tools/{reads,writes}
     jira/          client + tools/issues
     linear/        client + tools/{issues,writes}
     slack/         client + tools/conversations
@@ -87,6 +91,8 @@ proxy/
     google_drive/  client + tools/files
     teams/         client + tools/graph
     discord/       client + tools/me
+    trello/        client + tools/boards
+    asana/         client + tools/tasks
 ```
 
 **Add a tool:** implement in `apps/<provider>/tools/`, add to that app’s
@@ -117,6 +123,7 @@ let result = invoke(
 | --- | --- |
 | `github` (read) | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits` |
 | `github` (write) | `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
+| `gitlab` | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment` |
 | `jira` | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
 | `linear` | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
 | `slack` | `list_channels`, `list_users`, `post_message`, `get_channel_history` |
@@ -125,6 +132,8 @@ let result = invoke(
 | `google_drive` | `list_files`, `get_file`, `export_file` (readonly) |
 | `teams` | `get_me`, `list_chats`, `list_teams`, `list_channels`, `list_chat_messages`, `send_chat_message`, `send_channel_message` |
 | `discord` | `get_me`, `list_guilds` |
+| `trello` | `list_boards`, `list_lists`, `list_cards`, `get_card`, `create_card`, `update_card`, `add_comment` |
+| `asana` | `list_workspaces`, `list_projects`, `list_tasks`, `get_task`, `create_task`, `update_task`, `add_comment` |
 
 Decrypt path: `credentials_for` → provider HTTP → `sanitize_value` → chat/agent.  
 **Writes run only on the control plane** (`integration_query` with `provider=github`, `operation=commit_files` or `create_pr`).  
