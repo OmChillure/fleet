@@ -174,6 +174,17 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("need curl, wget, or fetch", fbsd)
         self.assertNotIn("need curl or wget", fbsd)
 
+    def test_unix_starts_daemon_after_pair(self):
+        """Pair is a handshake. Offline after 30s unless run is started."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        self.assertIn("start_host_service()", common)
+        self.assertIn("enable --now fleet-host", common)
+        self.assertIn("start_host_service || true", common)
+        self.assertNotIn(
+            "start the daemon: $BIN_DIR/fleet-host run",
+            common,
+        )
+
     def test_fetch_only_path_installs_freebsd_bins(self):
         """No curl/wget: fetch -o dest url must place fleet-host (dest-leak check)."""
         import shutil

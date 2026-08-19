@@ -272,9 +272,10 @@ pub async fn patch_host(
 
 /// `DELETE /api/workspaces/{id}/worker-hosts/{hid}`
 pub async fn revoke_host(workspace_id: &str, host_id: &str) -> Result<(), String> {
-    let res =
-        authorized_delete(&format!("/api/workspaces/{workspace_id}/worker-hosts/{host_id}"))
-            .await?;
+    let res = authorized_delete(&format!(
+        "/api/workspaces/{workspace_id}/worker-hosts/{host_id}"
+    ))
+    .await?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
@@ -291,7 +292,7 @@ pub fn install_commands(created: &CreateHostResponse) -> String {
     }
     let api = auth_base_url();
     format!(
-        "curl -fsSL {api}/install-worker.sh | FLEET_URL={api} sh\nfleet-host pair --url {api} --token {}",
+        "curl -fsSL {api}/install-worker.sh | FLEET_URL={api} FLEET_PAIR_TOKEN={} sh",
         created.pair_token
     )
 }

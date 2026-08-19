@@ -213,7 +213,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         install = page.locator("pre").nth(1).inner_text()
         self.assertIn("/install-worker.sh", install)
-        self.assertIn("fleet-host pair", install)
+        self.assertIn("FLEET_PAIR_TOKEN=", install)
         self.assertIn(token, install)
 
         # Token is shown once: dismiss + reload must not repeat the plaintext.

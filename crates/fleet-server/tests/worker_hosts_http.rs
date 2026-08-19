@@ -444,6 +444,10 @@ async fn owner_create_and_get_list() {
     assert!(created.body["pair_expires_at"].is_string());
     let hint = created.body["install_hint"].as_str().unwrap_or("");
     assert!(hint.contains("/install-worker.sh"), "install_hint: {hint}");
+    assert!(
+        hint.contains("FLEET_PAIR_TOKEN="),
+        "install_hint must pair in the same command: {hint}"
+    );
     assert!(hint.contains(&pair_token), "install_hint includes token");
 
     let hid = created.body["host"]["id"]

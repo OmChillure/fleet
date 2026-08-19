@@ -36,7 +36,29 @@ pub async fn pair(url: &str, token: &str) -> Result<()> {
     );
     println!("wrote {}", config_path.display());
     println!("wrote {}", token_path.display());
+    start_run_after_pair();
     Ok(())
+}
+
+/// Pair is a handshake. Offline after 30s unless `fleet-host run` is up.
+fn start_run_after_pair() {
+    let user = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", "fleet-host"])
+        .status();
+    if matches!(user, Ok(s) if s.success()) {
+        println!("started systemd user unit fleet-host");
+        return;
+    }
+    let sys = std::process::Command::new("systemctl")
+        .args(["enable", "--now", "fleet-host"])
+        .status();
+    if matches!(sys, Ok(s) if s.success()) {
+        println!("started systemd unit fleet-host");
+        return;
+    }
+    println!("this host goes offline after 30s without heartbeats");
+    println!("start: fleet-host run");
+    println!("   or: systemctl --user enable --now fleet-host");
 }
 
 pub fn status() -> Result<()> {

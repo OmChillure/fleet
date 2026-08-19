@@ -91,9 +91,7 @@ fn api_base(state: &AppState) -> String {
 }
 
 fn install_hint(api: &str, pair_token: &str) -> String {
-    format!(
-        "curl -fsSL {api}/install-worker.sh | FLEET_URL={api} sh\nfleet-host pair --url {api} --token {pair_token}"
-    )
+    format!("curl -fsSL {api}/install-worker.sh | FLEET_URL={api} FLEET_PAIR_TOKEN={pair_token} sh")
 }
 
 fn cp_settings_json(host: &WorkerHost) -> Value {

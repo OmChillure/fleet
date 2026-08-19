@@ -115,11 +115,26 @@ WantedBy=default.target
 EOF
     if [ "$(id -u)" -eq 0 ]; then
         systemctl daemon-reload 2>/dev/null || true
-        info "systemd unit: $unit_dir/$unit  (systemctl enable --now fleet-host)"
+        info "systemd unit: $unit_dir/$unit"
     else
         systemctl --user daemon-reload 2>/dev/null || true
-        info "systemd user unit: $unit_dir/$unit  (systemctl --user enable --now fleet-host)"
+        info "systemd user unit: $unit_dir/$unit"
     fi
+}
+
+start_host_service() {
+    if have systemctl; then
+        if [ "$(id -u)" -eq 0 ]; then
+            systemctl enable --now fleet-host
+            info "started systemd unit fleet-host (systemctl status fleet-host)"
+            return 0
+        fi
+        systemctl --user enable --now fleet-host
+        info "started systemd user unit fleet-host (systemctl --user status fleet-host)"
+        return 0
+    fi
+    info "no systemd; keep this running: $BIN_DIR/fleet-host run"
+    return 1
 }
 
 install_service_launchd() {
@@ -206,10 +221,12 @@ esac
 if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
     info "pairing with control plane…"
     "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
-    info "start the daemon: $BIN_DIR/fleet-host run"
+    # pair is a handshake only. Offline after 30s unless run/heartbeats start.
+    start_host_service || true
 else
     info "next: fleet-host pair --url $ORIGIN --token <pair-token-from-ui>"
-    info "then: fleet-host run"
+    info "then start heartbeats: systemctl --user enable --now fleet-host"
+    info "  (or: $BIN_DIR/fleet-host run)"
     info "config (host vs container) is local: ~/.config/fleet-host/config.toml"
     info "  run_host / run_container — this machine only"
 fi
