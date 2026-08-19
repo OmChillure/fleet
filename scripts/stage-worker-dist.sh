@@ -65,6 +65,18 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+write_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}' >"$file.sha256"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}' >"$file.sha256"
+  else
+    echo "stage-worker-dist: need sha256sum or shasum" >&2
+    exit 1
+  fi
+}
+
 copy_bins() {
   local src="$1"
   local out="$2"
@@ -77,6 +89,7 @@ copy_bins() {
     fi
     cp "$src/$bin" "$out/$bin"
     chmod 755 "$out/$bin"
+    write_sha256 "$out/$bin"
     echo "staged $out/$bin"
   done
 }
@@ -93,6 +106,7 @@ copy_exe_bins() {
     fi
     cp "$src/$bin" "$out/$bin"
     chmod 755 "$out/$bin"
+    write_sha256 "$out/$bin"
     echo "staged $out/$bin"
   done
 }

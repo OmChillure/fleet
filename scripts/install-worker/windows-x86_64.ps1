@@ -11,16 +11,41 @@ if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA "fleet-host" }
 $BinDir = Join-Path $Prefix "bin"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
+function Get-RemoteSha256([string]$Url) {
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri $Url
+        return (($r.Content.ToString().Trim() -split "\s+")[0]).ToLowerInvariant()
+    } catch {
+        return $null
+    }
+}
+function Get-LocalSha256([string]$Path) {
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
 $base = "$Origin/install/worker/bin/windows-x86_64"
 $installed = $false
 foreach ($bin in @("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe")) {
     $dest = Join-Path $BinDir $bin
     $url = "$base/$bin"
+    $tmp = "$dest.tmp"
+    $want = Get-RemoteSha256 "$url.sha256"
+    if ($want -and (Test-Path $dest) -and ((Get-LocalSha256 $dest) -eq $want)) {
+        Write-Host "unchanged $dest"
+        $installed = $true
+        continue
+    }
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $dest
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -Uri $url -OutFile $tmp
+        if ($want) {
+            $got = Get-LocalSha256 $tmp
+            if ($got -ne $want) { throw "checksum mismatch $bin" }
+        }
+        Move-Item -Force $tmp $dest
         Write-Host "installed $dest"
         $installed = $true
     } catch {
+        if (Test-Path $tmp) { Remove-Item -Force $tmp }
         Write-Host "no prebuilt $bin at $url"
     }
 }

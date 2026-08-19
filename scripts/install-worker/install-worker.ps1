@@ -7,10 +7,21 @@
 $ErrorActionPreference = "Stop"
 
 function Get-FleetPlatform {
+    # OS arch, not this process. x64 PowerShell on ARM64 Windows reports AMD64.
+    $osArch = $null
+    try {
+        $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    } catch { }
+    switch -Regex ("$osArch") {
+        "Arm64" { return "windows-arm64" }
+        "X64" { return "windows-x86_64" }
+        "X86" { throw "32-bit Windows is not supported" }
+    }
     $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
     switch -Regex ($arch) {
-        "AMD64" { return "windows-x86_64" }
         "ARM64" { return "windows-arm64" }
+        "AMD64" { return "windows-x86_64" }
         default { throw "unsupported PROCESSOR_ARCHITECTURE=$arch" }
     }
 }

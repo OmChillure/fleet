@@ -174,6 +174,34 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("need curl, wget, or fetch", fbsd)
         self.assertNotIn("need curl or wget", fbsd)
 
+    def test_install_skips_download_when_sha256_matches(self):
+        """Reuse a local bin only when it matches the CP checksum; else refetch."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        self.assertIn("file_sha256()", common)
+        self.assertIn(".sha256", common)
+        self.assertIn("unchanged", common)
+        self.assertIn("checksum mismatch", common)
+        stage = (REPO / "scripts" / "stage-worker-dist.sh").read_text()
+        docker = (REPO / "scripts" / "stage-worker-dist-docker.sh").read_text()
+        self.assertIn("write_sha256()", stage)
+        self.assertIn("write_sha256()", docker)
+        self.assertIn(".sha256", stage)
+        self.assertIn(".sha256", docker)
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("Get-FileHash", text, name)
+            self.assertIn(".sha256", text, name)
+            self.assertIn("unchanged", text, name)
+            self.assertIn("checksum mismatch", text, name)
+            self.assertIn("TimeoutSec 600", text, name)
+
+    def test_windows_bootstrap_uses_os_architecture(self):
+        """x64 PowerShell on ARM64 Windows reports PROCESSOR_ARCHITECTURE=AMD64."""
+        boot = (SCRIPT_DIR / "install-worker.ps1").read_text(encoding="ascii")
+        self.assertIn("OSArchitecture", boot)
+        self.assertIn("Arm64", boot)
+        self.assertIn("windows-arm64", boot)
+
     def test_every_platform_starts_daemon_after_pair(self):
         """Pair is a handshake. Every OS installer must start run after pair.
 

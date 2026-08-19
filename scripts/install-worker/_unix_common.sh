@@ -43,12 +43,50 @@ fetch_to() {
     fi
 }
 
+file_sha256() {
+    if have sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif have shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif have sha256; then
+        sha256 -q "$1"
+    else
+        die "need sha256sum, shasum, or sha256"
+    fi
+}
+
+norm_sha() {
+    printf '%s\n' "$1" | tr 'A-F' 'a-f'
+}
+
 install_bins_from_cp() {
     base="$ORIGIN/install/worker/bin/$PLATFORM"
     ok=0
     for bin in fleet-host fleet-worker fleet-driver; do
         dest="$BIN_DIR/$bin"
+        want=""
+        if fetch_to "$base/$bin.sha256" "$dest.sha256.tmp" 2>/dev/null; then
+            want=$(norm_sha "$(awk '{print $1}' "$dest.sha256.tmp")")
+            rm -f "$dest.sha256.tmp"
+        else
+            rm -f "$dest.sha256.tmp"
+        fi
+        if [ -n "$want" ] && [ -f "$dest" ]; then
+            got=$(norm_sha "$(file_sha256 "$dest")")
+            if [ "$got" = "$want" ]; then
+                info "unchanged $dest"
+                ok=1
+                continue
+            fi
+        fi
         if fetch_to "$base/$bin" "$dest.tmp" 2>/dev/null; then
+            if [ -n "$want" ]; then
+                got=$(norm_sha "$(file_sha256 "$dest.tmp")")
+                if [ "$got" != "$want" ]; then
+                    rm -f "$dest.tmp"
+                    die "checksum mismatch for $bin"
+                fi
+            fi
             chmod 755 "$dest.tmp"
             mv "$dest.tmp" "$dest"
             info "installed $dest"
