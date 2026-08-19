@@ -296,3 +296,28 @@ pub fn install_commands(created: &CreateHostResponse) -> String {
         created.pair_token
     )
 }
+
+/// Control-plane URL the install command will call (from hint, else page origin).
+pub fn install_api_url(created: &CreateHostResponse) -> String {
+    let hint = install_commands(created);
+    if let Some(rest) = hint.split("FLEET_URL=").nth(1) {
+        let url = rest
+            .split(|c: char| c.is_whitespace() || c == '|')
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == '\'' || c == '"');
+        if url.starts_with("http") {
+            return url.to_string();
+        }
+    }
+    auth_base_url()
+}
+
+/// PowerShell one-liner: download, pair, start (Windows).
+pub fn windows_install_command(created: &CreateHostResponse) -> String {
+    let api = install_api_url(created);
+    format!(
+        "$env:FLEET_URL='{api}'; $env:FLEET_PAIR_TOKEN='{}'; irm \"$env:FLEET_URL/install-worker.ps1\" | iex",
+        created.pair_token
+    )
+}

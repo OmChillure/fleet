@@ -206,15 +206,20 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
         page.get_by_role("button", name="Add worker").click()
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
+        body = page.inner_text("body")
+        self.assertIn("open a terminal and paste", body.lower())
+        self.assertIn("Open PowerShell and paste", body)
 
-        token = page.locator("pre").nth(0).inner_text().strip()
+        unix = page.locator("pre").filter(has_text="install-worker.sh").inner_text()
+        self.assertIn("FLEET_PAIR_TOKEN=", unix)
+        win = page.locator("pre").filter(has_text="install-worker.ps1").inner_text()
+        self.assertIn("FLEET_PAIR_TOKEN=", win)
+
+        token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
         self.assertTrue(token.startswith("flp_"), f"pair token prefix: {token}")
         self.assertGreaterEqual(len(token), len("flp_") + 32, token)
-
-        install = page.locator("pre").nth(1).inner_text()
-        self.assertIn("/install-worker.sh", install)
-        self.assertIn("FLEET_PAIR_TOKEN=", install)
-        self.assertIn(token, install)
+        self.assertIn(token, unix)
+        self.assertIn(token, win)
 
         # Token is shown once: dismiss + reload must not repeat the plaintext.
         page.get_by_role("button", name="Done").click()

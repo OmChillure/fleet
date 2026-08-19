@@ -166,7 +166,7 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Workers" \
-    "Workspace → Workers (/{ws}/workers). Add worker — copy the install command and pair token." \
+    "Workspace → Workers (/{ws}/workers). Add worker — paste the install command on the machine." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." || return 0
 
   pause_step "Agents" \

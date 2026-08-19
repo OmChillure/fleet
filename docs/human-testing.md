@@ -83,8 +83,9 @@ same change. The walkthrough is allowed to go stale only if the product did.
    Settings, Workers). Expand collapsed sections.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
-8. **Workers** — `/{ws}/workers`. Create a host, copy the install command and
-   pair token. Token panel is success — do not require a second machine.
+8. **Workers** — `/{ws}/workers`. Create a host; paste the install command
+   on the machine (Linux/macOS or Windows). Token panel is success — do
+   not require a second machine.
 9. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
 10. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
     are in `.env`.
@@ -154,7 +155,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
-| `crates/fleet-host`, worker-hosts API, UI `/{ws}/workers` | `workers` | create host, copy install command; token panel is success (no second machine) |
+| `crates/fleet-host`, worker-hosts API, UI `/{ws}/workers` | `workers` | create host, paste install command; token panel is success (no second machine) |
 | `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |

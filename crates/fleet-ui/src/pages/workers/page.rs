@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use super::api::{
     CreateHostBody, CreateHostResponse, HostPatch, HostPublic, create_host, install_commands,
-    list_hosts, patch_host, revoke_host,
+    list_hosts, patch_host, revoke_host, windows_install_command,
 };
 use crate::components::toast::show_toast;
 
@@ -175,7 +175,7 @@ pub fn Workers(workspace_id: String) -> Element {
                             "No hosts yet"
                         }
                         p { class: "mt-2 text-sm text-[var(--app-muted)]",
-                            "Add a worker to get a one-time pair token, then run the install commands on the machine."
+                            "Add a worker, then paste the install command in a terminal on that machine."
                         }
                     }
                 } else {
@@ -208,11 +208,13 @@ pub fn Workers(workspace_id: String) -> Element {
 
 #[component]
 fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) -> Element {
-    let commands = install_commands(&created);
+    let unix = install_commands(&created);
+    let windows = windows_install_command(&created);
     let expires = format_ts(&created.pair_expires_at);
     let token = created.pair_token.clone();
-    let commands_copy = commands.clone();
-    let loopback_hint = hint_is_loopback(&created.install_hint) || hint_is_loopback(&commands);
+    let unix_copy = unix.clone();
+    let windows_copy = windows.clone();
+    let loopback_hint = hint_is_loopback(&created.install_hint) || hint_is_loopback(&unix);
 
     rsx! {
         section {
@@ -220,20 +222,67 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
             h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
                 "Pair this worker"
             }
-            p { class: "mt-1 text-xs text-amber-300/90",
-                "This pair token is shown once. Copy it now — it will not be shown again."
+            p { class: "mt-1 text-sm text-[var(--app-fg)]",
+                "On the machine, open a terminal and paste the command. It installs, pairs, and starts the worker."
             }
-            p { class: "mt-2 text-xs text-[var(--app-muted)]",
-                "Expires {expires}"
+            p { class: "mt-1 text-xs text-amber-300/90",
+                "This token is shown once and expires {expires}."
             }
             if loopback_hint {
                 p { class: "mt-2 text-xs text-amber-300/90",
-                    "This install hint uses a loopback URL. Off-box machines need a reachable control-plane URL."
+                    "This command uses a loopback URL. Another computer needs a LAN or public control-plane URL."
                 }
             }
 
-            label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
+            label { class: "mt-4 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                "Linux, macOS, FreeBSD"
+            }
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "Open a terminal and paste:"
+            }
+            div { class: "mt-1 flex flex-wrap items-start gap-2",
+                pre {
+                    class: "m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 font-mono text-xs text-[var(--app-fg)]",
+                    "{unix}"
+                }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    onclick: move |_| {
+                        copy_text(&unix_copy);
+                        show_toast().success("Command copied.");
+                    },
+                    "Copy"
+                }
+            }
+
+            label { class: "mt-4 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                "Windows"
+            }
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "Open PowerShell and paste:"
+            }
+            div { class: "mt-1 flex flex-wrap items-start gap-2",
+                pre {
+                    class: "m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 font-mono text-xs text-[var(--app-fg)]",
+                    "{windows}"
+                }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    onclick: move |_| {
+                        copy_text(&windows_copy);
+                        show_toast().success("Command copied.");
+                    },
+                    "Copy"
+                }
+            }
+
+            label { class: "mt-4 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
                 "Pair token"
+            }
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "Already in the command. Shown once if you pair by hand."
             }
             div { class: "mt-1 flex flex-wrap items-start gap-2",
                 pre {
@@ -246,25 +295,6 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                     onclick: move |_| {
                         copy_text(&token);
                         show_toast().success("Token copied.");
-                    },
-                    "Copy"
-                }
-            }
-
-            label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                "Install"
-            }
-            div { class: "mt-1 flex flex-wrap items-start gap-2",
-                pre {
-                    class: "m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 font-mono text-xs text-[var(--app-fg)]",
-                    "{commands}"
-                }
-                button {
-                    class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
-                    r#type: "button",
-                    onclick: move |_| {
-                        copy_text(&commands_copy);
-                        show_toast().success("Install commands copied.");
                     },
                     "Copy"
                 }
