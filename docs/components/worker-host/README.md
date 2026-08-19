@@ -20,7 +20,13 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
 
 - `fleet-server` up, Postgres migrated (`008_worker_hosts.sql`).
 - Public URL: `API_PUBLIC_BASE` / `ORCHESTRATOR_PUBLIC_URL` (already used for
-  `FLEET_ORCHESTRATOR_URL`). Workers heartbeat here.
+  `FLEET_ORCHESTRATOR_URL`). Workers heartbeat here. Loopback
+  (`127.0.0.1`, `localhost`, `::1`) is fine for a worker on the same box.
+  Off-box machines cannot reach loopback. v1 does **not** refuse to assign
+  a host when the URL is loopback (local `fleet-dev` would break). The
+  Workers pair panel warns; spawn logs `tracing::warn`. Set a reachable
+  URL before pairing a remote machine. Follow-up: fail-closed assign when
+  the URL is loopback and the host is not this machine.
 - Cookie auth for owners who create pair tokens.
 - `FLEET_WORKER_DIST_DIR` (optional): directory of prebuilt
   `fleet-host` / `fleet-worker` / `fleet-driver` per platform. If unset,

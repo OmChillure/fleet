@@ -174,6 +174,20 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         self.assertIn("Integration", page.locator("h1").first.inner_text())
 
+        page.get_by_role("link", name="Workers", exact=True).click()
+        page.wait_for_url("**/workers", timeout=10_000)
+        page.wait_for_selector("h1")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
+        workers_body = page.inner_text("body")
+        self.assertTrue(
+            page.get_by_role("button", name="Add worker").count() > 0,
+            "Workers page missing Add worker",
+        )
+        self.assertTrue(
+            "No hosts yet" in workers_body or "last seen" in workers_body,
+            "Workers empty state or host card missing",
+        )
+
         page.get_by_role("link", name="Settings", exact=True).click()
         page.wait_for_url("**/settings", timeout=10_000)
         page.wait_for_selector("h1")
@@ -183,7 +197,36 @@ class BrowserE2ETests(unittest.TestCase):
         page.reload(wait_until="networkidle")
         self.assertNotIn("/login", page.url)
 
-    def test_05_api_health_from_browser(self) -> None:
+    def test_05_workers_add_shows_pair_token(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/workers", wait_until="networkidle")
+        page.wait_for_selector("h1")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
+        page.get_by_role("button", name="Add worker").click()
+        page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
+        body = page.inner_text("body")
+        self.assertIn("This pair token is shown once", body)
+        self.assertIn("Pair token", body)
+        self.assertIn("Install", body)
+
+        token = page.locator("pre").nth(0).inner_text().strip()
+        self.assertTrue(token.startswith("flp_"), f"pair token prefix: {token}")
+        self.assertGreaterEqual(len(token), len("flp_") + 32, token)
+
+        install = page.locator("pre").nth(1).inner_text()
+        self.assertIn("/install-worker.sh", install)
+        self.assertIn("fleet-host pair", install)
+        self.assertIn(token, install)
+        if any(s in install.lower() for s in ("127.0.0.1", "localhost", "[::1]")):
+            self.assertIn("loopback URL", body)
+
+        self.assertNotIn("No hosts yet", page.inner_text("body"))
+        self.assertTrue(page.get_by_role("button", name="Revoke").first.is_visible())
+        self.assertIn("pending", page.inner_text("body").lower())
+
+    def test_06_api_health_from_browser(self) -> None:
         res = self.page.request.get(f"{API}/health")
         self.assertEqual(res.status, 200, res.text()[:300])
         body = res.json()
@@ -198,7 +241,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(ui.status, 200, ui.text()[:300])
         self.assertEqual(ui.text().strip(), sha)
 
-    def test_06_sidebar_has_fleet_and_integrations(self) -> None:
+    def test_07_sidebar_has_fleet_and_integrations(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
@@ -212,8 +255,10 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_text("Workspace", exact=True).first.click()
         integ = nav.get_by_role("link", name="Integrations", exact=True)
         self.assertTrue(integ.first.is_visible())
+        workers = nav.get_by_role("link", name="Workers", exact=True)
+        self.assertTrue(workers.first.is_visible())
 
-    def test_07_logout_returns_to_login(self) -> None:
+    def test_08_logout_returns_to_login(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
