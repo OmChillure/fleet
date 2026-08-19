@@ -5,12 +5,13 @@ use std::sync::Mutex;
 use dioxus::prelude::*;
 
 use super::api::{
-    complete_chat, create_conversation, fetch_chat_status, get_conversation, ChatActionDto,
-    ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
+    ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, complete_chat,
+    create_conversation, fetch_chat_status, get_conversation,
 };
-use super::markdown::{highlight, markdown_to_parts, MdPart};
-use crate::components::toast::show_toast;
+use super::markdown::{MdPart, highlight, markdown_to_parts};
 use crate::Route;
+use crate::clipboard::copy_text;
+use crate::components::toast::show_toast;
 
 /// Hand off the first message across the `/chat` → `/chat/{id}` route switch.
 struct PendingFirstSend {
@@ -999,8 +1000,11 @@ fn CodeBlock(lang: String, code: String) -> Element {
                     title: "Copy",
                     "aria-label": "Copy code",
                     onclick: move |_| {
-                        copy_text(&code_for_copy);
-                        copied.set(true);
+                        if copy_text(&code_for_copy) {
+                            copied.set(true);
+                        } else {
+                            show_toast().error("Copy failed. Select the code and copy it yourself.");
+                        }
                     },
                     if copied() { "Copied" } else { "Copy" }
                 }
@@ -1010,34 +1014,6 @@ fn CodeBlock(lang: String, code: String) -> Element {
                 dangerous_inner_html: "{highlighted}",
             }
         }
-    }
-}
-
-fn copy_text(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let clip = js_sys::Reflect::get(
-            window.navigator().as_ref(),
-            &wasm_bindgen::JsValue::from_str("clipboard"),
-        )
-        .ok()
-        .filter(|v| !v.is_undefined() && !v.is_null())
-        .and_then(|v| v.dyn_into::<web_sys::Clipboard>().ok());
-        let Some(clip) = clip else {
-            return;
-        };
-        let text = text.to_string();
-        spawn(async move {
-            let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
-        });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
     }
 }
 

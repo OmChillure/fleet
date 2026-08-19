@@ -2,6 +2,7 @@
 
 #![allow(non_snake_case)]
 
+mod clipboard;
 mod components;
 mod pages;
 mod theme;

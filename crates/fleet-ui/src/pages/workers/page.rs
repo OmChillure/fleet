@@ -6,6 +6,7 @@ use super::api::{
     CreateHostBody, CreateHostResponse, HostPatch, HostPublic, create_host, install_commands,
     list_hosts, patch_host, revoke_host, windows_install_command,
 };
+use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
 
 fn field_class() -> &'static str {
@@ -40,36 +41,6 @@ fn format_ts_opt(ts: &Option<String>) -> String {
 fn hint_is_loopback(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("[::1]")
-}
-
-fn copy_text(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        // `Navigator::clipboard()` panics when the getter is undefined (Firefox
-        // insecure / permission). Dropping the write Promise also aborts Firefox.
-        let clip = js_sys::Reflect::get(
-            window.navigator().as_ref(),
-            &wasm_bindgen::JsValue::from_str("clipboard"),
-        )
-        .ok()
-        .filter(|v| !v.is_undefined() && !v.is_null())
-        .and_then(|v| v.dyn_into::<web_sys::Clipboard>().ok());
-        let Some(clip) = clip else {
-            return;
-        };
-        let text = text.to_string();
-        spawn(async move {
-            let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
-        });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
-    }
 }
 
 fn replace_host(list: &mut Vec<HostPublic>, updated: HostPublic) {
@@ -249,8 +220,11 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                     class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
                     r#type: "button",
                     onclick: move |_| {
-                        copy_text(&unix_copy);
-                        show_toast().success("Command copied.");
+                        if copy_text(&unix_copy) {
+                            show_toast().success("Command copied.");
+                        } else {
+                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                        }
                     },
                     "Copy"
                 }
@@ -271,8 +245,11 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                     class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
                     r#type: "button",
                     onclick: move |_| {
-                        copy_text(&windows_copy);
-                        show_toast().success("Command copied.");
+                        if copy_text(&windows_copy) {
+                            show_toast().success("Command copied.");
+                        } else {
+                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                        }
                     },
                     "Copy"
                 }
@@ -293,8 +270,11 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                     class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
                     r#type: "button",
                     onclick: move |_| {
-                        copy_text(&token);
-                        show_toast().success("Token copied.");
+                        if copy_text(&token) {
+                            show_toast().success("Token copied.");
+                        } else {
+                            show_toast().error("Copy failed. Select the token and copy it yourself.");
+                        }
                     },
                     "Copy"
                 }
