@@ -97,10 +97,11 @@ pub fn runtime_allowed(
 ) -> bool {
     match runtime {
         JobRuntime::Host => cfg.run_host && effective_host,
+        // v1: container / k3d is not a working executor. Refuse even if the
+        // operator flipped run_container and docker/k3d is on PATH.
         JobRuntime::Container => {
-            cfg.run_container
-                && effective_container
-                && command_exists(cfg.container_backend.required_binary())
+            let _ = (cfg, effective_container);
+            false
         }
     }
 }
@@ -149,7 +150,9 @@ pub async fn run_claim(
 
     match payload.runtime {
         JobRuntime::Host => run_host(cfg, payload, &session_dir).await,
-        JobRuntime::Container => run_container(cfg, payload, &session_dir).await,
+        JobRuntime::Container => {
+            bail!("container/k3d runtime is not supported in v1")
+        }
     }
 }
 
@@ -182,6 +185,7 @@ async fn run_host(cfg: &LocalConfig, payload: &SpawnPayload, cwd: &Path) -> Resu
     wait_child(&mut child, payload.timeout_s, &bin).await
 }
 
+#[allow(dead_code)] // kept for the later container/k3d executor; v1 refuses above
 async fn run_container(
     cfg: &LocalConfig,
     payload: &SpawnPayload,
@@ -563,5 +567,16 @@ mod tests {
             .insert("FLEET_WORK_DIR".into(), "/control/plane/path".into());
         let env = child_env(&payload, &HashMap::new(), Path::new("/work"));
         assert_eq!(env.get("FLEET_WORK_DIR").map(String::as_str), Some("/work"));
+    }
+
+    #[test]
+    fn v1_refuses_container_runtime_even_if_local_flag_is_on() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.run_container = true;
+        assert!(runtime_allowed(JobRuntime::Host, &cfg, true, true));
+        assert!(
+            !runtime_allowed(JobRuntime::Container, &cfg, true, true),
+            "container/k3d must not be a v1 executor"
+        );
     }
 }

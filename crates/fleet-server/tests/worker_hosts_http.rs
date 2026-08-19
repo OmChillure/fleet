@@ -823,6 +823,48 @@ async fn lease_null_when_both_effective_modes_false() {
 }
 
 #[tokio::test]
+async fn lease_null_when_only_container_is_advertised() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) =
+        create_pair_and_heartbeat(&app, &jar, &ws, "k3d-only", false, true).await;
+    assert_eq!(
+        call_bearer(
+            &app,
+            "POST",
+            "/api/worker-hosts/me/heartbeat",
+            &machine,
+            Some(json!({
+                "advertised_host": false,
+                "advertised_container": true,
+                "current_jobs": 0
+            })),
+        )
+        .await
+        .body["effective"]["host"],
+        false
+    );
+
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    enqueue_spawn_for_host(&state, workspace_id, host_id).await;
+
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+    assert!(
+        lease.body["claim"].is_null(),
+        "v1 must not lease to a container-only host: {}",
+        lease.body
+    );
+}
+
+#[tokio::test]
 async fn lease_only_returns_claim_for_this_host() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;

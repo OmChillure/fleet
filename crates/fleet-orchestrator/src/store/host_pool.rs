@@ -47,11 +47,10 @@ impl ChosenHost {
     }
 }
 
-/// Container if allowed and advertised; else Host if allowed and advertised.
+/// v1 is host-only. Container / k3d is not a working executor — do not
+/// assign `runtime=container` even when the plane and the box advertise it.
 pub fn effective_runtime(host: &AssignableHost) -> Option<HostRuntime> {
-    if host.allow_container && host.advertised_container {
-        Some(HostRuntime::Container)
-    } else if host.allow_host && host.advertised_host {
+    if host.allow_host && host.advertised_host {
         Some(HostRuntime::Host)
     } else {
         None
@@ -221,9 +220,16 @@ mod tests {
     }
 
     #[test]
-    fn prefers_container_when_both_effective() {
+    fn v1_assigns_host_even_when_container_is_advertised() {
         let h = host(Uuid::new_v4(), true, true, true, true, 4);
-        assert_eq!(effective_runtime(&h), Some(HostRuntime::Container));
+        assert_eq!(effective_runtime(&h), Some(HostRuntime::Host));
+    }
+
+    #[test]
+    fn v1_skips_container_only_host() {
+        let h = host(Uuid::new_v4(), true, true, false, true, 4);
+        assert_eq!(effective_runtime(&h), None);
+        assert!(pick_assignable_host(&[h], &HashMap::new()).is_none());
     }
 
     #[test]

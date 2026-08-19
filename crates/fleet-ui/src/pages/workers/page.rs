@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    create_host, install_commands, list_hosts, patch_host, revoke_host, CreateHostBody,
-    CreateHostResponse, HostPatch, HostPublic,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, create_host, install_commands,
+    list_hosts, patch_host, revoke_host,
 };
 use crate::components::toast::show_toast;
 
@@ -16,12 +16,8 @@ fn status_pill_class(status: &str) -> &'static str {
     match status {
         "online" => "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
         "pending" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
-        "offline" => {
-            "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]"
-        }
-        "disabled" => {
-            "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]"
-        }
+        "offline" => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
+        "disabled" => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
         "error" => "bg-red-500/15 text-red-400 border-red-500/30",
         _ => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
     }
@@ -128,7 +124,7 @@ pub fn Workers(workspace_id: String) -> Element {
                         "Workers"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine; it phones home; the plane never dials inbound. Machines run agents on the host — container/k3d is not ready."
+                        "Pair a machine; it phones home; the plane never dials inbound. Jobs run as processes on that machine (same as a self-hosted runner)."
                     }
                 }
                 button {
@@ -279,10 +275,8 @@ fn HostCard(
     let pill = status_pill_class(&host.status);
     let last_seen = format_ts_opt(&host.last_seen_at);
     let can_host = host.allow_host && host.advertised_host;
-    let can_container = host.allow_container && host.advertised_container;
-    let no_effective = matches!(host.status.as_str(), "online" | "offline")
-        && !can_host
-        && !can_container;
+    // v1 is host-only; advertised container is not a working executor.
+    let no_effective = matches!(host.status.as_str(), "online" | "offline") && !can_host;
 
     let hostname = host.hostname.clone().unwrap_or_default();
     let platform = host.platform.clone().unwrap_or_default();
@@ -414,7 +408,7 @@ fn HostCard(
                     input {
                         r#type: "checkbox",
                         checked: host.allow_container,
-                        disabled: busy() || revoked,
+                        disabled: true,
                         onchange: {
                             let workspace_id = workspace_id.clone();
                             let host = host.clone();
@@ -441,7 +435,7 @@ fn HostCard(
                     }
                     "Allow container"
                     span { class: "text-[var(--app-muted)]",
-                        "(not validated)"
+                        "(not shipped)"
                     }
                 }
                 label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",

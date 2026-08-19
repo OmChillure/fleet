@@ -469,7 +469,7 @@ fn host_accepts_leases(host: &WorkerHost) -> bool {
         && !host.paused
         && !host.drain
         && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && (host.effective_host() || host.effective_container())
+        && host.effective_host()
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {

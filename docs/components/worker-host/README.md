@@ -135,8 +135,10 @@ max_jobs   = min(cp.max_concurrent, local.max_concurrent)
 ```
 
 If both effective modes are false, the host stays online but never
-receives leases (UI shows a warning). v1 should be treated as host-only;
-do not rely on the container side of this formula.
+receives leases (UI shows a warning). **v1 assigns host only.** A box
+that advertises container (or only container) does not receive jobs —
+`run_container` / k3d is not a working executor. Do not prefer container
+when both flags are true.
 
 ---
 
@@ -380,10 +382,10 @@ token **unchanged**):
 1. List worker_hosts for `project_id` (= workspace_id) that are
    `enabled`, not `paused`, not `drain`, `status` stored `online`,
    `last_seen_at` within 30s, `machine_token_hash` set.
-2. Compute effective modes; skip hosts that cannot run the chosen
-   runtime. v1 is host-only (container / k3d is not a working executor).
-   Planned later: prefer **container** if the host can do both (isolation);
-   otherwise host.
+2. Compute effective modes; skip hosts that cannot run **host**. v1 is
+   host-only (container / k3d is not a working executor). Do not enqueue
+   `runtime=container`. Planned later: prefer container if the host can
+   do both (isolation); otherwise host.
 3. Count in-flight sessions for that host
    (`runtime_backend = 'remote'` and `runtime_handle = 'host:{id}'`
    and status in `spawning`/`healthy`). Skip if ≥ effective max.

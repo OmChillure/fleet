@@ -58,11 +58,17 @@ fn sample_req(token: &str) -> SpawnRequest {
 }
 
 #[test]
-fn pick_prefers_container_then_host() {
+fn pick_uses_host_in_v1_even_when_container_advertised() {
     let both = host(true, true, true, true, 4);
     let chosen = pick_assignable_host(&[both.clone()], &HashMap::new()).unwrap();
-    assert_eq!(chosen.runtime, HostRuntime::Container);
-    assert_eq!(chosen.runtime.as_str(), "container");
+    assert_eq!(chosen.runtime, HostRuntime::Host);
+    assert_eq!(chosen.runtime.as_str(), "host");
+
+    let container_only = host(true, true, false, true, 4);
+    assert!(
+        pick_assignable_host(&[container_only], &HashMap::new()).is_none(),
+        "container/k3d is not a v1 executor"
+    );
 
     let host_only = host(true, true, true, false, 4);
     let chosen = pick_assignable_host(&[host_only], &HashMap::new()).unwrap();
