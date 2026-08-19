@@ -338,7 +338,7 @@ start_ui() {
   nohup env \
     CARGO_TERM_COLOR=never \
     FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
-    dx serve --package fleet-ui --port "$UI_PORT" \
+    dx serve --package fleet-ui --port "$UI_PORT" --addr "${UI_ADDR:-$HOST}" \
     >>"$LOG_UI" 2>&1 &
   echo $! >"$PID_UI"
   ok "  fleet-ui pid $(read_pid "$PID_UI")  log → $LOG_UI"
