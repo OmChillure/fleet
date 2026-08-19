@@ -47,9 +47,11 @@ Write-Host "startup shortcut: $startup"
 
 if ($env:FLEET_PAIR_TOKEN) {
     & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $env:FLEET_PAIR_TOKEN
-    Write-Host "start: fleet-host run"
+    # Pair is a handshake. Offline after 30s unless run is started now.
+    Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
+    Write-Host "started fleet-host run (also at logon: $startup)"
 } else {
     Write-Host "next: fleet-host pair --url $Origin --token <pair-token-from-ui>"
-    Write-Host "then: fleet-host run"
+    Write-Host "then: Start-Process fleet-host.exe -ArgumentList run"
     Write-Host "local settings: %USERPROFILE%\.config\fleet-host\config.toml  (run_host / run_container)"
 }

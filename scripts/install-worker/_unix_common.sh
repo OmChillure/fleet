@@ -123,18 +123,52 @@ EOF
 }
 
 start_host_service() {
-    if have systemctl; then
-        if [ "$(id -u)" -eq 0 ]; then
-            systemctl enable --now fleet-host
-            info "started systemd unit fleet-host (systemctl status fleet-host)"
-            return 0
-        fi
-        systemctl --user enable --now fleet-host
-        info "started systemd user unit fleet-host (systemctl --user status fleet-host)"
-        return 0
-    fi
-    info "no systemd; keep this running: $BIN_DIR/fleet-host run"
-    return 1
+    case ${PLATFORM:-} in
+        linux-*)
+            if have systemctl; then
+                if [ "$(id -u)" -eq 0 ]; then
+                    systemctl enable --now fleet-host
+                    info "started systemd unit fleet-host (systemctl status fleet-host)"
+                    return 0
+                fi
+                systemctl --user enable --now fleet-host
+                info "started systemd user unit fleet-host (systemctl --user status fleet-host)"
+                return 0
+            fi
+            info "no systemd; keep this running: $BIN_DIR/fleet-host run"
+            return 1
+            ;;
+        darwin-*)
+            plist="${HOME}/Library/LaunchAgents/ai.agentfleet.host.plist"
+            uid=$(id -u)
+            if have launchctl && [ -f "$plist" ]; then
+                launchctl bootout "gui/${uid}" "$plist" 2>/dev/null || true
+                if launchctl bootstrap "gui/${uid}" "$plist" 2>/dev/null \
+                    || launchctl load "$plist" 2>/dev/null; then
+                    info "started launchd $plist"
+                    return 0
+                fi
+            fi
+            info "start: launchctl load $plist"
+            info "  (or: $BIN_DIR/fleet-host run)"
+            return 1
+            ;;
+        freebsd-*)
+            if [ "$(id -u)" -eq 0 ] && [ -x /usr/local/etc/rc.d/fleet-host ]; then
+                sysrc fleet_host_enable=YES 2>/dev/null || true
+                /usr/local/etc/rc.d/fleet-host start
+                info "started rc.d fleet-host"
+                return 0
+            fi
+            info "start: $BIN_DIR/fleet-host run"
+            info "  (root: sysrc fleet_host_enable=YES && service fleet_host start)"
+            return 1
+            ;;
+        *)
+            info "start: $BIN_DIR/fleet-host run"
+            return 1
+            ;;
+    esac
 }
 
 install_service_launchd() {
@@ -225,8 +259,22 @@ if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
     start_host_service || true
 else
     info "next: fleet-host pair --url $ORIGIN --token <pair-token-from-ui>"
-    info "then start heartbeats: systemctl --user enable --now fleet-host"
-    info "  (or: $BIN_DIR/fleet-host run)"
+    case ${PLATFORM:-} in
+        linux-*)
+            info "then start heartbeats: systemctl --user enable --now fleet-host"
+            info "  (or: $BIN_DIR/fleet-host run)"
+            ;;
+        darwin-*)
+            info "then start heartbeats: launchctl load ~/Library/LaunchAgents/ai.agentfleet.host.plist"
+            info "  (or: $BIN_DIR/fleet-host run)"
+            ;;
+        freebsd-*)
+            info "then start heartbeats: $BIN_DIR/fleet-host run"
+            ;;
+        *)
+            info "then start heartbeats: $BIN_DIR/fleet-host run"
+            ;;
+    esac
     info "config (host vs container) is local: ~/.config/fleet-host/config.toml"
     info "  run_host / run_container — this machine only"
 fi

@@ -174,16 +174,39 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("need curl, wget, or fetch", fbsd)
         self.assertNotIn("need curl or wget", fbsd)
 
-    def test_unix_starts_daemon_after_pair(self):
-        """Pair is a handshake. Offline after 30s unless run is started."""
+    def test_every_platform_starts_daemon_after_pair(self):
+        """Pair is a handshake. Every OS installer must start run after pair.
+
+        A Linux-only fix leaves Darwin/FreeBSD/Windows offline after 30s.
+        """
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
         self.assertIn("start_host_service()", common)
-        self.assertIn("enable --now fleet-host", common)
         self.assertIn("start_host_service || true", common)
+        self.assertIn("enable --now fleet-host", common)
+        self.assertIn("launchctl bootstrap", common)
+        self.assertIn("launchctl load", common)
+        self.assertIn("/usr/local/etc/rc.d/fleet-host start", common)
         self.assertNotIn(
             "start the daemon: $BIN_DIR/fleet-host run",
             common,
         )
+        start_fn = common.split("start_host_service()", 1)[1]
+        self.assertIn("linux-*", start_fn)
+        self.assertIn("darwin-*", start_fn)
+        self.assertIn("freebsd-*", start_fn)
+
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertRegex(
+                text,
+                r"FLEET_PAIR_TOKEN[\s\S]*Start-Process[\s\S]*fleet-host\.exe[\s\S]*\brun\b",
+                f"{name} must Start-Process fleet-host run after pair",
+            )
+            self.assertNotRegex(
+                text,
+                r'FLEET_PAIR_TOKEN[\s\S]*Write-Host "start: fleet-host run"',
+                f"{name} must not leave start as a hint after pair",
+            )
 
     def test_fetch_only_path_installs_freebsd_bins(self):
         """No curl/wget: fetch -o dest url must place fleet-host (dest-leak check)."""
