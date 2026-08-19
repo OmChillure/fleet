@@ -1053,6 +1053,37 @@ async fn install_worker_bin_from_dist_dir() {
 }
 
 #[tokio::test]
+async fn install_worker_bin_head_reports_length_without_body() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plat = dir.path().join("linux-x86_64");
+    std::fs::create_dir_all(&plat).unwrap();
+    let payload = b"fake-fleet-host-from-dist";
+    std::fs::write(plat.join("fleet-host"), payload).unwrap();
+
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let out = call(
+        &app,
+        "HEAD",
+        "/install/worker/bin/linux-x86_64/fleet-host",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.raw);
+    assert!(
+        out.raw.is_empty(),
+        "HEAD must not send the file: {}",
+        out.raw
+    );
+    let cl = out
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cl, payload.len().to_string(), "{cl}");
+}
+
+#[tokio::test]
 async fn install_worker_bin_dotdot_rejected() {
     let app = app().await;
     let out = call(&app, "GET", "/install/worker/bin/../fleet-host", None, None).await;

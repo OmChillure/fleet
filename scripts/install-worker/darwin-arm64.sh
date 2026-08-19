@@ -5,7 +5,7 @@ set -eu
 export FLEET_PLATFORM=darwin-arm64
 ORIGIN="${FLEET_INSTALL_ORIGIN:-${FLEET_URL:-}}"
 if [ -z "$ORIGIN" ]; then
-  echo "fleet-host install: set FLEET_URL to the control plane" >&2
+  echo "worker install: set FLEET_URL to the control plane" >&2
   exit 1
 fi
 if command -v curl >/dev/null 2>&1; then
@@ -13,6 +13,6 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
   wget -qO- "$ORIGIN/install/worker/_unix_common.sh" | sh
 else
-  echo "fleet-host install: need curl or wget" >&2
+  echo "worker install: need curl or wget" >&2
   exit 1
 fi

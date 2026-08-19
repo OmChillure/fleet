@@ -32,7 +32,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/install-worker.sh", get(get_install_worker_sh))
         .route("/install-worker.ps1", get(get_install_worker_ps1))
-        .route("/install/worker/bin/{platform}/{bin}", get(get_worker_bin))
+        .route(
+            "/install/worker/bin/{platform}/{bin}",
+            get(get_worker_bin).head(head_worker_bin),
+        )
         .route("/install/worker/{*name}", get(get_named_script))
 }
 
@@ -50,24 +53,27 @@ async fn get_named_script(AxumPath(name): AxumPath<String>) -> AppResult<Respons
     Ok(script_response(&name, body))
 }
 
+fn lookup_worker_bin(state: &AppState, platform: &str, bin: &str) -> AppResult<PathBuf> {
+    reject_unsafe_name(platform)?;
+    reject_unsafe_name(bin)?;
+    let exe_dir = current_exe_dir();
+    let workspace_target = workspace_target_dir();
+    resolve_worker_bin(
+        state.worker_dist_dir.as_deref(),
+        exe_dir.as_deref(),
+        workspace_target.as_deref(),
+        platform,
+        bin,
+        &native_platform_id(),
+    )
+    .ok_or_else(|| AppError::not_found(missing_bin_hint(platform, bin)))
+}
+
 async fn get_worker_bin(
     State(state): State<AppState>,
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
-    reject_unsafe_name(&platform)?;
-    reject_unsafe_name(&bin)?;
-    let exe_dir = current_exe_dir();
-    let workspace_target = workspace_target_dir();
-    let Some(path) = resolve_worker_bin(
-        state.worker_dist_dir.as_deref(),
-        exe_dir.as_deref(),
-        workspace_target.as_deref(),
-        &platform,
-        &bin,
-        &native_platform_id(),
-    ) else {
-        return Err(AppError::not_found(missing_bin_hint(&platform, &bin)));
-    };
+    let path = lookup_worker_bin(&state, &platform, &bin)?;
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((
             StatusCode::OK,
@@ -75,6 +81,34 @@ async fn get_worker_bin(
             bytes,
         )
             .into_response()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(AppError::not_found(missing_bin_hint(&platform, &bin)))
+        }
+        Err(e) => Err(AppError::internal(e.to_string())),
+    }
+}
+
+async fn head_worker_bin(
+    State(state): State<AppState>,
+    AxumPath((platform, bin)): AxumPath<(String, String)>,
+) -> AppResult<Response> {
+    let path = lookup_worker_bin(&state, &platform, &bin)?;
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) => {
+            let len = meta.len().to_string();
+            let len = HeaderValue::from_str(&len).unwrap_or_else(|_| HeaderValue::from_static("0"));
+            Ok((
+                StatusCode::OK,
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    ),
+                    (header::CONTENT_LENGTH, len),
+                ],
+            )
+                .into_response())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(AppError::not_found(missing_bin_hint(&platform, &bin)))
         }
@@ -336,6 +370,31 @@ mod tests {
             body.contains("FLEET_PLATFORM=linux-armv7-musl"),
             "platform script must export linux-armv7-musl"
         );
+    }
+
+    #[test]
+    fn script_body_names_worker_and_three_bins() {
+        let common = script_body("_unix_common.sh").expect("wired");
+        assert!(
+            common.contains("this machine is a self-hosted worker"),
+            "installer must say the product is a worker"
+        );
+        assert!(
+            common.contains("fleet-host   stays up"),
+            "fleet-host is the machine daemon"
+        );
+        assert!(
+            common.contains("fleet-worker runs each job"),
+            "fleet-worker is the per-job process"
+        );
+        assert!(common.contains("worker install:"), "{common:.80}");
+        assert!(
+            !common.contains("fleet-host install:"),
+            "error prefix is worker install:"
+        );
+        let boot = script_body("install-worker.sh").expect("wired");
+        assert!(boot.contains("Install this worker from:"));
+        assert!(!boot.contains("Install fleet-host from:"));
     }
 
     #[test]

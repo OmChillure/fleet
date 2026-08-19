@@ -184,8 +184,8 @@ class BrowserE2ETests(unittest.TestCase):
             "Workers page missing Add worker",
         )
         self.assertTrue(
-            "No hosts yet" in workers_body or "last seen" in workers_body,
-            "Workers empty state or host card missing",
+            "No workers yet" in workers_body or "last seen" in workers_body,
+            "Workers empty state or worker card missing",
         )
 
         page.get_by_role("link", name="Settings", exact=True).click()
@@ -209,6 +209,8 @@ class BrowserE2ETests(unittest.TestCase):
         body = page.inner_text("body")
         self.assertIn("open a terminal and paste", body.lower())
         self.assertIn("Open PowerShell and paste", body)
+        self.assertIn("fleet-host", body)
+        self.assertIn("fleet-worker", body)
 
         unix = page.locator("pre").filter(has_text="install-worker.sh").inner_text()
         self.assertIn("FLEET_PAIR_TOKEN=", unix)

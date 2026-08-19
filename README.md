@@ -93,7 +93,7 @@ dx serve --package fleet-ui --port 3030
    - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
    - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
    Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
-8. **Workers** (`/{workspace_id}/workers`): create a host, copy the install
+8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
    command and one-time pair token. The machine pairs outbound (no inbound
    port). Tick uses an online matching host, else the local `SANDBOX_BACKEND`.
    Install: `curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh`

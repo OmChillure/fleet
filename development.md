@@ -61,7 +61,7 @@ See [`infra/README.md`](infra/README.md).
 1. Open http://localhost:3030  
 2. **Sign up** → login → workspace dashboard  
 3. **Agents** → **Seed starters** for personas  
-4. **Workers** — add a host and copy the install/pair command (token panel is enough; no second machine). [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md)
+4. **Workers** — add a worker and copy the install/pair command (token panel is enough; no second machine). [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md)
 
 ### Tear down
 

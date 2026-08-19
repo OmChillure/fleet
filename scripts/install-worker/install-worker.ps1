@@ -39,7 +39,7 @@ if ($env:FLEET_DETECT_ONLY -eq "1") {
 $official = $env:FLEET_OFFICIAL_BASE
 $origin = $env:FLEET_URL
 if (-not $origin) {
-    Write-Host "Install fleet-host from:"
+    Write-Host "Install this worker from:"
     if ($official) {
         Write-Host "  1) Official  ($official)"
     } else {
@@ -81,8 +81,17 @@ $scriptUrl = "$origin/install/worker/${platform}.ps1"
 if ($BinDir -and -not (Test-Path (Join-Path $BinDir "libunwind.dll"))) {
     $dllDest = Join-Path $BinDir "libunwind.dll"
     $dllUrl = "$origin/install/worker/bin/$platform/libunwind.dll"
+    Write-Host "checking libunwind.dll"
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $dllUrl -OutFile $dllDest
+        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+        if ($curl) {
+            Write-Host "downloading libunwind.dll"
+            & curl.exe -fL --progress-bar -o $dllDest $dllUrl
+            if ($LASTEXITCODE -ne 0) { throw "download failed" }
+        } else {
+            Write-Host "downloading libunwind.dll"
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri $dllUrl -OutFile $dllDest
+        }
         Write-Host "installed $dllDest"
     } catch {
         if (Test-Path $dllDest) { Remove-Item -Force $dllDest }

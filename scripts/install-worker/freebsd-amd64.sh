@@ -5,7 +5,7 @@ set -eu
 export FLEET_PLATFORM=freebsd-amd64
 ORIGIN="${FLEET_INSTALL_ORIGIN:-${FLEET_URL:-}}"
 if [ -z "$ORIGIN" ]; then
-  echo "fleet-host install: set FLEET_URL to the control plane" >&2
+  echo "worker install: set FLEET_URL to the control plane" >&2
   exit 1
 fi
 if command -v curl >/dev/null 2>&1; then
@@ -16,6 +16,6 @@ elif command -v fetch >/dev/null 2>&1; then
   # Stock FreeBSD has fetch(1), not curl/wget. fetch -o dest url; dest=- is stdout.
   fetch -o - "$ORIGIN/install/worker/_unix_common.sh" | sh
 else
-  echo "fleet-host install: need curl, wget, or fetch" >&2
+  echo "worker install: need curl, wget, or fetch" >&2
   exit 1
 fi

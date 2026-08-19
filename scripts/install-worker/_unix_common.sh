@@ -10,7 +10,7 @@ PREFIX="${FLEET_PREFIX:-}"
 REPO="${FLEET_REPO:-}"
 
 info() { printf '%s\n' "$*"; }
-err() { printf 'fleet-host install: %s\n' "$*" >&2; }
+err() { printf 'worker install: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -29,18 +29,49 @@ mkdir -p "$BIN_DIR"
 
 fetch_to() {
     # dest is used by the caller; must not clobber it here.
+    # $3=quiet — no progress (tiny .sha256). Bin downloads stay noisy.
     _url=$1
     _dest=$2
+    _quiet=${3:-}
     if have curl; then
-        curl -fL --progress-bar "$_url" -o "$_dest"
+        if [ -n "$_quiet" ]; then
+            curl -fsSL "$_url" -o "$_dest"
+        else
+            curl -fL --progress-bar "$_url" -o "$_dest"
+        fi
     elif have wget; then
-        wget -O "$_dest" "$_url"
+        if [ -n "$_quiet" ]; then
+            wget -q -O "$_dest" "$_url"
+        else
+            wget -O "$_dest" "$_url"
+        fi
     elif have fetch; then
         # FreeBSD: fetch -o dest url (not dest= — keep dest-leak fix)
-        fetch -o "$_dest" "$_url"
+        if [ -n "$_quiet" ]; then
+            fetch -q -o "$_dest" "$_url"
+        else
+            fetch -o "$_dest" "$_url"
+        fi
     else
         die "need curl, wget, or fetch"
     fi
+}
+
+content_length() {
+    if have curl; then
+        curl -sI -L "$1" | tr -d '\r' | awk 'tolower($1)=="content-length:" {print $2; exit}'
+    fi
+}
+
+size_note() {
+    n=$1
+    [ -n "$n" ] || return 0
+    awk -v n="$n" 'BEGIN {
+        if (n+0 < 1) exit
+        if (n >= 1048576) printf " (%.0f MB)", n/1048576
+        else if (n >= 1024) printf " (%.0f KB)", n/1024
+        else printf " (%s B)", n
+    }'
 }
 
 file_sha256() {
@@ -60,12 +91,17 @@ norm_sha() {
 }
 
 install_bins_from_cp() {
+    info "this machine is a self-hosted worker"
+    info "  fleet-host   stays up; pairs and takes jobs"
+    info "  fleet-worker runs each job"
+    info "  fleet-driver runs jobs that use an agent harness (Grok)"
     base="$ORIGIN/install/worker/bin/$PLATFORM"
     ok=0
     for bin in fleet-host fleet-worker fleet-driver; do
         dest="$BIN_DIR/$bin"
         want=""
-        if fetch_to "$base/$bin.sha256" "$dest.sha256.tmp" 2>/dev/null; then
+        info "checking $bin"
+        if fetch_to "$base/$bin.sha256" "$dest.sha256.tmp" quiet 2>/dev/null; then
             want=$(norm_sha "$(awk '{print $1}' "$dest.sha256.tmp")")
             rm -f "$dest.sha256.tmp"
         else
@@ -78,9 +114,14 @@ install_bins_from_cp() {
                 ok=1
                 continue
             fi
+            info "local $bin is stale; downloading again"
         fi
-        if fetch_to "$base/$bin" "$dest.tmp" 2>/dev/null; then
+        bytes=$(content_length "$base/$bin" || true)
+        note=$(size_note "$bytes")
+        info "downloading $bin$note"
+        if fetch_to "$base/$bin" "$dest.tmp"; then
             if [ -n "$want" ]; then
+                info "verifying $bin"
                 got=$(norm_sha "$(file_sha256 "$dest.tmp")")
                 if [ "$got" != "$want" ]; then
                     rm -f "$dest.tmp"
@@ -291,9 +332,9 @@ case :$PATH: in
 esac
 
 if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
-    info "pairing with control plane…"
+    info "pairing with the control plane"
     "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
-    # pair is a handshake only. Offline after 30s unless run/heartbeats start.
+    info "starting fleet-host (heartbeats; offline after 30s if this fails)"
     start_host_service || true
 else
     info "next: fleet-host pair --url $ORIGIN --token <pair-token-from-ui>"

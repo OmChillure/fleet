@@ -174,6 +174,59 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("need curl, wget, or fetch", fbsd)
         self.assertNotIn("need curl or wget", fbsd)
 
+    def test_install_uses_worker_product_name_and_three_bins(self):
+        """Product is a Worker. fleet-host is the spawner, not a second product."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        boot = BOOTSTRAP.read_text()
+        self.assertIn("worker install:", common)
+        self.assertNotIn("fleet-host install:", common)
+        self.assertIn("worker install:", boot)
+        self.assertNotIn("fleet-host install:", boot)
+        self.assertIn("Install this worker from:", boot)
+        self.assertNotIn("Install fleet-host from:", boot)
+        self.assertIn("this machine is a self-hosted worker", common)
+        self.assertIn("fleet-host   stays up", common)
+        self.assertIn("fleet-worker runs each job", common)
+        self.assertIn("fleet-driver", common)
+        for name in PLATFORMS:
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii", errors="replace")
+            self.assertNotIn("fleet-host install:", text, name)
+            if name.endswith(".sh"):
+                if "set FLEET_URL" in text and name != "install-worker.sh":
+                    self.assertIn("worker install:", text, name)
+        ps = (SCRIPT_DIR / "install-worker.ps1").read_text(encoding="ascii")
+        self.assertIn("Install this worker from:", ps)
+        self.assertNotIn("Install fleet-host from:", ps)
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("this machine is a self-hosted worker", text, name)
+            self.assertIn("fleet-host   stays up", text, name)
+            self.assertIn("fleet-worker runs each job", text, name)
+
+    def test_install_prints_progress_not_silent_downloads(self):
+        """Phase lines + a progress bar so a 100MB fetch does not look frozen."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        self.assertIn("this machine is a self-hosted worker", common)
+        self.assertIn("fleet-host   stays up", common)
+        self.assertIn("fleet-worker runs each job", common)
+        self.assertIn("downloading $bin", common)
+        self.assertIn("checking $bin", common)
+        self.assertIn("size_note", common)
+        self.assertIn("--progress-bar", common)
+        # Bin fetch must not swallow curl progress (sha256 fetch may be quiet).
+        self.assertNotRegex(
+            common,
+            r'fetch_to "\$base/\$bin" "\$dest\.tmp" 2>/dev/null',
+        )
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("this machine is a self-hosted worker", text, name)
+            self.assertIn("downloading $bin", text, name)
+            self.assertIn("checking $bin", text, name)
+            self.assertIn("curl.exe", text, name)
+            self.assertIn("--progress-bar", text, name)
+            self.assertIn("Format-Bytes", text, name)
+
     def test_install_skips_download_when_sha256_matches(self):
         """Reuse a local bin only when it matches the CP checksum; else refetch."""
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()

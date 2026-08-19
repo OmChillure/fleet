@@ -16,7 +16,7 @@ set -eu
 OFFICIAL_DEFAULT="${FLEET_OFFICIAL_BASE:-}"
 
 info() { printf '%s\n' "$*"; }
-err() { printf 'fleet-host install: %s\n' "$*" >&2; }
+err() { printf 'worker install: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -133,7 +133,7 @@ prompt_origin() {
   Example: curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh
   FreeBSD: fetch -o - http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh"
     fi
-    info "Install fleet-host from:"
+    info "Install this worker from:"
     if [ -n "$OFFICIAL_DEFAULT" ]; then
         info "  1) Official  ($OFFICIAL_DEFAULT)"
     else

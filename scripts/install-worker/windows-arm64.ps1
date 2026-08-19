@@ -22,6 +22,35 @@ function Get-RemoteSha256([string]$Url) {
 function Get-LocalSha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
+function Format-Bytes([object]$n) {
+    if (-not $n) { return "" }
+    $n = [int64]$n
+    if ($n -ge 1048576) { return (" ({0:N0} MB)" -f ($n / 1MB)) }
+    if ($n -ge 1024) { return (" ({0:N0} KB)" -f ($n / 1KB)) }
+    return " ($n B)"
+}
+function Get-RemoteLength([string]$Url) {
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing -Method Head -TimeoutSec 15 -Uri $Url
+        $cl = $r.Headers["Content-Length"]
+        if ($cl) { return [int64]$cl }
+    } catch { }
+    return $null
+}
+function Save-Url([string]$Url, [string]$Dest) {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & curl.exe -fL --progress-bar -o $Dest $Url
+        if ($LASTEXITCODE -ne 0) { throw "download failed $Url" }
+        return
+    }
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -Uri $Url -OutFile $Dest
+}
+
+Write-Host "this machine is a self-hosted worker"
+Write-Host "  fleet-host   stays up; pairs and takes jobs"
+Write-Host "  fleet-worker runs each job"
+Write-Host "  fleet-driver runs jobs that use an agent harness (Grok)"
 
 $base = "$Origin/install/worker/bin/windows-arm64"
 $installed = $false
@@ -29,15 +58,22 @@ foreach ($bin in @("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe")) {
     $dest = Join-Path $BinDir $bin
     $url = "$base/$bin"
     $tmp = "$dest.tmp"
+    Write-Host "checking $bin"
     $want = Get-RemoteSha256 "$url.sha256"
     if ($want -and (Test-Path $dest) -and ((Get-LocalSha256 $dest) -eq $want)) {
         Write-Host "unchanged $dest"
         $installed = $true
         continue
     }
+    if ($want -and (Test-Path $dest)) {
+        Write-Host "local $bin is stale; downloading again"
+    }
+    $note = Format-Bytes (Get-RemoteLength $url)
+    Write-Host "downloading $bin$note"
     try {
-        Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -Uri $url -OutFile $tmp
+        Save-Url $url $tmp
         if ($want) {
+            Write-Host "verifying $bin"
             $got = Get-LocalSha256 $tmp
             if ($got -ne $want) { throw "checksum mismatch $bin" }
         }
@@ -54,13 +90,15 @@ foreach ($dll in @("libunwind.dll")) {
     $dest = Join-Path $BinDir $dll
     $url = "$base/$dll"
     $tmp = "$dest.tmp"
+    Write-Host "checking $dll"
     $want = Get-RemoteSha256 "$url.sha256"
     if ($want -and (Test-Path $dest) -and ((Get-LocalSha256 $dest) -eq $want)) {
         Write-Host "unchanged $dest"
         continue
     }
+    Write-Host "downloading $dll"
     try {
-        Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri $url -OutFile $tmp
+        Save-Url $url $tmp
         if ($want) {
             $got = Get-LocalSha256 $tmp
             if ($got -ne $want) { throw "checksum mismatch $dll" }
@@ -93,8 +131,9 @@ $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup
 Write-Host "startup shortcut: $startup"
 
 if ($env:FLEET_PAIR_TOKEN) {
+    Write-Host "pairing with the control plane"
     & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $env:FLEET_PAIR_TOKEN
-    # Pair is a handshake. Offline after 30s unless run is started now.
+    Write-Host "starting fleet-host (heartbeats; offline after 30s if this fails)"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
     Write-Host "started fleet-host run (also at logon: $startup)"
 } else {

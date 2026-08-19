@@ -113,7 +113,7 @@ pub fn Workers(workspace_id: String) -> Element {
                         "Workers"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine; it phones home; the plane never dials inbound. Jobs run as processes on that machine (same as a self-hosted runner)."
+                        "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
                     }
                 }
                 button {
@@ -143,7 +143,7 @@ pub fn Workers(workspace_id: String) -> Element {
                     div {
                         class: "mt-6 rounded-xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-8 text-center",
                         p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
-                            "No hosts yet"
+                            "No workers yet"
                         }
                         p { class: "mt-2 text-sm text-[var(--app-muted)]",
                             "Add a worker, then paste the install command in a terminal on that machine."
@@ -194,7 +194,7 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                 "Pair this worker"
             }
             p { class: "mt-1 text-sm text-[var(--app-fg)]",
-                "On the machine, open a terminal and paste the command. It installs, pairs, and starts the worker."
+                "On the machine, open a terminal and paste the command. This worker is three binaries: fleet-host (stays up; pairs and takes jobs), fleet-worker (each job), fleet-driver (Grok/ACP). Then it pairs and starts."
             }
             p { class: "mt-1 text-xs text-amber-300/90",
                 "This token is shown once and expires {expires}."
@@ -362,7 +362,7 @@ fn HostCard(
 
             if no_effective {
                 p { class: "mt-2 text-xs text-amber-300/90",
-                    "No effective run mode — this host will not receive jobs."
+                    "No effective run mode — this worker will not receive jobs."
                 }
             }
             if !last_error.is_empty() {
@@ -438,7 +438,7 @@ fn HostCard(
                             }
                         },
                     }
-                    "Allow host"
+                    "Allow host jobs"
                 }
                 label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
                     input {
@@ -446,7 +446,7 @@ fn HostCard(
                         checked: host.allow_container,
                         disabled: true,
                     }
-                    "Allow container"
+                    "Allow container jobs"
                     span { class: "text-[var(--app-muted)]",
                         "(not shipped)"
                     }
@@ -497,7 +497,7 @@ fn HostCard(
                     if confirm_revoke() {
                         span { class: "inline-flex flex-wrap items-center gap-2 text-xs",
                             span { class: "text-[var(--app-muted)]",
-                                "Revoke this host?"
+                                "Revoke this worker?"
                             }
                             button {
                                 class: "rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/15 disabled:opacity-50",
