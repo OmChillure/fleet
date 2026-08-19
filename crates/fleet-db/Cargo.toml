@@ -9,9 +9,13 @@ description = "Agent Fleet Postgres layer — migrations, pool, models, reposito
 
 [dependencies]
 chrono = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

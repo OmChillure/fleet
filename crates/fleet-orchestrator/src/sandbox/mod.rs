@@ -6,12 +6,13 @@
 pub mod agent_loop;
 mod docker;
 pub(crate) mod git_isolate;
+pub mod remote;
 pub mod share;
 pub mod team;
 pub mod team_chat;
 mod worker_script;
 
-pub use docker::{docker_runtime, DockerRuntime};
+pub use docker::{DockerRuntime, docker_runtime};
 pub use worker_script::{extract_bash_blocks, materialize_workspace};
 
 use async_trait::async_trait;
@@ -118,10 +119,7 @@ pub fn fleet_worker_env(req: &SpawnRequest, orchestrator_url: &str) -> HashMap<S
     env.insert("FLEET_WORKER_PROFILE".into(), req.worker_profile.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
     env.insert("FLEET_API_BASE".into(), orchestrator_url.into());
-    env.insert(
-        "FLEET_WORK_DIR".into(),
-        req.work_dir.display().to_string(),
-    );
+    env.insert("FLEET_WORK_DIR".into(), req.work_dir.display().to_string());
     env
 }
 
@@ -241,7 +239,7 @@ impl SandboxRuntime for StubRuntime {
 mod process;
 mod process_om;
 
-pub use process::{build_process_runtime, worker_argv_from_env, ProcessRuntime};
+pub use process::{ProcessRuntime, build_process_runtime, worker_argv_from_env};
 pub use process_om::process_runtime;
 
 /// Options for [`build_runtime`].

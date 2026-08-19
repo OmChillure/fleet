@@ -126,6 +126,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.x.ai/v1".into(),
         },
+        worker_dist_dir: None,
     };
 
     let db = connect_and_migrate_with(
@@ -152,6 +153,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
     let router = build_http_app(state.clone(), orch, &config).expect("build_http_app");

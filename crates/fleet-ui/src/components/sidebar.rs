@@ -54,7 +54,9 @@ pub fn Sidebar() -> Element {
                 Some(NavSection::Monitoring)
             }
             Route::Agents { .. } => Some(NavSection::Agents),
-            Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
+            Route::Integrations { .. } | Route::Workers { .. } | Route::Settings { .. } => {
+                Some(NavSection::Workspace)
+            }
             _ => None,
         };
         if let Some(section) = section {
@@ -364,6 +366,10 @@ pub fn Sidebar() -> Element {
                     NavSubLink {
                         to: Route::Integrations { workspace_id: workspace_id.clone() },
                         label: "Integrations",
+                    }
+                    NavSubLink {
+                        to: Route::Workers { workspace_id: workspace_id.clone() },
+                        label: "Workers",
                     }
                     NavSubLink {
                         to: Route::Settings { workspace_id: workspace_id.clone() },

@@ -17,4 +17,5 @@ pub use board_sync_step::sync_external_board;
 pub use deps_step::*;
 pub use materialize_step::*;
 pub use rollup::*;
+pub use spawn::apply_retry_after_failure;
 pub use tick::*;

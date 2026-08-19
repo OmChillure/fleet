@@ -21,6 +21,7 @@ use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
 use pages::sessions::{SessionDetail, Sessions};
 use pages::settings::Settings;
+use pages::workers::Workers;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -57,6 +58,8 @@ pub enum Route {
         Sandboxes { workspace_id: String },
         #[route("/:workspace_id/integrations")]
         Integrations { workspace_id: String },
+        #[route("/:workspace_id/workers")]
+        Workers { workspace_id: String },
         #[route("/:workspace_id/settings")]
         Settings { workspace_id: String },
 }
@@ -74,6 +77,7 @@ impl Route {
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
             | Route::Integrations { workspace_id }
+            | Route::Workers { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,
         }

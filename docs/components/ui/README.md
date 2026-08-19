@@ -58,6 +58,7 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 | `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
 | `/{workspace_id}/integrations` | Connect platforms via OAuth | Catalog + connect flow |
 | `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM (no git URL) |
+| `/{workspace_id}/workers` | Paired worker hosts | Create host + one-time pair token |
 
 ```text
 Marketing                          App shell
@@ -96,6 +97,7 @@ crates/fleet-ui/src/
     dashboard/ fleet/ sessions/ agents/ sandboxes/
     integrations/         # catalog + oauth_done
     settings/
+    workers/              # /{ws}/workers (paired hosts)
     shared/               # EmptyPage
 ```
 

@@ -249,6 +249,24 @@ class Demo:
         p.goto(f"{base}/settings", wait_until="networkidle")
         pause(p, 1500)
 
+    def scene_workers(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/workers", wait_until="networkidle")
+        pause(p, 1000)
+        body = p.inner_text("body")
+        heading = ""
+        if p.locator("h1").count():
+            heading = p.locator("h1").first.inner_text()
+        if "Workers" not in heading and "Workers" not in body:
+            raise RuntimeError(
+                f"workers page missing Workers heading or text: {body[:300]}"
+            )
+        add = p.get_by_role("button", name="Add worker")
+        if add.count():
+            add.first.click()
+            pause(p, 1500)
+
     def scene_sessions(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -329,6 +347,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
+    "workers": Demo.scene_workers,
     "sessions": Demo.scene_sessions,
     "dashboard": Demo.scene_dashboard,
     "lab": Demo.scene_lab,
@@ -347,6 +366,7 @@ CORE = [
     "agents",
     "integrations",
     "settings",
+    "workers",
     "sessions",
     "dashboard",
 ]

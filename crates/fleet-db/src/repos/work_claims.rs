@@ -12,9 +12,9 @@ use crate::models::{NewWorkClaim, WorkClaim};
 use crate::pool::map_query_err;
 
 const CLAIM_COLS: &str = r#"
-    id, workspace_id, kind, payload, status, lease_owner, lease_token,
-    lease_expires_at, attempts, max_attempts, available_at, last_error,
-    created_at, updated_at, version
+    w.id, w.workspace_id, w.kind, w.payload, w.status, w.lease_owner, w.lease_token,
+    w.lease_expires_at, w.attempts, w.max_attempts, w.available_at, w.last_error,
+    w.created_at, w.updated_at, w.version
 "#;
 
 pub async fn enqueue(pool: &PgPool, new: &NewWorkClaim) -> DbResult<()> {
@@ -86,6 +86,54 @@ pub async fn claim_next(
         .map_err(map_query_err)
 }
 
+/// Claim the next ready `spawn_session` whose payload is addressed to `host_id`.
+pub async fn claim_next_spawn_for_host(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    host_id: Uuid,
+    lease_for: Duration,
+) -> DbResult<Option<WorkClaim>> {
+    let lease_token = Uuid::now_v7();
+    let lease_expires = Utc::now() + lease_for;
+    let host_id_text = host_id.to_string();
+    let q = format!(
+        r#"
+        WITH cte AS (
+            SELECT id FROM work_claims
+            WHERE status = 'ready'
+              AND available_at <= now()
+              AND workspace_id = $1
+              AND kind = 'spawn_session'
+              AND payload->>'host_id' = $5
+            ORDER BY available_at, created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE work_claims w
+        SET status = 'leased',
+            lease_owner = $2,
+            lease_token = $3,
+            lease_expires_at = $4,
+            attempts = attempts + 1,
+            version = version + 1,
+            updated_at = now()
+        FROM cte
+        WHERE w.id = cte.id
+        RETURNING {CLAIM_COLS}
+        "#
+    );
+
+    sqlx::query_as::<_, WorkClaim>(&q)
+        .bind(workspace_id)
+        .bind(host_id)
+        .bind(lease_token)
+        .bind(lease_expires)
+        .bind(&host_id_text)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Heartbeat / extend lease — only the holder with the matching token succeeds.
 pub async fn heartbeat(
     pool: &PgPool,
@@ -113,11 +161,16 @@ pub async fn heartbeat(
     Ok(res.rows_affected() == 1)
 }
 
-pub async fn complete(
-    pool: &PgPool,
-    claim_id: Uuid,
-    lease_token: Uuid,
-) -> DbResult<bool> {
+pub async fn get(pool: &PgPool, claim_id: Uuid) -> DbResult<Option<WorkClaim>> {
+    let q = format!("SELECT {CLAIM_COLS} FROM work_claims w WHERE w.id = $1");
+    sqlx::query_as::<_, WorkClaim>(&q)
+        .bind(claim_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn complete(pool: &PgPool, claim_id: Uuid, lease_token: Uuid) -> DbResult<bool> {
     let res = sqlx::query(
         r#"
         UPDATE work_claims
@@ -134,6 +187,40 @@ pub async fn complete(
     )
     .bind(claim_id)
     .bind(lease_token)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Complete only if this host still holds the lease in this workspace.
+pub async fn complete_owned(
+    pool: &PgPool,
+    claim_id: Uuid,
+    lease_token: Uuid,
+    host_id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET status = 'done',
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            version = version + 1,
+            updated_at = now()
+        WHERE id = $1
+          AND lease_token = $2
+          AND status = 'leased'
+          AND lease_owner = $3
+          AND workspace_id = $4
+        "#,
+    )
+    .bind(claim_id)
+    .bind(lease_token)
+    .bind(host_id)
+    .bind(workspace_id)
     .execute(pool)
     .await
     .map_err(map_query_err)?;
@@ -171,6 +258,49 @@ pub async fn fail(
     .bind(lease_token)
     .bind(error)
     .bind(retry_after)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Fail only if this host still holds the lease in this workspace.
+pub async fn fail_owned(
+    pool: &PgPool,
+    claim_id: Uuid,
+    lease_token: Uuid,
+    host_id: Uuid,
+    workspace_id: Uuid,
+    error: &str,
+    retry_after: Option<DateTime<Utc>>,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET status = CASE
+                WHEN attempts >= max_attempts THEN 'dead'
+                ELSE 'ready'
+            END,
+            last_error = $3,
+            available_at = COALESCE($4, now()),
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            version = version + 1,
+            updated_at = now()
+        WHERE id = $1
+          AND lease_token = $2
+          AND status = 'leased'
+          AND lease_owner = $5
+          AND workspace_id = $6
+        "#,
+    )
+    .bind(claim_id)
+    .bind(lease_token)
+    .bind(error)
+    .bind(retry_after)
+    .bind(host_id)
+    .bind(workspace_id)
     .execute(pool)
     .await
     .map_err(map_query_err)?;

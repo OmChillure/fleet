@@ -8,7 +8,7 @@ use fleet_auth::validate_cookie_policy;
 use fleet_db::connect_and_migrate;
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::Config as OrchConfig;
-use fleet_server::{build_http_app, AppState, ServerConfig};
+use fleet_server::{AppState, ServerConfig, build_http_app};
 use tracing_subscriber::EnvFilter;
 
 /// Default when `RUST_LOG` is unset.
@@ -90,10 +90,12 @@ async fn run() -> anyhow::Result<()> {
         "configuration loaded"
     );
 
-    let db = connect_and_migrate(&config.database_url).await.map_err(|e| {
-        tracing::error!(error = %e, "database startup failed");
-        anyhow::anyhow!(e)
-    })?;
+    let db = connect_and_migrate(&config.database_url)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "database startup failed");
+            anyhow::anyhow!(e)
+        })?;
     tracing::info!("database ready");
 
     let orch_cfg = OrchConfig::from_env_for_server(&config.database_url, &config.bind.to_string())
@@ -142,6 +144,7 @@ async fn run() -> anyhow::Result<()> {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
     {
@@ -177,9 +180,7 @@ async fn run() -> anyhow::Result<()> {
         %addr,
         "fleet-server listening (auth + workspaces + integrations + fleet + orchestrator)"
     );
-    tracing::info!(
-        "logging: RUST_LOG=info (default) | debug (verbose) | warn (quiet errors only)"
-    );
+    tracing::info!("logging: RUST_LOG=info (default) | debug (verbose) | warn (quiet errors only)");
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         tracing::error!(%addr, error = %e, "failed to bind listen address");

@@ -38,7 +38,9 @@ EXPECTED_SCENES = (
     "agents",
     "integrations",
     "settings",
+    "workers",
     "sessions",
+    "dashboard",
     "lab",
     "kind",
 )
@@ -52,6 +54,7 @@ EXPECTED_PAUSE_TITLES = (
     "Sidebar",
     "Workspace switcher",
     "Settings",
+    "Workers",
     "Agents",
     "Integrations",
     "Chat",

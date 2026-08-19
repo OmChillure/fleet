@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Worker bootstrap: POSIX syntax + platform detect. No network."""
+from __future__ import annotations
+
+import os
+import subprocess
+import unittest
+from pathlib import Path
+
+# tests/ → sandbox-lab → fleet-sandbox-driver → crates → repo
+REPO = Path(__file__).resolve().parents[4]
+SCRIPT_DIR = REPO / "scripts" / "install-worker"
+BOOTSTRAP = SCRIPT_DIR / "install-worker.sh"
+
+PLATFORMS = (
+    "linux-x86_64.sh",
+    "linux-aarch64.sh",
+    "linux-armv7.sh",
+    "linux-x86_64-musl.sh",
+    "linux-aarch64-musl.sh",
+    "linux-armv7-musl.sh",
+    "darwin-arm64.sh",
+    "darwin-x86_64.sh",
+    "freebsd-amd64.sh",
+    "windows-x86_64.ps1",
+    "windows-arm64.ps1",
+    "install-worker.ps1",
+    "_unix_common.sh",
+)
+
+
+class InstallWorkerTests(unittest.TestCase):
+    def test_bootstrap_exists_and_executable(self):
+        self.assertTrue(BOOTSTRAP.is_file(), BOOTSTRAP)
+        self.assertTrue(BOOTSTRAP.stat().st_mode & 0o111, "bootstrap must be executable")
+
+    def test_all_top10_scripts_present(self):
+        for name in PLATFORMS:
+            path = SCRIPT_DIR / name
+            self.assertTrue(path.is_file(), path)
+
+    def test_posix_syntax(self):
+        for name in (
+            "install-worker.sh",
+            "_unix_common.sh",
+            "linux-x86_64.sh",
+            "linux-aarch64.sh",
+            "linux-armv7.sh",
+            "linux-x86_64-musl.sh",
+            "linux-aarch64-musl.sh",
+            "linux-armv7-musl.sh",
+            "darwin-arm64.sh",
+            "darwin-x86_64.sh",
+            "freebsd-amd64.sh",
+        ):
+            r = subprocess.run(
+                ["sh", "-n", str(SCRIPT_DIR / name)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, f"{name}: {r.stderr}")
+
+    def test_detect_only_prints_known_id(self):
+        env = os.environ.copy()
+        env["FLEET_DETECT_ONLY"] = "1"
+        r = subprocess.run(
+            ["sh", str(BOOTSTRAP)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        plat = r.stdout.strip()
+        known = {
+            "linux-x86_64",
+            "linux-aarch64",
+            "linux-armv7",
+            "linux-x86_64-musl",
+            "linux-aarch64-musl",
+            "linux-armv7-musl",
+            "darwin-arm64",
+            "darwin-x86_64",
+            "freebsd-amd64",
+            "windows-x86_64",
+            "windows-arm64",
+        }
+        self.assertIn(plat, known, plat)
+
+    def test_detect_armv7_musl_prints_id_not_die(self):
+        """Alpine armv7l + musl must print linux-armv7-musl, not die."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            bindir = Path(td)
+            (bindir / "uname").write_text(
+                "#!/bin/sh\n"
+                "case $1 in\n"
+                "  -s) echo Linux ;;\n"
+                "  -m) echo armv7l ;;\n"
+                "  -r) echo 6.12.13-0-virt ;;\n"
+                "  *) echo unknown ;;\n"
+                "esac\n"
+            )
+            (bindir / "ldd").write_text("#!/bin/sh\necho '/lib/ld-musl-armhf.so.1'\n")
+            (bindir / "uname").chmod(0o755)
+            (bindir / "ldd").chmod(0o755)
+            env = os.environ.copy()
+            env["FLEET_DETECT_ONLY"] = "1"
+            env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+            r = subprocess.run(
+                ["sh", str(BOOTSTRAP)],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "linux-armv7-musl")
+        self.assertNotIn("no musl installer for", r.stderr)
+
+    def test_piped_without_url_fails_closed(self):
+        env = os.environ.copy()
+        env.pop("FLEET_URL", None)
+        env.pop("FLEET_OFFICIAL_BASE", None)
+        env.pop("FLEET_DETECT_ONLY", None)
+        r = subprocess.run(
+            ["sh", str(BOOTSTRAP)],
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        err = (r.stderr or "") + (r.stdout or "")
+        self.assertIn("FLEET_URL", err)
+
+    def test_windows_arm64_fetches_libunwind_optional(self):
+        """gnullvm PE imports libunwind.dll; 404 must not fail the install."""
+        arm = (SCRIPT_DIR / "windows-arm64.ps1").read_text()
+        boot = (SCRIPT_DIR / "install-worker.ps1").read_text()
+        x64 = (SCRIPT_DIR / "windows-x86_64.ps1").read_text()
+        self.assertIn("libunwind.dll", arm)
+        self.assertIn("no runtime", arm)
+        self.assertIn("libunwind.dll", boot)
+        self.assertIn("no runtime libunwind.dll", boot)
+        self.assertNotIn("libunwind.dll", x64)
+
+    def test_ps1_ascii_only_for_windows_powershell_51(self):
+        """PS 5.1 `powershell -File` on UTF-8 no-BOM treats U+2014 as a string terminator."""
+        for name in ("install-worker.ps1", "windows-x86_64.ps1", "windows-arm64.ps1"):
+            raw = (SCRIPT_DIR / name).read_bytes()
+            non_ascii = [i for i, b in enumerate(raw) if b >= 128]
+            self.assertEqual(
+                non_ascii,
+                [],
+                f"{name}: non-ASCII bytes at {non_ascii[:8]} (PS 5.1 -File / CP-1252)",
+            )
+            self.assertNotIn("\u2014".encode("utf-8"), raw, f"{name}: em-dash U+2014")
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), f"{name}: unexpected UTF-8 BOM")
+
+    def test_scripts_use_fetch_and_keep_dest_leak_fix(self):
+        """Stock FreeBSD has fetch(1), not curl/wget. dest= clobbers caller dest."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        boot = BOOTSTRAP.read_text()
+        fbsd = (SCRIPT_DIR / "freebsd-amd64.sh").read_text()
+        self.assertIn("_dest=$2", common)
+        self.assertNotRegex(common, r"(?m)^\s*dest=\$2\s*$")
+        self.assertIn('fetch -o "$_dest" "$_url"', common)
+        self.assertNotIn('need curl or wget', common)
+        self.assertIn("need curl, wget, or fetch", common)
+        self.assertIn("fetch -o -", boot)
+        self.assertIn("need curl, wget, or fetch", boot)
+        self.assertNotIn("need curl or wget to download", boot)
+        self.assertIn('fetch -o -', fbsd)
+        self.assertIn("need curl, wget, or fetch", fbsd)
+        self.assertNotIn("need curl or wget", fbsd)
+
+    def test_fetch_only_path_installs_freebsd_bins(self):
+        """No curl/wget: fetch -o dest url must place fleet-host (dest-leak check)."""
+        import shutil
+        import socket
+        import tempfile
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        common = (SCRIPT_DIR / "_unix_common.sh").read_bytes()
+        plat = (SCRIPT_DIR / "freebsd-amd64.sh").read_bytes()
+        boot = BOOTSTRAP.read_bytes()
+        bins = {
+            "fleet-host": b"fake-freebsd-host\n",
+            "fleet-worker": b"fake-freebsd-worker\n",
+            "fleet-driver": b"fake-freebsd-driver\n",
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                mapping = {
+                    "/install-worker.sh": boot,
+                    "/install/worker/_unix_common.sh": common,
+                    "/install/worker/freebsd-amd64.sh": plat,
+                    "/install/worker/bin/freebsd-amd64/fleet-host": bins["fleet-host"],
+                    "/install/worker/bin/freebsd-amd64/fleet-worker": bins["fleet-worker"],
+                    "/install/worker/bin/freebsd-amd64/fleet-driver": bins["fleet-driver"],
+                }
+                body = mapping.get(self.path)
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                bindir = td / "bin"
+                bindir.mkdir()
+                fetch_log = td / "fetch.log"
+                fetch = bindir / "fetch"
+                fetch.write_text(
+                    "#!/bin/sh\n"
+                    # fetch -o dest url  (dest=- → stdout)
+                    f'echo "$@" >> "{fetch_log}"\n'
+                    'dest=""; url=""\n'
+                    'while [ $# -gt 0 ]; do\n'
+                    '  case $1 in\n'
+                    '    -o) dest=$2; shift 2 ;;\n'
+                    '    -q|-qo) if [ "$1" = "-qo" ]; then dest=$2; shift 2; else shift; fi ;;\n'
+                    '    -*) shift ;;\n'
+                    '    *) url=$1; shift ;;\n'
+                    '  esac\n'
+                    'done\n'
+                    '[ -n "$dest" ] && [ -n "$url" ] || exit 2\n'
+                    'if [ "$dest" = "-" ]; then\n'
+                    '  python3 -c "import sys,urllib.request; sys.stdout.buffer.write(urllib.request.urlopen(sys.argv[1]).read())" "$url"\n'
+                    'else\n'
+                    '  python3 -c "import sys,urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "$url" "$dest"\n'
+                    'fi\n'
+                )
+                fetch.chmod(0o755)
+                needed = (
+                    "sh",
+                    "mkdir",
+                    "chmod",
+                    "mv",
+                    "rm",
+                    "id",
+                    "printf",
+                    "echo",
+                    "grep",
+                    "head",
+                    "cat",
+                    "uname",
+                    "mktemp",
+                    "sleep",
+                    "sed",
+                    "tr",
+                    "cut",
+                    "wc",
+                    "ls",
+                    "test",
+                    "true",
+                    "false",
+                    "env",
+                    "date",
+                    "python3",
+                    "basename",
+                    "dirname",
+                    "touch",
+                    "[",
+                )
+                for name in needed:
+                    src = shutil.which(name)
+                    if src:
+                        dest = bindir / name
+                        if not dest.exists():
+                            dest.symlink_to(src)
+                prefix = td / "prefix"
+                env = os.environ.copy()
+                env["PATH"] = str(bindir)
+                env["FLEET_URL"] = f"http://127.0.0.1:{port}"
+                env["FLEET_PLATFORM"] = "freebsd-amd64"
+                env["FLEET_PREFIX"] = str(prefix)
+                env["HOME"] = str(td)
+                env.pop("FLEET_DETECT_ONLY", None)
+                env.pop("FLEET_PAIR_TOKEN", None)
+                # Confirm curl/wget are hidden.
+                hidden = subprocess.run(
+                    ["sh", "-c", "command -v curl; command -v wget; command -v fetch"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotIn("curl", hidden.stdout)
+                self.assertNotIn("wget", hidden.stdout)
+                self.assertIn("fetch", hidden.stdout)
+
+                r = subprocess.run(
+                    ["sh", str(SCRIPT_DIR / "freebsd-amd64.sh")],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                out = (r.stdout or "") + (r.stderr or "")
+                self.assertEqual(r.returncode, 0, out)
+                host = prefix / "bin" / "fleet-host"
+                self.assertTrue(host.is_file(), out)
+                self.assertEqual(host.read_bytes(), bins["fleet-host"])
+                self.assertFalse((prefix / "bin" / "fleet-host.tmp").exists(), out)
+                self.assertNotIn("need curl", out)
+                self.assertIn("installed", out)
+                log = fetch_log.read_text()
+                self.assertIn("-o", log)
+                # dest-leak: fetch wrote to *.tmp then mv, never dest=
+                self.assertNotIn("dest=", log)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -18,6 +18,7 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
 | [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | Process worker: ACP (mock/grok) + orch heartbeat/status |
 | [`fleet-sandbox-driver`](crates/fleet-sandbox-driver/) | `crates/fleet-sandbox-driver` | In-sandbox driver: per-task compose, volume provision, multi-harness ACP |
+| [`fleet-host`](crates/fleet-host/) | `crates/fleet-host` | Self-hosted worker host (`pair` / `run`); outbound to the control plane |
 
 ## Local development
 
@@ -66,7 +67,8 @@ dx serve --package fleet-ui --port 3030
 3. **App shell** requires a live session (`GET /api/auth/me`). Unauthenticated
    visits to app routes redirect to `/login`.
 4. **Sidebar** has a workspace switcher (list + create). Nav sections: Chat,
-   Monitoring, Agents, Workspace. Links stay under the current workspace id.
+   Monitoring, Agents, Workspace (Integrations, Settings, Workers). Links stay
+   under the current workspace id.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
@@ -91,6 +93,12 @@ dx serve --package fleet-ui --port 3030
    - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
    - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
    Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
+8. **Workers** (`/{workspace_id}/workers`): create a host, copy the install
+   command and one-time pair token. The machine pairs outbound (no inbound
+   port). Tick uses an online matching host, else the local `SANDBOX_BACKEND`.
+   Install: `curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh`
+   then `fleet-host pair --url … --token …`. See
+   [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md).
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -113,6 +121,7 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
+| `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
 | `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
@@ -133,6 +142,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
+| `/{workspace_id}/workers` | Paired worker hosts (create + install/pair token) |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),
@@ -157,5 +167,6 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | [`docs/components/personas/`](docs/components/personas/) | **Personas** schema, API, Agents UI ([plan](docs/components/personas/plan.html)) |
 | [`docs/components/auth/README.md`](docs/components/auth/README.md) | **Auth + workspaces** API and cookie model |
 | [`docs/components/integrations/README.md`](docs/components/integrations/README.md) | **OAuth integrations** + credential encryption |
+| [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md) | Self-hosted worker hosts (create-then-pair, outbound) |
 | [`docs/components/`](docs/components/) | Per-component design stubs |
 | [`docs/references/`](docs/references/) | Reference projects and prior vision artifacts |

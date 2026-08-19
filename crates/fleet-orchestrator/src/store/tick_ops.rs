@@ -1,6 +1,6 @@
 //! Store operations used by the reconcile tick (PR5b/c).
 
-use super::{hash_worker_token, Result, Store, WorkerSessionRow};
+use super::{Result, Store, WorkerSessionRow, hash_worker_token};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -136,6 +136,31 @@ impl Store {
         Ok(())
     }
 
+    /// Remote enqueue: keep `spawning` until the job worker heartbeats.
+    /// Does not stamp `last_heartbeat_at` (that would start the stale clock).
+    pub async fn record_remote_enqueued(
+        &self,
+        session_id: Uuid,
+        runtime_handle: &str,
+        work_dir: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE worker_sessions
+            SET runtime_backend = 'remote',
+                runtime_handle = $2,
+                work_dir = COALESCE($3, work_dir)
+            WHERE id = $1 AND status = 'spawning'
+            "#,
+        )
+        .bind(session_id)
+        .bind(runtime_handle)
+        .bind(work_dir)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<()> {
         sqlx::query(
             r#"
@@ -195,7 +220,9 @@ impl Store {
             r#"
             UPDATE worker_sessions
             SET last_heartbeat_at = now(),
-                progress_pct = COALESCE($2, progress_pct)
+                progress_pct = COALESCE($2, progress_pct),
+                status = CASE WHEN status = 'spawning' THEN 'healthy' ELSE status END,
+                started_at = COALESCE(started_at, now())
             WHERE id = $1
             "#,
         )
@@ -209,6 +236,8 @@ impl Store {
             UPDATE board_tasks
             SET last_report_seq = GREATEST(last_report_seq, $2),
                 progress_pct = COALESCE($3, progress_pct),
+                status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
+                started_at = COALESCE(started_at, now()),
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -547,10 +576,7 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub async fn cancel_nonterminal_tasks_without_session(
-        &self,
-        run_id: Uuid,
-    ) -> Result<u64> {
+    pub async fn cancel_nonterminal_tasks_without_session(&self, run_id: Uuid) -> Result<u64> {
         let res = sqlx::query(
             r#"
             UPDATE board_tasks
@@ -602,7 +628,6 @@ pub struct SpawnAssignment {
     pub worker_token: String,
 }
 
-
 impl Store {
     pub async fn get_project(&self, project_id: Uuid) -> Result<Option<super::ProjectRow>> {
         sqlx::query_as::<_, super::ProjectRow>(
@@ -614,7 +639,11 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub async fn get_run(&self, project_id: Uuid, run_id: Uuid) -> Result<Option<super::WorkRunRow>> {
+    pub async fn get_run(
+        &self,
+        project_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<Option<super::WorkRunRow>> {
         sqlx::query_as::<_, super::WorkRunRow>(
             r#"
             SELECT id, project_id, status, source, cancel_requested_at,
@@ -808,7 +837,6 @@ impl Store {
         }
     }
 }
-
 
 impl Store {
     /// Create project with a fixed id if missing (workspace_id == project_id mapping).

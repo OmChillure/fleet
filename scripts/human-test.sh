@@ -156,7 +156,7 @@ cmd_guide() {
     "Chat: New chat, Chat history." \
     "Monitoring: Dashboard, Fleet, Sandboxes." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
-    "Workspace (expand it): Integrations, Settings." || return 0
+    "Workspace (expand it): Integrations, Settings, Workers." || return 0
 
   pause_step "Workspace switcher" \
     "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
@@ -164,6 +164,10 @@ cmd_guide() {
   pause_step "Settings" \
     "Number of agents + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
+
+  pause_step "Workers" \
+    "Workspace → Workers (/{ws}/workers). Add worker — copy the install command and pair token." \
+    "Token panel is enough. Do not require a second machine; pairing is outbound." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0

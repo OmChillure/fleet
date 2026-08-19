@@ -83,6 +83,7 @@ build-release:
 test:
     cargo test --workspace --lib --exclude fleet-ui --locked
     cargo test -p fleet-driver --locked
+    cargo test -p fleet-host --locked
 
 # Integration tests that need Postgres (`just db-up` + `.env.local` / DATABASE_URL).
 test-integration: _require-env db-up
@@ -91,7 +92,8 @@ test-integration: _require-env db-up
       --test tick_integration \
       --test api_integration \
       --test e2e_matrix \
-      --test process_sandbox
+      --test process_sandbox \
+      --test host_pool_spawn
     cargo test -p fleet-auth --locked --tests
     cargo test -p fleet-server --locked --tests
     cargo test -p fleet-db --locked --tests
@@ -138,3 +140,8 @@ fmt:
 # Clippy the workspace.
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Stage fleet-host / fleet-worker / fleet-driver for curl|sh.
+# Args: (none|--native) host toolchain; --bookworm glibc 2.36; --aarch64 linux-aarch64; --armv7 linux-armv7; --musl; --aarch64-musl; --armv7-musl; --windows windows-x86_64; --windows-arm64; --portable bookworm+musl.
+stage-worker-dist *args:
+    ./scripts/stage-worker-dist.sh {{args}}
