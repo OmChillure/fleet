@@ -45,10 +45,26 @@ fn hint_is_loopback(text: &str) -> bool {
 fn copy_text(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(window) = web_sys::window() {
-            let clipboard = window.navigator().clipboard();
-            let _ = clipboard.write_text(text);
-        }
+        use wasm_bindgen::JsCast;
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        // `Navigator::clipboard()` panics when the getter is undefined (Firefox
+        // insecure / permission). Dropping the write Promise also aborts Firefox.
+        let clip = js_sys::Reflect::get(
+            window.navigator().as_ref(),
+            &wasm_bindgen::JsValue::from_str("clipboard"),
+        )
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .and_then(|v| v.dyn_into::<web_sys::Clipboard>().ok());
+        let Some(clip) = clip else {
+            return;
+        };
+        let text = text.to_string();
+        spawn(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -71,7 +87,9 @@ pub fn Workers(workspace_id: String) -> Element {
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
 
     let ws_load = workspace_id.clone();
-    use_effect(move || {
+    // Once per mount. Do not track `hosts` — a write-triggered effect loops
+    // and Firefox OOMs on Add worker when the first card mounts.
+    use_hook(|| {
         let ws = ws_load.clone();
         spawn(async move {
             match list_hosts(&ws).await {
@@ -350,15 +368,19 @@ fn HostCard(
                         onchange: {
                             let workspace_id = workspace_id.clone();
                             let host = host.clone();
-                            move |_| {
+                            move |evt| {
                                 if busy() || revoked {
+                                    return;
+                                }
+                                let checked = evt.checked();
+                                if checked == host.paused {
                                     return;
                                 }
                                 busy.set(true);
                                 let ws = workspace_id.clone();
                                 let current = host.clone();
                                 let patch = HostPatch {
-                                    paused: Some(!host.paused),
+                                    paused: Some(checked),
                                     ..HostPatch::default()
                                 };
                                 spawn(async move {
@@ -381,15 +403,19 @@ fn HostCard(
                         onchange: {
                             let workspace_id = workspace_id.clone();
                             let host = host.clone();
-                            move |_| {
+                            move |evt| {
                                 if busy() || revoked {
+                                    return;
+                                }
+                                let checked = evt.checked();
+                                if checked == host.allow_host {
                                     return;
                                 }
                                 busy.set(true);
                                 let ws = workspace_id.clone();
                                 let current = host.clone();
                                 let patch = HostPatch {
-                                    allow_host: Some(!host.allow_host),
+                                    allow_host: Some(checked),
                                     ..HostPatch::default()
                                 };
                                 spawn(async move {
@@ -409,29 +435,6 @@ fn HostCard(
                         r#type: "checkbox",
                         checked: host.allow_container,
                         disabled: true,
-                        onchange: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            move |_| {
-                                if busy() || revoked {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                let patch = HostPatch {
-                                    allow_container: Some(!host.allow_container),
-                                    ..HostPatch::default()
-                                };
-                                spawn(async move {
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => on_updated.call(updated),
-                                        Err(e) => show_toast().error(e),
-                                    }
-                                    busy.set(false);
-                                });
-                            }
-                        },
                     }
                     "Allow container"
                     span { class: "text-[var(--app-muted)]",

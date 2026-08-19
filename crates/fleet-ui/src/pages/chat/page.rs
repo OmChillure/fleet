@@ -1016,10 +1016,24 @@ fn CodeBlock(lang: String, code: String) -> Element {
 fn copy_text(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(window) = web_sys::window() {
-            let clipboard = window.navigator().clipboard();
-            let _ = clipboard.write_text(text);
-        }
+        use wasm_bindgen::JsCast;
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let clip = js_sys::Reflect::get(
+            window.navigator().as_ref(),
+            &wasm_bindgen::JsValue::from_str("clipboard"),
+        )
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .and_then(|v| v.dyn_into::<web_sys::Clipboard>().ok());
+        let Some(clip) = clip else {
+            return;
+        };
+        let text = text.to_string();
+        spawn(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
