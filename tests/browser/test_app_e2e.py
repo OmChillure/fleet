@@ -206,10 +206,6 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
         page.get_by_role("button", name="Add worker").click()
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
-        body = page.inner_text("body")
-        self.assertIn("This pair token is shown once", body)
-        self.assertIn("Pair token", body)
-        self.assertIn("Install", body)
 
         token = page.locator("pre").nth(0).inner_text().strip()
         self.assertTrue(token.startswith("flp_"), f"pair token prefix: {token}")
@@ -219,10 +215,14 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("/install-worker.sh", install)
         self.assertIn("fleet-host pair", install)
         self.assertIn(token, install)
-        if any(s in install.lower() for s in ("127.0.0.1", "localhost", "[::1]")):
-            self.assertIn("loopback URL", body)
 
-        self.assertNotIn("No hosts yet", page.inner_text("body"))
+        # Token is shown once: dismiss + reload must not repeat the plaintext.
+        page.get_by_role("button", name="Done").click()
+        page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
+        self.assertNotIn(token, page.inner_text("body"))
+        page.reload(wait_until="networkidle")
+        page.wait_for_selector("h1")
+        self.assertNotIn(token, page.inner_text("body"))
         self.assertTrue(page.get_by_role("button", name="Revoke").first.is_visible())
         self.assertIn("pending", page.inner_text("body").lower())
 

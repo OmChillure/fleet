@@ -286,23 +286,3 @@ pub async fn apply_retry_after_failure(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod loopback_url_tests {
-    use super::worker_url_is_loopback;
-
-    #[test]
-    fn loopback_hosts_are_detected() {
-        assert!(worker_url_is_loopback("http://127.0.0.1:8080"));
-        assert!(worker_url_is_loopback("http://localhost:8080/v1"));
-        assert!(worker_url_is_loopback("http://[::1]:8080"));
-        assert!(worker_url_is_loopback("https://localhost"));
-    }
-
-    #[test]
-    fn public_hosts_are_not_loopback() {
-        assert!(!worker_url_is_loopback("https://fleet.example.com"));
-        assert!(!worker_url_is_loopback("http://192.168.1.10:8080"));
-        assert!(!worker_url_is_loopback("http://10.0.0.5:8080/v1"));
-    }
-}

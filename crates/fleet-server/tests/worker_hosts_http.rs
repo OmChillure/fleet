@@ -1016,3 +1016,231 @@ async fn install_worker_bin_dotdot_rejected() {
         out.raw
     );
 }
+
+#[tokio::test]
+async fn member_can_list_but_cannot_mutate() {
+    let (app, state) = app_with_state().await;
+    let (_owner_email, owner_jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&owner_jar),
+        Some(json!({ "name": "studio" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "create: {}", created.body);
+    let hid = created.body["host"]["id"]
+        .as_str()
+        .expect("host.id")
+        .to_string();
+
+    let member_email = unique_email();
+    let signed = signup(&app, &member_email, TEST_PASSWORD).await;
+    assert_eq!(
+        signed.status,
+        StatusCode::CREATED,
+        "member signup: {}",
+        signed.body
+    );
+    let (member_login, member_jar) = login(&app, &member_email, TEST_PASSWORD).await;
+    assert_eq!(
+        member_login.status,
+        StatusCode::OK,
+        "member login: {}",
+        member_login.body
+    );
+    let me = call(&app, "GET", "/api/auth/me", Some(&member_jar), None).await;
+    assert_eq!(me.status, StatusCode::OK, "me: {}", me.body);
+    let member_id =
+        Uuid::parse_str(me.body["user"]["id"].as_str().expect("user.id")).expect("uuid");
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
+    let mut tx = state.db.begin().await.expect("begin");
+    fleet_db::repos::workspaces::add_member_tx(
+        &mut tx,
+        workspace_id,
+        member_id,
+        "member",
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("add member");
+    tx.commit().await.expect("commit member");
+
+    let list = call(&app, "GET", &hosts_path(&ws), Some(&member_jar), None).await;
+    assert_eq!(list.status, StatusCode::OK, "member list: {}", list.body);
+    assert!(
+        list.body["hosts"]
+            .as_array()
+            .expect("hosts")
+            .iter()
+            .any(|h| h["id"].as_str() == Some(hid.as_str())),
+        "member must see the host: {}",
+        list.body
+    );
+    assert!(
+        list.body["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h.get("pair_token").is_none() && h.get("machine_token_hash").is_none()),
+        "list must not leak tokens: {}",
+        list.body
+    );
+
+    let create = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&member_jar),
+        Some(json!({ "name": "nope" })),
+    )
+    .await;
+    assert_eq!(
+        create.status,
+        StatusCode::FORBIDDEN,
+        "member create: {}",
+        create.body
+    );
+
+    let patch = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&member_jar),
+        Some(json!({ "paused": true })),
+    )
+    .await;
+    assert_eq!(
+        patch.status,
+        StatusCode::FORBIDDEN,
+        "member patch: {}",
+        patch.body
+    );
+
+    let rotate = call(
+        &app,
+        "POST",
+        &format!("{}/{hid}/pair-tokens", hosts_path(&ws)),
+        Some(&member_jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        rotate.status,
+        StatusCode::FORBIDDEN,
+        "member rotate: {}",
+        rotate.body
+    );
+
+    let del = call(
+        &app,
+        "DELETE",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&member_jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        del.status,
+        StatusCode::FORBIDDEN,
+        "member delete: {}",
+        del.body
+    );
+}
+
+#[tokio::test]
+async fn new_pair_token_only_while_pending_and_old_token_dies() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&jar),
+        Some(json!({ "name": "rotate" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "create: {}", created.body);
+    let hid = created.body["host"]["id"]
+        .as_str()
+        .expect("host.id")
+        .to_string();
+    let old = created.body["pair_token"]
+        .as_str()
+        .expect("pair_token")
+        .to_string();
+
+    let rotated = call(
+        &app,
+        "POST",
+        &format!("{}/{hid}/pair-tokens", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(rotated.status, StatusCode::OK, "rotate: {}", rotated.body);
+    let new = rotated.body["pair_token"]
+        .as_str()
+        .expect("new token")
+        .to_string();
+    assert_ne!(new, old, "rotate must issue a different token");
+
+    let stale = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": old,
+            "hostname": "box",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert!(
+        stale.status == StatusCode::UNAUTHORIZED || stale.status == StatusCode::CONFLICT,
+        "old token after rotate: {} {}",
+        stale.status,
+        stale.body
+    );
+
+    let paired = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": new,
+            "hostname": "box",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert_eq!(
+        paired.status,
+        StatusCode::OK,
+        "pair with new: {}",
+        paired.body
+    );
+
+    let again = call(
+        &app,
+        "POST",
+        &format!("{}/{hid}/pair-tokens", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        again.status,
+        StatusCode::CONFLICT,
+        "rotate after pair: {}",
+        again.body
+    );
+}

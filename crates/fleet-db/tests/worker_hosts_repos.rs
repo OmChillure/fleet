@@ -489,3 +489,103 @@ async fn complete_owned_rejects_wrong_host() {
         .expect("complete_owned owner");
     assert!(ok, "owning host must complete the lease");
 }
+
+#[tokio::test]
+async fn pair_token_is_stored_hashed_not_plaintext() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "hashed", expires).await;
+
+    let stored: String = sqlx::query_scalar(
+        "SELECT token_hash FROM worker_host_pair_tokens WHERE host_id = $1 AND used_at IS NULL",
+    )
+    .bind(host.id)
+    .fetch_one(&pool)
+    .await
+    .expect("pair token row");
+    assert_eq!(stored, hash_token(&token));
+    assert_ne!(stored, token);
+    assert!(
+        !stored.contains(&token),
+        "plaintext pair token must not appear in the hash column"
+    );
+}
+
+#[tokio::test]
+async fn replace_pair_token_only_while_pending_and_invalidates_old() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, old_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "rotate", expires).await;
+
+    let new_token = generate_pair_token();
+    worker_hosts::replace_pair_token(&pool, host.id, &hash_token(&new_token), expires)
+        .await
+        .expect("replace while pending");
+
+    let err =
+        worker_hosts::consume_pair_token(&pool, &old_token, "box", "linux-x86_64", true, false)
+            .await
+            .expect_err("old pair token must die after rotate");
+    match err {
+        DbError::Conflict(_) | DbError::NotFound(_) => {}
+        other => panic!("expected used/invalid old token, got {other:?}"),
+    }
+
+    let paired = pair_host(&pool, &new_token, "box").await;
+    assert_eq!(paired.host.id, host.id);
+    assert_eq!(paired.host.status, "online");
+
+    let again = worker_hosts::replace_pair_token(
+        &pool,
+        host.id,
+        &hash_token(&generate_pair_token()),
+        expires,
+    )
+    .await
+    .expect_err("online host must not get a new pair token");
+    match again {
+        DbError::Conflict(msg) => assert!(
+            msg.contains("pending"),
+            "conflict should say pending-only: {msg}"
+        ),
+        other => panic!("expected Conflict after pair, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stored_online_with_stale_last_seen_serializes_offline() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "stale-seen", expires).await;
+    pair_host(&pool, &token, "stale-box").await;
+
+    sqlx::query("UPDATE worker_hosts SET last_seen_at = now() - interval '2 minutes' WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("age last_seen_at");
+
+    let row = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(row.status, "online", "stored status stays online");
+    assert_eq!(
+        row.as_public(Utc::now()).status,
+        "offline",
+        "API/UI must report offline after 30s without a heartbeat"
+    );
+    assert!(
+        worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+            .await
+            .expect("assignable")
+            .is_empty(),
+        "stale host must not be scheduled"
+    );
+}

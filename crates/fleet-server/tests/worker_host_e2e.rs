@@ -695,3 +695,138 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
         after.body
     );
 }
+
+/// Tick must enqueue on a live host instead of spawning the local stub.
+/// stub_duration is 0 in this fixture: a local spawn would complete in the
+/// same tick. Remote stays `spawning` until the host leases + job-heartbeats.
+#[tokio::test]
+async fn tick_assigns_remote_host_instead_of_local_stub() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "tick-host").await;
+
+    let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
+
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
+
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    assert!(
+        tick.body["spawned"].as_u64().unwrap_or(0) >= 1,
+        "tick must spawn: {}",
+        tick.body
+    );
+    assert_eq!(
+        tick.body["completed_via_runtime"].as_u64().unwrap_or(0),
+        0,
+        "remote session must not be completed by the local stub: {}",
+        tick.body
+    );
+
+    let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
+    let sess = sessions.body["sessions"]
+        .as_array()
+        .expect("sessions")
+        .first()
+        .unwrap_or_else(|| panic!("expected a session: {}", sessions.body));
+    assert_eq!(
+        sess["runtime_backend"], "remote",
+        "tick must choose the paired host, not stub: {}",
+        sessions.body
+    );
+    assert_eq!(
+        sess["runtime_handle"].as_str(),
+        Some(format!("host:{host_id}").as_str()),
+        "{}",
+        sessions.body
+    );
+    assert_eq!(
+        sess["status"], "spawning",
+        "remote job stays spawning until the host leases it: {}",
+        sessions.body
+    );
+
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+    let claim = lease.body["claim"]
+        .as_object()
+        .unwrap_or_else(|| panic!("tick must enqueue a claim: {}", lease.body));
+    assert_eq!(claim["payload"]["runtime"], "host");
+    assert_eq!(
+        claim["payload"]["host_id"].as_str(),
+        Some(host_id.to_string().as_str())
+    );
+    assert_eq!(claim["payload"]["session_id"].as_str(), sess["id"].as_str());
+    let token = claim["payload"]["worker_token"].as_str().unwrap_or("");
+    assert!(!token.is_empty(), "job token must be on the payload");
+    assert!(
+        claim["payload"]["env"]
+            .as_object()
+            .map(|e| e.get("FLEET_WORK_DIR").is_none())
+            .unwrap_or(true),
+        "CP work_dir must not leave the plane: {}",
+        lease.body
+    );
+}
+
+#[tokio::test]
+async fn tick_without_host_uses_local_sandbox() {
+    let app = app_with_state().await.0;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
+
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
+
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    assert!(
+        tick.body["spawned"].as_u64().unwrap_or(0) >= 1,
+        "tick must spawn locally: {}",
+        tick.body
+    );
+
+    let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
+    let sess = sessions.body["sessions"]
+        .as_array()
+        .expect("sessions")
+        .first()
+        .unwrap_or_else(|| panic!("expected a session: {}", sessions.body));
+    assert_ne!(
+        sess["runtime_backend"], "remote",
+        "no paired host → local SANDBOX_BACKEND, not remote: {}",
+        sessions.body
+    );
+    assert_eq!(
+        sess["runtime_backend"], "stub",
+        "this fixture's local backend is stub: {}",
+        sessions.body
+    );
+}

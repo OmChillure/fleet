@@ -171,6 +171,90 @@ pub struct HostCpSettings {
     pub labels: Option<Vec<String>>,
 }
 
+#[cfg(test)]
+mod public_view_tests {
+    use super::*;
+
+    fn host(status: &str, last_seen: Option<DateTime<Utc>>) -> WorkerHost {
+        let now = Utc::now();
+        WorkerHost {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            name: "studio".into(),
+            status: status.into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            allow_host: true,
+            allow_container: true,
+            max_concurrent: 4,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: Some("should-never-leave".into()),
+            advertised_host: true,
+            advertised_container: false,
+            platform: Some("linux-x86_64".into()),
+            hostname: Some("box".into()),
+            last_seen_at: last_seen,
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            created_by: None,
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn stale_online_host_is_reported_offline() {
+        let now = Utc::now();
+        let fresh = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(5)));
+        assert_eq!(fresh.public_status(now), WORKER_HOST_STATUS_ONLINE);
+
+        let stale = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(31)));
+        assert_eq!(stale.public_status(now), "offline");
+
+        let never_seen = host(WORKER_HOST_STATUS_ONLINE, None);
+        assert_eq!(never_seen.public_status(now), "offline");
+    }
+
+    #[test]
+    fn pending_and_disabled_are_not_rewritten_to_offline() {
+        let now = Utc::now();
+        let pending = host(WORKER_HOST_STATUS_PENDING, None);
+        assert_eq!(pending.public_status(now), WORKER_HOST_STATUS_PENDING);
+        let disabled = host(WORKER_HOST_STATUS_DISABLED, Some(now - Duration::hours(1)));
+        assert_eq!(disabled.public_status(now), WORKER_HOST_STATUS_DISABLED);
+    }
+
+    #[test]
+    fn public_json_never_includes_hashes_or_tokens() {
+        let h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        let v = serde_json::to_value(h.as_public(Utc::now())).expect("json");
+        let obj = v.as_object().expect("object");
+        for secret in [
+            "machine_token_hash",
+            "pair_token",
+            "pair_token_hash",
+            "token_hash",
+            "machine_token",
+        ] {
+            assert!(
+                !obj.contains_key(secret),
+                "public host leaked {secret}: {v}"
+            );
+        }
+        // Stored WorkerHost must also skip the hash on accidental serialize.
+        let raw = serde_json::to_value(&h).expect("host json");
+        assert!(
+            raw.get("machine_token_hash").is_none(),
+            "WorkerHost serialize leaked hash: {raw}"
+        );
+        assert_eq!(v["status"], "online");
+    }
+}
+
 /// Pair-token row (`worker_host_pair_tokens`). Store only `token_hash`.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct WorkerHostPairToken {
