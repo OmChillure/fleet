@@ -267,11 +267,44 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn("TimeoutSec 600", text, name)
 
     def test_windows_bootstrap_uses_os_architecture(self):
-        """x64 PowerShell on ARM64 Windows reports PROCESSOR_ARCHITECTURE=AMD64."""
+        """x64 PowerShell on ARM64 Windows reports PROCESSOR_ARCHITECTURE=AMD64.
+
+        .NET Framework OSArchitecture also lies as X64 under emulation. Use the
+        Machine-scoped env / HKLM value first.
+        """
+        for name in ("install-worker.ps1", "windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn(
+                'GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")',
+                text,
+                name,
+            )
+            self.assertIn("windows-arm64", text, name)
+            self.assertIn("Win32_Processor", text, name)
+
+    def test_windows_refuses_wrong_arch_and_does_not_hide_errors(self):
+        """Do not install amd64 PE on ARM64, and do not pair a leftover exe."""
+        for name, want_pe, this_plat in (
+            ("windows-x86_64.ps1", "amd64", "windows-x86_64"),
+            ("windows-arm64.ps1", "arm64", "windows-arm64"),
+        ):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("Get-PeMachine", text, name)
+            self.assertIn("0x8664", text, name)
+            self.assertIn("0xAA64", text, name)
+            self.assertIn(f'$WantPe = "{want_pe}"', text, name)
+            self.assertIn(f'$ThisPlat = "{this_plat}"', text, name)
+            self.assertIn("this machine is $detected, not $ThisPlat", text, name)
+            self.assertIn("failed $bin", text, name)
+            self.assertNotIn(
+                'Write-Host "no prebuilt $bin at $url"',
+                text,
+                name,
+            )
+            self.assertIn("hostReady", text, name)
+            self.assertIn("missing or not valid", text, name)
         boot = (SCRIPT_DIR / "install-worker.ps1").read_text(encoding="ascii")
-        self.assertIn("OSArchitecture", boot)
-        self.assertIn("Arm64", boot)
-        self.assertIn("windows-arm64", boot)
+        self.assertIn("machine arch:", boot)
 
     def test_every_platform_starts_daemon_after_pair(self):
         """Pair is a handshake. Every OS installer must start run after pair.

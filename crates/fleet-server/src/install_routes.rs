@@ -416,6 +416,10 @@ mod tests {
             body.contains("no runtime"),
             "libunwind 404 must be skip, not a hard fail"
         );
+        assert!(
+            body.contains(r#"GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")"#),
+            "ARM64 installer must refuse x64-emulation arch"
+        );
     }
 
     #[test]

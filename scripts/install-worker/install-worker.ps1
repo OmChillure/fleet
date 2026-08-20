@@ -7,16 +7,31 @@
 $ErrorActionPreference = "Stop"
 
 function Get-FleetPlatform {
-    # OS arch, not this process. x64 PowerShell on ARM64 Windows reports AMD64.
-    $osArch = $null
+    # OS arch, not this process. x64 PowerShell on ARM64 Windows reports AMD64
+    # and .NET Framework OSArchitecture often lies as X64 under emulation.
+    $machine = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")
+    if (-not $machine) {
+        try {
+            $machine = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" -ErrorAction Stop).PROCESSOR_ARCHITECTURE
+        } catch { }
+    }
+    switch -Regex ("$machine") {
+        "ARM64" { return "windows-arm64" }
+        "AMD64" { return "windows-x86_64" }
+        "x86" { throw "32-bit Windows is not supported" }
+    }
+    try {
+        $n = [int]((Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1).Architecture)
+        if ($n -eq 12) { return "windows-arm64" }
+        if ($n -eq 9) { return "windows-x86_64" }
+    } catch { }
     try {
         $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        switch -Regex ($osArch) {
+            "Arm64" { return "windows-arm64" }
+            "X64" { return "windows-x86_64" }
+        }
     } catch { }
-    switch -Regex ("$osArch") {
-        "Arm64" { return "windows-arm64" }
-        "X64" { return "windows-x86_64" }
-        "X86" { throw "32-bit Windows is not supported" }
-    }
     $arch = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
     switch -Regex ($arch) {
@@ -71,7 +86,10 @@ $platform = Get-FleetPlatform
 $env:FLEET_URL = $origin
 $env:FLEET_INSTALL_ORIGIN = $origin
 $env:FLEET_PLATFORM = $platform
+$machineArch = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")
 Write-Host "platform: $platform"
+Write-Host "  machine arch: $machineArch"
+Write-Host "  process arch: $($env:PROCESSOR_ARCHITECTURE)"
 Write-Host "source:   $origin"
 
 $scriptUrl = "$origin/install/worker/${platform}.ps1"
