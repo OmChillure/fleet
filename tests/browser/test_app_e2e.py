@@ -230,8 +230,17 @@ class BrowserE2ETests(unittest.TestCase):
         page.reload(wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertNotIn(token, page.inner_text("body"))
-        self.assertTrue(page.get_by_role("button", name="Revoke").first.is_visible())
-        self.assertIn("pending", page.inner_text("body").lower())
+        card = page.inner_text("body")
+        self.assertTrue(
+            page.get_by_role("button", name="Remove worker").first.is_visible()
+        )
+        self.assertTrue(page.get_by_role("button", name="Pause").first.is_visible())
+        self.assertIn("pending", card.lower())
+        self.assertIn("Waiting to pair", card)
+        self.assertIn("Max jobs at once", card)
+        self.assertNotIn("Allow host", card)
+        self.assertNotIn("Allow container", card)
+        self.assertNotIn("Advertised", card)
 
     def test_06_api_health_from_browser(self) -> None:
         res = self.page.request.get(f"{API}/health")

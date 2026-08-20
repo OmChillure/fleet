@@ -1,6 +1,7 @@
 //! Workspace Workers: pair a machine that phones home (no inbound dial).
 
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
     CreateHostBody, CreateHostResponse, HostPatch, HostPublic, create_host, install_commands,
@@ -8,6 +9,8 @@ use super::api::{
 };
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
+
+const POLL_MS: u32 = 10_000;
 
 fn field_class() -> &'static str {
     "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-sm text-[var(--app-fg)] outline-none focus:border-[var(--app-muted)]"
@@ -31,10 +34,58 @@ fn format_ts(ts: &str) -> String {
     ts.get(..19).unwrap_or(ts).replace('T', " ")
 }
 
-fn format_ts_opt(ts: &Option<String>) -> String {
-    match ts {
-        Some(s) if !s.is_empty() => format_ts(s),
-        _ => "—".into(),
+fn relative_seen(ts: &Option<String>) -> String {
+    let Some(raw) = ts.as_ref().filter(|s| !s.is_empty()) else {
+        return "never".into();
+    };
+    let parsed = js_sys::Date::parse(raw);
+    if parsed.is_nan() {
+        return format_ts(raw);
+    }
+    let secs = ((js_sys::Date::now() - parsed) / 1000.0).max(0.0) as i64;
+    if secs < 5 {
+        "just now".into()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn status_label(status: &str) -> &str {
+    match status {
+        "disabled" => "removed",
+        other => other,
+    }
+}
+
+fn display_name(host: &HostPublic) -> String {
+    let n = host.name.trim();
+    if n.is_empty() {
+        "Unnamed worker".into()
+    } else {
+        n.to_string()
+    }
+}
+
+fn not_taking_reason(host: &HostPublic) -> Option<String> {
+    match host.status.as_str() {
+        "disabled" => Some("Removed — will not take jobs.".into()),
+        "pending" => Some("Waiting to pair.".into()),
+        "offline" => Some("Offline — fleet-host is not heartbeating.".into()),
+        "error" => Some(
+            host.last_error
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Error — not taking jobs.".into()),
+        ),
+        _ if host.paused => Some("Paused — not taking new jobs.".into()),
+        "online" if !host.allow_host || !host.advertised_host => Some("Not taking jobs.".into()),
+        _ => None,
     }
 }
 
@@ -57,23 +108,30 @@ pub fn Workers(workspace_id: String) -> Element {
     let mut hosts = use_signal(Vec::<HostPublic>::new);
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
 
-    let ws_load = workspace_id.clone();
-    // Once per mount. Do not track `hosts` — a write-triggered effect loops
-    // and Firefox OOMs on Add worker when the first card mounts.
-    use_hook(|| {
-        let ws = ws_load.clone();
+    // Do not read `hosts` / `loading` here — a write-triggered effect loops
+    // and Firefox OOMs when the first card mounts.
+    let ws_poll = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_poll.clone();
         spawn(async move {
-            match list_hosts(&ws).await {
-                Ok(list) => {
-                    hosts.set(list);
-                    error.set(None);
+            let mut first = true;
+            loop {
+                match list_hosts(&ws).await {
+                    Ok(list) => {
+                        hosts.set(list);
+                        error.set(None);
+                    }
+                    Err(e) => {
+                        if first {
+                            error.set(Some(e.clone()));
+                            show_toast().error(e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error.set(Some(e.clone()));
-                    show_toast().error(e);
-                }
+                first = false;
+                loading.set(false);
+                TimeoutFuture::new(POLL_MS).await;
             }
-            loading.set(false);
         });
     });
 
@@ -106,7 +164,7 @@ pub fn Workers(workspace_id: String) -> Element {
     };
 
     rsx! {
-        div { class: "mx-auto max-w-3xl px-4 py-6 md:px-6",
+        div { class: "mx-auto flex h-full w-full max-w-3xl flex-col overflow-auto px-4 py-6 md:px-6",
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div { class: "min-w-0 flex-1",
                     h1 { class: "m-0 text-2xl font-semibold tracking-tight text-[var(--app-fg)]",
@@ -194,7 +252,7 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
                 "Pair this worker"
             }
             p { class: "mt-1 text-sm text-[var(--app-fg)]",
-                "On the machine, open a terminal and paste the command. This worker is three binaries: fleet-host (stays up; pairs and takes jobs), fleet-worker (each job), fleet-driver (Grok/ACP). Then it pairs and starts."
+                "On the machine, open a terminal and paste the command. It installs fleet-host, fleet-worker, and fleet-driver, then pairs and starts."
             }
             p { class: "mt-1 text-xs text-amber-300/90",
                 "This token is shown once and expires {expires}."
@@ -290,6 +348,10 @@ fn PairPanel(created: CreateHostResponse, on_dismiss: EventHandler<MouseEvent>) 
     }
 }
 
+fn btn_class() -> &'static str {
+    "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50"
+}
+
 #[component]
 fn HostCard(
     workspace_id: String,
@@ -298,28 +360,90 @@ fn HostCard(
     on_revoked: EventHandler<String>,
 ) -> Element {
     let mut busy = use_signal(|| false);
-    let mut confirm_revoke = use_signal(|| false);
+    let mut confirm_remove = use_signal(|| false);
+    let mut renaming = use_signal(|| false);
+    let mut name_draft = use_signal(|| host.name.clone());
     let revoked = host.status == "disabled";
     let pill = status_pill_class(&host.status);
-    let last_seen = format_ts_opt(&host.last_seen_at);
-    let can_host = host.allow_host && host.advertised_host;
-    // v1 is host-only; advertised container is not a working executor.
-    let no_effective = matches!(host.status.as_str(), "online" | "offline") && !can_host;
-
+    let last_seen = relative_seen(&host.last_seen_at);
+    let title = display_name(&host);
+    let why = not_taking_reason(&host);
     let hostname = host.hostname.clone().unwrap_or_default();
     let platform = host.platform.clone().unwrap_or_default();
     let last_error = host.last_error.clone().unwrap_or_default();
+    let show_error = !last_error.is_empty()
+        && why
+            .as_ref()
+            .map(|w| !w.contains(&last_error))
+            .unwrap_or(true);
 
     rsx! {
         article { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
             div { class: "flex flex-wrap items-start justify-between gap-2",
                 div { class: "min-w-0 flex flex-wrap items-center gap-2",
-                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "{host.name}"
+                    if renaming() && !revoked {
+                        input {
+                            class: "{field_class()} min-w-[10rem]",
+                            value: "{name_draft}",
+                            autofocus: true,
+                            oninput: move |e| name_draft.set(e.value()),
+                            onkeydown: {
+                                let workspace_id = workspace_id.clone();
+                                let host = host.clone();
+                                move |e: Event<KeyboardData>| {
+                                    let key = e.key();
+                                    if key == Key::Escape {
+                                        name_draft.set(host.name.clone());
+                                        renaming.set(false);
+                                    } else if key == Key::Enter {
+                                        let next = name_draft().trim().to_string();
+                                        if next.is_empty() || next == host.name {
+                                            renaming.set(false);
+                                            return;
+                                        }
+                                        if busy() {
+                                            return;
+                                        }
+                                        busy.set(true);
+                                        let ws = workspace_id.clone();
+                                        let current = host.clone();
+                                        let patch = HostPatch {
+                                            name: Some(next),
+                                            ..HostPatch::default()
+                                        };
+                                        spawn(async move {
+                                            match patch_host(&ws, &current.id, &current, &patch)
+                                                .await
+                                            {
+                                                Ok(updated) => on_updated.call(updated),
+                                                Err(e) => show_toast().error(e),
+                                            }
+                                            busy.set(false);
+                                            renaming.set(false);
+                                        });
+                                    }
+                                }
+                            },
+                        }
+                    } else {
+                        button {
+                            class: "m-0 border-0 bg-transparent p-0 text-left text-sm font-semibold text-[var(--app-fg)] hover:underline disabled:no-underline disabled:opacity-70",
+                            r#type: "button",
+                            disabled: revoked,
+                            title: "Rename",
+                            onclick: {
+                                let name = host.name.clone();
+                                move |_| {
+                                    name_draft.set(name.clone());
+                                    renaming.set(true);
+                                }
+                            },
+                            "{title}"
+                        }
                     }
                     span {
                         class: "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium {pill}",
-                        "{host.status}"
+                        "{status_label(&host.status)}"
                     }
                 }
                 span { class: "text-xs text-[var(--app-muted)]",
@@ -341,56 +465,33 @@ fn HostCard(
                 }
             }
 
-            div { class: "mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--app-muted)]",
-                span { "Advertised" }
-                if host.advertised_host {
-                    span { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[var(--app-fg)]",
-                        "host"
-                    }
-                }
-                if host.advertised_container {
-                    span { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[var(--app-fg)]",
-                        "container"
-                    }
-                }
-                if !host.advertised_host && !host.advertised_container {
-                    span { "none yet" }
-                }
-                span { class: "text-[var(--app-border)]", "·" }
-                span { "max {host.max_concurrent}" }
-            }
-
-            if no_effective {
+            if let Some(reason) = why {
                 p { class: "mt-2 text-xs text-amber-300/90",
-                    "No effective run mode — this worker will not receive jobs."
+                    "{reason}"
                 }
             }
-            if !last_error.is_empty() {
+            if show_error {
                 p { class: "mt-2 text-xs text-red-400", "{last_error}" }
             }
 
-            div { class: "mt-3 flex flex-wrap items-center gap-x-4 gap-y-2",
-                label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
-                    input {
-                        r#type: "checkbox",
-                        checked: host.paused,
-                        disabled: busy() || revoked,
-                        onchange: {
+            if !revoked {
+                div { class: "mt-3 flex flex-wrap items-center gap-x-4 gap-y-2",
+                    button {
+                        class: "{btn_class()}",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: {
                             let workspace_id = workspace_id.clone();
                             let host = host.clone();
-                            move |evt| {
-                                if busy() || revoked {
-                                    return;
-                                }
-                                let checked = evt.checked();
-                                if checked == host.paused {
+                            move |_| {
+                                if busy() {
                                     return;
                                 }
                                 busy.set(true);
                                 let ws = workspace_id.clone();
                                 let current = host.clone();
                                 let patch = HostPatch {
-                                    paused: Some(checked),
+                                    paused: Some(!host.paused),
                                     ..HostPatch::default()
                                 };
                                 spawn(async move {
@@ -402,102 +503,57 @@ fn HostCard(
                                 });
                             }
                         },
+                        if host.paused { "Resume" } else { "Pause" }
                     }
-                    "Paused"
-                }
-                label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
-                    input {
-                        r#type: "checkbox",
-                        checked: host.allow_host,
-                        disabled: busy() || revoked,
-                        onchange: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            move |evt| {
-                                if busy() || revoked {
-                                    return;
-                                }
-                                let checked = evt.checked();
-                                if checked == host.allow_host {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                let patch = HostPatch {
-                                    allow_host: Some(checked),
-                                    ..HostPatch::default()
-                                };
-                                spawn(async move {
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => on_updated.call(updated),
-                                        Err(e) => show_toast().error(e),
+                    label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
+                        "Max jobs at once"
+                        input {
+                            class: "{field_class()} w-16",
+                            r#type: "number",
+                            min: "1",
+                            max: "256",
+                            value: "{host.max_concurrent}",
+                            disabled: busy(),
+                            onchange: {
+                                let workspace_id = workspace_id.clone();
+                                let host = host.clone();
+                                move |e| {
+                                    if busy() {
+                                        return;
                                     }
-                                    busy.set(false);
-                                });
-                            }
-                        },
-                    }
-                    "Allow host jobs"
-                }
-                label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
-                    input {
-                        r#type: "checkbox",
-                        checked: host.allow_container,
-                        disabled: true,
-                    }
-                    "Allow container jobs"
-                    span { class: "text-[var(--app-muted)]",
-                        "(not shipped)"
-                    }
-                }
-                label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
-                    "max"
-                    input {
-                        class: "{field_class()} w-16",
-                        r#type: "number",
-                        min: "1",
-                        max: "256",
-                        value: "{host.max_concurrent}",
-                        disabled: busy() || revoked,
-                        onchange: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            move |e| {
-                                if busy() || revoked {
-                                    return;
-                                }
-                                let Ok(n) = e.value().parse::<i32>() else {
-                                    return;
-                                };
-                                let n = n.clamp(1, 256);
-                                if n == host.max_concurrent {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                let patch = HostPatch {
-                                    max_concurrent: Some(n),
-                                    ..HostPatch::default()
-                                };
-                                spawn(async move {
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => on_updated.call(updated),
-                                        Err(e) => show_toast().error(e),
+                                    let Ok(n) = e.value().parse::<i32>() else {
+                                        return;
+                                    };
+                                    let n = n.clamp(1, 256);
+                                    if n == host.max_concurrent {
+                                        return;
                                     }
-                                    busy.set(false);
-                                });
-                            }
-                        },
+                                    busy.set(true);
+                                    let ws = workspace_id.clone();
+                                    let current = host.clone();
+                                    let patch = HostPatch {
+                                        max_concurrent: Some(n),
+                                        ..HostPatch::default()
+                                    };
+                                    spawn(async move {
+                                        match patch_host(&ws, &current.id, &current, &patch).await
+                                        {
+                                            Ok(updated) => on_updated.call(updated),
+                                            Err(e) => show_toast().error(e),
+                                        }
+                                        busy.set(false);
+                                    });
+                                }
+                            },
+                        }
                     }
                 }
 
-                if !revoked {
-                    if confirm_revoke() {
+                div { class: "mt-3 border-t border-[var(--app-border)] pt-3",
+                    if confirm_remove() {
                         span { class: "inline-flex flex-wrap items-center gap-2 text-xs",
                             span { class: "text-[var(--app-muted)]",
-                                "Revoke this worker?"
+                                "Remove this worker? It must be paired again to come back."
                             }
                             button {
                                 class: "rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/15 disabled:opacity-50",
@@ -517,22 +573,22 @@ fn HostCard(
                                             match revoke_host(&ws, &id).await {
                                                 Ok(()) => {
                                                     on_revoked.call(id);
-                                                    show_toast().success("Worker revoked.");
+                                                    show_toast().success("Worker removed.");
                                                 }
                                                 Err(e) => show_toast().error(e),
                                             }
                                             busy.set(false);
-                                            confirm_revoke.set(false);
+                                            confirm_remove.set(false);
                                         });
                                     }
                                 },
                                 "Confirm"
                             }
                             button {
-                                class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs text-[var(--app-muted)] hover:text-[var(--app-fg)]",
+                                class: "{btn_class()}",
                                 r#type: "button",
                                 disabled: busy(),
-                                onclick: move |_| confirm_revoke.set(false),
+                                onclick: move |_| confirm_remove.set(false),
                                 "Cancel"
                             }
                         }
@@ -541,8 +597,8 @@ fn HostCard(
                             class: "rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/15 disabled:opacity-50",
                             r#type: "button",
                             disabled: busy(),
-                            onclick: move |_| confirm_revoke.set(true),
-                            "Revoke"
+                            onclick: move |_| confirm_remove.set(true),
+                            "Remove worker"
                         }
                     }
                 }

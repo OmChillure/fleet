@@ -438,11 +438,12 @@ Job child still POSTs `/v1/.../heartbeat|status` with the **job** token.
 
 New route `/{workspace_id}/workers` (sidebar: Workspace → Workers).
 
-- List hosts: name, status chip, modes, last seen, pause/disable.
+- List workers: name, status chip, last seen, hostname/platform.
 - **Add worker**: POST, show pair token **once** + install commands
   (copy). Token is not shown again.
-- Edit CP settings (allow host / container, max concurrent, pause).
-- Revoke.
+- Everyday: Pause / Resume, max jobs at once. Rename by clicking the name.
+- Remove worker (revoke). Do not expose allow_host / allow_container on the card
+  (v1 is host-only; container is not shipped).
 
 Human-test + `record_demo.py` scene `workers` in the same change.
 

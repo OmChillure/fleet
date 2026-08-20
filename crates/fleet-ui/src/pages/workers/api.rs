@@ -75,6 +75,8 @@ pub struct CreateHostBody {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct HostPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_host: Option<bool>,
@@ -209,6 +211,9 @@ fn error_message(status: reqwest::StatusCode, text: &str) -> String {
 }
 
 fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
+    if let Some(v) = patch.name.clone() {
+        host.name = v;
+    }
     if let Some(v) = patch.paused {
         host.paused = v;
     }
