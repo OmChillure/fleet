@@ -811,7 +811,7 @@ fn HostCard(
 
     rsx! {
         article { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-            div { class: "flex flex-wrap items-start justify-between gap-2",
+            div { class: "flex flex-wrap items-start justify-between gap-x-3 gap-y-1",
                 div { class: "min-w-0 flex flex-wrap items-center gap-2",
                     if renaming() && !revoked {
                         input {
@@ -878,61 +878,59 @@ fn HostCard(
                         "{status_label(&host.status)}"
                     }
                 }
-                span { class: "text-xs text-[var(--app-muted)]",
-                    "last seen {last_seen}"
-                }
-                span {
-                    class: "text-xs text-[var(--app-muted)]",
-                    title: "Stable worker id. Same machine keeps this id after remove + re-pair.",
-                    "worker {worker_id_label(&host)}"
+                div { class: "flex flex-wrap items-center gap-x-3 text-xs text-[var(--app-muted)]",
+                    span { "last seen {last_seen}" }
+                    span {
+                        title: "Stable worker id. Same machine keeps this id after remove + re-pair.",
+                        "id {worker_id_label(&host)}"
+                    }
                 }
             }
 
-            if host.status != "pending" && host.status != "disabled" {
-                p {
-                    class: "mt-1 text-xs text-[var(--app-muted)]",
-                    title: "{software_title(&host)}",
-                    "software "
-                    if software_flag(&host) == Some("outdated")
-                        || software_flag(&host) == Some("old package")
-                    {
-                        span { class: "text-amber-400",
+            div { class: "mt-3 space-y-1 text-xs text-[var(--app-muted)]",
+                if !hostname.is_empty() || !platform.is_empty() {
+                    p { class: "m-0",
+                        if !hostname.is_empty() {
+                            "{hostname}"
+                        }
+                        if !hostname.is_empty() && !platform.is_empty() {
+                            " · "
+                        }
+                        if !platform.is_empty() {
+                            "{platform}"
+                        }
+                    }
+                }
+                if let Some(specs) = specs_line(&host) {
+                    p { class: "m-0", "{specs}" }
+                }
+                if host.status != "pending" && host.status != "disabled" {
+                    p {
+                        class: "m-0",
+                        title: "{software_title(&host)}",
+                        "software "
+                        if software_flag(&host) == Some("outdated")
+                            || software_flag(&host) == Some("old package")
+                        {
+                            span { class: "text-amber-400",
+                                "{software_line(&host)}"
+                            }
+                        } else {
                             "{software_line(&host)}"
                         }
-                    } else {
-                        "{software_line(&host)}"
                     }
                 }
-            }
-
-            if !hostname.is_empty() || !platform.is_empty() {
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    if !hostname.is_empty() {
-                        "{hostname}"
+                p { class: "m-0",
+                    "jobs {host.current_jobs} / {job_cap(&host)}"
+                    if let Some(pct) = host.hardware.as_ref().and_then(|h| h.cpu_used_pct) {
+                        " · cpu {pct}%"
                     }
-                    if !hostname.is_empty() && !platform.is_empty() {
-                        " · "
+                    if let Some(pct) = host.hardware.as_ref().and_then(|h| h.mem_used_pct) {
+                        " · mem {pct}%"
                     }
-                    if !platform.is_empty() {
-                        "{platform}"
+                    if let Some(pct) = host.hardware.as_ref().and_then(|h| h.gpu_used_pct) {
+                        " · gpu {pct}%"
                     }
-                }
-            }
-            if let Some(specs) = specs_line(&host) {
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "{specs}"
-                }
-            }
-            p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "jobs {host.current_jobs} / {job_cap(&host)}"
-                if let Some(pct) = host.hardware.as_ref().and_then(|h| h.cpu_used_pct) {
-                    " · cpu {pct}%"
-                }
-                if let Some(pct) = host.hardware.as_ref().and_then(|h| h.mem_used_pct) {
-                    " · mem {pct}%"
-                }
-                if let Some(pct) = host.hardware.as_ref().and_then(|h| h.gpu_used_pct) {
-                    " · gpu {pct}%"
                 }
             }
 
@@ -946,7 +944,7 @@ fn HostCard(
             }
 
             if !revoked {
-                div { class: "mt-3 flex flex-wrap items-center gap-x-4 gap-y-2",
+                div { class: "mt-3 space-y-3 border-t border-[var(--app-border)] pt-3",
                     RunnerModeChecks {
                         native: host.allow_host,
                         sandboxed: host.allow_container,
@@ -1004,6 +1002,7 @@ fn HostCard(
                             }
                         },
                     }
+                    div { class: "flex flex-wrap items-center gap-x-4 gap-y-2",
                     button {
                         class: "{btn_class()}",
                         r#type: "button",
@@ -1171,13 +1170,8 @@ fn HostCard(
                             },
                         }
                     }
-                }
-                if !holding {
-                    p { class: "mt-1.5 text-xs text-[var(--app-muted)]",
-                        "Does not stop jobs already running on this machine."
                     }
                 }
-
                 div { class: "mt-3 border-t border-[var(--app-border)] pt-3",
                     if confirm_remove() {
                         span { class: "inline-flex flex-wrap items-center gap-2 text-xs",

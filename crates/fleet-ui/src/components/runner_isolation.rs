@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-const SANDBOXED_HINT: &str = "Placeholder — sandboxed jobs are not implemented yet.";
+const SANDBOXED_HINT: &str = "Sandboxed is not implemented yet.";
 
 /// Native and Sandboxed on one runner. Either, both, or neither.
 #[component]
@@ -43,7 +43,7 @@ pub fn RunnerModeChecks(
                 }
             }
             p { class: "m-0 text-[10px] leading-4 text-[var(--app-muted)]",
-                "Sandboxed is a placeholder for now."
+                "Sandboxed is not implemented yet."
             }
         }
     }
