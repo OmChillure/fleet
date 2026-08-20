@@ -10,6 +10,7 @@ pub mod config;
 pub mod fleet_routes;
 pub mod grok;
 pub mod install_routes;
+pub mod partners;
 pub mod retry;
 pub mod state;
 pub mod tickets;
@@ -53,6 +54,7 @@ pub fn build_router() -> Router<AppState> {
         // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
         .merge(worker_hosts::router())
+        .merge(partners::router())
         .merge(install_routes::router())
 }
 

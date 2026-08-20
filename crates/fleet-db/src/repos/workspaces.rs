@@ -162,3 +162,50 @@ pub async fn user_role(
     .map_err(map_query_err)?;
     Ok(row)
 }
+
+/// Timestamp of the partners disclaimer ack, or `None` if not accepted.
+///
+/// Missing workspace → [`DbError::NotFound`]. Default (NULL) is not accepted.
+pub async fn partners_disclaimer_accepted_at(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Option<DateTime<Utc>>> {
+    let row = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        r#"
+        SELECT partners_disclaimer_accepted_at
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+/// Record the partners disclaimer ack. First write wins.
+///
+/// Does not enable lending, borrowing, enqueue, or assignable runners.
+pub async fn accept_partners_disclaimer(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    at: DateTime<Utc>,
+) -> DbResult<DateTime<Utc>> {
+    let accepted_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        UPDATE workspaces
+        SET partners_disclaimer_accepted_at = COALESCE(partners_disclaimer_accepted_at, $2),
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING partners_disclaimer_accepted_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(at)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    accepted_at.ok_or_else(|| DbError::NotFound("workspace".into()))
+}

@@ -44,6 +44,25 @@ pub struct WorkspacePublic {
     pub role: String,
 }
 
+/// Workspace-level partners disclaimer ack.
+///
+/// Default is not accepted (`accepted_at` is `None`). Recording an ack
+/// does not enable lending, borrowing, enqueue, or assignable runners.
+#[derive(Debug, Clone, Serialize)]
+pub struct PartnersDisclaimerAck {
+    pub accepted: bool,
+    pub accepted_at: Option<DateTime<Utc>>,
+}
+
+impl PartnersDisclaimerAck {
+    pub fn from_accepted_at(accepted_at: Option<DateTime<Utc>>) -> Self {
+        Self {
+            accepted: accepted_at.is_some(),
+            accepted_at,
+        }
+    }
+}
+
 impl From<WorkspaceWithRole> for WorkspacePublic {
     fn from(w: WorkspaceWithRole) -> Self {
         w.as_public()
