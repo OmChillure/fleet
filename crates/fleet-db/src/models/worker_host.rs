@@ -1,6 +1,13 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Served dist identity vs the box report (`HostPublic.software_status`).
+pub const WORKER_SOFTWARE_STATUS_UNKNOWN: &str = "unknown";
+pub const WORKER_SOFTWARE_STATUS_CURRENT: &str = "current";
+pub const WORKER_SOFTWARE_STATUS_BEHIND: &str = "behind";
 
 pub const WORKER_HOST_STATUS_PENDING: &str = "pending";
 pub const WORKER_HOST_STATUS_ONLINE: &str = "online";
@@ -8,7 +15,10 @@ pub const WORKER_HOST_STATUS_DISABLED: &str = "disabled";
 pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 
 /// Stored `online` older than this is serialized as `offline`.
-pub const WORKER_HOST_OFFLINE_AFTER: Duration = Duration::seconds(30);
+///
+/// Heartbeats are every ~10s. 90s is several missed beats plus a Wi-Fi roam,
+/// so a laptop does not flicker offline between successful heartbeats.
+pub const WORKER_HOST_OFFLINE_AFTER: Duration = Duration::seconds(90);
 
 /// Durable paired worker machine (`worker_hosts`).
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
@@ -40,6 +50,8 @@ pub struct WorkerHost {
     pub software_reported_at: Option<DateTime<Utc>>,
     pub software_updating: bool,
     pub auto_update: bool,
+    pub update_requested_at: Option<DateTime<Utc>>,
+    pub machine_id: Option<Uuid>,
     pub hardware: Option<serde_json::Value>,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -101,8 +113,22 @@ pub struct WorkerHostPublic {
     pub paired_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub software: Option<WorkerSoftwarePublic>,
+    /// Staged `manifest.json` for `platform`, if that platform was built.
+    #[serde(default)]
+    pub desired: Option<WorkerSoftwareManifest>,
+    /// `current` | `behind` | `unknown`. Never `behind` without a report + manifest.
+    #[serde(default = "default_software_status")]
+    pub software_status: String,
+    /// True only when `software_status` is `behind`.
+    #[serde(default)]
+    pub outdated: bool,
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    #[serde(default)]
+    pub update_requested_at: Option<DateTime<Utc>>,
+    /// Durable box id (`fleet-host` `machine.id`). Same machine after re-pair.
+    #[serde(default)]
+    pub machine_id: Option<Uuid>,
     #[serde(default)]
     pub current_jobs: i32,
     #[serde(default)]
@@ -113,6 +139,10 @@ pub struct WorkerHostPublic {
 
 fn default_auto_update() -> bool {
     true
+}
+
+fn default_software_status() -> String {
+    WORKER_SOFTWARE_STATUS_UNKNOWN.to_string()
 }
 
 /// What the box last reported. `None` on `WorkerHostPublic.software` means never reported.
@@ -126,6 +156,28 @@ pub struct WorkerSoftwarePublic {
     pub updating: bool,
 }
 
+/// One binary in a staged platform package (`manifest.json` `bins` entry).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerBinMeta {
+    pub sha256: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// Served dist for one platform. Source of truth for “what should be on the box”.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSoftwareManifest {
+    #[serde(default)]
+    pub git_sha: String,
+    #[serde(default)]
+    pub platform: String,
+    /// When this package was last written. Empty if unknown.
+    #[serde(default)]
+    pub staged_at: String,
+    #[serde(default)]
+    pub bins: BTreeMap<String, WorkerBinMeta>,
+}
+
 /// Snapshot from the box. Not a monitoring series.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerHardwarePublic {
@@ -137,6 +189,55 @@ pub struct WorkerHardwarePublic {
     pub mem_used_pct: Option<u8>,
     #[serde(default)]
     pub os: Option<String>,
+    #[serde(default)]
+    pub cpu_model: Option<String>,
+    #[serde(default)]
+    pub cpu_used_pct: Option<u8>,
+    #[serde(default)]
+    pub mem_speed_mts: Option<u32>,
+    #[serde(default)]
+    pub mem_type: Option<String>,
+    #[serde(default)]
+    pub gpus: Option<Vec<WorkerGpuPublic>>,
+    #[serde(default)]
+    pub gpu_used_pct: Option<u8>,
+}
+
+/// One GPU the box could name. `vram_bytes` omitted when unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerGpuPublic {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vram_bytes: Option<u64>,
+    #[serde(default)]
+    pub used_pct: Option<u8>,
+}
+
+fn enrich_reported_gpus(hw: &mut WorkerHardwarePublic) {
+    if let Some(list) = hw.gpus.as_mut() {
+        for g in list.iter_mut() {
+            if let Some(n) = g.name.take() {
+                let cleaned = super::normalize_gpu_name(&n);
+                g.name = if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(cleaned)
+                };
+            }
+        }
+        list.retain(|g| g.name.as_deref().is_some_and(|n| !n.trim().is_empty()));
+        if !list.is_empty() {
+            return;
+        }
+    }
+    if let Some(name) = hw.cpu_model.as_deref().and_then(super::infer_igpu_from_cpu) {
+        hw.gpus = Some(vec![WorkerGpuPublic {
+            name: Some(name),
+            vram_bytes: None,
+            used_pct: None,
+        }]);
+    }
 }
 
 impl WorkerHostPublic {
@@ -172,15 +273,134 @@ impl WorkerHostPublic {
             } else {
                 None
             },
+            desired: None,
+            software_status: WORKER_SOFTWARE_STATUS_UNKNOWN.to_string(),
+            outdated: false,
             auto_update: host.auto_update,
+            update_requested_at: host.update_requested_at,
+            machine_id: host.machine_id,
             current_jobs: host.current_jobs,
             advertised_max_concurrent: host.advertised_max_concurrent,
-            hardware: host
-                .hardware
-                .as_ref()
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            hardware: host.hardware.as_ref().and_then(|v| {
+                let mut hw: WorkerHardwarePublic = serde_json::from_value(v.clone()).ok()?;
+                enrich_reported_gpus(&mut hw);
+                Some(hw)
+            }),
         }
     }
+
+    /// Attach the staged platform package and recompute `software_status` / `outdated`.
+    pub fn with_desired(mut self, desired: Option<WorkerSoftwareManifest>) -> Self {
+        let status = compute_software_status(self.software.as_ref(), desired.as_ref());
+        self.desired = desired;
+        self.software_status = status.to_string();
+        self.outdated = status == WORKER_SOFTWARE_STATUS_BEHIND;
+        self
+    }
+}
+
+const PACKAGE_BIN_STEMS: [&str; 3] = ["fleet-host", "fleet-worker", "fleet-driver"];
+
+/// `current` / `behind` / `unknown` from the box report vs the served dist.
+///
+/// No report or no manifest → `unknown` (not behind). Present package bins
+/// that disagree → `behind`. Mixed match/mismatch is behind. When no bin
+/// pair exists, fall back to both git shas if they are non-empty.
+pub fn compute_software_status(
+    software: Option<&WorkerSoftwarePublic>,
+    desired: Option<&WorkerSoftwareManifest>,
+) -> &'static str {
+    let Some(sw) = software else {
+        return WORKER_SOFTWARE_STATUS_UNKNOWN;
+    };
+    let Some(desired) = desired else {
+        return WORKER_SOFTWARE_STATUS_UNKNOWN;
+    };
+
+    let mut compared = 0u32;
+    let mut mismatch = false;
+    if let Some(bins) = sw.bins.as_ref() {
+        for stem in PACKAGE_BIN_STEMS {
+            let reported = reported_bin_sha(bins, stem);
+            let want = desired_bin_sha(desired, stem);
+            match (reported, want) {
+                (Some(got), Some(expect)) => {
+                    compared += 1;
+                    if !sha_eq(&got, &expect) {
+                        mismatch = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if compared > 0 {
+        return if mismatch {
+            WORKER_SOFTWARE_STATUS_BEHIND
+        } else {
+            WORKER_SOFTWARE_STATUS_CURRENT
+        };
+    }
+
+    let reported_sha = sw
+        .git_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let desired_sha = desired.git_sha.trim();
+    match (reported_sha, desired_sha.is_empty()) {
+        (Some(got), false) => {
+            if sha_eq(got, desired_sha) {
+                WORKER_SOFTWARE_STATUS_CURRENT
+            } else {
+                WORKER_SOFTWARE_STATUS_BEHIND
+            }
+        }
+        _ => WORKER_SOFTWARE_STATUS_UNKNOWN,
+    }
+}
+
+fn sha_eq(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn bin_sha_from_value(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        return Some(s.to_string());
+    }
+    let s = v.get("sha256")?.as_str()?.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+fn lookup_bin_value<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    stem: &str,
+) -> Option<&'a serde_json::Value> {
+    let exe = format!("{stem}.exe");
+    obj.get(stem).or_else(|| obj.get(exe.as_str()))
+}
+
+fn reported_bin_sha(bins: &serde_json::Value, stem: &str) -> Option<String> {
+    let obj = bins.as_object()?;
+    lookup_bin_value(obj, stem).and_then(bin_sha_from_value)
+}
+
+fn desired_bin_sha(desired: &WorkerSoftwareManifest, stem: &str) -> Option<String> {
+    let exe = format!("{stem}.exe");
+    desired
+        .bins
+        .get(stem)
+        .or_else(|| desired.bins.get(exe.as_str()))
+        .map(|b| b.sha256.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Insert a pending host (pair token is a separate row).
@@ -230,6 +450,9 @@ pub struct HostCpSettings {
     pub max_concurrent: Option<i32>,
     pub max_job_timeout_s: Option<i32>,
     pub labels: Option<Vec<String>>,
+    pub auto_update: Option<bool>,
+    /// When true, set `update_requested_at = now()` (host applies once even if auto is off).
+    pub request_update: Option<bool>,
 }
 
 #[cfg(test)]
@@ -265,6 +488,8 @@ mod public_view_tests {
             software_reported_at: None,
             software_updating: false,
             auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
             hardware: None,
             created_by: None,
             created_at: now,
@@ -279,11 +504,31 @@ mod public_view_tests {
         let fresh = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(5)));
         assert_eq!(fresh.public_status(now), WORKER_HOST_STATUS_ONLINE);
 
-        let stale = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(31)));
+        let paused = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(60)));
+        assert_eq!(
+            paused.public_status(now),
+            WORKER_HOST_STATUS_ONLINE,
+            "a missed beat must not flip the card offline"
+        );
+
+        let stale = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(91)));
         assert_eq!(stale.public_status(now), "offline");
 
         let never_seen = host(WORKER_HOST_STATUS_ONLINE, None);
         assert_eq!(never_seen.public_status(now), "offline");
+    }
+
+    #[test]
+    fn public_hardware_infers_intel_uhd_for_x1_cpu() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.hardware = Some(serde_json::json!({
+            "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
+            "cpu_cores": 8
+        }));
+        let pub_h = h.as_public(Utc::now());
+        let gpus = pub_h.hardware.expect("hw").gpus.expect("gpus");
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name.as_deref(), Some("Intel UHD Graphics"));
     }
 
     #[test]
@@ -323,6 +568,203 @@ mod public_view_tests {
             v.get("software").unwrap().is_null(),
             "never-reported software must be null: {v}"
         );
+        assert_eq!(v["software_status"], "unknown");
+        assert_eq!(v["outdated"], false);
+        assert!(
+            v.get("desired").unwrap().is_null(),
+            "desired is attached by the API, not from_host: {v}"
+        );
+    }
+
+    fn sample_manifest(host_sha: &str) -> WorkerSoftwareManifest {
+        let mut bins = BTreeMap::new();
+        bins.insert(
+            "fleet-host".into(),
+            WorkerBinMeta {
+                sha256: host_sha.into(),
+                size: 10,
+            },
+        );
+        bins.insert(
+            "fleet-worker".into(),
+            WorkerBinMeta {
+                sha256: "worker-sha".into(),
+                size: 11,
+            },
+        );
+        bins.insert(
+            "fleet-driver".into(),
+            WorkerBinMeta {
+                sha256: "driver-sha".into(),
+                size: 12,
+            },
+        );
+        WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins,
+        }
+    }
+
+    fn reported(git_sha: Option<&str>, bins: Option<serde_json::Value>) -> WorkerSoftwarePublic {
+        WorkerSoftwarePublic {
+            git_sha: git_sha.map(str::to_string),
+            bins,
+            reported_at: Some(Utc::now()),
+            updating: false,
+        }
+    }
+
+    #[test]
+    fn software_status_unknown_without_report_or_manifest() {
+        let desired = sample_manifest("aaa");
+        assert_eq!(
+            compute_software_status(None, Some(&desired)),
+            WORKER_SOFTWARE_STATUS_UNKNOWN
+        );
+        let sw = reported(Some("stage-tree-id"), None);
+        assert_eq!(
+            compute_software_status(Some(&sw), None),
+            WORKER_SOFTWARE_STATUS_UNKNOWN
+        );
+    }
+
+    #[test]
+    fn software_status_behind_when_present_bin_mismatches() {
+        let desired = sample_manifest("aaa");
+        let sw = reported(
+            Some("stage-tree-id"),
+            Some(serde_json::json!({
+                "fleet-host": "bbb",
+                "fleet-worker": "worker-sha",
+                "fleet-driver": "driver-sha"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+    }
+
+    #[test]
+    fn software_status_current_when_bins_match() {
+        let desired = sample_manifest("AaA");
+        let sw = reported(
+            Some("other-git"),
+            Some(serde_json::json!({
+                "fleet-host": "aaa",
+                "fleet-worker": { "sha256": "worker-sha", "size": 11 },
+                "fleet-driver": "driver-sha"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT
+        );
+    }
+
+    #[test]
+    fn software_status_behind_on_mixed_bins() {
+        let desired = sample_manifest("aaa");
+        let sw = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": "aaa",
+                "fleet-worker": "wrong"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+    }
+
+    #[test]
+    fn software_status_maps_windows_exe_keys() {
+        let mut bins = BTreeMap::new();
+        bins.insert(
+            "fleet-host.exe".into(),
+            WorkerBinMeta {
+                sha256: "pe-host".into(),
+                size: 1,
+            },
+        );
+        bins.insert(
+            "fleet-worker.exe".into(),
+            WorkerBinMeta {
+                sha256: "pe-worker".into(),
+                size: 1,
+            },
+        );
+        bins.insert(
+            "fleet-driver.exe".into(),
+            WorkerBinMeta {
+                sha256: "pe-driver".into(),
+                size: 1,
+            },
+        );
+        let desired = WorkerSoftwareManifest {
+            git_sha: "win".into(),
+            platform: "windows-x86_64".into(),
+            staged_at: String::new(),
+            bins,
+        };
+        let sw = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": "pe-host",
+                "fleet-worker": "pe-worker",
+                "fleet-driver": "pe-driver"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT
+        );
+    }
+
+    #[test]
+    fn software_status_falls_back_to_git_sha_when_bins_missing() {
+        let desired = sample_manifest("aaa");
+        let current = reported(Some("stage-tree-id"), None);
+        assert_eq!(
+            compute_software_status(Some(&current), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT
+        );
+        let behind = reported(Some("old-tree"), Some(serde_json::json!({})));
+        assert_eq!(
+            compute_software_status(Some(&behind), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+        let empty = reported(Some("  "), None);
+        assert_eq!(
+            compute_software_status(Some(&empty), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_UNKNOWN
+        );
+    }
+
+    #[test]
+    fn with_desired_sets_outdated_only_when_behind() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.software_git_sha = Some("old".into());
+        h.software_reported_at = Some(Utc::now());
+        let public = h
+            .as_public(Utc::now())
+            .with_desired(Some(sample_manifest("aaa")));
+        assert_eq!(public.software_status, WORKER_SOFTWARE_STATUS_BEHIND);
+        assert!(public.outdated);
+        assert_eq!(
+            public.desired.as_ref().map(|d| d.git_sha.as_str()),
+            Some("stage-tree-id")
+        );
+
+        let no_sw = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()))
+            .as_public(Utc::now())
+            .with_desired(Some(sample_manifest("aaa")));
+        assert_eq!(no_sw.software_status, WORKER_SOFTWARE_STATUS_UNKNOWN);
+        assert!(!no_sw.outdated);
+        assert!(no_sw.desired.is_some());
     }
 }
 

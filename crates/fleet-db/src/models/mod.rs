@@ -1,6 +1,7 @@
 mod audit;
 mod case;
 mod chat;
+mod gpu;
 mod integration;
 mod persona;
 mod session;
@@ -13,6 +14,7 @@ mod workspace;
 pub use audit::*;
 pub use case::*;
 pub use chat::*;
+pub use gpu::{infer_igpu_from_cpu, normalize_gpu_name};
 pub use integration::*;
 pub use persona::*;
 pub use session::*;

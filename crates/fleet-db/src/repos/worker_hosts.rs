@@ -23,6 +23,7 @@ const HOST_COLS: &str = r#"
     machine_token_hash, advertised_host, advertised_container, platform, hostname,
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
     software_git_sha, software_bins, software_reported_at, software_updating, auto_update,
+    update_requested_at, machine_id,
     hardware,
     created_by, created_at, paired_at, updated_at
 "#;
@@ -181,6 +182,12 @@ pub async fn patch_cp_settings(
     let max_concurrent = patch.max_concurrent.unwrap_or(current.max_concurrent);
     let max_job_timeout_s = patch.max_job_timeout_s.unwrap_or(current.max_job_timeout_s);
     let labels = patch.labels.as_ref().unwrap_or(&current.labels);
+    let auto_update = patch.auto_update.unwrap_or(current.auto_update);
+    let update_requested_at = if patch.request_update == Some(true) {
+        Some(Utc::now())
+    } else {
+        current.update_requested_at
+    };
 
     let q = format!(
         r#"
@@ -194,6 +201,8 @@ pub async fn patch_cp_settings(
             max_concurrent = $8,
             max_job_timeout_s = $9,
             labels = $10,
+            auto_update = $11,
+            update_requested_at = $12,
             updated_at = now()
         WHERE id = $1
         RETURNING {HOST_COLS}
@@ -210,6 +219,8 @@ pub async fn patch_cp_settings(
         .bind(max_concurrent)
         .bind(max_job_timeout_s)
         .bind(labels)
+        .bind(auto_update)
+        .bind(update_requested_at)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?
@@ -223,6 +234,7 @@ pub async fn consume_pair_token(
     platform: &str,
     advertised_host: bool,
     advertised_container: bool,
+    machine_id: Option<Uuid>,
 ) -> DbResult<PairedWorkerHost> {
     let token_hash = hash_token(token_plaintext);
     let mut tx = pool.begin().await.map_err(DbError::from)?;
@@ -266,6 +278,33 @@ pub async fn consume_pair_token(
 
     if host.status != WORKER_HOST_STATUS_PENDING {
         return Err(DbError::Conflict("host is not pending".into()));
+    }
+
+    // Same box pairing again (durable machine.id, or hostname+platform
+    // when the binary is too old to send one): revive that row.
+    if let Some(prior) = find_reclaim_target(
+        &mut tx,
+        host.workspace_id,
+        host.id,
+        machine_id,
+        hostname,
+        platform,
+    )
+    .await?
+    {
+        let mid = machine_id.or(prior.machine_id).unwrap_or(prior.id);
+        return reclaim_existing(
+            tx,
+            pair,
+            host,
+            prior,
+            hostname,
+            platform,
+            advertised_host,
+            advertised_container,
+            mid,
+        )
+        .await;
     }
 
     sqlx::query(
@@ -312,6 +351,157 @@ pub async fn consume_pair_token(
             platform = $5,
             advertised_host = $6,
             advertised_container = $7,
+            machine_id = $8,
+            paired_at = now(),
+            last_seen_at = now(),
+            last_error = NULL,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    let assigned_machine_id = machine_id.unwrap_or(host.id);
+    let host = sqlx::query_as::<_, WorkerHost>(&upd)
+        .bind(host.id)
+        .bind(display_name)
+        .bind(&machine_token_hash)
+        .bind(hostname)
+        .bind(platform)
+        .bind(advertised_host)
+        .bind(advertised_container)
+        .bind(assigned_machine_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_query_err)?;
+
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(PairedWorkerHost {
+        host,
+        machine_token,
+    })
+}
+
+async fn find_reclaim_target(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    exclude_id: Uuid,
+    machine_id: Option<Uuid>,
+    hostname: &str,
+    platform: &str,
+) -> DbResult<Option<WorkerHost>> {
+    if let Some(mid) = machine_id {
+        let q = format!(
+            r#"
+            SELECT {HOST_COLS}
+            FROM worker_hosts
+            WHERE workspace_id = $1 AND machine_id = $2 AND id <> $3
+            FOR UPDATE
+            "#
+        );
+        if let Some(prior) = sqlx::query_as::<_, WorkerHost>(&q)
+            .bind(workspace_id)
+            .bind(mid)
+            .bind(exclude_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_query_err)?
+        {
+            return Ok(Some(prior));
+        }
+    }
+
+    let hostname = hostname.trim();
+    let platform = platform.trim();
+    if hostname.is_empty() || platform.is_empty() {
+        return Ok(None);
+    }
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE workspace_id = $1
+          AND id <> $2
+          AND hostname IS NOT NULL
+          AND lower(trim(hostname)) = lower($3)
+          AND platform IS NOT NULL
+          AND lower(trim(platform)) = lower($4)
+        ORDER BY
+          CASE WHEN status = '{WORKER_HOST_STATUS_DISABLED}' THEN 1 ELSE 0 END,
+          last_seen_at DESC NULLS LAST,
+          paired_at DESC NULLS LAST,
+          created_at DESC
+        LIMIT 1
+        FOR UPDATE
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(workspace_id)
+        .bind(exclude_id)
+        .bind(hostname)
+        .bind(platform)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_query_err)
+}
+
+async fn reclaim_existing(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    pair: WorkerHostPairToken,
+    pending: WorkerHost,
+    prior: WorkerHost,
+    hostname: &str,
+    platform: &str,
+    advertised_host: bool,
+    advertised_container: bool,
+    machine_id: Uuid,
+) -> DbResult<PairedWorkerHost> {
+    sqlx::query(
+        r#"
+        UPDATE worker_host_pair_tokens
+        SET used_at = now()
+        WHERE id = $1 OR (host_id = $2 AND used_at IS NULL)
+        "#,
+    )
+    .bind(pair.id)
+    .bind(pending.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_query_err)?;
+
+    sqlx::query(
+        r#"
+        UPDATE worker_hosts
+        SET status = $2,
+            enabled = FALSE,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(pending.id)
+    .bind(WORKER_HOST_STATUS_DISABLED)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_query_err)?;
+
+    let machine_token = generate_machine_token();
+    let machine_token_hash = hash_token(&machine_token);
+    let display_name = if prior.name.trim().is_empty() {
+        hostname.to_string()
+    } else {
+        prior.name.clone()
+    };
+    let upd = format!(
+        r#"
+        UPDATE worker_hosts
+        SET status = '{WORKER_HOST_STATUS_ONLINE}',
+            enabled = TRUE,
+            name = $2,
+            machine_token_hash = $3,
+            hostname = $4,
+            platform = $5,
+            advertised_host = $6,
+            advertised_container = $7,
+            machine_id = $8,
             paired_at = now(),
             last_seen_at = now(),
             last_error = NULL,
@@ -321,13 +511,14 @@ pub async fn consume_pair_token(
         "#
     );
     let host = sqlx::query_as::<_, WorkerHost>(&upd)
-        .bind(host.id)
+        .bind(prior.id)
         .bind(display_name)
         .bind(&machine_token_hash)
         .bind(hostname)
         .bind(platform)
         .bind(advertised_host)
         .bind(advertised_container)
+        .bind(machine_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_query_err)?;
@@ -384,6 +575,41 @@ pub async fn heartbeat(
     software_updating: Option<bool>,
     hardware: Option<serde_json::Value>,
 ) -> DbResult<WorkerHost> {
+    heartbeat_with_machine(
+        pool,
+        host_id,
+        advertised_host,
+        advertised_container,
+        platform,
+        hostname,
+        last_error,
+        current_jobs,
+        advertised_max_concurrent,
+        software_git_sha,
+        software_bins,
+        software_updating,
+        hardware,
+        None,
+    )
+    .await
+}
+
+pub async fn heartbeat_with_machine(
+    pool: &PgPool,
+    host_id: Uuid,
+    advertised_host: bool,
+    advertised_container: bool,
+    platform: Option<&str>,
+    hostname: Option<&str>,
+    last_error: Option<&str>,
+    current_jobs: i32,
+    advertised_max_concurrent: Option<i32>,
+    software_git_sha: Option<&str>,
+    software_bins: Option<serde_json::Value>,
+    software_updating: Option<bool>,
+    hardware: Option<serde_json::Value>,
+    machine_id: Option<Uuid>,
+) -> DbResult<WorkerHost> {
     let current_jobs = current_jobs.max(0);
     let advertised_max_concurrent = advertised_max_concurrent.map(|n| n.clamp(1, 256));
     let report_software = software_git_sha.is_some() || software_bins.is_some();
@@ -403,7 +629,17 @@ pub async fn heartbeat(
             software_bins = COALESCE($10, software_bins),
             software_reported_at = CASE WHEN $11 THEN now() ELSE software_reported_at END,
             software_updating = COALESCE($12, software_updating),
-            hardware = COALESCE($13, hardware)
+            hardware = COALESCE($13, hardware),
+            machine_id = CASE
+                WHEN $14::uuid IS NULL THEN COALESCE(machine_id, id)
+                WHEN EXISTS (
+                    SELECT 1 FROM worker_hosts o
+                    WHERE o.workspace_id = worker_hosts.workspace_id
+                      AND o.machine_id = $14
+                      AND o.id <> worker_hosts.id
+                ) THEN COALESCE(machine_id, id)
+                ELSE $14
+            END
         WHERE id = $1
           AND status <> '{WORKER_HOST_STATUS_DISABLED}'
         RETURNING {HOST_COLS}
@@ -423,6 +659,7 @@ pub async fn heartbeat(
         .bind(report_software)
         .bind(software_updating)
         .bind(hardware)
+        .bind(machine_id)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?
@@ -542,6 +779,37 @@ pub async fn list_assignable(
           AND NOT paused
           AND NOT drain
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
+          AND machine_token_hash IS NOT NULL
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at >= $2
+        ORDER BY last_seen_at DESC, id ASC
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(workspace_id)
+        .bind(cutoff)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Paired hosts mid host-bin restart (`software_updating`) seen within `seen_within`.
+/// Tick uses this so a brief restart does not fail over to local `SANDBOX_BACKEND`.
+/// Does not change pause/drain meaning.
+pub async fn list_updating_recent(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    seen_within: Duration,
+) -> DbResult<Vec<WorkerHost>> {
+    let cutoff = Utc::now() - seen_within;
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE workspace_id = $1
+          AND software_updating
+          AND enabled
+          AND status <> '{WORKER_HOST_STATUS_DISABLED}'
           AND machine_token_hash IS NOT NULL
           AND last_seen_at IS NOT NULL
           AND last_seen_at >= $2

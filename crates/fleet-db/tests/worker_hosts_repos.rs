@@ -78,7 +78,7 @@ async fn pair_host(
     token: &str,
     hostname: &str,
 ) -> worker_hosts::PairedWorkerHost {
-    worker_hosts::consume_pair_token(pool, token, hostname, "linux-x86_64", true, false)
+    worker_hosts::consume_pair_token(pool, token, hostname, "linux-x86_64", true, false, None)
         .await
         .expect("consume_pair_token")
 }
@@ -155,6 +155,11 @@ async fn pair_token_works_once_second_consume_fails() {
     assert!(paired.host.paired_at.is_some());
     assert!(paired.host.last_seen_at.is_some());
     assert!(paired.host.machine_token_hash.is_some());
+    assert_eq!(
+        paired.host.machine_id,
+        Some(host.id),
+        "first pair assigns a durable machine id"
+    );
     assert!(
         paired
             .machine_token
@@ -167,7 +172,7 @@ async fn pair_token_works_once_second_consume_fails() {
         .expect("machine token must authenticate");
     assert_eq!(authed.id, host.id);
 
-    let err = worker_hosts::consume_pair_token(&pool, &token, "box-1", "linux-x86_64", true, false)
+    let err = worker_hosts::consume_pair_token(&pool, &token, "box-1", "linux-x86_64", true, false, None)
         .await
         .expect_err("second consume must fail");
     match err {
@@ -180,6 +185,89 @@ async fn pair_token_works_once_second_consume_fails() {
 }
 
 #[tokio::test]
+async fn re_pair_same_machine_id_reclaims_existing_row() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mid = Uuid::now_v7();
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box", expires).await;
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token_a,
+        "box",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("first pair");
+    assert_eq!(paired.host.id, first.id);
+    assert_eq!(paired.host.machine_id, Some(mid));
+
+    worker_hosts::revoke(&pool, first.id)
+        .await
+        .expect("remove");
+
+    let (second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-again", expires).await;
+    let again = worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        "box",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("re-pair");
+    assert_eq!(again.host.id, first.id, "must revive the original row");
+    assert_eq!(again.host.status, "online");
+    assert!(again.host.enabled);
+    assert_eq!(again.host.machine_id, Some(mid));
+
+    let leftover = worker_hosts::get(&pool, second.id)
+        .await
+        .expect("get leftover")
+        .expect("pending leftover exists");
+    assert_eq!(leftover.status, "disabled");
+}
+
+#[tokio::test]
+async fn re_pair_same_hostname_without_machine_id_reclaims_existing_row() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box", expires).await;
+    let paired = pair_host(&pool, &token_a, "studio-pc").await;
+    assert_eq!(paired.host.id, first.id);
+    assert_eq!(paired.host.machine_id, Some(first.id));
+
+    worker_hosts::revoke(&pool, first.id)
+        .await
+        .expect("remove");
+
+    let (second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-again", expires).await;
+    let again = pair_host(&pool, &token_b, "studio-pc").await;
+    assert_eq!(again.host.id, first.id, "same hostname must revive the row");
+    assert_eq!(again.host.status, "online");
+    assert!(again.host.enabled);
+    assert_eq!(again.host.machine_id, Some(first.id));
+
+    let leftover = worker_hosts::get(&pool, second.id)
+        .await
+        .expect("get leftover")
+        .expect("pending leftover exists");
+    assert_eq!(leftover.status, "disabled");
+}
+
+#[tokio::test]
 async fn expired_pair_token_fails() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -187,7 +275,7 @@ async fn expired_pair_token_fails() {
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "stale-token", expired_at).await;
 
-    let err = worker_hosts::consume_pair_token(&pool, &token, "box", "linux-x86_64", true, false)
+    let err = worker_hosts::consume_pair_token(&pool, &token, "box", "linux-x86_64", true, false, None)
         .await
         .expect_err("expired pair token must fail");
     match err {
@@ -476,6 +564,116 @@ async fn list_assignable_excludes_paused_disabled_stale() {
     );
 }
 
+#[tokio::test]
+async fn list_updating_recent_is_paired_updating_and_fresh() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let other_ws = seed_user_with_workspace(&pool).await.1;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let (fresh, tok) =
+        create_pending_with_token(&pool, workspace_id, user_id, "updating", expires).await;
+    pair_host(&pool, &tok, "updating-box").await;
+    worker_hosts::heartbeat(
+        &pool,
+        fresh.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        0,
+        None,
+        Some("abc"),
+        None,
+        Some(true),
+        None,
+    )
+    .await
+    .expect("hb updating");
+
+    let (stale, stale_tok) =
+        create_pending_with_token(&pool, workspace_id, user_id, "stale-up", expires).await;
+    pair_host(&pool, &stale_tok, "stale-up-box").await;
+    worker_hosts::heartbeat(
+        &pool,
+        stale.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        0,
+        None,
+        Some("abc"),
+        None,
+        Some(true),
+        None,
+    )
+    .await
+    .expect("hb stale updating");
+    sqlx::query(
+        "UPDATE worker_hosts SET last_seen_at = now() - interval '10 minutes' WHERE id = $1",
+    )
+    .bind(stale.id)
+    .execute(&pool)
+    .await
+    .expect("age stale updating");
+
+    let (idle, idle_tok) =
+        create_pending_with_token(&pool, workspace_id, user_id, "idle", expires).await;
+    pair_host(&pool, &idle_tok, "idle-box").await;
+    worker_hosts::heartbeat(
+        &pool,
+        idle.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        0,
+        None,
+        Some("abc"),
+        None,
+        Some(false),
+        None,
+    )
+    .await
+    .expect("hb idle");
+
+    let (other, other_tok) =
+        create_pending_with_token(&pool, other_ws, user_id, "other-up", expires).await;
+    pair_host(&pool, &other_tok, "other-box").await;
+    worker_hosts::heartbeat(
+        &pool,
+        other.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        0,
+        None,
+        Some("abc"),
+        None,
+        Some(true),
+        None,
+    )
+    .await
+    .expect("hb other");
+
+    let listed = worker_hosts::list_updating_recent(&pool, workspace_id, Duration::seconds(120))
+        .await
+        .expect("list_updating_recent");
+    let ids: Vec<Uuid> = listed.iter().map(|h| h.id).collect();
+    assert_eq!(
+        ids,
+        vec![fresh.id],
+        "only the recent updating host: {ids:?}"
+    );
+    assert!(listed.iter().all(|h| h.software_updating));
+}
+
 fn spawn_claim(workspace_id: Uuid, host_id: Uuid, kind: &str) -> NewWorkClaim {
     NewWorkClaim {
         id: Uuid::now_v7(),
@@ -623,7 +821,7 @@ async fn replace_pair_token_only_while_pending_and_invalidates_old() {
         .expect("replace while pending");
 
     let err =
-        worker_hosts::consume_pair_token(&pool, &old_token, "box", "linux-x86_64", true, false)
+        worker_hosts::consume_pair_token(&pool, &old_token, "box", "linux-x86_64", true, false, None)
             .await
             .expect_err("old pair token must die after rotate");
     match err {
@@ -677,7 +875,7 @@ async fn stored_online_with_stale_last_seen_serializes_offline() {
     assert_eq!(
         row.as_public(Utc::now()).status,
         "offline",
-        "API/UI must report offline after 30s without a heartbeat"
+        "API/UI must report offline after 90s without a heartbeat"
     );
     assert!(
         worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
