@@ -21,6 +21,7 @@ pub mod dashboard;
 pub mod fleet;
 pub mod home;
 pub mod integrations;
+pub mod runners;
 pub mod sandboxes;
 pub mod sessions;
 pub mod settings;

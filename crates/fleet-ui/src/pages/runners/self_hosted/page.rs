@@ -1,11 +1,12 @@
-//! Workspace Workers: pair a machine that phones home (no inbound dial).
+//! Self-hosted runners: pair a machine that phones home (no inbound dial).
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, PackageInventory, create_host,
-    install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
+    create_host, install_commands, list_workers_page, patch_host, revoke_host,
+    windows_install_command, CreateHostBody, CreateHostResponse, HostPatch, HostPublic,
+    PackageInventory,
 };
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
@@ -115,7 +116,11 @@ fn package_line(inv: &PackageInventory) -> Option<String> {
         .packages
         .iter()
         .filter_map(|p| {
-            let plat = p.platform.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+            let plat = p
+                .platform
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?;
             let sha = p
                 .git_sha
                 .as_deref()
@@ -151,7 +156,11 @@ fn packages_need_restage(inv: &PackageInventory) -> bool {
 
 fn short_sha(sha: &str) -> &str {
     let s = sha.trim();
-    if s.len() > 12 { &s[..12] } else { s }
+    if s.len() > 12 {
+        &s[..12]
+    } else {
+        s
+    }
 }
 
 fn software_line(host: &HostPublic) -> String {
@@ -301,8 +310,14 @@ fn same_box(a: &HostPublic, b: &HostPublic) -> bool {
         return false;
     }
     if let (Some(x), Some(y)) = (
-        a.machine_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-        b.machine_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        a.machine_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        b.machine_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
     ) {
         if x.eq_ignore_ascii_case(y) {
             return true;
@@ -447,7 +462,7 @@ fn specs_line(host: &HostPublic) -> Option<String> {
 }
 
 #[component]
-pub fn Workers(workspace_id: String) -> Element {
+pub fn SelfHosted(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
     let mut creating = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -531,10 +546,13 @@ pub fn Workers(workspace_id: String) -> Element {
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div { class: "min-w-0 flex-1",
                     h1 { class: "m-0 text-2xl font-semibold tracking-tight text-[var(--app-fg)]",
-                        "Workers"
+                        "Self-hosted"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
                         "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Isolation: Native"
                     }
                     if let Some(line) = package_line(&packages()) {
                         p {

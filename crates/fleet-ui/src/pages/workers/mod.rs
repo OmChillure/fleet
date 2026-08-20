@@ -1,6 +1,4 @@
-//! Workers feature (`/{workspace_id}/workers`).
+//! Thin re-export so `use pages::workers::Workers as SelfHosted` still compiles.
 
-mod api;
-mod page;
-
-pub use page::Workers;
+#[allow(unused_imports)]
+pub use crate::pages::runners::self_hosted::{SelfHosted as Workers, *};
