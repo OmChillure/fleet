@@ -295,7 +295,9 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn(f'$WantPe = "{want_pe}"', text, name)
             self.assertIn(f'$ThisPlat = "{this_plat}"', text, name)
             self.assertIn("this machine is $detected, not $ThisPlat", text, name)
-            self.assertIn("failed $bin", text, name)
+            self.assertIn("ASCII.GetString", text, name)
+            self.assertIn("$bin : $($_.Exception.Message)", text, name)
+            self.assertNotIn("failed $bin", text, name)
             self.assertNotIn(
                 'Write-Host "no prebuilt $bin at $url"',
                 text,

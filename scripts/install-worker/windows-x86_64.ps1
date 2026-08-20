@@ -74,7 +74,13 @@ if ($detected -ne $ThisPlat) {
 function Get-RemoteSha256([string]$Url) {
     try {
         $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri $Url
-        return (($r.Content.ToString().Trim() -split "\s+")[0]).ToLowerInvariant()
+        $c = $r.Content
+        if ($c -is [byte[]]) {
+            $text = [Text.Encoding]::ASCII.GetString($c)
+        } else {
+            $text = [string]$c
+        }
+        return (($text.Trim() -split "\s+")[0]).ToLowerInvariant()
     } catch {
         return $null
     }
@@ -154,7 +160,7 @@ foreach ($bin in @("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe")) {
         if ($bin -eq "fleet-host.exe") { $hostReady = $true }
     } catch {
         if (Test-Path $tmp) { Remove-Item -Force $tmp }
-        Write-Host "failed $bin : $($_.Exception.Message)"
+        Write-Host "$bin : $($_.Exception.Message)"
     }
 }
 if (-not $hostReady) {

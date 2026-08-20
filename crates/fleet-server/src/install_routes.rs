@@ -74,13 +74,13 @@ async fn get_worker_bin(
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
     let path = lookup_worker_bin(&state, &platform, &bin)?;
+    let ct = if bin.ends_with(".sha256") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    };
     match tokio::fs::read(&path).await {
-        Ok(bytes) => Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/octet-stream")],
-            bytes,
-        )
-            .into_response()),
+        Ok(bytes) => Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(AppError::not_found(missing_bin_hint(&platform, &bin)))
         }
@@ -97,13 +97,15 @@ async fn head_worker_bin(
         Ok(meta) => {
             let len = meta.len().to_string();
             let len = HeaderValue::from_str(&len).unwrap_or_else(|_| HeaderValue::from_static("0"));
+            let ct = if bin.ends_with(".sha256") {
+                "text/plain; charset=utf-8"
+            } else {
+                "application/octet-stream"
+            };
             Ok((
                 StatusCode::OK,
                 [
-                    (
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/octet-stream"),
-                    ),
+                    (header::CONTENT_TYPE, HeaderValue::from_str(ct).unwrap()),
                     (header::CONTENT_LENGTH, len),
                 ],
             )
