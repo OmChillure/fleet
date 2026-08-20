@@ -174,18 +174,37 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         self.assertIn("Integration", page.locator("h1").first.inner_text())
 
-        page.get_by_role("link", name="Workers", exact=True).click()
-        page.wait_for_url("**/workers", timeout=10_000)
+        # Runners / Self-hosted — not Workers under Workspace.
+        nav = page.locator("aside nav")
+        self.assertEqual(
+            nav.get_by_role("link", name="Workers", exact=True).count(),
+            0,
+            "Workers must not remain under Workspace",
+        )
+        runners = nav.get_by_text("Runners", exact=True)
+        self.assertTrue(runners.first.is_visible(), "sidebar missing Runners")
+        self_hosted = nav.get_by_role("link", name="Self-hosted", exact=True)
+        if self_hosted.count() == 0 or not self_hosted.first.is_visible():
+            runners.first.click()
+            self_hosted = nav.get_by_role("link", name="Self-hosted", exact=True)
+        self.assertTrue(self_hosted.first.is_visible(), "sidebar missing Self-hosted")
+        self_hosted.first.click()
+        page.wait_for_url("**/runners/self-hosted", timeout=10_000)
         page.wait_for_selector("h1")
-        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
-        workers_body = page.inner_text("body")
+        runners_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertIn(
+            runners_h1,
+            {"Self-hosted", "Workers"},
+            f"unexpected runners heading {runners_h1!r}",
+        )
+        runners_body = page.inner_text("body")
         self.assertTrue(
             page.get_by_role("button", name="Add worker").count() > 0,
-            "Workers page missing Add worker",
+            "Self-hosted runners page missing Add worker",
         )
         self.assertTrue(
-            "No workers yet" in workers_body or "last seen" in workers_body,
-            "Workers empty state or worker card missing",
+            "No workers yet" in runners_body or "last seen" in runners_body,
+            "Self-hosted empty state or runner card missing",
         )
 
         page.get_by_role("link", name="Settings", exact=True).click()
@@ -201,9 +220,14 @@ class BrowserE2ETests(unittest.TestCase):
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
-        page.goto(f"{base}/workers", wait_until="networkidle")
+        page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Workers")
+        runners_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertIn(
+            runners_h1,
+            {"Self-hosted", "Workers"},
+            f"unexpected runners heading {runners_h1!r}",
+        )
         page.get_by_role("button", name="Add worker").click()
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         body = page.inner_text("body")
@@ -277,10 +301,36 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_text("Workspace", exact=True).first.click()
         integ = nav.get_by_role("link", name="Integrations", exact=True)
         self.assertTrue(integ.first.is_visible())
-        workers = nav.get_by_role("link", name="Workers", exact=True)
-        self.assertTrue(workers.first.is_visible())
+        self.assertEqual(
+            nav.get_by_role("link", name="Workers", exact=True).count(),
+            0,
+            "Workers must not remain under Workspace",
+        )
+        runners = nav.get_by_text("Runners", exact=True)
+        self.assertTrue(runners.first.is_visible(), "sidebar missing Runners")
+        self_hosted = nav.get_by_role("link", name="Self-hosted", exact=True)
+        if self_hosted.count() == 0 or not self_hosted.first.is_visible():
+            runners.first.click()
+            self_hosted = nav.get_by_role("link", name="Self-hosted", exact=True)
+        self.assertTrue(self_hosted.first.is_visible(), "sidebar missing Self-hosted")
 
-    def test_08_logout_returns_to_login(self) -> None:
+    def test_08_workers_redirects_to_self_hosted(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/workers", wait_until="domcontentloaded")
+        page.wait_for_url("**/runners/self-hosted", timeout=15_000)
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$")
+
+    def test_09_runners_redirects_to_self_hosted(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/runners", wait_until="domcontentloaded")
+        page.wait_for_url("**/runners/self-hosted", timeout=15_000)
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$")
+
+    def test_10_logout_returns_to_login(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
