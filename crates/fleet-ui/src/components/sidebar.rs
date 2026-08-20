@@ -52,6 +52,8 @@ pub fn Sidebar() -> Element {
             }
             Route::Agents { .. } => Some(NavSection::Agents),
             Route::SelfHosted { .. }
+            | Route::CloudPage { .. }
+            | Route::PartnersPage { .. }
             | Route::RunnersIndex { .. }
             | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
             Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
@@ -362,8 +364,14 @@ pub fn Sidebar() -> Element {
                         to: Route::SelfHosted { workspace_id: workspace_id.clone() },
                         label: "Self-hosted",
                     }
-                    NavComingSoon { label: "Cloud" }
-                    NavComingSoon { label: "Partners" }
+                    NavSubLink {
+                        to: Route::CloudPage { workspace_id: workspace_id.clone() },
+                        label: "Cloud",
+                    }
+                    NavSubLink {
+                        to: Route::PartnersPage { workspace_id: workspace_id.clone() },
+                        label: "Partners",
+                    }
                 }
 
                 NavAccordion {

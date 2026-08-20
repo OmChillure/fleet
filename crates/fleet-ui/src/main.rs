@@ -19,6 +19,8 @@ use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
 use pages::integrations::{Integrations, OAuthDone};
+use pages::runners::cloud::CloudPage;
+use pages::runners::partners::PartnersPage;
 use pages::sandboxes::Sandboxes;
 use pages::sessions::{SessionDetail, Sessions};
 use pages::settings::Settings;
@@ -61,6 +63,10 @@ pub enum Route {
         Integrations { workspace_id: String },
         #[route("/:workspace_id/runners/self-hosted")]
         SelfHosted { workspace_id: String },
+        #[route("/:workspace_id/runners/cloud")]
+        CloudPage { workspace_id: String },
+        #[route("/:workspace_id/runners/partners")]
+        PartnersPage { workspace_id: String },
         #[route("/:workspace_id/runners")]
         RunnersIndex { workspace_id: String },
         #[route("/:workspace_id/workers")]
@@ -83,6 +89,8 @@ impl Route {
             | Route::Sandboxes { workspace_id }
             | Route::Integrations { workspace_id }
             | Route::SelfHosted { workspace_id }
+            | Route::CloudPage { workspace_id }
+            | Route::PartnersPage { workspace_id }
             | Route::RunnersIndex { workspace_id }
             | Route::WorkersRedirect { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
