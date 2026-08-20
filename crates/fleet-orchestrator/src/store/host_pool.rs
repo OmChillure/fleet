@@ -105,6 +105,35 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
     pick_assignable_host(&hosts, &in_flight)
 }
 
+/// How long after last_seen a `software_updating` host still holds ready tasks.
+pub const HOST_UPDATE_HOLD_SECS: i64 = 120;
+
+/// Paired host is mid host-bin restart: do not fail over to local sandbox.
+pub async fn workspace_has_updating_host(store: &Store, project_id: Uuid) -> bool {
+    match fleet_db::repos::worker_hosts::list_updating_recent(
+        store.pool(),
+        project_id,
+        chrono::Duration::seconds(HOST_UPDATE_HOLD_SECS),
+    )
+    .await
+    {
+        Ok(hosts) => !hosts.is_empty(),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                project_id = %project_id,
+                "worker_hosts updating query unavailable"
+            );
+            false
+        }
+    }
+}
+
+/// No assignable host + a recent updating host → leave the task ready.
+pub fn hold_ready_for_host_update(has_assignable: bool, updating_recent: bool) -> bool {
+    !has_assignable && updating_recent
+}
+
 pub async fn enqueue_remote_spawn(
     store: &Store,
     chosen: &ChosenHost,
@@ -152,7 +181,7 @@ async fn list_assignable_hosts(store: &Store, project_id: Uuid) -> Option<Vec<As
     match fleet_db::repos::worker_hosts::list_assignable(
         store.pool(),
         project_id,
-        chrono::Duration::seconds(30),
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
     )
     .await
     {
@@ -303,5 +332,13 @@ mod tests {
         assert_eq!(job_timeout_s(7200, 3600), 3600);
         assert_eq!(job_timeout_s(30, 3600), 30);
         assert_eq!(job_timeout_s(10, 10), 10);
+    }
+
+    #[test]
+    fn hold_ready_only_when_no_assignable_and_updating() {
+        assert!(hold_ready_for_host_update(false, true));
+        assert!(!hold_ready_for_host_update(true, true));
+        assert!(!hold_ready_for_host_update(false, false));
+        assert!(!hold_ready_for_host_update(true, false));
     }
 }

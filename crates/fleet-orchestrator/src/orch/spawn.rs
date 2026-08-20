@@ -3,7 +3,10 @@
 use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
 use crate::sandbox::remote::{self, RemoteHostHandle};
 use crate::sandbox::{SandboxRuntime, SpawnRequest, fleet_worker_env};
-use crate::store::{BoardSnapshot, Store, enqueue_remote_spawn, select_assignable_host};
+use crate::store::{
+    BoardSnapshot, Store, enqueue_remote_spawn, hold_ready_for_host_update, select_assignable_host,
+    workspace_has_updating_host,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +69,14 @@ pub async fn schedule_and_spawn(
         }
         // Missing worker_hosts must not fail the tick.
         let remote_host = select_assignable_host(store, project_id).await;
+        let updating = workspace_has_updating_host(store, project_id).await;
+        if hold_ready_for_host_update(remote_host.is_some(), updating) {
+            tracing::info!(
+                task_id = %task.id,
+                "paired host is applying a host-bin update; leaving task ready"
+            );
+            continue;
+        }
         let backend = if remote_host.is_some() {
             remote::BACKEND
         } else {
