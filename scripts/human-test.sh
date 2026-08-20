@@ -171,6 +171,7 @@ cmd_guide() {
     "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Add worker — paste the install command on the machine." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane." \
+    "Each card has Native and Sandboxed checkboxes. Sandboxed is a placeholder. Both off is the same as stop taking new jobs." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." || return 0
 
   pause_step "Workers" \

@@ -27,15 +27,12 @@ invent a second spawn path.
 
 ## Isolation is not a nav item
 
-Isolation is a property of a runner, not a sidebar item:
+Each self-hosted runner has two checkboxes: **Native** and **Sandboxed**.
+Both, either, or neither. Neither is the same as stop taking new jobs.
 
-- **Native** — agent process on the OS. Today’s paired `fleet-host`.
-  Not a sandbox. Required for “run on this PC / this server.” Only
-  Native is a working executor in v1.
-- **Sandboxed** — container / VM / k8s. Current local `SANDBOX_BACKEND`
-  (`stub` / `process` / `docker`) and future cloud / partner / k8s stay
-  here. Self-hosted sandbox is a visible toggle only; it is not
-  assignable.
+- **Native** — jobs run as processes on that OS. This is what v1 assigns.
+- **Sandboxed** — placeholder. Shown on the card so the option is not
+  missing; checking it does not run container/k8s jobs yet.
 
 Sidebar after MR 3: **Runners** accordion (same rank as Monitoring and
 Agents). Children: **Self-hosted** (live), **Cloud** and **Partners**

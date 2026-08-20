@@ -9,7 +9,7 @@ use super::api::{
     PackageInventory,
 };
 use crate::clipboard::copy_text;
-use crate::components::runner_isolation::RunnerIsolationChip;
+use crate::components::runner_isolation::RunnerModeChecks;
 use crate::components::toast::show_toast;
 
 const POLL_MS: u32 = 10_000;
@@ -205,7 +205,7 @@ fn display_name(host: &HostPublic) -> String {
 }
 
 fn holding_new_jobs(host: &HostPublic) -> bool {
-    host.paused || host.drain
+    host.paused || host.drain || (!host.allow_host && !host.allow_container)
 }
 
 fn hold_jobs_reason(host: &HostPublic) -> Option<String> {
@@ -551,11 +551,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
                         "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
-                    }
-                    div { class: "mt-2",
-                        RunnerIsolationChip {
-                            caption: Some("Jobs run as processes on that machine.".into()),
-                        }
                     }
                     if let Some(line) = package_line(&packages()) {
                         p {
@@ -952,6 +947,63 @@ fn HostCard(
 
             if !revoked {
                 div { class: "mt-3 flex flex-wrap items-center gap-x-4 gap-y-2",
+                    RunnerModeChecks {
+                        native: host.allow_host,
+                        sandboxed: host.allow_container,
+                        disabled: busy(),
+                        on_native: {
+                            let workspace_id = workspace_id.clone();
+                            let host = host.clone();
+                            move |on: bool| {
+                                if busy() {
+                                    return;
+                                }
+                                if on == host.allow_host {
+                                    return;
+                                }
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                let current = host.clone();
+                                spawn(async move {
+                                    let patch = HostPatch {
+                                        allow_host: Some(on),
+                                        ..HostPatch::default()
+                                    };
+                                    match patch_host(&ws, &current.id, &current, &patch).await {
+                                        Ok(updated) => on_updated.call(updated),
+                                        Err(e) => show_toast().error(e),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        on_sandboxed: {
+                            let workspace_id = workspace_id.clone();
+                            let host = host.clone();
+                            move |on: bool| {
+                                if busy() {
+                                    return;
+                                }
+                                if on == host.allow_container {
+                                    return;
+                                }
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                let current = host.clone();
+                                spawn(async move {
+                                    let patch = HostPatch {
+                                        allow_container: Some(on),
+                                        ..HostPatch::default()
+                                    };
+                                    match patch_host(&ws, &current.id, &current, &patch).await {
+                                        Ok(updated) => on_updated.call(updated),
+                                        Err(e) => show_toast().error(e),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                    }
                     button {
                         class: "{btn_class()}",
                         r#type: "button",
@@ -969,8 +1021,10 @@ fn HostCard(
                                 let ws = workspace_id.clone();
                                 let current = host.clone();
                                 let patch = HostPatch {
-                                    paused: Some(next_hold),
-                                    drain: if next_hold { None } else { Some(false) },
+                                    allow_host: Some(!next_hold),
+                                    allow_container: Some(false),
+                                    paused: Some(false),
+                                    drain: Some(false),
                                     ..HostPatch::default()
                                 };
                                 spawn(async move {
@@ -1290,6 +1344,12 @@ mod tests {
 
         host.drain = false;
         assert!(hold_jobs_reason(&host).is_none());
+
+        host.allow_host = false;
+        host.allow_container = false;
+        assert!(holding_new_jobs(&host));
+        let both_off = hold_jobs_reason(&host).expect("both modes off holds");
+        assert_no_pause(&both_off);
     }
 
     #[test]
