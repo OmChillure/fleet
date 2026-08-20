@@ -9,6 +9,7 @@ use super::api::{
     PackageInventory,
 };
 use crate::clipboard::copy_text;
+use crate::components::runner_isolation::RunnerIsolationChip;
 use crate::components::toast::show_toast;
 
 const POLL_MS: u32 = 10_000;
@@ -551,8 +552,10 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
                         "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
                     }
-                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Isolation: Native"
+                    div { class: "mt-2",
+                        RunnerIsolationChip {
+                            caption: Some("Jobs run as processes on that machine.".into()),
+                        }
                     }
                     if let Some(line) = package_line(&packages()) {
                         p {
