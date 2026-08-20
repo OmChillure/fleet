@@ -421,6 +421,10 @@ fn fleet(ws: &str, suffix: &str) -> String {
     }
 }
 
+fn partners_disclaimer(ws: &str) -> String {
+    format!("/api/workspaces/{ws}/partners/disclaimer")
+}
+
 async fn tick_until_tasks_done(
     app: &axum::Router,
     jar: &CookieJar,
@@ -1815,4 +1819,168 @@ async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
     .await;
     assert!(replay_action.ok, "{replay_action:?} {replay}");
     assert_eq!(replay["already_launched"], true, "{replay}");
+}
+
+// ── 13. partners disclaimer ack stub ────────────────────────────────────────
+
+#[tokio::test]
+async fn partners_disclaimer_get_defaults_not_accepted() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let got = call(&app, "GET", &partners_disclaimer(&ws), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(
+        got.body["accepted"], false,
+        "default must be not accepted: {}",
+        got.body
+    );
+    assert!(
+        got.body["accepted_at"].is_null(),
+        "default accepted_at must be null: {}",
+        got.body
+    );
+}
+
+#[tokio::test]
+async fn partners_disclaimer_post_then_get_ack_is_sticky() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let posted = call(
+        &app,
+        "POST",
+        &partners_disclaimer(&ws),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(posted.status, StatusCode::OK, "post: {}", posted.body);
+    assert_eq!(posted.body["accepted"], true, "{}", posted.body);
+    let accepted_at = posted.body["accepted_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("accepted_at: {}", posted.body))
+        .to_string();
+    assert!(
+        !accepted_at.is_empty(),
+        "POST must return accepted_at: {}",
+        posted.body
+    );
+
+    let got = call(&app, "GET", &partners_disclaimer(&ws), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "get after post: {}", got.body);
+    assert_eq!(got.body["accepted"], true, "{}", got.body);
+    assert_eq!(
+        got.body["accepted_at"].as_str(),
+        Some(accepted_at.as_str()),
+        "GET must return the recorded timestamp: {}",
+        got.body
+    );
+
+    let again = call(
+        &app,
+        "POST",
+        &partners_disclaimer(&ws),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "second post: {}", again.body);
+    assert_eq!(again.body["accepted"], true, "{}", again.body);
+    assert_eq!(
+        again.body["accepted_at"].as_str(),
+        Some(accepted_at.as_str()),
+        "second POST must not change accepted_at: {}",
+        again.body
+    );
+}
+
+#[tokio::test]
+async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
+    let posted = call(
+        &app,
+        "POST",
+        &partners_disclaimer(&ws),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(posted.status, StatusCode::OK, "post: {}", posted.body);
+    assert_eq!(posted.body["accepted"], true, "{}", posted.body);
+    assert!(
+        posted.body["accepted_at"].as_str().is_some(),
+        "ack is a timestamp only: {}",
+        posted.body
+    );
+
+    let hosts = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/worker-hosts"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(hosts.status, StatusCode::OK, "hosts: {}", hosts.body);
+    let host_list = hosts.body["hosts"].as_array().cloned().unwrap_or_default();
+    assert!(
+        host_list.is_empty(),
+        "ack must not create worker_hosts: {}",
+        hosts.body
+    );
+
+    let listed = fleet_db::repos::worker_hosts::list_for_workspace(&state.db, workspace_id)
+        .await
+        .expect("list_for_workspace");
+    assert!(
+        listed.is_empty(),
+        "ack must not insert worker_hosts rows: {listed:?}"
+    );
+
+    let assignable = fleet_db::repos::worker_hosts::list_assignable(
+        &state.db,
+        workspace_id,
+        chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("list_assignable");
+    assert!(
+        assignable.is_empty(),
+        "ack must not create assignable hosts: {assignable:?}"
+    );
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(tasks.status, StatusCode::OK, "tasks: {}", tasks.body);
+    let task_list = tasks.body["tasks"].as_array().cloned().unwrap_or_default();
+    assert!(
+        task_list.is_empty(),
+        "ack must not enqueue fleet tasks: {}",
+        tasks.body
+    );
+
+    let runs = call(&app, "GET", &fleet(&ws, "/runs"), Some(&jar), None).await;
+    assert_eq!(runs.status, StatusCode::OK, "runs: {}", runs.body);
+    let run_list = runs.body["runs"].as_array().cloned().unwrap_or_default();
+    assert!(
+        run_list.is_empty(),
+        "ack must not enqueue fleet runs: {}",
+        runs.body
+    );
+
+    let claimed = fleet_db::repos::work_claims::claim_next(
+        &state.db,
+        workspace_id,
+        Uuid::now_v7(),
+        chrono::Duration::minutes(1),
+    )
+    .await
+    .expect("claim_next");
+    assert!(
+        claimed.is_none(),
+        "ack must not enqueue work_claims: {claimed:?}"
+    );
 }
