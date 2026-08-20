@@ -370,6 +370,14 @@ mod tests {
             body.contains("FLEET_PLATFORM=linux-armv7-musl"),
             "platform script must export linux-armv7-musl"
         );
+        assert!(
+            body.contains("fetch -o -"),
+            "every Unix wrapper must accept fetch, not only freebsd-amd64"
+        );
+        assert!(
+            body.contains("worker install: fetching installer"),
+            "wrapper must print a phase line before the silent common fetch"
+        );
     }
 
     #[test]

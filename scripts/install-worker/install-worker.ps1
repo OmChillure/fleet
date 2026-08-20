@@ -75,6 +75,7 @@ Write-Host "platform: $platform"
 Write-Host "source:   $origin"
 
 $scriptUrl = "$origin/install/worker/${platform}.ps1"
+Write-Host "downloading $platform installer"
 & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $scriptUrl).Content))
 
 # Optional gnullvm runtime. 404 = skip so x86_64 gnu is unchanged.

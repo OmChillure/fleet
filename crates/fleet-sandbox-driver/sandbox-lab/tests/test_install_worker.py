@@ -161,7 +161,6 @@ class InstallWorkerTests(unittest.TestCase):
         """Stock FreeBSD has fetch(1), not curl/wget. dest= clobbers caller dest."""
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
         boot = BOOTSTRAP.read_text()
-        fbsd = (SCRIPT_DIR / "freebsd-amd64.sh").read_text()
         self.assertIn("_dest=$2", common)
         self.assertNotRegex(common, r"(?m)^\s*dest=\$2\s*$")
         self.assertIn('fetch -o "$_dest" "$_url"', common)
@@ -170,9 +169,14 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("fetch -o -", boot)
         self.assertIn("need curl, wget, or fetch", boot)
         self.assertNotIn("need curl or wget to download", boot)
-        self.assertIn('fetch -o -', fbsd)
-        self.assertIn("need curl, wget, or fetch", fbsd)
-        self.assertNotIn("need curl or wget", fbsd)
+        unix_plats = [n for n in PLATFORMS if n.endswith(".sh") and n != "_unix_common.sh"]
+        for name in unix_plats:
+            text = (SCRIPT_DIR / name).read_text()
+            self.assertIn("_unix_common.sh", text, name)
+            self.assertIn("fetch -o -", text, name)
+            self.assertIn("need curl, wget, or fetch", text, name)
+            self.assertNotIn("need curl or wget", text, name)
+            self.assertIn("worker install: fetching installer", text, name)
 
     def test_install_uses_worker_product_name_and_three_bins(self):
         """Product is a Worker. fleet-host is the spawner, not a second product."""
@@ -202,9 +206,14 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn("this machine is a self-hosted worker", text, name)
             self.assertIn("fleet-host   stays up", text, name)
             self.assertIn("fleet-worker runs each job", text, name)
+            self.assertIn("Agent Fleet worker installer", text, name)
 
     def test_install_prints_progress_not_silent_downloads(self):
-        """Phase lines + a progress bar so a 100MB fetch does not look frozen."""
+        """Phase lines + a progress bar so a 100MB fetch does not look frozen.
+
+        Every OS path must participate: Unix wrappers fetch _unix_common.sh
+        (which has the bar); Windows scripts have their own.
+        """
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
         self.assertIn("this machine is a self-hosted worker", common)
         self.assertIn("fleet-host   stays up", common)
@@ -218,6 +227,15 @@ class InstallWorkerTests(unittest.TestCase):
             common,
             r'fetch_to "\$base/\$bin" "\$dest\.tmp" 2>/dev/null',
         )
+        boot = BOOTSTRAP.read_text()
+        self.assertIn("downloading $PLATFORM installer", boot)
+        ps_boot = (SCRIPT_DIR / "install-worker.ps1").read_text(encoding="ascii")
+        self.assertIn("downloading $platform installer", ps_boot)
+        unix_plats = [n for n in PLATFORMS if n.endswith(".sh") and n != "_unix_common.sh"]
+        for name in unix_plats:
+            text = (SCRIPT_DIR / name).read_text()
+            self.assertIn("worker install: fetching installer", text, name)
+            self.assertIn("_unix_common.sh", text, name)
         for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
             self.assertIn("this machine is a self-hosted worker", text, name)
@@ -432,10 +450,102 @@ class InstallWorkerTests(unittest.TestCase):
                 self.assertFalse((prefix / "bin" / "fleet-host.tmp").exists(), out)
                 self.assertNotIn("need curl", out)
                 self.assertIn("installed", out)
+                self.assertIn("this machine is a self-hosted worker", out)
+                self.assertIn("fleet-host   stays up", out)
+                self.assertIn("fleet-worker runs each job", out)
+                self.assertIn("checking fleet-host", out)
+                self.assertIn("downloading fleet-host", out)
+                self.assertIn("fetching installer", out)
                 log = fetch_log.read_text()
                 self.assertIn("-o", log)
                 # dest-leak: fetch wrote to *.tmp then mv, never dest=
                 self.assertNotIn("dest=", log)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_linux_curl_path_prints_progress_and_names_bins(self):
+        """Linux (curl) must print the same worker naming + phase lines as FreeBSD."""
+        import tempfile
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        common = (SCRIPT_DIR / "_unix_common.sh").read_bytes()
+        plat = (SCRIPT_DIR / "linux-x86_64.sh").read_bytes()
+        bins = {
+            "fleet-host": b"fake-linux-host\n",
+            "fleet-worker": b"fake-linux-worker\n",
+            "fleet-driver": b"fake-linux-driver\n",
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def _body(self):
+                mapping = {
+                    "/install/worker/_unix_common.sh": common,
+                    "/install/worker/linux-x86_64.sh": plat,
+                    "/install/worker/bin/linux-x86_64/fleet-host": bins["fleet-host"],
+                    "/install/worker/bin/linux-x86_64/fleet-worker": bins["fleet-worker"],
+                    "/install/worker/bin/linux-x86_64/fleet-driver": bins["fleet-driver"],
+                }
+                return mapping.get(self.path)
+
+            def do_HEAD(self):
+                body = self._body()
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+
+            def do_GET(self):
+                body = self._body()
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                prefix = td / "prefix"
+                env = os.environ.copy()
+                env["FLEET_URL"] = f"http://127.0.0.1:{port}"
+                env["FLEET_PLATFORM"] = "linux-x86_64"
+                env["FLEET_PREFIX"] = str(prefix)
+                env["HOME"] = str(td)
+                env.pop("FLEET_DETECT_ONLY", None)
+                env.pop("FLEET_PAIR_TOKEN", None)
+                r = subprocess.run(
+                    ["sh", str(SCRIPT_DIR / "linux-x86_64.sh")],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                out = (r.stdout or "") + (r.stderr or "")
+                self.assertEqual(r.returncode, 0, out)
+                host = prefix / "bin" / "fleet-host"
+                self.assertTrue(host.is_file(), out)
+                self.assertEqual(host.read_bytes(), bins["fleet-host"])
+                self.assertIn("fetching installer", out)
+                self.assertIn("this machine is a self-hosted worker", out)
+                self.assertIn("fleet-host   stays up", out)
+                self.assertIn("fleet-worker runs each job", out)
+                self.assertIn("checking fleet-host", out)
+                self.assertIn("downloading fleet-host", out)
+                self.assertIn("installed", out)
         finally:
             httpd.shutdown()
             httpd.server_close()

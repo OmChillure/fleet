@@ -47,6 +47,10 @@ function Save-Url([string]$Url, [string]$Dest) {
     Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -Uri $Url -OutFile $Dest
 }
 
+Write-Host "Agent Fleet worker installer"
+Write-Host "  platform: windows-arm64"
+Write-Host "  origin:   $Origin"
+Write-Host "  prefix:   $Prefix"
 Write-Host "this machine is a self-hosted worker"
 Write-Host "  fleet-host   stays up; pairs and takes jobs"
 Write-Host "  fleet-worker runs each job"

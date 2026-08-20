@@ -195,6 +195,7 @@ esac
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
+info "downloading $PLATFORM installer"
 if ! http_get "$script" >"$tmp"; then
     die "failed to download $script"
 fi

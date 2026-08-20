@@ -8,6 +8,7 @@ if [ -z "$ORIGIN" ]; then
   echo "worker install: set FLEET_URL to the control plane" >&2
   exit 1
 fi
+echo "worker install: fetching installer"
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL "$ORIGIN/install/worker/_unix_common.sh" | sh
 elif command -v wget >/dev/null 2>&1; then

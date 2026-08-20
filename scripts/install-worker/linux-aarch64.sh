@@ -8,11 +8,15 @@ if [ -z "$ORIGIN" ]; then
   echo "worker install: set FLEET_URL to the control plane" >&2
   exit 1
 fi
+echo "worker install: fetching installer"
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL "$ORIGIN/install/worker/_unix_common.sh" | sh
 elif command -v wget >/dev/null 2>&1; then
   wget -qO- "$ORIGIN/install/worker/_unix_common.sh" | sh
+elif command -v fetch >/dev/null 2>&1; then
+  # Stock FreeBSD has fetch(1), not curl/wget. fetch -o dest url; dest=- is stdout.
+  fetch -o - "$ORIGIN/install/worker/_unix_common.sh" | sh
 else
-  echo "worker install: need curl or wget" >&2
+  echo "worker install: need curl, wget, or fetch" >&2
   exit 1
 fi
