@@ -25,7 +25,8 @@ and repo-root `.env`. This page does not install packages.
 | Small tweak: typo, comment nit, one-line docs wording, import order | No | No | Optional (direct to the target branch is OK) |
 
 If it can break a user, a sandbox, or the next install, it is **not** a small
-tweak. Prefer an MR and a named reviewer even when you could push.
+tweak. Prefer an MR and a Slack ask for review even when you could
+push. Do not assign a reviewer on the GitLab MR — that creates locks.
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`. Tests
 and demos run on a developer or agent host.
@@ -195,10 +196,10 @@ is not a second test framework.
 ## Merge request text (copy)
 
 ```
-Human testing: ran ./scripts/human-test.sh (or reviewer will).
+Human testing: ran ./scripts/human-test.sh (or a peer will).
 Demo: agent-recorded .tmp/demos/<file>.webm attached — shows <scene>.
-Reviewer: @<peer>
+Ask for a review on Slack. Do not assign a reviewer on the MR.
 ```
 
-Reviewers: watch the clip, then spot-check the walkthrough on the MR branch
-if the change is auth, fleet, install, or data.
+Whoever picks it up: watch the clip, then spot-check the walkthrough on
+the MR branch if the change is auth, fleet, install, or data.
