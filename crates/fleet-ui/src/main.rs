@@ -22,7 +22,7 @@ use pages::integrations::{Integrations, OAuthDone};
 use pages::sandboxes::Sandboxes;
 use pages::sessions::{SessionDetail, Sessions};
 use pages::settings::Settings;
-use pages::workers::Workers;
+use pages::workers::Workers as SelfHosted;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -59,8 +59,12 @@ pub enum Route {
         Sandboxes { workspace_id: String },
         #[route("/:workspace_id/integrations")]
         Integrations { workspace_id: String },
+        #[route("/:workspace_id/runners/self-hosted")]
+        SelfHosted { workspace_id: String },
+        #[route("/:workspace_id/runners")]
+        RunnersIndex { workspace_id: String },
         #[route("/:workspace_id/workers")]
-        Workers { workspace_id: String },
+        WorkersRedirect { workspace_id: String },
         #[route("/:workspace_id/settings")]
         Settings { workspace_id: String },
 }
@@ -78,7 +82,9 @@ impl Route {
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
             | Route::Integrations { workspace_id }
-            | Route::Workers { workspace_id }
+            | Route::SelfHosted { workspace_id }
+            | Route::RunnersIndex { workspace_id }
+            | Route::WorkersRedirect { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,
         }
@@ -97,6 +103,30 @@ fn App() -> Element {
             Router::<Route> {}
         }
     }
+}
+
+/// `/{ws}/runners` → current self-hosted workers UI.
+#[component]
+fn RunnersIndex(workspace_id: String) -> Element {
+    let navigator = use_navigator();
+    use_effect(move || {
+        navigator.replace(Route::SelfHosted {
+            workspace_id: workspace_id.clone(),
+        });
+    });
+    rsx! {}
+}
+
+/// `/{ws}/workers` → `/{ws}/runners/self-hosted`.
+#[component]
+fn WorkersRedirect(workspace_id: String) -> Element {
+    let navigator = use_navigator();
+    use_effect(move || {
+        navigator.replace(Route::SelfHosted {
+            workspace_id: workspace_id.clone(),
+        });
+    });
+    rsx! {}
 }
 
 /// Landing + auth chrome — pure black, no color accents.

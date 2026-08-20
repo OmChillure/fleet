@@ -4,10 +4,9 @@ use dioxus::prelude::*;
 
 use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
-    CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout,
-    me,
+    create_workspace, list_workspaces, logout, me, CreateWorkspaceBody, UserPublic, WorkspacePublic,
 };
-use crate::theme::{Theme, use_theme};
+use crate::theme::{use_theme, Theme};
 use crate::Route;
 
 /// Which top-level nav sections are expanded.
@@ -16,6 +15,7 @@ enum NavSection {
     Chat,
     Monitoring,
     Agents,
+    Runners,
     Workspace,
 }
 
@@ -37,9 +37,8 @@ pub fn Sidebar() -> Element {
     let navigator = use_navigator();
 
     // Collapsible sections — start with Chat + Monitoring open.
-    let mut expanded = use_signal(|| {
-        std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring])
-    });
+    let mut expanded =
+        use_signal(|| std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring]));
 
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
@@ -47,16 +46,15 @@ pub fn Sidebar() -> Element {
             Route::Chat { .. }
             | Route::ChatThread { .. }
             | Route::Sessions { .. }
-            | Route::SessionDetail { .. } => {
-                Some(NavSection::Chat)
-            }
+            | Route::SessionDetail { .. } => Some(NavSection::Chat),
             Route::Fleet { .. } | Route::Dashboard { .. } | Route::Sandboxes { .. } => {
                 Some(NavSection::Monitoring)
             }
             Route::Agents { .. } => Some(NavSection::Agents),
-            Route::Integrations { .. } | Route::Workers { .. } | Route::Settings { .. } => {
-                Some(NavSection::Workspace)
-            }
+            Route::SelfHosted { .. }
+            | Route::RunnersIndex { .. }
+            | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
+            Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
             _ => None,
         };
         if let Some(section) = section {
@@ -92,16 +90,13 @@ pub fn Sidebar() -> Element {
         .cloned()
         .or_else(|| list_snapshot.first().cloned());
 
-    let current_label = current
-        .as_ref()
-        .map(|w| w.name.clone())
-        .unwrap_or_else(|| {
-            if workspace_id.is_empty() {
-                "Select workspace".into()
-            } else {
-                "Workspace".into()
-            }
-        });
+    let current_label = current.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| {
+        if workspace_id.is_empty() {
+            "Select workspace".into()
+        } else {
+            "Workspace".into()
+        }
+    });
 
     let is_open = sidebar_open();
 
@@ -353,6 +348,25 @@ pub fn Sidebar() -> Element {
                 }
 
                 NavAccordion {
+                    title: "Runners",
+                    expanded: expanded().contains(&NavSection::Runners),
+                    on_toggle: move |_| {
+                        let mut set = expanded();
+                        if !set.remove(&NavSection::Runners) {
+                            set.insert(NavSection::Runners);
+                        }
+                        expanded.set(set);
+                    },
+                    icon: rsx! { IconServer {} },
+                    NavSubLink {
+                        to: Route::SelfHosted { workspace_id: workspace_id.clone() },
+                        label: "Self-hosted",
+                    }
+                    NavComingSoon { label: "Cloud" }
+                    NavComingSoon { label: "Partners" }
+                }
+
+                NavAccordion {
                     title: "Workspace",
                     expanded: expanded().contains(&NavSection::Workspace),
                     on_toggle: move |_| {
@@ -366,10 +380,6 @@ pub fn Sidebar() -> Element {
                     NavSubLink {
                         to: Route::Integrations { workspace_id: workspace_id.clone() },
                         label: "Integrations",
-                    }
-                    NavSubLink {
-                        to: Route::Workers { workspace_id: workspace_id.clone() },
-                        label: "Workers",
                     }
                     NavSubLink {
                         to: Route::Settings { workspace_id: workspace_id.clone() },
@@ -590,6 +600,18 @@ fn NavSubLink(to: Route, label: &'static str) -> Element {
     }
 }
 
+#[component]
+fn NavComingSoon(label: &'static str) -> Element {
+    rsx! {
+        span {
+            class: "block cursor-not-allowed rounded-md px-2 py-1 text-sm text-[var(--app-muted)] opacity-60",
+            title: "Coming soon",
+            "{label}"
+            span { class: "ml-1 text-[10px] uppercase tracking-wide", "Coming soon" }
+        }
+    }
+}
+
 /* ── Inline icons (no external icon crate) ─────────────────────── */
 
 #[component]
@@ -657,6 +679,24 @@ fn IconBot() -> Element {
             rect { x: "3", y: "11", width: "18", height: "10", rx: "2" }
             path { d: "M12 2v4M8 16h.01M16 16h.01" }
             circle { cx: "12", cy: "7", r: "1" }
+        }
+    }
+}
+
+#[component]
+fn IconServer() -> Element {
+    rsx! {
+        svg {
+            class: "h-4 w-4",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            rect { x: "2", y: "2", width: "20", height: "8", rx: "2" }
+            rect { x: "2", y: "14", width: "20", height: "8", rx: "2" }
+            path { d: "M6 6h.01M6 18h.01" }
         }
     }
 }
