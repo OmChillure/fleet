@@ -815,6 +815,16 @@ fn HostCard(
     let mut confirm_remove = use_signal(|| false);
     let mut renaming = use_signal(|| false);
     let mut name_draft = use_signal(|| host.name.clone());
+    let mut d_native = use_signal(|| host.allow_host);
+    let mut d_sandboxed = use_signal(|| host.allow_container);
+    let mut d_auto = use_signal(|| host.auto_update);
+    let mut d_max = use_signal(|| host.max_concurrent);
+    let dirty = d_native() != host.allow_host
+        || d_sandboxed() != host.allow_container
+        || d_auto() != host.auto_update
+        || d_max() != host.max_concurrent;
+    let pending = host.settings_pending || host.settings_gen != host.settings_ack_gen;
+    let draft_holding = !d_native() && !d_sandboxed();
     let revoked = host.status == "disabled";
     let pill = status_pill_class(&host.status);
     let last_seen = relative_seen(&host.last_seen_at);
@@ -967,147 +977,40 @@ fn HostCard(
             if !revoked {
                 div { class: "mt-3 space-y-3 border-t border-[var(--app-border)] pt-3",
                     RunnerModeChecks {
-                        native: host.allow_host,
-                        sandboxed: host.allow_container,
-                        disabled: busy(),
-                        on_native: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            move |on: bool| {
-                                if busy() {
-                                    return;
-                                }
-                                if on == host.allow_host {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                spawn(async move {
-                                    let patch = HostPatch {
-                                        allow_host: Some(on),
-                                        ..HostPatch::default()
-                                    };
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => on_updated.call(updated),
-                                        Err(e) => show_toast().error(e),
-                                    }
-                                    busy.set(false);
-                                });
-                            }
-                        },
-                        on_sandboxed: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            move |on: bool| {
-                                if busy() {
-                                    return;
-                                }
-                                if on == host.allow_container {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                spawn(async move {
-                                    let patch = HostPatch {
-                                        allow_container: Some(on),
-                                        ..HostPatch::default()
-                                    };
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => on_updated.call(updated),
-                                        Err(e) => show_toast().error(e),
-                                    }
-                                    busy.set(false);
-                                });
-                            }
-                        },
+                        native: d_native(),
+                        sandboxed: d_sandboxed(),
+                        disabled: busy() || pending,
+                        on_native: move |on: bool| d_native.set(on),
+                        on_sandboxed: move |on: bool| d_sandboxed.set(on),
                     }
                     div { class: "flex flex-wrap items-center gap-x-4 gap-y-2",
                     button {
                         class: "{btn_class()}",
                         r#type: "button",
                         disabled: busy(),
-                        title: "{accept_jobs_title(holding)}",
-                        onclick: {
-                            let workspace_id = workspace_id.clone();
-                            let host = host.clone();
-                            let next_hold = !holding;
-                            move |_| {
-                                if busy() {
-                                    return;
-                                }
-                                busy.set(true);
-                                let ws = workspace_id.clone();
-                                let current = host.clone();
-                                let patch = HostPatch {
-                                    allow_host: Some(!next_hold),
-                                    allow_container: Some(false),
-                                    paused: Some(false),
-                                    drain: Some(false),
-                                    ..HostPatch::default()
-                                };
-                                spawn(async move {
-                                    match patch_host(&ws, &current.id, &current, &patch).await {
-                                        Ok(updated) => {
-                                            on_updated.call(updated);
-                                            if next_hold {
-                                                show_toast().success(
-                                                    "Not taking new jobs. Running jobs keep going.",
-                                                );
-                                            } else {
-                                                show_toast().success(
-                                                    "This worker will take new jobs again.",
-                                                );
-                                            }
-                                        }
-                                        Err(e) => show_toast().error(e),
-                                    }
-                                    busy.set(false);
-                                });
+                        title: "{accept_jobs_title(draft_holding)}",
+                        onclick: move |_| {
+                            if draft_holding {
+                                d_native.set(true);
+                            } else {
+                                d_native.set(false);
+                                d_sandboxed.set(false);
                             }
                         },
-                        "{accept_jobs_label(holding)}"
+                        "{accept_jobs_label(draft_holding)}"
                     }
                     label {
                         class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
                         title: "When on, this worker pulls the served package by itself. Turn off to wait for Update now.",
                         input {
                             r#type: "checkbox",
-                            checked: host.auto_update,
-                            disabled: busy(),
-                            onchange: {
-                                let workspace_id = workspace_id.clone();
-                                let host = host.clone();
-                                move |e| {
-                                    if busy() {
-                                        return;
-                                    }
-                                    let on = e.checked();
-                                    if on == host.auto_update {
-                                        return;
-                                    }
-                                    busy.set(true);
-                                    let ws = workspace_id.clone();
-                                    let current = host.clone();
-                                    let patch = HostPatch {
-                                        auto_update: Some(on),
-                                        ..HostPatch::default()
-                                    };
-                                    spawn(async move {
-                                        match patch_host(&ws, &current.id, &current, &patch).await
-                                        {
-                                            Ok(updated) => on_updated.call(updated),
-                                            Err(err) => show_toast().error(err),
-                                        }
-                                        busy.set(false);
-                                    });
-                                }
-                            },
+                            checked: d_auto(),
+                            disabled: busy() || pending,
+                            onchange: move |e| d_auto.set(e.checked()),
                         }
                         "Auto-update"
                     }
-                    if !host.auto_update && needs_software_update(&host) {
+                    if !d_auto() && needs_software_update(&host) {
                         button {
                             class: "{btn_class()}",
                             r#type: "button",
@@ -1156,39 +1059,58 @@ fn HostCard(
                             r#type: "number",
                             min: "1",
                             max: "256",
-                            value: "{host.max_concurrent}",
+                            value: "{d_max()}",
+                            disabled: busy() || pending,
+                            onchange: move |e| {
+                                if let Ok(n) = e.value().parse::<i32>() {
+                                    d_max.set(n.clamp(1, 256));
+                                }
+                            },
+                        }
+                    }
+                    if dirty {
+                        button {
+                            class: "rounded-lg bg-[var(--app-fg)] px-2.5 py-1 text-xs font-semibold text-[var(--app-bg)] hover:opacity-90 disabled:opacity-50",
+                            r#type: "button",
                             disabled: busy(),
-                            onchange: {
+                            onclick: {
                                 let workspace_id = workspace_id.clone();
                                 let host = host.clone();
-                                move |e| {
+                                move |_| {
                                     if busy() {
-                                        return;
-                                    }
-                                    let Ok(n) = e.value().parse::<i32>() else {
-                                        return;
-                                    };
-                                    let n = n.clamp(1, 256);
-                                    if n == host.max_concurrent {
                                         return;
                                     }
                                     busy.set(true);
                                     let ws = workspace_id.clone();
                                     let current = host.clone();
                                     let patch = HostPatch {
-                                        max_concurrent: Some(n),
+                                        allow_host: Some(d_native()),
+                                        allow_container: Some(d_sandboxed()),
+                                        auto_update: Some(d_auto()),
+                                        max_concurrent: Some(d_max()),
+                                        paused: Some(false),
+                                        drain: Some(false),
                                         ..HostPatch::default()
                                     };
                                     spawn(async move {
                                         match patch_host(&ws, &current.id, &current, &patch).await
                                         {
-                                            Ok(updated) => on_updated.call(updated),
+                                            Ok(updated) => {
+                                                on_updated.call(updated);
+                                                show_toast().success("Settings sent. Waiting for the runner.");
+                                            }
                                             Err(e) => show_toast().error(e),
                                         }
                                         busy.set(false);
                                     });
                                 }
                             },
+                            "Apply"
+                        }
+                    } else if pending {
+                        span {
+                            class: "inline-flex items-center rounded-lg border border-amber-500/30 px-2.5 py-1 text-xs font-medium text-amber-300/90",
+                            "Pending apply"
                         }
                     }
                     }

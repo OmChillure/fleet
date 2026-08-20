@@ -57,6 +57,12 @@ pub struct HostPublic {
     #[serde(default)]
     pub machine_id: Option<String>,
     #[serde(default)]
+    pub settings_gen: i32,
+    #[serde(default)]
+    pub settings_ack_gen: i32,
+    #[serde(default)]
+    pub settings_pending: bool,
+    #[serde(default)]
     pub current_jobs: i32,
     #[serde(default)]
     pub advertised_max_concurrent: Option<i32>,

@@ -117,6 +117,7 @@ fn cp_settings_json(host: &WorkerHost) -> Value {
         "max_concurrent": host.max_concurrent,
         "max_job_timeout_s": host.max_job_timeout_s,
         "labels": host.labels,
+        "settings_gen": host.settings_gen,
     })
 }
 
@@ -247,6 +248,9 @@ pub struct HeartbeatBody {
     /// Optional machine snapshot (cores / RAM / OS).
     #[serde(default)]
     pub hardware: Option<serde_json::Value>,
+    /// Last `settings_gen` this box applied from a heartbeat response.
+    #[serde(default)]
+    pub settings_ack_gen: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,6 +526,13 @@ async fn http_heartbeat(
         parse_machine_id(body.machine_id.as_deref()),
     )
     .await?;
+    let host = if let Some(n) = body.settings_ack_gen {
+        host_repo::ack_settings(&state.db, host.id, n)
+            .await
+            .unwrap_or(host)
+    } else {
+        host
+    };
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
     Ok(Json(json!({

@@ -271,6 +271,43 @@ async fn re_pair_same_hostname_without_machine_id_reclaims_existing_row() {
 }
 
 #[tokio::test]
+async fn patch_bumps_settings_gen_until_ack() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "ack", expires).await;
+    pair_host(&pool, &token, "ack-box").await;
+
+    let before = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(before.settings_gen, 0);
+    assert!(!before.settings_pending());
+
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch");
+    assert_eq!(patched.settings_gen, 1);
+    assert_eq!(patched.settings_ack_gen, 0);
+    assert!(patched.settings_pending());
+
+    let acked = worker_hosts::ack_settings(&pool, host.id, 1)
+        .await
+        .expect("ack");
+    assert_eq!(acked.settings_ack_gen, 1);
+    assert!(!acked.settings_pending());
+}
+
+#[tokio::test]
 async fn expired_pair_token_fails() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;

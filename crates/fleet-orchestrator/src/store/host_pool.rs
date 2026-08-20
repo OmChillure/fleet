@@ -471,6 +471,8 @@ mod tests {
             update_requested_at: None,
             machine_id: None,
             hardware: None,
+            settings_gen: 0,
+            settings_ack_gen: 0,
             created_by: None,
             created_at: now,
             paired_at: Some(now),

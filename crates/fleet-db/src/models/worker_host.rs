@@ -69,6 +69,8 @@ pub struct WorkerHost {
     pub update_requested_at: Option<DateTime<Utc>>,
     pub machine_id: Option<Uuid>,
     pub hardware: Option<serde_json::Value>,
+    pub settings_gen: i32,
+    pub settings_ack_gen: i32,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
@@ -88,6 +90,10 @@ impl WorkerHost {
     /// Tick / lease assignment: only native isolation is v1.
     pub fn is_native_isolation(&self) -> bool {
         self.isolation == WORKER_HOST_ISOLATION_NATIVE
+    }
+
+    pub fn settings_pending(&self) -> bool {
+        self.settings_gen != self.settings_ack_gen
     }
 
     /// `online` with a stale `last_seen_at` is reported as `offline`.
@@ -152,6 +158,12 @@ pub struct WorkerHostPublic {
     /// Durable box id (`fleet-host` `machine.id`). Same machine after re-pair.
     #[serde(default)]
     pub machine_id: Option<Uuid>,
+    #[serde(default)]
+    pub settings_gen: i32,
+    #[serde(default)]
+    pub settings_ack_gen: i32,
+    #[serde(default)]
+    pub settings_pending: bool,
     #[serde(default)]
     pub current_jobs: i32,
     #[serde(default)]
@@ -311,6 +323,9 @@ impl WorkerHostPublic {
             auto_update: host.auto_update,
             update_requested_at: host.update_requested_at,
             machine_id: host.machine_id,
+            settings_gen: host.settings_gen,
+            settings_ack_gen: host.settings_ack_gen,
+            settings_pending: host.settings_pending(),
             current_jobs: host.current_jobs,
             advertised_max_concurrent: host.advertised_max_concurrent,
             hardware: host.hardware.as_ref().and_then(|v| {
@@ -526,6 +541,8 @@ mod public_view_tests {
             update_requested_at: None,
             machine_id: None,
             hardware: None,
+            settings_gen: 0,
+            settings_ack_gen: 0,
             created_by: None,
             created_at: now,
             paired_at: Some(now),

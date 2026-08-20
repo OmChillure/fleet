@@ -1,6 +1,8 @@
 //! Control-plane HTTP: pair, heartbeat, lease, complete.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -25,6 +27,7 @@ pub struct HostClient {
     http: Client,
     base: String,
     token: Option<String>,
+    settings_ack: Arc<AtomicI32>,
 }
 
 impl HostClient {
@@ -61,7 +64,23 @@ impl HostClient {
             http: b.build().context("reqwest client")?,
             base,
             token,
+            settings_ack: Arc::new(AtomicI32::new(0)),
         })
+    }
+
+    fn take_settings_ack(&self) -> Option<i32> {
+        let n = self.settings_ack.load(Ordering::SeqCst);
+        if n > 0 {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    fn note_settings_gen(&self, n: i32) {
+        if n > 0 {
+            self.settings_ack.store(n, Ordering::SeqCst);
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -119,6 +138,7 @@ impl HostClient {
             software: Some(crate::software::heartbeat_software(cfg, updating)),
             hardware: Some(crate::hardware::heartbeat_hardware()),
             machine_id: crate::paths::load_or_create_machine_id().ok(),
+            settings_ack_gen: self.take_settings_ack(),
         };
         let resp = self
             .http
@@ -129,7 +149,11 @@ impl HostClient {
             .await
             .context("POST /api/worker-hosts/me/heartbeat")?;
         reject_auth(resp.status())?;
-        read_json(resp).await
+        let parsed: HeartbeatResponse = read_json(resp).await?;
+        if let Some(n) = parsed.host.settings_gen {
+            self.note_settings_gen(n);
+        }
+        Ok(parsed)
     }
 
     pub async fn lease(&self) -> Result<Option<LeaseClaim>> {
@@ -301,6 +325,8 @@ struct HeartbeatRequest {
     hardware: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings_ack_gen: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -351,6 +377,8 @@ pub struct HostPublic {
     /// One-shot Update click. Host applies once even when auto is off.
     #[serde(default)]
     pub update_requested_at: Option<String>,
+    #[serde(default)]
+    pub settings_gen: Option<i32>,
 }
 
 impl HostPublic {

@@ -25,7 +25,7 @@ const HOST_COLS: &str = r#"
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
     software_git_sha, software_bins, software_reported_at, software_updating, auto_update,
     update_requested_at, machine_id,
-    hardware,
+    hardware, settings_gen, settings_ack_gen,
     created_by, created_at, paired_at, updated_at
 "#;
 
@@ -194,6 +194,22 @@ pub async fn patch_cp_settings(
     } else {
         current.update_requested_at
     };
+    let bump = name.as_str() != current.name.as_str()
+        || enabled != current.enabled
+        || paused != current.paused
+        || drain != current.drain
+        || isolation != current.isolation.as_str()
+        || allow_host != current.allow_host
+        || allow_container != current.allow_container
+        || max_concurrent != current.max_concurrent
+        || max_job_timeout_s != current.max_job_timeout_s
+        || labels != &current.labels
+        || auto_update != current.auto_update;
+    let settings_gen = if bump {
+        current.settings_gen.saturating_add(1)
+    } else {
+        current.settings_gen
+    };
 
     let q = format!(
         r#"
@@ -210,6 +226,7 @@ pub async fn patch_cp_settings(
             labels = $11,
             auto_update = $12,
             update_requested_at = $13,
+            settings_gen = $14,
             updated_at = now()
         WHERE id = $1
         RETURNING {HOST_COLS}
@@ -229,6 +246,27 @@ pub async fn patch_cp_settings(
         .bind(labels)
         .bind(auto_update)
         .bind(update_requested_at)
+        .bind(settings_gen)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+pub async fn ack_settings(pool: &PgPool, host_id: Uuid, ack_gen: i32) -> DbResult<WorkerHost> {
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET settings_ack_gen = $2,
+            updated_at = now()
+        WHERE id = $1
+          AND settings_gen = $2
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(ack_gen)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?
