@@ -22,6 +22,7 @@ const HOST_COLS: &str = r#"
     allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
     machine_token_hash, advertised_host, advertised_container, platform, hostname,
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
+    software_git_sha, software_bins, software_reported_at, software_updating, auto_update,
     created_by, created_at, paired_at, updated_at
 "#;
 
@@ -377,9 +378,13 @@ pub async fn heartbeat(
     last_error: Option<&str>,
     current_jobs: i32,
     advertised_max_concurrent: Option<i32>,
+    software_git_sha: Option<&str>,
+    software_bins: Option<serde_json::Value>,
+    software_updating: Option<bool>,
 ) -> DbResult<WorkerHost> {
     let current_jobs = current_jobs.max(0);
     let advertised_max_concurrent = advertised_max_concurrent.map(|n| n.clamp(1, 256));
+    let report_software = software_git_sha.is_some() || software_bins.is_some();
     let q = format!(
         r#"
         UPDATE worker_hosts
@@ -391,7 +396,11 @@ pub async fn heartbeat(
             last_seen_at = now(),
             updated_at = now(),
             current_jobs = $7,
-            advertised_max_concurrent = COALESCE($8, advertised_max_concurrent)
+            advertised_max_concurrent = COALESCE($8, advertised_max_concurrent),
+            software_git_sha = COALESCE($9, software_git_sha),
+            software_bins = COALESCE($10, software_bins),
+            software_reported_at = CASE WHEN $11 THEN now() ELSE software_reported_at END,
+            software_updating = COALESCE($12, software_updating)
         WHERE id = $1
           AND status <> '{WORKER_HOST_STATUS_DISABLED}'
         RETURNING {HOST_COLS}
@@ -406,6 +415,10 @@ pub async fn heartbeat(
         .bind(last_error)
         .bind(current_jobs)
         .bind(advertised_max_concurrent)
+        .bind(software_git_sha)
+        .bind(software_bins)
+        .bind(report_software)
+        .bind(software_updating)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?

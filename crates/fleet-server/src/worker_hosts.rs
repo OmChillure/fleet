@@ -213,6 +213,19 @@ pub struct HeartbeatBody {
     pub max_concurrent: Option<i32>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Optional; omitted by hosts built before version reporting.
+    #[serde(default)]
+    pub software: Option<HeartbeatSoftware>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatSoftware {
+    #[serde(default)]
+    pub git_sha: Option<String>,
+    #[serde(default)]
+    pub bins: Option<serde_json::Value>,
+    #[serde(default)]
+    pub updating: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,6 +457,7 @@ async fn http_heartbeat(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let sw = body.software.as_ref();
     let host = host_repo::heartbeat(
         &state.db,
         host.id,
@@ -454,6 +468,9 @@ async fn http_heartbeat(
         last_error,
         body.current_jobs,
         body.max_concurrent,
+        sw.and_then(|s| s.git_sha.as_deref()),
+        sw.and_then(|s| s.bins.clone()),
+        sw.and_then(|s| s.updating),
     )
     .await?;
     Ok(Json(json!({

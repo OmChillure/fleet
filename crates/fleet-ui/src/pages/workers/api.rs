@@ -42,6 +42,18 @@ pub struct HostPublic {
     pub created_at: Option<String>,
     #[serde(default)]
     pub paired_at: Option<String>,
+    #[serde(default)]
+    pub software: Option<HostSoftware>,
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct HostSoftware {
+    #[serde(default)]
+    pub git_sha: Option<String>,
+    #[serde(default)]
+    pub updating: bool,
 }
 
 fn default_true() -> bool {

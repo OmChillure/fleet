@@ -256,6 +256,9 @@ async fn heartbeat_updates_last_seen_at() {
         Some("disk full"),
         0,
         None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("heartbeat");
@@ -270,10 +273,22 @@ async fn heartbeat_updates_last_seen_at() {
     assert_eq!(after.current_jobs, 0);
     assert_eq!(after.advertised_max_concurrent, None);
 
-    let load =
-        worker_hosts::heartbeat(&pool, host.id, false, true, None, None, None, -3, Some(512))
-            .await
-            .expect("heartbeat load");
+    let load = worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        false,
+        true,
+        None,
+        None,
+        None,
+        -3,
+        Some(512),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("heartbeat load");
     assert_eq!(load.current_jobs, 0, "current_jobs must clamp >= 0");
     assert_eq!(
         load.advertised_max_concurrent,
@@ -281,20 +296,72 @@ async fn heartbeat_updates_last_seen_at() {
         "advertised_max_concurrent must clamp to 256"
     );
 
-    let mid = worker_hosts::heartbeat(&pool, host.id, false, true, None, None, None, 2, Some(8))
-        .await
-        .expect("heartbeat mid");
+    let mid = worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        false,
+        true,
+        None,
+        None,
+        None,
+        2,
+        Some(8),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("heartbeat mid");
     assert_eq!(mid.current_jobs, 2);
     assert_eq!(mid.advertised_max_concurrent, Some(8));
 
-    let keep = worker_hosts::heartbeat(&pool, host.id, false, true, None, None, None, 1, None)
-        .await
-        .expect("heartbeat keep advertised");
+    let keep = worker_hosts::heartbeat(
+        &pool, host.id, false, true, None, None, None, 1, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat keep advertised");
     assert_eq!(keep.current_jobs, 1);
     assert_eq!(
         keep.advertised_max_concurrent,
         Some(8),
         "None must leave advertised_max_concurrent unchanged"
+    );
+    assert!(
+        keep.software_git_sha.is_none(),
+        "old heartbeat without software must leave software unset"
+    );
+
+    let bins = serde_json::json!({ "fleet-host": "abc" });
+    let with_sw = worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        false,
+        true,
+        None,
+        None,
+        None,
+        1,
+        None,
+        Some("deadbeef"),
+        Some(bins.clone()),
+        Some(false),
+    )
+    .await
+    .expect("heartbeat software");
+    assert_eq!(with_sw.software_git_sha.as_deref(), Some("deadbeef"));
+    assert_eq!(with_sw.software_bins, Some(bins));
+    assert!(with_sw.software_reported_at.is_some());
+    assert!(!with_sw.software_updating);
+
+    let keep_sw = worker_hosts::heartbeat(
+        &pool, host.id, false, true, None, None, None, 1, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat keep software");
+    assert_eq!(
+        keep_sw.software_git_sha.as_deref(),
+        Some("deadbeef"),
+        "omitted software must not clear the last report"
     );
 }
 
@@ -565,11 +632,13 @@ async fn stored_online_with_stale_last_seen_serializes_offline() {
         create_pending_with_token(&pool, workspace_id, user_id, "stale-seen", expires).await;
     pair_host(&pool, &token, "stale-box").await;
 
-    sqlx::query("UPDATE worker_hosts SET last_seen_at = now() - interval '2 minutes' WHERE id = $1")
-        .bind(host.id)
-        .execute(&pool)
-        .await
-        .expect("age last_seen_at");
+    sqlx::query(
+        "UPDATE worker_hosts SET last_seen_at = now() - interval '2 minutes' WHERE id = $1",
+    )
+    .bind(host.id)
+    .execute(&pool)
+    .await
+    .expect("age last_seen_at");
 
     let row = worker_hosts::get(&pool, host.id)
         .await

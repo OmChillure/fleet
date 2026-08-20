@@ -35,6 +35,11 @@ pub struct WorkerHost {
     pub last_error: Option<String>,
     pub current_jobs: i32,
     pub advertised_max_concurrent: Option<i32>,
+    pub software_git_sha: Option<String>,
+    pub software_bins: Option<serde_json::Value>,
+    pub software_reported_at: Option<DateTime<Utc>>,
+    pub software_updating: bool,
+    pub auto_update: bool,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
@@ -93,6 +98,25 @@ pub struct WorkerHostPublic {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub software: Option<WorkerSoftwarePublic>,
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+}
+
+fn default_auto_update() -> bool {
+    true
+}
+
+/// What the box last reported. `None` on `WorkerHostPublic.software` means never reported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSoftwarePublic {
+    pub git_sha: Option<String>,
+    #[serde(default)]
+    pub bins: Option<serde_json::Value>,
+    pub reported_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updating: bool,
 }
 
 impl WorkerHostPublic {
@@ -118,6 +142,17 @@ impl WorkerHostPublic {
             last_error: host.last_error.clone(),
             created_at: host.created_at,
             paired_at: host.paired_at,
+            software: if host.software_reported_at.is_some() || host.software_git_sha.is_some() {
+                Some(WorkerSoftwarePublic {
+                    git_sha: host.software_git_sha.clone(),
+                    bins: host.software_bins.clone(),
+                    reported_at: host.software_reported_at,
+                    updating: host.software_updating,
+                })
+            } else {
+                None
+            },
+            auto_update: host.auto_update,
         }
     }
 }
@@ -199,6 +234,11 @@ mod public_view_tests {
             last_error: None,
             current_jobs: 0,
             advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: None,
+            software_updating: false,
+            auto_update: true,
             created_by: None,
             created_at: now,
             paired_at: Some(now),
@@ -252,6 +292,10 @@ mod public_view_tests {
             "WorkerHost serialize leaked hash: {raw}"
         );
         assert_eq!(v["status"], "online");
+        assert!(
+            v.get("software").unwrap().is_null(),
+            "never-reported software must be null: {v}"
+        );
     }
 }
 

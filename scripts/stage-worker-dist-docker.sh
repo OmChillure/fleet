@@ -30,6 +30,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+export FLEET_GIT_SHA="${FLEET_GIT_SHA:-$(bash "$ROOT/scripts/tree-id.sh")}"
 
 DEST="${FLEET_WORKER_DIST_DIR:-.tmp/vms/dist}"
 # Isolated cargo home so this can run next to a host cargo build.
@@ -170,6 +171,7 @@ docker_cargo() {
     -e HOME=/tmp \
     -e CARGO_HOME=/cargo \
     -e CARGO_TARGET_DIR=/target \
+    -e "FLEET_GIT_SHA=${FLEET_GIT_SHA:-}" \
     -v "$CARGO_DOCKER:/cargo" \
     -v "$ROOT:/src:rw" \
     -v "$target_dir:/target" \

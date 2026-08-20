@@ -5,6 +5,7 @@ pub mod config;
 pub mod paths;
 pub mod platform;
 pub mod run;
+pub mod software;
 pub mod spawn;
 
 pub use config::{ContainerBackend, LocalConfig, merge_child_env};

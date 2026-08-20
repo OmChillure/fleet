@@ -27,6 +27,10 @@ fn real_main() -> Result<()> {
         }
         Cmd::Version => {
             println!("fleet-host {}", env!("CARGO_PKG_VERSION"));
+            match fleet_host::software::baked_git_sha() {
+                Some(sha) => println!("git_sha {sha}"),
+                None => println!("git_sha unknown"),
+            }
             Ok(())
         }
         Cmd::Status => run::status(),

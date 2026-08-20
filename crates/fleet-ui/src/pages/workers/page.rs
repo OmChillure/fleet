@@ -63,6 +63,24 @@ fn status_label(status: &str) -> &str {
     }
 }
 
+fn short_sha(sha: &str) -> &str {
+    let s = sha.trim();
+    if s.len() > 12 { &s[..12] } else { s }
+}
+
+fn software_line(host: &HostPublic) -> String {
+    match host
+        .software
+        .as_ref()
+        .and_then(|s| s.git_sha.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(sha) => short_sha(sha).to_string(),
+        None => "unknown".into(),
+    }
+}
+
 fn display_name(host: &HostPublic) -> String {
     let n = host.name.trim();
     if n.is_empty() {
@@ -448,6 +466,13 @@ fn HostCard(
                 }
                 span { class: "text-xs text-[var(--app-muted)]",
                     "last seen {last_seen}"
+                }
+            }
+
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "software {software_line(&host)}"
+                if host.software.as_ref().is_none_or(|s| s.git_sha.as_ref().is_none_or(|g| g.trim().is_empty())) {
+                    " · re-run the install command to report a version"
                 }
             }
 

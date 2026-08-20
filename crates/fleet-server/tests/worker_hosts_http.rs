@@ -707,6 +707,39 @@ async fn lease_returns_enqueued_spawn_session() {
     assert_eq!(done.status, StatusCode::OK, "complete: {}", done.body);
 }
 
+#[tokio::test]
+async fn heartbeat_without_software_leaves_public_software_null() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let host = &listed.body["hosts"][0];
+    assert!(
+        host.get("software").is_none() || host["software"].is_null(),
+        "old host must not invent a version: {}",
+        host
+    );
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0,
+            "software": { "git_sha": "abc123def456", "updating": false }
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "software heartbeat: {}", hb.body);
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    let host = &listed.body["hosts"][0];
+    assert_eq!(host["software"]["git_sha"], "abc123def456", "{}", host);
+}
+
 async fn create_pair_and_heartbeat(
     app: &axum::Router,
     jar: &CookieJar,
