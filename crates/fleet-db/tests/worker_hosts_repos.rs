@@ -115,6 +115,12 @@ async fn create_pending_then_list_for_workspace() {
     assert_eq!(listed.iter().filter(|h| h.id == a.id).count(), 1);
     assert!(listed.iter().all(|h| h.workspace_id == workspace_id));
     assert!(listed.iter().all(|h| h.status == "pending"));
+    assert!(
+        listed
+            .iter()
+            .all(|h| h.isolation == "native" && h.is_native_isolation()),
+        "existing and new hosts default to native isolation"
+    );
     assert!(listed.iter().all(|h| h.machine_token_hash.is_none()));
     assert!(listed.iter().all(|h| h.current_jobs == 0));
     assert!(listed.iter().all(|h| h.advertised_max_concurrent.is_none()));
@@ -172,9 +178,10 @@ async fn pair_token_works_once_second_consume_fails() {
         .expect("machine token must authenticate");
     assert_eq!(authed.id, host.id);
 
-    let err = worker_hosts::consume_pair_token(&pool, &token, "box-1", "linux-x86_64", true, false, None)
-        .await
-        .expect_err("second consume must fail");
+    let err =
+        worker_hosts::consume_pair_token(&pool, &token, "box-1", "linux-x86_64", true, false, None)
+            .await
+            .expect_err("second consume must fail");
     match err {
         DbError::Conflict(msg) => assert!(
             msg.contains("used") || msg.contains("pending"),
@@ -207,9 +214,7 @@ async fn re_pair_same_machine_id_reclaims_existing_row() {
     assert_eq!(paired.host.id, first.id);
     assert_eq!(paired.host.machine_id, Some(mid));
 
-    worker_hosts::revoke(&pool, first.id)
-        .await
-        .expect("remove");
+    worker_hosts::revoke(&pool, first.id).await.expect("remove");
 
     let (second, token_b) =
         create_pending_with_token(&pool, workspace_id, user_id, "box-again", expires).await;
@@ -248,9 +253,7 @@ async fn re_pair_same_hostname_without_machine_id_reclaims_existing_row() {
     assert_eq!(paired.host.id, first.id);
     assert_eq!(paired.host.machine_id, Some(first.id));
 
-    worker_hosts::revoke(&pool, first.id)
-        .await
-        .expect("remove");
+    worker_hosts::revoke(&pool, first.id).await.expect("remove");
 
     let (second, token_b) =
         create_pending_with_token(&pool, workspace_id, user_id, "box-again", expires).await;
@@ -275,9 +278,10 @@ async fn expired_pair_token_fails() {
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "stale-token", expired_at).await;
 
-    let err = worker_hosts::consume_pair_token(&pool, &token, "box", "linux-x86_64", true, false, None)
-        .await
-        .expect_err("expired pair token must fail");
+    let err =
+        worker_hosts::consume_pair_token(&pool, &token, "box", "linux-x86_64", true, false, None)
+            .await
+            .expect_err("expired pair token must fail");
     match err {
         DbError::Conflict(msg) => {
             assert!(msg.contains("expired"), "unexpected conflict: {msg}");
@@ -565,6 +569,75 @@ async fn list_assignable_excludes_paused_disabled_stale() {
 }
 
 #[tokio::test]
+async fn list_assignable_excludes_sandboxed_isolation() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let (native_host, native_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "native", expires).await;
+    pair_host(&pool, &native_token, "native-box").await;
+    assert_eq!(
+        worker_hosts::get(&pool, native_host.id)
+            .await
+            .expect("get native")
+            .expect("native exists")
+            .isolation,
+        "native"
+    );
+
+    let (sandboxed_host, sandboxed_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "sandboxed", expires).await;
+    pair_host(&pool, &sandboxed_token, "sandboxed-box").await;
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        sandboxed_host.id,
+        &HostCpSettings {
+            isolation: Some("sandboxed".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("mark sandboxed");
+    assert_eq!(patched.isolation, "sandboxed");
+    assert!(!patched.is_native_isolation());
+
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable");
+    let ids: Vec<Uuid> = assignable.iter().map(|h| h.id).collect();
+    assert_eq!(
+        ids,
+        vec![native_host.id],
+        "sandboxed host is a placeholder and must not be assignable: {ids:?}"
+    );
+    assert!(assignable.iter().all(|h| h.isolation == "native"));
+
+    let back = worker_hosts::patch_cp_settings(
+        &pool,
+        sandboxed_host.id,
+        &HostCpSettings {
+            isolation: Some("native".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("restore native");
+    assert_eq!(back.isolation, "native");
+    let both = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list after restore");
+    let both_ids: Vec<Uuid> = both.iter().map(|h| h.id).collect();
+    assert_eq!(
+        both_ids.len(),
+        2,
+        "native again is assignable: {both_ids:?}"
+    );
+    assert!(both_ids.contains(&native_host.id));
+    assert!(both_ids.contains(&sandboxed_host.id));
+}
+
+#[tokio::test]
 async fn list_updating_recent_is_paired_updating_and_fresh() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -820,10 +893,17 @@ async fn replace_pair_token_only_while_pending_and_invalidates_old() {
         .await
         .expect("replace while pending");
 
-    let err =
-        worker_hosts::consume_pair_token(&pool, &old_token, "box", "linux-x86_64", true, false, None)
-            .await
-            .expect_err("old pair token must die after rotate");
+    let err = worker_hosts::consume_pair_token(
+        &pool,
+        &old_token,
+        "box",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect_err("old pair token must die after rotate");
     match err {
         DbError::Conflict(_) | DbError::NotFound(_) => {}
         other => panic!("expected used/invalid old token, got {other:?}"),

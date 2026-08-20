@@ -430,6 +430,11 @@ async fn owner_create_and_get_list() {
     assert_eq!(created.body["host"]["name"], "studio");
     assert_eq!(created.body["host"]["status"], "pending");
     assert_eq!(
+        created.body["host"]["isolation"], "native",
+        "new hosts default to native isolation: {}",
+        created.body
+    );
+    assert_eq!(
         created.body["host"]["workspace_id"].as_str(),
         Some(ws.as_str())
     );
@@ -475,8 +480,124 @@ async fn owner_create_and_get_list() {
     assert_eq!(got.status, StatusCode::OK, "get: {}", got.body);
     assert_eq!(got.body["id"].as_str(), Some(hid.as_str()));
     assert_eq!(got.body["name"], "studio");
+    assert_eq!(got.body["isolation"], "native");
     assert!(got.body.get("machine_token_hash").is_none());
     assert!(got.body.get("pair_token").is_none());
+}
+
+#[tokio::test]
+async fn isolation_defaults_native_and_patch_sandboxed() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "get: {}", got.body);
+    assert_eq!(got.body["isolation"], "native", "{}", got.body);
+
+    let listed = worker_hosts_assignable(&state, &ws).await;
+    assert_eq!(
+        listed,
+        vec![host_id],
+        "native host is assignable: {listed:?}"
+    );
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "isolation": "sandboxed" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
+    assert_eq!(
+        patched.body["isolation"], "sandboxed",
+        "PATCH may set the placeholder: {}",
+        patched.body
+    );
+
+    let listed = worker_hosts_assignable(&state, &ws).await;
+    assert!(
+        listed.is_empty(),
+        "sandboxed must not be assignable: {listed:?}"
+    );
+
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+    assert!(
+        lease.body["claim"].is_null(),
+        "sandboxed host must not lease: {}",
+        lease.body
+    );
+
+    let bad = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "isolation": "k8s" })),
+    )
+    .await;
+    assert_eq!(
+        bad.status,
+        StatusCode::BAD_REQUEST,
+        "bad isolation: {}",
+        bad.body
+    );
+    assert!(
+        bad.body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("isolation"),
+        "error should name isolation: {}",
+        bad.body
+    );
+
+    let back = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "isolation": "native" })),
+    )
+    .await;
+    assert_eq!(back.status, StatusCode::OK, "restore: {}", back.body);
+    assert_eq!(back.body["isolation"], "native");
+    let listed = worker_hosts_assignable(&state, &ws).await;
+    assert_eq!(
+        listed,
+        vec![host_id],
+        "native again is assignable: {listed:?}"
+    );
+}
+
+async fn worker_hosts_assignable(state: &AppState, ws: &str) -> Vec<Uuid> {
+    let workspace_id = Uuid::parse_str(ws).expect("ws");
+    fleet_db::repos::worker_hosts::list_assignable(
+        &state.db,
+        workspace_id,
+        chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("list_assignable")
+    .into_iter()
+    .map(|h| h.id)
+    .collect()
 }
 
 #[tokio::test]

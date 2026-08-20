@@ -13,7 +13,9 @@ use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
-use fleet_db::{HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic};
+use fleet_db::{
+    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, parse_worker_host_isolation,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -109,6 +111,7 @@ fn cp_settings_json(host: &WorkerHost) -> Value {
         "enabled": host.enabled,
         "paused": host.paused,
         "drain": host.drain,
+        "isolation": host.isolation,
         "allow_host": host.allow_host,
         "allow_container": host.allow_container,
         "max_concurrent": host.max_concurrent,
@@ -165,6 +168,11 @@ fn validate_max_job_timeout_s(n: i32) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_isolation(raw: &str) -> AppResult<&'static str> {
+    parse_worker_host_isolation(raw)
+        .ok_or_else(|| AppError::bad_request("isolation must be native or sandboxed"))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkerHostBody {
     #[serde(default)]
@@ -187,6 +195,8 @@ pub struct PatchWorkerHostBody {
     pub paused: Option<bool>,
     #[serde(default)]
     pub drain: Option<bool>,
+    #[serde(default)]
+    pub isolation: Option<String>,
     #[serde(default)]
     pub allow_host: Option<bool>,
     #[serde(default)]
@@ -349,6 +359,10 @@ async fn http_patch(
     if let Some(n) = body.max_job_timeout_s {
         validate_max_job_timeout_s(n)?;
     }
+    let isolation = match body.isolation.as_deref() {
+        None => None,
+        Some(raw) => Some(validate_isolation(raw)?.to_string()),
+    };
     let patch = HostCpSettings {
         name: body
             .name
@@ -357,6 +371,7 @@ async fn http_patch(
         enabled: body.enabled,
         paused: body.paused,
         drain: body.drain,
+        isolation,
         allow_host: body.allow_host,
         allow_container: body.allow_container,
         max_concurrent: body.max_concurrent,
@@ -520,6 +535,7 @@ fn host_accepts_leases(host: &WorkerHost) -> bool {
     host.enabled
         && !host.paused
         && !host.drain
+        && host.is_native_isolation()
         && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
         && host.effective_host()
 }

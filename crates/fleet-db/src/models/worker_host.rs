@@ -14,6 +14,20 @@ pub const WORKER_HOST_STATUS_ONLINE: &str = "online";
 pub const WORKER_HOST_STATUS_DISABLED: &str = "disabled";
 pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 
+/// Native host process (v1). Only this isolation is assignable.
+pub const WORKER_HOST_ISOLATION_NATIVE: &str = "native";
+/// Placeholder self-hosted sandbox. Not assignable; no k8s executor in v1.
+pub const WORKER_HOST_ISOLATION_SANDBOXED: &str = "sandboxed";
+
+/// `native` or `sandboxed`. Other values are rejected.
+pub fn parse_worker_host_isolation(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        WORKER_HOST_ISOLATION_NATIVE => Some(WORKER_HOST_ISOLATION_NATIVE),
+        WORKER_HOST_ISOLATION_SANDBOXED => Some(WORKER_HOST_ISOLATION_SANDBOXED),
+        _ => None,
+    }
+}
+
 /// Stored `online` older than this is serialized as `offline`.
 ///
 /// Heartbeats are every ~10s. 90s is several missed beats plus a Wi-Fi roam,
@@ -30,6 +44,8 @@ pub struct WorkerHost {
     pub enabled: bool,
     pub paused: bool,
     pub drain: bool,
+    /// `native` (v1) or `sandboxed` (placeholder; not assignable).
+    pub isolation: String,
     pub allow_host: bool,
     pub allow_container: bool,
     pub max_concurrent: i32,
@@ -69,6 +85,11 @@ impl WorkerHost {
         self.allow_container && self.advertised_container
     }
 
+    /// Tick / lease assignment: only native isolation is v1.
+    pub fn is_native_isolation(&self) -> bool {
+        self.isolation == WORKER_HOST_ISOLATION_NATIVE
+    }
+
     /// `online` with a stale `last_seen_at` is reported as `offline`.
     pub fn public_status(&self, now: DateTime<Utc>) -> &str {
         if self.status == WORKER_HOST_STATUS_ONLINE {
@@ -98,6 +119,8 @@ pub struct WorkerHostPublic {
     pub enabled: bool,
     pub paused: bool,
     pub drain: bool,
+    #[serde(default = "default_isolation")]
+    pub isolation: String,
     pub allow_host: bool,
     pub allow_container: bool,
     pub max_concurrent: i32,
@@ -139,6 +162,10 @@ pub struct WorkerHostPublic {
 
 fn default_auto_update() -> bool {
     true
+}
+
+fn default_isolation() -> String {
+    WORKER_HOST_ISOLATION_NATIVE.to_string()
 }
 
 fn default_software_status() -> String {
@@ -250,6 +277,11 @@ impl WorkerHostPublic {
             enabled: host.enabled,
             paused: host.paused,
             drain: host.drain,
+            isolation: if host.isolation == WORKER_HOST_ISOLATION_SANDBOXED {
+                WORKER_HOST_ISOLATION_SANDBOXED.to_string()
+            } else {
+                WORKER_HOST_ISOLATION_NATIVE.to_string()
+            },
             allow_host: host.allow_host,
             allow_container: host.allow_container,
             max_concurrent: host.max_concurrent,
@@ -445,6 +477,8 @@ pub struct HostCpSettings {
     pub enabled: Option<bool>,
     pub paused: Option<bool>,
     pub drain: Option<bool>,
+    /// `native` or `sandboxed`. `None` leaves the column unchanged.
+    pub isolation: Option<String>,
     pub allow_host: Option<bool>,
     pub allow_container: Option<bool>,
     pub max_concurrent: Option<i32>,
@@ -469,6 +503,7 @@ mod public_view_tests {
             enabled: true,
             paused: false,
             drain: false,
+            isolation: WORKER_HOST_ISOLATION_NATIVE.into(),
             allow_host: true,
             allow_container: true,
             max_concurrent: 4,
@@ -532,6 +567,28 @@ mod public_view_tests {
     }
 
     #[test]
+    fn isolation_parse_and_public_view() {
+        assert_eq!(
+            parse_worker_host_isolation("native"),
+            Some(WORKER_HOST_ISOLATION_NATIVE)
+        );
+        assert_eq!(
+            parse_worker_host_isolation(" sandboxed "),
+            Some(WORKER_HOST_ISOLATION_SANDBOXED)
+        );
+        assert_eq!(parse_worker_host_isolation("k8s"), None);
+        assert_eq!(parse_worker_host_isolation(""), None);
+
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        boxed.isolation = WORKER_HOST_ISOLATION_SANDBOXED.into();
+        assert!(!boxed.is_native_isolation());
+        assert_eq!(
+            boxed.as_public(Utc::now()).isolation,
+            WORKER_HOST_ISOLATION_SANDBOXED
+        );
+    }
+
+    #[test]
     fn pending_and_disabled_are_not_rewritten_to_offline() {
         let now = Utc::now();
         let pending = host(WORKER_HOST_STATUS_PENDING, None);
@@ -564,6 +621,8 @@ mod public_view_tests {
             "WorkerHost serialize leaked hash: {raw}"
         );
         assert_eq!(v["status"], "online");
+        assert_eq!(v["isolation"], WORKER_HOST_ISOLATION_NATIVE);
+        assert!(h.is_native_isolation());
         assert!(
             v.get("software").unwrap().is_null(),
             "never-reported software must be null: {v}"

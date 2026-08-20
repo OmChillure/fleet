@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    HostCpSettings, NewWorkerHost, WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE,
-    WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
+    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_STATUS_DISABLED,
+    WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
+    parse_worker_host_isolation,
 };
 use crate::pool::map_query_err;
 
@@ -18,7 +19,7 @@ pub const PAIR_TOKEN_PREFIX: &str = "flp_";
 pub const MACHINE_TOKEN_PREFIX: &str = "flm_";
 
 const HOST_COLS: &str = r#"
-    id, workspace_id, name, status, enabled, paused, drain,
+    id, workspace_id, name, status, enabled, paused, drain, isolation,
     allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
     machine_token_hash, advertised_host, advertised_container, platform, hostname,
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
@@ -177,6 +178,11 @@ pub async fn patch_cp_settings(
     let enabled = patch.enabled.unwrap_or(current.enabled);
     let paused = patch.paused.unwrap_or(current.paused);
     let drain = patch.drain.unwrap_or(current.drain);
+    let isolation = match patch.isolation.as_deref() {
+        None => current.isolation.as_str(),
+        Some(raw) => parse_worker_host_isolation(raw)
+            .ok_or_else(|| DbError::Conflict("isolation must be native or sandboxed".into()))?,
+    };
     let allow_host = patch.allow_host.unwrap_or(current.allow_host);
     let allow_container = patch.allow_container.unwrap_or(current.allow_container);
     let max_concurrent = patch.max_concurrent.unwrap_or(current.max_concurrent);
@@ -196,13 +202,14 @@ pub async fn patch_cp_settings(
             enabled = $3,
             paused = $4,
             drain = $5,
-            allow_host = $6,
-            allow_container = $7,
-            max_concurrent = $8,
-            max_job_timeout_s = $9,
-            labels = $10,
-            auto_update = $11,
-            update_requested_at = $12,
+            isolation = $6,
+            allow_host = $7,
+            allow_container = $8,
+            max_concurrent = $9,
+            max_job_timeout_s = $10,
+            labels = $11,
+            auto_update = $12,
+            update_requested_at = $13,
             updated_at = now()
         WHERE id = $1
         RETURNING {HOST_COLS}
@@ -214,6 +221,7 @@ pub async fn patch_cp_settings(
         .bind(enabled)
         .bind(paused)
         .bind(drain)
+        .bind(isolation)
         .bind(allow_host)
         .bind(allow_container)
         .bind(max_concurrent)
@@ -778,6 +786,7 @@ pub async fn list_assignable(
           AND enabled
           AND NOT paused
           AND NOT drain
+          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
           AND machine_token_hash IS NOT NULL
           AND last_seen_at IS NOT NULL
