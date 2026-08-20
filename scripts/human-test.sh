@@ -156,7 +156,8 @@ cmd_guide() {
     "Chat: New chat, Chat history." \
     "Monitoring: Dashboard, Fleet, Sandboxes." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
-    "Workspace (expand it): Integrations, Settings, Workers." || return 0
+    "Workspace (expand it): Integrations, Settings, Runners → Self-hosted." \
+    "Workers is gone from the sidebar; /{ws}/workers still redirects." || return 0
 
   pause_step "Workspace switcher" \
     "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
@@ -165,11 +166,15 @@ cmd_guide() {
     "Number of agents + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
-  pause_step "Workers" \
-    "Workspace → Workers (/{ws}/workers). Add worker — paste the install command on the machine." \
+  pause_step "Runners / Self-hosted" \
+    "Workspace → Runners → Self-hosted (/{ws}/runners/self-hosted). Add worker — paste the install command on the machine." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." || return 0
+
+  pause_step "Workers" \
+    "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \
+    "/{ws}/runners also lands on Self-hosted. Record scene is runners (workers alias)." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0

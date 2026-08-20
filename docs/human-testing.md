@@ -80,12 +80,14 @@ same change. The walkthrough is allowed to go stale only if the product did.
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
    Sandboxes), Agents (All agents, Live sessions), Workspace (Integrations,
-   Settings, Workers). Expand collapsed sections.
+   Settings, Runners → Self-hosted). Expand collapsed sections. `/workers`
+   still redirects.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
-8. **Workers** — `/{ws}/workers`. Add a worker; paste the install command
-   on the machine (Linux/macOS or Windows). Token panel is success — do
-   not require a second machine.
+8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
+   paste the install command on the machine (Linux/macOS or Windows). Token
+   panel is success — do not require a second machine. `/{ws}/workers`
+   redirects here (`workers` scene is an alias).
 9. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
 10. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
     are in `.env`.
@@ -155,7 +157,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
-| `crates/fleet-host`, worker-hosts API, UI `/{ws}/workers` | `workers` | add worker, paste install command; token panel is success (no second machine) |
+| `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). `/{ws}/workers` redirects |
 | `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
@@ -166,8 +168,9 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |
 
 `all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, agents,
-integrations, settings, workers, sessions (logout at the end of `auth`/`shell`
-as needed). `lab` and `kind` are extra — pass them when that is the MR.
+integrations, settings, runners, sessions (logout at the end of `auth`/`shell`
+as needed). `workers` is an alias for `runners`. `lab` and `kind` are extra —
+pass them when that is the MR.
 
 ### Adding a scene (required when you add a surface)
 

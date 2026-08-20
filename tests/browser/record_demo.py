@@ -249,18 +249,23 @@ class Demo:
         p.goto(f"{base}/settings", wait_until="networkidle")
         pause(p, 1500)
 
-    def scene_workers(self) -> None:
+    def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
         p = self.page
-        p.goto(f"{base}/workers", wait_until="networkidle")
+        p.goto(f"{base}{rel}", wait_until="networkidle")
         pause(p, 1000)
+        if rel != "/runners/self-hosted":
+            p.wait_for_url("**/runners/self-hosted", timeout=15_000)
         body = p.inner_text("body")
         heading = ""
         if p.locator("h1").count():
             heading = p.locator("h1").first.inner_text()
-        if "Workers" not in heading and "Workers" not in body:
+        if not any(
+            label in heading or label in body
+            for label in ("Self-hosted", "Runners", "Workers")
+        ):
             raise RuntimeError(
-                f"workers page missing Workers heading or text: {body[:300]}"
+                f"self-hosted runners page missing heading or text: {body[:300]}"
             )
         add = p.get_by_role("button", name="Add worker")
         if add.count():
@@ -270,6 +275,13 @@ class Demo:
         if hold.count() and hold.first.is_visible():
             hold.first.click()
             pause(p, 1500)
+
+    def scene_runners(self) -> None:
+        self._film_self_hosted("/runners/self-hosted")
+
+    def scene_workers(self) -> None:
+        """Alias: /{ws}/workers redirects to the self-hosted runners page."""
+        self._film_self_hosted("/workers")
 
     def scene_sessions(self) -> None:
         base = self.ensure_session()
@@ -351,6 +363,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
+    "runners": Demo.scene_runners,
     "workers": Demo.scene_workers,
     "sessions": Demo.scene_sessions,
     "dashboard": Demo.scene_dashboard,
@@ -370,7 +383,7 @@ CORE = [
     "agents",
     "integrations",
     "settings",
-    "workers",
+    "runners",
     "sessions",
     "dashboard",
 ]
