@@ -2,6 +2,9 @@
 
 use dioxus::prelude::*;
 
+use super::api::{fetch_disclaimer_ack, post_disclaimer_ack};
+use crate::components::toast::show_toast;
+
 fn field_class() -> &'static str {
     "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)] outline-none disabled:cursor-not-allowed disabled:opacity-50"
 }
@@ -10,11 +13,34 @@ fn btn_class() -> &'static str {
     "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-50"
 }
 
-/// Coming-soon Partners surface. Checkbox is local UI state only.
+/// Coming-soon Partners surface. Ack is a recorded timestamp only.
 #[component]
 pub fn PartnersPage(workspace_id: String) -> Element {
     let mut acknowledged = use_signal(|| false);
-    let _ = workspace_id;
+    let mut posting = use_signal(|| false);
+
+    let ws_load = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_load.clone();
+        spawn(async move {
+            match fetch_disclaimer_ack(&ws).await {
+                Ok(ack) => {
+                    if ack.accepted {
+                        acknowledged.set(true);
+                    } else if !posting() {
+                        acknowledged.set(false);
+                    }
+                }
+                Err(_) => {
+                    if !posting() {
+                        acknowledged.set(false);
+                    }
+                }
+            }
+        });
+    });
+
+    let ack_locked = acknowledged() || posting();
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-3xl flex-col overflow-auto px-4 py-6 md:px-6",
@@ -59,7 +85,32 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                         class: "mt-0.5",
                         r#type: "checkbox",
                         checked: acknowledged(),
-                        onchange: move |e| acknowledged.set(e.checked()),
+                        disabled: ack_locked,
+                        "aria-disabled": if ack_locked { "true" } else { "false" },
+                        onchange: {
+                            let workspace_id = workspace_id.clone();
+                            move |e| {
+                                if !e.checked() {
+                                    return;
+                                }
+                                if acknowledged() || posting() {
+                                    return;
+                                }
+                                acknowledged.set(true);
+                                posting.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match post_disclaimer_ack(&ws).await {
+                                        Ok(ack) => acknowledged.set(ack.accepted),
+                                        Err(err) => {
+                                            acknowledged.set(false);
+                                            show_toast().error(err);
+                                        }
+                                    }
+                                    posting.set(false);
+                                });
+                            }
+                        },
                     }
                     span {
                         "I acknowledge the trust terms above. Acknowledging does not enable lending."
