@@ -8,6 +8,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fleet_auth::{AppError, AppResult};
+use fleet_db::WorkerSoftwareManifest;
 
 use crate::state::AppState;
 
@@ -74,11 +75,7 @@ async fn get_worker_bin(
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
     let path = lookup_worker_bin(&state, &platform, &bin)?;
-    let ct = if bin.ends_with(".sha256") {
-        "text/plain; charset=utf-8"
-    } else {
-        "application/octet-stream"
-    };
+    let ct = worker_bin_content_type(&bin);
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -97,11 +94,7 @@ async fn head_worker_bin(
         Ok(meta) => {
             let len = meta.len().to_string();
             let len = HeaderValue::from_str(&len).unwrap_or_else(|_| HeaderValue::from_static("0"));
-            let ct = if bin.ends_with(".sha256") {
-                "text/plain; charset=utf-8"
-            } else {
-                "application/octet-stream"
-            };
+            let ct = worker_bin_content_type(&bin);
             Ok((
                 StatusCode::OK,
                 [
@@ -260,6 +253,90 @@ fn is_musl() -> bool {
     false
 }
 
+fn worker_bin_content_type(bin: &str) -> &'static str {
+    if bin == "manifest.json" || bin.ends_with(".json") {
+        "application/json"
+    } else if bin.ends_with(".sha256") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Staged `manifest.json` for this platform, or `None` if it was not staged.
+pub fn load_platform_manifest(
+    state: &AppState,
+    platform: Option<&str>,
+) -> Option<WorkerSoftwareManifest> {
+    let platform = platform.map(str::trim).filter(|s| !s.is_empty())?;
+    if reject_unsafe_name(platform).is_err() {
+        return None;
+    }
+    let path = resolve_worker_bin(
+        state.worker_dist_dir.as_deref(),
+        current_exe_dir().as_deref(),
+        workspace_target_dir().as_deref(),
+        platform,
+        "manifest.json",
+        &native_platform_id(),
+    )?;
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                platform,
+                path = %path.display(),
+                error = %e,
+                "worker dist manifest.json unreadable"
+            );
+            return None;
+        }
+    };
+    match serde_json::from_slice::<WorkerSoftwareManifest>(&bytes) {
+        Ok(mut m) => {
+            if m.platform.trim().is_empty() {
+                m.platform = platform.to_string();
+            }
+            Some(m)
+        }
+        Err(e) => {
+            tracing::warn!(
+                platform,
+                path = %path.display(),
+                error = %e,
+                "worker dist manifest.json is not valid JSON"
+            );
+            None
+        }
+    }
+}
+
+/// Every staged `manifest.json` under `FLEET_WORKER_DIST_DIR` (one per platform).
+pub fn list_dist_packages(state: &AppState) -> Vec<WorkerSoftwareManifest> {
+    let Some(root) = state.worker_dist_dir.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ent in entries.flatten() {
+        if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = ent.file_name();
+        let platform = name.to_string_lossy();
+        if reject_unsafe_name(&platform).is_err() {
+            continue;
+        }
+        if let Some(m) = load_platform_manifest(state, Some(platform.as_ref())) {
+            out.push(m);
+        }
+    }
+    out.sort_by(|a, b| a.platform.cmp(&b.platform));
+    out
+}
+
 fn missing_bin_hint(platform: &str, bin: &str) -> String {
     format!(
         "binary not available for {platform}/{bin}; set FLEET_WORKER_DIST_DIR to a directory of {{platform}}/{{bin}} or build from source (FLEET_WORKER_BUILD_FROM_SOURCE=1)"
@@ -340,6 +417,19 @@ mod tests {
         }
         fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn manifest_json_is_served_as_json() {
+        assert_eq!(worker_bin_content_type("manifest.json"), "application/json");
+        assert_eq!(
+            worker_bin_content_type("fleet-host.sha256"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            worker_bin_content_type("fleet-host"),
+            "application/octet-stream"
+        );
     }
 
     #[test]

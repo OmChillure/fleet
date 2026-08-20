@@ -541,6 +541,123 @@ async fn pair_once_second_pair_rejected() {
         again.status,
         again.body
     );
+
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
+    let host = listed.body["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid.as_str()))
+        .expect("paired host in list");
+    assert_eq!(
+        host["machine_id"].as_str(),
+        Some(hid.as_str()),
+        "pair assigns durable machine_id: {}",
+        listed.body
+    );
+}
+
+#[tokio::test]
+async fn re_pair_same_hostname_reclaims_row() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&jar),
+        Some(json!({ "name": "box" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "create: {}", created.body);
+    let hid = created.body["host"]["id"]
+        .as_str()
+        .expect("host.id")
+        .to_string();
+    let pair_token = created.body["pair_token"].as_str().expect("pair_token");
+    let paired = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": pair_token,
+            "hostname": "studio-pc",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert_eq!(paired.status, StatusCode::OK, "pair: {}", paired.body);
+
+    let del = call(
+        &app,
+        "DELETE",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(del.status, StatusCode::OK, "remove: {}", del.body);
+
+    let created2 = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&jar),
+        Some(json!({ "name": "box-again" })),
+    )
+    .await;
+    assert_eq!(
+        created2.status,
+        StatusCode::OK,
+        "create again: {}",
+        created2.body
+    );
+    let hid2 = created2.body["host"]["id"]
+        .as_str()
+        .expect("host.id")
+        .to_string();
+    let token2 = created2.body["pair_token"].as_str().expect("pair_token");
+    let again = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": token2,
+            "hostname": "studio-pc",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "re-pair: {}", again.body);
+    assert_eq!(
+        again.body["host_id"].as_str(),
+        Some(hid.as_str()),
+        "same hostname must reclaim the original row: {}",
+        again.body
+    );
+    assert_ne!(hid2, hid, "second create is a new pending row");
+
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
+    let hosts = listed.body["hosts"].as_array().expect("hosts");
+    let live = hosts
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid.as_str()))
+        .expect("original row");
+    assert_eq!(live["status"], "online");
+    assert_eq!(live["machine_id"].as_str(), Some(hid.as_str()));
+    let leftover = hosts
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid2.as_str()))
+        .expect("leftover pending");
+    assert_eq!(leftover["status"], "disabled");
 }
 
 #[tokio::test]
@@ -1145,6 +1262,189 @@ async fn install_worker_bin_dotdot_rejected() {
         "{}",
         out.raw
     );
+}
+
+fn write_platform_manifest(dir: &std::path::Path, platform: &str, host_sha: &str, git_sha: &str) {
+    let plat = dir.join(platform);
+    std::fs::create_dir_all(&plat).unwrap();
+    let body = serde_json::json!({
+        "git_sha": git_sha,
+        "platform": platform,
+        "bins": {
+            "fleet-host": { "sha256": host_sha, "size": 12 },
+            "fleet-worker": { "sha256": "worker-sha", "size": 13 },
+            "fleet-driver": { "sha256": "driver-sha", "size": 14 }
+        }
+    });
+    std::fs::write(
+        plat.join("manifest.json"),
+        serde_json::to_vec_pretty(&body).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn install_worker_manifest_404_when_unstaged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let out = call(
+        &app,
+        "GET",
+        "/install/worker/bin/linux-x86_64/manifest.json",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::NOT_FOUND, "{}", out.raw);
+}
+
+#[tokio::test]
+async fn install_worker_manifest_200_when_staged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let out = call(
+        &app,
+        "GET",
+        "/install/worker/bin/linux-x86_64/manifest.json",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.raw);
+    assert_eq!(out.body["git_sha"], "stage-tree");
+    assert_eq!(out.body["platform"], "linux-x86_64");
+    assert_eq!(out.body["bins"]["fleet-host"]["sha256"], "aaa111");
+    assert_eq!(out.body["bins"]["fleet-host"]["size"], 12);
+    let ct = out
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("json"), "content-type={ct}");
+}
+
+#[tokio::test]
+async fn heartbeat_includes_desired_when_staged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0,
+            "software": {
+                "git_sha": "old-tree",
+                "bins": {
+                    "fleet-host": "bbb222",
+                    "fleet-worker": "worker-sha",
+                    "fleet-driver": "driver-sha"
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "heartbeat: {}", hb.body);
+    assert_eq!(hb.body["desired"]["git_sha"], "stage-tree", "{}", hb.body);
+    assert_eq!(
+        hb.body["desired"]["bins"]["fleet-host"]["sha256"], "aaa111",
+        "{}",
+        hb.body
+    );
+    assert_eq!(hb.body["host"]["software_status"], "behind", "{}", hb.body);
+    assert_eq!(hb.body["host"]["outdated"], true, "{}", hb.body);
+    assert_eq!(
+        hb.body["host"]["desired"]["git_sha"], "stage-tree",
+        "{}",
+        hb.body
+    );
+}
+
+#[tokio::test]
+async fn public_host_software_status_current_behind_unknown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let (_id_old, machine_old) =
+        create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    let unknown = listed.body["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "old-box")
+        .expect("old-box");
+    assert_eq!(unknown["software_status"], "unknown", "{}", unknown);
+    assert_eq!(unknown["outdated"], false, "{}", unknown);
+    assert!(
+        unknown.get("software").is_none() || unknown["software"].is_null(),
+        "no software report: {unknown}"
+    );
+    assert_eq!(unknown["desired"]["git_sha"], "stage-tree", "{}", unknown);
+
+    let hb_behind = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine_old,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0,
+            "software": { "bins": { "fleet-host": "not-the-staged-sha" } }
+        })),
+    )
+    .await;
+    assert_eq!(hb_behind.status, StatusCode::OK, "{}", hb_behind.body);
+    assert_eq!(hb_behind.body["host"]["software_status"], "behind");
+    assert_eq!(hb_behind.body["host"]["outdated"], true);
+
+    let hb_current = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine_old,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0,
+            "software": {
+                "git_sha": "other",
+                "bins": {
+                    "fleet-host": "aaa111",
+                    "fleet-worker": "worker-sha",
+                    "fleet-driver": "driver-sha"
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(hb_current.status, StatusCode::OK, "{}", hb_current.body);
+    assert_eq!(hb_current.body["host"]["software_status"], "current");
+    assert_eq!(hb_current.body["host"]["outdated"], false);
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("{}/{}", hosts_path(&ws), unknown["id"].as_str().unwrap()),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["software_status"], "current");
+    assert_eq!(got.body["outdated"], false);
+    assert_eq!(got.body["desired"]["platform"], "linux-x86_64");
 }
 
 #[tokio::test]

@@ -78,8 +78,17 @@ async fn require_owner(
     Ok(user)
 }
 
-fn host_json(host: &WorkerHost) -> WorkerHostPublic {
+fn parse_machine_id(raw: Option<&str>) -> Option<Uuid> {
+    Uuid::parse_str(raw?.trim()).ok()
+}
+
+fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSoftwareManifest> {
+    crate::install_routes::load_platform_manifest(state, host.platform.as_deref())
+}
+
+fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
     host.as_public(Utc::now())
+        .with_desired(desired_for(state, host))
 }
 
 fn api_base(state: &AppState) -> String {
@@ -131,7 +140,7 @@ fn created_payload(
 ) -> Value {
     let api = api_base(state);
     json!({
-        "host": host_json(host),
+        "host": host_json(state, host),
         "pair_token": pair_token,
         "pair_expires_at": pair_expires_at,
         "install_hint": install_hint(&api, pair_token),
@@ -188,6 +197,10 @@ pub struct PatchWorkerHostBody {
     pub max_job_timeout_s: Option<i32>,
     #[serde(default)]
     pub labels: Option<Vec<String>>,
+    #[serde(default)]
+    pub auto_update: Option<bool>,
+    #[serde(default)]
+    pub request_update: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +210,8 @@ pub struct PairBody {
     pub platform: String,
     pub advertised_host: bool,
     pub advertised_container: bool,
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +228,9 @@ pub struct HeartbeatBody {
     pub max_concurrent: Option<i32>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Durable box id. Same file on the machine after remove + re-pair.
+    #[serde(default)]
+    pub machine_id: Option<String>,
     /// Optional; omitted by hosts built before version reporting.
     #[serde(default)]
     pub software: Option<HeartbeatSoftware>,
@@ -285,8 +303,16 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    let hosts: Vec<WorkerHostPublic> = rows.iter().map(host_json).collect();
-    Ok(Json(json!({ "hosts": hosts })))
+    let hosts: Vec<WorkerHostPublic> = rows.iter().map(|h| host_json(&state, h)).collect();
+    let packages = crate::install_routes::list_dist_packages(&state);
+    let plane_git_sha = option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    Ok(Json(json!({
+        "hosts": hosts,
+        "packages": packages,
+        "plane_git_sha": plane_git_sha,
+    })))
 }
 
 async fn load_in_workspace(
@@ -306,7 +332,7 @@ async fn http_get(
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let host = load_in_workspace(&state, workspace_id, host_id).await?;
-    Ok(Json(host_json(&host)))
+    Ok(Json(host_json(&state, &host)))
 }
 
 async fn http_patch(
@@ -336,9 +362,11 @@ async fn http_patch(
         max_concurrent: body.max_concurrent,
         max_job_timeout_s: body.max_job_timeout_s,
         labels: body.labels,
+        auto_update: body.auto_update,
+        request_update: body.request_update,
     };
     let host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
-    Ok(Json(host_json(&host)))
+    Ok(Json(host_json(&state, &host)))
 }
 
 async fn http_delete(
@@ -349,7 +377,7 @@ async fn http_delete(
     let _ = require_owner(&state, &jar, workspace_id).await?;
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     let host = host_repo::revoke(&state.db, host_id).await?;
-    Ok(Json(host_json(&host)))
+    Ok(Json(host_json(&state, &host)))
 }
 
 async fn http_new_pair_token(
@@ -404,6 +432,7 @@ async fn http_pair(
         platform,
         body.advertised_host,
         body.advertised_container,
+        parse_machine_id(body.machine_id.as_deref()),
     )
     .await
     .map_err(map_pair_err)?;
@@ -461,7 +490,7 @@ async fn http_heartbeat(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let sw = body.software.as_ref();
-    let host = host_repo::heartbeat(
+    let host = host_repo::heartbeat_with_machine(
         &state.db,
         host.id,
         body.advertised_host,
@@ -475,11 +504,15 @@ async fn http_heartbeat(
         sw.and_then(|s| s.bins.clone()),
         sw.and_then(|s| s.updating),
         body.hardware.clone(),
+        parse_machine_id(body.machine_id.as_deref()),
     )
     .await?;
+    let public = host_json(&state, &host);
+    let desired = public.desired.clone();
     Ok(Json(json!({
-        "host": host_json(&host),
+        "host": public,
         "effective": effective_json(&host),
+        "desired": desired,
     })))
 }
 
