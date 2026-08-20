@@ -69,6 +69,49 @@ impl From<WorkspaceWithRole> for WorkspacePublic {
     }
 }
 
+#[cfg(test)]
+mod partners_disclaimer_tests {
+    use super::*;
+
+    #[test]
+    fn missing_timestamp_is_not_accepted() {
+        let ack = PartnersDisclaimerAck::from_accepted_at(None);
+        assert!(!ack.accepted, "default (NULL) is not accepted");
+        assert_eq!(ack.accepted_at, None);
+    }
+
+    #[test]
+    fn recorded_timestamp_is_accepted() {
+        let at = DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&Utc);
+        let ack = PartnersDisclaimerAck::from_accepted_at(Some(at));
+        assert!(ack.accepted);
+        assert_eq!(ack.accepted_at, Some(at));
+    }
+
+    #[test]
+    fn ack_serializes_timestamp_only() {
+        let at = DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&Utc);
+        let json = serde_json::to_value(PartnersDisclaimerAck::from_accepted_at(Some(at)))
+            .expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert_eq!(obj.get("accepted"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            obj.get("accepted_at"),
+            Some(&serde_json::json!("2026-08-20T12:00:00Z"))
+        );
+        // Ack is a recorded timestamp only — no lend/borrow/enqueue flags.
+        assert_eq!(obj.len(), 2);
+        assert!(!obj.contains_key("lending"));
+        assert!(!obj.contains_key("borrowing"));
+        assert!(!obj.contains_key("enqueue"));
+        assert!(!obj.contains_key("assignable"));
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct WorkspaceMember {
     pub workspace_id: Uuid,
