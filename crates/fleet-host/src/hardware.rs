@@ -119,7 +119,7 @@ fn win_mem() -> Option<(u64, u8)> {
         avail_ext: u64,
     }
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GlobalMemoryStatusEx(s: *mut MemoryStatusEx) -> i32;
     }
     let mut s = MemoryStatusEx {
