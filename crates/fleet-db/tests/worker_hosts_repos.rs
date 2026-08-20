@@ -259,6 +259,7 @@ async fn heartbeat_updates_last_seen_at() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("heartbeat");
@@ -286,6 +287,7 @@ async fn heartbeat_updates_last_seen_at() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("heartbeat load");
@@ -309,6 +311,7 @@ async fn heartbeat_updates_last_seen_at() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("heartbeat mid");
@@ -316,7 +319,7 @@ async fn heartbeat_updates_last_seen_at() {
     assert_eq!(mid.advertised_max_concurrent, Some(8));
 
     let keep = worker_hosts::heartbeat(
-        &pool, host.id, false, true, None, None, None, 1, None, None, None, None,
+        &pool, host.id, false, true, None, None, None, 1, None, None, None, None, None,
     )
     .await
     .expect("heartbeat keep advertised");
@@ -345,6 +348,7 @@ async fn heartbeat_updates_last_seen_at() {
         Some("deadbeef"),
         Some(bins.clone()),
         Some(false),
+        None,
     )
     .await
     .expect("heartbeat software");
@@ -354,7 +358,7 @@ async fn heartbeat_updates_last_seen_at() {
     assert!(!with_sw.software_updating);
 
     let keep_sw = worker_hosts::heartbeat(
-        &pool, host.id, false, true, None, None, None, 1, None, None, None, None,
+        &pool, host.id, false, true, None, None, None, 1, None, None, None, None, None,
     )
     .await
     .expect("heartbeat keep software");
@@ -363,6 +367,31 @@ async fn heartbeat_updates_last_seen_at() {
         Some("deadbeef"),
         "omitted software must not clear the last report"
     );
+
+    let hw =
+        serde_json::json!({ "cpu_cores": 8, "mem_total_bytes": 32000000000u64, "os": "linux" });
+    let with_hw = worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        false,
+        true,
+        None,
+        None,
+        None,
+        3,
+        None,
+        None,
+        None,
+        None,
+        Some(hw.clone()),
+    )
+    .await
+    .expect("heartbeat hardware");
+    assert_eq!(with_hw.current_jobs, 3);
+    assert_eq!(with_hw.hardware, Some(hw));
+    let pub_h = with_hw.as_public(Utc::now());
+    assert_eq!(pub_h.current_jobs, 3);
+    assert_eq!(pub_h.hardware.as_ref().and_then(|h| h.cpu_cores), Some(8));
 }
 
 #[tokio::test]

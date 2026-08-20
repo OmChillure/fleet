@@ -239,6 +239,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("Waiting to pair", card)
         self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
+        self.assertRegex(card.lower(), r"jobs\s+0\s*/\s*4")
         self.assertNotIn("Allow host", card)
         self.assertNotIn("Allow container", card)
         self.assertNotIn("Advertised", card)

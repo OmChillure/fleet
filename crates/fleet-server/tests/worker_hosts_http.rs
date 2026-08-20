@@ -738,6 +738,26 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     let host = &listed.body["hosts"][0];
     assert_eq!(host["software"]["git_sha"], "abc123def456", "{}", host);
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 2,
+            "hardware": { "cpu_cores": 8, "mem_total_bytes": 32000000000u64, "mem_used_pct": 41, "os": "linux 6.8 x86_64" }
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "hardware heartbeat: {}", hb.body);
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    let host = &listed.body["hosts"][0];
+    assert_eq!(host["current_jobs"], 2, "{}", host);
+    assert_eq!(host["hardware"]["cpu_cores"], 8, "{}", host);
+    assert_eq!(host["hardware"]["mem_used_pct"], 41, "{}", host);
 }
 
 async fn create_pair_and_heartbeat(

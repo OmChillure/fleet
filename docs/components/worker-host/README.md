@@ -272,7 +272,9 @@ fleet-host pair --url {api} --token {pair_token}
   "created_at": "…",
   "paired_at": null,
   "software": null,
-  "auto_update": true
+  "auto_update": true,
+  "current_jobs": 0,
+  "hardware": null
 }
 ```
 
@@ -471,7 +473,7 @@ Fail closed: missing `DATABASE_URL` panics. No `SKIP_*`.
 
 | Owner | Paths |
 | --- | --- |
-| **db** | `crates/fleet-db/migrations/008_worker_hosts.sql`, `crates/fleet-db/migrations/009_worker_host_software.sql`, `crates/fleet-db/src/models/worker_host.rs`, `crates/fleet-db/src/repos/worker_hosts.rs`, `crates/fleet-db/src/models/mod.rs` (export only), `crates/fleet-db/src/repos/mod.rs` (mod only), `crates/fleet-db/tests/worker_hosts_repos.rs` |
+| **db** | `crates/fleet-db/migrations/008_worker_hosts.sql`, `crates/fleet-db/migrations/009_worker_host_software.sql`, `crates/fleet-db/migrations/010_worker_host_hardware.sql`, `crates/fleet-db/src/models/worker_host.rs`, `crates/fleet-db/src/repos/worker_hosts.rs`, `crates/fleet-db/src/models/mod.rs` (export only), `crates/fleet-db/src/repos/mod.rs` (mod only), `crates/fleet-db/tests/worker_hosts_repos.rs` |
 | **api** | `crates/fleet-server/src/worker_hosts.rs`, `crates/fleet-server/src/install_routes.rs`, `crates/fleet-server/src/lib.rs` (merge + `/api` index links only), `crates/fleet-server/src/main.rs` (only if needed), `crates/fleet-server/tests/worker_hosts_http.rs`, `.env.example` (new keys only) |
 | **orch** | `crates/fleet-orchestrator/Cargo.toml` (add `fleet-db`), `crates/fleet-orchestrator/src/orch/spawn.rs`, `crates/fleet-orchestrator/src/sandbox/remote.rs` (new), `crates/fleet-orchestrator/src/sandbox/mod.rs` (`remote` is **not** a SANDBOX_BACKEND env value), `crates/fleet-orchestrator/src/store/host_pool.rs` (new), orch tests you add as new files |
 | **host** | `crates/fleet-host/**`, root `Cargo.toml` `members` + `workspace.dependencies.fleet-host` only |

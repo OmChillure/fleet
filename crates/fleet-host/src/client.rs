@@ -115,6 +115,7 @@ impl HostClient {
             max_concurrent: cfg.max_concurrent,
             error: error.map(|s| s.to_string()),
             software: Some(crate::software::heartbeat_software(cfg)),
+            hardware: Some(crate::hardware::heartbeat_hardware()),
         };
         let resp = self
             .http
@@ -236,6 +237,8 @@ struct HeartbeatRequest {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     software: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hardware: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

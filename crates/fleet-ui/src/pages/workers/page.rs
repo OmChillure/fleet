@@ -133,6 +133,46 @@ fn is_removed(host: &HostPublic) -> bool {
     host.status == "disabled"
 }
 
+fn job_cap(host: &HostPublic) -> i32 {
+    let cp = host.max_concurrent.clamp(1, 256);
+    match host.advertised_max_concurrent {
+        Some(n) => cp.min(n.clamp(1, 256)),
+        None => cp,
+    }
+}
+
+fn fmt_gib(bytes: u64) -> String {
+    let g = bytes as f64 / 1_073_741_824.0;
+    if g >= 10.0 {
+        format!("{g:.0} GB")
+    } else {
+        format!("{g:.1} GB")
+    }
+}
+
+fn specs_line(host: &HostPublic) -> Option<String> {
+    let hw = host.hardware.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(n) = hw.cpu_cores.filter(|n| *n > 0) {
+        parts.push(if n == 1 {
+            "1 core".into()
+        } else {
+            format!("{n} cores")
+        });
+    }
+    if let Some(b) = hw.mem_total_bytes.filter(|b| *b > 0) {
+        parts.push(fmt_gib(b));
+    }
+    if let Some(os) = hw.os.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(os.to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
 #[component]
 pub fn Workers(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
@@ -554,6 +594,17 @@ fn HostCard(
                     if !platform.is_empty() {
                         "{platform}"
                     }
+                }
+            }
+            if let Some(specs) = specs_line(&host) {
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "{specs}"
+                }
+            }
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "jobs {host.current_jobs} / {job_cap(&host)}"
+                if let Some(pct) = host.hardware.as_ref().and_then(|h| h.mem_used_pct) {
+                    " · mem {pct}%"
                 }
             }
 

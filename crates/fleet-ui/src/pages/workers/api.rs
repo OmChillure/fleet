@@ -46,6 +46,24 @@ pub struct HostPublic {
     pub software: Option<HostSoftware>,
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    #[serde(default)]
+    pub current_jobs: i32,
+    #[serde(default)]
+    pub advertised_max_concurrent: Option<i32>,
+    #[serde(default)]
+    pub hardware: Option<HostHardware>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct HostHardware {
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
+    #[serde(default)]
+    pub mem_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub mem_used_pct: Option<u8>,
+    #[serde(default)]
+    pub os: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

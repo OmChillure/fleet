@@ -23,6 +23,7 @@ const HOST_COLS: &str = r#"
     machine_token_hash, advertised_host, advertised_container, platform, hostname,
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
     software_git_sha, software_bins, software_reported_at, software_updating, auto_update,
+    hardware,
     created_by, created_at, paired_at, updated_at
 "#;
 
@@ -381,6 +382,7 @@ pub async fn heartbeat(
     software_git_sha: Option<&str>,
     software_bins: Option<serde_json::Value>,
     software_updating: Option<bool>,
+    hardware: Option<serde_json::Value>,
 ) -> DbResult<WorkerHost> {
     let current_jobs = current_jobs.max(0);
     let advertised_max_concurrent = advertised_max_concurrent.map(|n| n.clamp(1, 256));
@@ -400,7 +402,8 @@ pub async fn heartbeat(
             software_git_sha = COALESCE($9, software_git_sha),
             software_bins = COALESCE($10, software_bins),
             software_reported_at = CASE WHEN $11 THEN now() ELSE software_reported_at END,
-            software_updating = COALESCE($12, software_updating)
+            software_updating = COALESCE($12, software_updating),
+            hardware = COALESCE($13, hardware)
         WHERE id = $1
           AND status <> '{WORKER_HOST_STATUS_DISABLED}'
         RETURNING {HOST_COLS}
@@ -419,6 +422,7 @@ pub async fn heartbeat(
         .bind(software_bins)
         .bind(report_software)
         .bind(software_updating)
+        .bind(hardware)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?

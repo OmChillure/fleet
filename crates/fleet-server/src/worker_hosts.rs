@@ -216,6 +216,9 @@ pub struct HeartbeatBody {
     /// Optional; omitted by hosts built before version reporting.
     #[serde(default)]
     pub software: Option<HeartbeatSoftware>,
+    /// Optional machine snapshot (cores / RAM / OS).
+    #[serde(default)]
+    pub hardware: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,6 +474,7 @@ async fn http_heartbeat(
         sw.and_then(|s| s.git_sha.as_deref()),
         sw.and_then(|s| s.bins.clone()),
         sw.and_then(|s| s.updating),
+        body.hardware.clone(),
     )
     .await?;
     Ok(Json(json!({

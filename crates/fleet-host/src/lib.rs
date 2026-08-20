@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod config;
+pub mod hardware;
 pub mod paths;
 pub mod platform;
 pub mod run;

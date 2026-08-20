@@ -40,6 +40,7 @@ pub struct WorkerHost {
     pub software_reported_at: Option<DateTime<Utc>>,
     pub software_updating: bool,
     pub auto_update: bool,
+    pub hardware: Option<serde_json::Value>,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
@@ -102,6 +103,12 @@ pub struct WorkerHostPublic {
     pub software: Option<WorkerSoftwarePublic>,
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    #[serde(default)]
+    pub current_jobs: i32,
+    #[serde(default)]
+    pub advertised_max_concurrent: Option<i32>,
+    #[serde(default)]
+    pub hardware: Option<WorkerHardwarePublic>,
 }
 
 fn default_auto_update() -> bool {
@@ -117,6 +124,19 @@ pub struct WorkerSoftwarePublic {
     pub reported_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updating: bool,
+}
+
+/// Snapshot from the box. Not a monitoring series.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerHardwarePublic {
+    #[serde(default)]
+    pub cpu_cores: Option<u32>,
+    #[serde(default)]
+    pub mem_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub mem_used_pct: Option<u8>,
+    #[serde(default)]
+    pub os: Option<String>,
 }
 
 impl WorkerHostPublic {
@@ -153,6 +173,12 @@ impl WorkerHostPublic {
                 None
             },
             auto_update: host.auto_update,
+            current_jobs: host.current_jobs,
+            advertised_max_concurrent: host.advertised_max_concurrent,
+            hardware: host
+                .hardware
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
     }
 }
@@ -239,6 +265,7 @@ mod public_view_tests {
             software_reported_at: None,
             software_updating: false,
             auto_update: true,
+            hardware: None,
             created_by: None,
             created_at: now,
             paired_at: Some(now),
