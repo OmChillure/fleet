@@ -26,7 +26,7 @@ and repo-root `.env`. This page does not install packages.
 
 If it can break a user, a sandbox, or the next install, it is **not** a small
 tweak. Prefer an MR and a Slack ask for review even when you could
-push. Do not assign a reviewer on the GitLab MR — that creates locks.
+push.
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`. Tests
 and demos run on a developer or agent host.
@@ -198,7 +198,7 @@ is not a second test framework.
 ```
 Human testing: ran ./scripts/human-test.sh (or a peer will).
 Demo: agent-recorded .tmp/demos/<file>.webm attached — shows <scene>.
-Ask for a review on Slack. Do not assign a reviewer on the MR.
+Ask for a review on Slack.
 ```
 
 Whoever picks it up: watch the clip, then spot-check the walkthrough on

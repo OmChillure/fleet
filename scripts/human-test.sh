@@ -222,7 +222,7 @@ cmd_guide() {
 
   echo
   ok "Walkthrough done."
-  echo "    Review: ask on Slack after the MR exists. Do not pin a reviewer on GitLab."
+  echo "    Review: ask on Slack after the MR exists."
   echo "    Agent demo: $0 record     → attach .tmp/demos/*.webm to the MR."
   echo "    Stop stack: $0 stop"
 }

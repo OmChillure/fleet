@@ -76,8 +76,7 @@ Protocol (checklist, when to film, which scene maps to which crate):
 ## Merge requests and review
 
 Ship work through a **GitLab merge request** and **ask for a review on
-Slack**. That is the default. Do not assign or pin a specific reviewer
-on the MR — that creates locks.
+Slack**. That is the default.
 
 Skip the MR/review loop **only** for small tweaks: typos, comment nits,
 import order, one-line docs wording. If it changes behavior, data, UI,
