@@ -4,183 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::pages::auth::api::{auth_base_url, refresh_session};
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct HostPublic {
-    pub id: String,
-    pub workspace_id: String,
-    pub name: String,
-    pub status: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub paused: bool,
-    #[serde(default)]
-    pub drain: bool,
-    #[serde(default = "default_true")]
-    pub allow_host: bool,
-    #[serde(default = "default_true")]
-    pub allow_container: bool,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: i32,
-    #[serde(default = "default_timeout")]
-    pub max_job_timeout_s: i32,
-    #[serde(default)]
-    pub labels: Vec<String>,
-    #[serde(default)]
-    pub advertised_host: bool,
-    #[serde(default)]
-    pub advertised_container: bool,
-    #[serde(default)]
-    pub platform: Option<String>,
-    #[serde(default)]
-    pub hostname: Option<String>,
-    #[serde(default)]
-    pub last_seen_at: Option<String>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub paired_at: Option<String>,
-    #[serde(default)]
-    pub software: Option<HostSoftware>,
-    #[serde(default)]
-    pub desired: Option<HostDesiredSoftware>,
-    #[serde(default)]
-    pub software_status: Option<String>,
-    #[serde(default)]
-    pub outdated: bool,
-    #[serde(default = "default_true")]
-    pub auto_update: bool,
-    #[serde(default)]
-    pub update_requested_at: Option<String>,
-    #[serde(default)]
-    pub machine_id: Option<String>,
-    #[serde(default)]
-    pub settings_gen: i32,
-    #[serde(default)]
-    pub settings_ack_gen: i32,
-    #[serde(default)]
-    pub settings_pending: bool,
-    #[serde(default)]
-    pub current_jobs: i32,
-    #[serde(default)]
-    pub advertised_max_concurrent: Option<i32>,
-    #[serde(default)]
-    pub hardware: Option<HostHardware>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct HostHardware {
-    #[serde(default)]
-    pub cpu_cores: Option<u32>,
-    #[serde(default)]
-    pub mem_total_bytes: Option<u64>,
-    #[serde(default)]
-    pub mem_used_pct: Option<u8>,
-    #[serde(default)]
-    pub os: Option<String>,
-    #[serde(default)]
-    pub cpu_model: Option<String>,
-    #[serde(default)]
-    pub cpu_used_pct: Option<u8>,
-    #[serde(default)]
-    pub mem_speed_mts: Option<u32>,
-    #[serde(default)]
-    pub mem_type: Option<String>,
-    #[serde(default)]
-    pub gpus: Option<Vec<HostGpu>>,
-    #[serde(default)]
-    pub gpu_used_pct: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct HostGpu {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub vram_bytes: Option<u64>,
-    #[serde(default)]
-    pub used_pct: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct HostSoftware {
-    #[serde(default)]
-    pub git_sha: Option<String>,
-    #[serde(default)]
-    pub bins: Option<serde_json::Value>,
-    #[serde(default)]
-    pub updating: bool,
-}
-
-/// Staged dist for this host's platform (`GET …/manifest.json`).
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct HostDesiredSoftware {
-    #[serde(default)]
-    pub git_sha: Option<String>,
-    #[serde(default)]
-    pub platform: Option<String>,
-    #[serde(default)]
-    pub staged_at: Option<String>,
-    #[serde(default)]
-    pub bins: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct PackageInventory {
-    #[serde(default)]
-    pub packages: Vec<HostDesiredSoftware>,
-    #[serde(default)]
-    pub plane_git_sha: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_max_concurrent() -> i32 {
-    4
-}
-
-fn default_timeout() -> i32 {
-    3600
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct CreateHostResponse {
-    pub host: HostPublic,
-    pub pair_token: String,
-    #[serde(default)]
-    pub pair_expires_at: String,
-    #[serde(default)]
-    pub install_hint: String,
-}
+#[allow(unused_imports)] // HostGpu/HostHardware/HostSoftware stay on the api surface
+pub use fleet_runners_view::{
+    CreateHostResponse, HostDesiredSoftware, HostGpu, HostHardware, HostPatch, HostPublic,
+    HostSoftware, PackageInventory,
+};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CreateHostBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct HostPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub paused: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drain: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_host: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_container: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_concurrent: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_update: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_update: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -311,32 +144,8 @@ fn error_message(status: reqwest::StatusCode, text: &str) -> String {
         })
 }
 
-fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
-    if let Some(v) = patch.name.clone() {
-        host.name = v;
-    }
-    if let Some(v) = patch.paused {
-        host.paused = v;
-    }
-    if let Some(v) = patch.drain {
-        host.drain = v;
-    }
-    if let Some(v) = patch.allow_host {
-        host.allow_host = v;
-    }
-    if let Some(v) = patch.allow_container {
-        host.allow_container = v;
-    }
-    if let Some(v) = patch.max_concurrent {
-        host.max_concurrent = v;
-    }
-    if let Some(v) = patch.auto_update {
-        host.auto_update = v;
-    }
-    if patch.request_update == Some(true) {
-        host.update_requested_at = Some("requested".into());
-    }
-    host
+fn apply_patch(host: HostPublic, patch: &HostPatch) -> HostPublic {
+    fleet_runners_view::apply_patch(host, patch)
 }
 
 /// `GET /api/workspaces/{id}/worker-hosts`
@@ -413,105 +222,15 @@ pub async fn revoke_host(workspace_id: &str, host_id: &str) -> Result<(), String
 
 /// Install + pair commands from `install_hint`, or a same-origin fallback.
 pub fn install_commands(created: &CreateHostResponse) -> String {
-    let hint = created.install_hint.trim();
-    if !hint.is_empty() {
-        return hint.to_string();
-    }
-    let api = auth_base_url();
-    format!(
-        "curl -fsSL {api}/install-worker.sh | FLEET_URL={api} FLEET_PAIR_TOKEN={} sh",
-        created.pair_token
-    )
+    fleet_runners_view::install_commands(created, &auth_base_url())
 }
 
 /// Control-plane URL the install command will call (from hint, else page origin).
 pub fn install_api_url(created: &CreateHostResponse) -> String {
-    let hint = install_commands(created);
-    if let Some(rest) = hint.split("FLEET_URL=").nth(1) {
-        let url = rest
-            .split(|c: char| c.is_whitespace() || c == '|')
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '\'' || c == '"');
-        if url.starts_with("http") {
-            return url.to_string();
-        }
-    }
-    auth_base_url()
+    fleet_runners_view::install_api_url(created, &auth_base_url())
 }
 
 /// PowerShell one-liner: download, pair, start (Windows).
 pub fn windows_install_command(created: &CreateHostResponse) -> String {
-    let api = install_api_url(created);
-    format!(
-        "$env:FLEET_URL='{api}'; $env:FLEET_PAIR_TOKEN='{}'; irm \"$env:FLEET_URL/install-worker.ps1\" | iex",
-        created.pair_token
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_host() -> HostPublic {
-        serde_json::from_str(r#"{"id":"h1","workspace_id":"w1","name":"box","status":"online"}"#)
-            .expect("sample host")
-    }
-
-    #[test]
-    fn host_patch_drain_serializes_when_set() {
-        let hold = HostPatch {
-            paused: Some(true),
-            ..HostPatch::default()
-        };
-        let hold_json = serde_json::to_value(&hold).expect("serialize hold");
-        assert_eq!(hold_json["paused"], true);
-        assert!(hold_json.get("drain").is_none());
-
-        let release = HostPatch {
-            paused: Some(false),
-            drain: Some(false),
-            ..HostPatch::default()
-        };
-        let release_json = serde_json::to_value(&release).expect("serialize release");
-        assert_eq!(release_json["paused"], false);
-        assert_eq!(release_json["drain"], false);
-    }
-
-    #[test]
-    fn apply_patch_sets_and_clears_drain() {
-        let host = sample_host();
-        assert!(!host.drain);
-        assert!(!host.paused);
-
-        let held = apply_patch(
-            host,
-            &HostPatch {
-                paused: Some(true),
-                ..HostPatch::default()
-            },
-        );
-        assert!(held.paused);
-        assert!(!held.drain);
-
-        let drained = apply_patch(
-            held,
-            &HostPatch {
-                drain: Some(true),
-                ..HostPatch::default()
-            },
-        );
-        assert!(drained.drain);
-
-        let released = apply_patch(
-            drained,
-            &HostPatch {
-                paused: Some(false),
-                drain: Some(false),
-                ..HostPatch::default()
-            },
-        );
-        assert!(!released.paused);
-        assert!(!released.drain);
-    }
+    fleet_runners_view::windows_install_command(created, &auth_base_url())
 }

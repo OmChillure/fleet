@@ -326,8 +326,8 @@ pub async fn consume_pair_token(
         return Err(DbError::Conflict("host is not pending".into()));
     }
 
-    // Same box pairing again (durable machine.id, or hostname+platform
-    // when the binary is too old to send one): revive that row.
+    // Same box pairing again: durable machine.id, or hostname+platform
+    // only when the binary omitted machine.id.
     if let Some(prior) = find_reclaim_target(
         &mut tx,
         host.workspace_id,
@@ -444,16 +444,13 @@ async fn find_reclaim_target(
             FOR UPDATE
             "#
         );
-        if let Some(prior) = sqlx::query_as::<_, WorkerHost>(&q)
+        return sqlx::query_as::<_, WorkerHost>(&q)
             .bind(workspace_id)
             .bind(mid)
             .bind(exclude_id)
             .fetch_optional(&mut **tx)
             .await
-            .map_err(map_query_err)?
-        {
-            return Ok(Some(prior));
-        }
+            .map_err(map_query_err);
     }
 
     let hostname = hostname.trim();

@@ -27,10 +27,7 @@ fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder
     req
 }
 
-pub async fn get_session_detail(
-    workspace_id: &str,
-    session_id: &str,
-) -> Result<Value, FleetError> {
+pub async fn get_session_detail(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
     let res = with_credentials(client().get(api_url(&format!(
         "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}"
     ))))

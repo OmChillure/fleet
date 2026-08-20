@@ -274,10 +274,28 @@ class Demo:
             raise RuntimeError(
                 f"self-hosted runners page missing heading or text: {body[:300]}"
             )
+        if "Control plane" not in body and p.locator("article").count() == 0:
+            raise RuntimeError("self-hosted page missing control plane or cards")
         add = p.get_by_role("button", name="Add worker")
         if add.count():
             add.first.click()
             pause(p, 1500)
+            unix_copy = (
+                p.locator("pre")
+                .filter(has_text="install-worker.sh")
+                .locator("xpath=..")
+                .get_by_role("button", name="Copy")
+            )
+            if unix_copy.count() and unix_copy.first.is_visible():
+                unix_copy.first.click()
+                pause(p, 600)
+            cancel = p.get_by_role("button", name="Cancel")
+            if cancel.count() and cancel.first.is_visible():
+                pause(p, 400)
+            done = p.get_by_role("button", name="Done")
+            if done.count() and done.first.is_visible():
+                done.first.click()
+                pause(p, 600)
         hold = p.get_by_role("button", name="Stop taking new jobs")
         if hold.count() and hold.first.is_visible():
             hold.first.click()

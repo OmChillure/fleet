@@ -1734,6 +1734,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-runners-view"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fleet-sandbox-driver"
 version = "0.1.0"
 dependencies = [
@@ -1789,6 +1798,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "fleet-chat-md",
+ "fleet-runners-view",
  "gloo-timers",
  "js-sys",
  "reqwest",

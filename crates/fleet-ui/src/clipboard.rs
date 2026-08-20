@@ -8,7 +8,7 @@
 
 /// Returns whether the text was placed on the clipboard.
 pub fn copy_text(text: &str) -> bool {
-    if text.is_empty() {
+    if !fleet_runners_view::clipboard_has_payload(text) {
         return false;
     }
     #[cfg(target_arch = "wasm32")]

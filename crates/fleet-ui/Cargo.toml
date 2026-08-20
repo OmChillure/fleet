@@ -10,6 +10,7 @@ description = "Agent Fleet web UI (Dioxus)"
 [dependencies]
 dioxus = { workspace = true, features = ["router"] }
 fleet-chat-md = { workspace = true }
+fleet-runners-view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }

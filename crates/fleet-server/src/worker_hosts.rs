@@ -10,11 +10,13 @@ use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
 use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_db::repos::plane_runners;
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, parse_worker_host_isolation,
+    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, is_control_plane_runner_id,
+    parse_worker_host_isolation,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -91,6 +93,23 @@ fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSo
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
     host.as_public(Utc::now())
         .with_desired(desired_for(state, host))
+}
+
+fn plane_git_sha() -> Option<&'static str> {
+    option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+async fn plane_public(state: &AppState, workspace_id: Uuid) -> AppResult<WorkerHostPublic> {
+    let row = plane_runners::get_or_default(&state.db, workspace_id).await?;
+    let jobs = state
+        .orch
+        .store
+        .count_local_capacity(workspace_id)
+        .await
+        .unwrap_or(0);
+    Ok(row.as_public_with_jobs(Utc::now(), jobs))
 }
 
 fn api_base(state: &AppState) -> String {
@@ -317,15 +336,15 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    let hosts: Vec<WorkerHostPublic> = rows.iter().map(|h| host_json(&state, h)).collect();
+    let plane = plane_public(&state, workspace_id).await?;
+    let mut hosts = Vec::with_capacity(rows.len() + 1);
+    hosts.push(plane);
+    hosts.extend(rows.iter().map(|h| host_json(&state, h)));
     let packages = crate::install_routes::list_dist_packages(&state);
-    let plane_git_sha = option_env!("FLEET_GIT_SHA")
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
     Ok(Json(json!({
         "hosts": hosts,
         "packages": packages,
-        "plane_git_sha": plane_git_sha,
+        "plane_git_sha": plane_git_sha(),
     })))
 }
 
@@ -345,6 +364,9 @@ async fn http_get(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
+    if is_control_plane_runner_id(workspace_id, host_id) {
+        return Ok(Json(plane_public(&state, workspace_id).await?));
+    }
     let host = load_in_workspace(&state, workspace_id, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -356,6 +378,34 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
+    if is_control_plane_runner_id(workspace_id, host_id) {
+        if let Some(n) = body.max_concurrent {
+            validate_max_concurrent(n)?;
+        }
+        // TODO: pause/drain/auto_update/request_update/isolation column are
+        // paired-host settings. Plane uses allow_host/allow_container only.
+        let row = plane_runners::upsert(
+            &state.db,
+            workspace_id,
+            &plane_runners::PlaneRunnerPatch {
+                name: body
+                    .name
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                allow_host: body.allow_host.or(body.enabled).or(body.paused.map(|p| !p)),
+                allow_container: body.allow_container,
+                max_concurrent: body.max_concurrent,
+            },
+        )
+        .await?;
+        let jobs = state
+            .orch
+            .store
+            .count_local_capacity(workspace_id)
+            .await
+            .unwrap_or(0);
+        return Ok(Json(row.as_public_with_jobs(Utc::now(), jobs)));
+    }
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
@@ -394,6 +444,11 @@ async fn http_delete(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
+    if is_control_plane_runner_id(workspace_id, host_id) {
+        return Err(AppError::bad_request(
+            "the control plane runner cannot be removed",
+        ));
+    }
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     let host = host_repo::revoke(&state.db, host_id).await?;
     Ok(Json(host_json(&state, &host)))
@@ -405,6 +460,11 @@ async fn http_new_pair_token(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
+    if is_control_plane_runner_id(workspace_id, host_id) {
+        return Err(AppError::bad_request(
+            "the control plane runner does not pair",
+        ));
+    }
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
@@ -598,22 +658,48 @@ async fn http_complete(
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
         {
-            let _ = state.orch.store.complete_spawn_failure(sid).await;
-            if let Some(tid) = claim
+            let sess = state
+                .orch
+                .store
+                .get_session(sid)
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?;
+            let attempt = sess.as_ref().map(|s| s.attempt).unwrap_or(1);
+            let tid = claim
                 .payload
                 .get("board_task_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok())
-            {
-                let _ = fleet_orchestrator::orch::apply_retry_after_failure(
+                .or_else(|| sess.as_ref().map(|s| s.board_task_id));
+            let max_retries = if let (Some(s), Some(task_id)) = (sess.as_ref(), tid) {
+                state
+                    .orch
+                    .store
+                    .get_task(s.project_id, task_id)
+                    .await
+                    .map_err(|e| AppError::internal(e.to_string()))?
+                    .map(|t| t.max_retries)
+                    .unwrap_or(2)
+            } else {
+                2
+            };
+            state
+                .orch
+                .store
+                .complete_spawn_failure(sid)
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?;
+            if let Some(tid) = tid {
+                fleet_orchestrator::orch::apply_retry_after_failure(
                     &state.orch.store,
                     tid,
-                    1,
-                    2,
+                    attempt,
+                    max_retries,
                     false,
                     fleet_orchestrator::domain::ExitReason::SpawnFailed,
                 )
-                .await;
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?;
             }
         }
     }

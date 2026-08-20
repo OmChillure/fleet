@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use super::api::{SignupBody, mark_just_registered, signup as api_signup};
 use super::layout::AuthSplit;
-use crate::components::toast::show_toast;
 use crate::Route;
+use crate::components::toast::show_toast;
 
 /// Signup — left form, right panel. On success → `/login?registered=1`.
 #[component]

@@ -485,6 +485,213 @@ async fn owner_create_and_get_list() {
     assert!(got.body.get("pair_token").is_none());
 }
 
+/// catalog:unit-patch-name — owner PATCH name persists (GET + list).
+#[tokio::test]
+async fn owner_can_rename_host() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let created = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&jar),
+        Some(json!({ "name": "studio" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "create: {}", created.body);
+    assert_eq!(created.body["host"]["name"], "studio");
+    let hid = created.body["host"]["id"]
+        .as_str()
+        .expect("host.id")
+        .to_string();
+    let isolation = created.body["host"]["isolation"].clone();
+    let gen0 = created.body["host"]["settings_gen"]
+        .as_i64()
+        .expect("settings_gen");
+
+    let denied = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        None,
+        Some(json!({ "name": "stolen" })),
+    )
+    .await;
+    assert_eq!(
+        denied.status,
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated PATCH name: {}",
+        denied.body
+    );
+
+    let (_other_email, other_jar, other_ws) = signup_and_login(&app).await;
+    let foreign_ws = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&other_ws)),
+        Some(&other_jar),
+        Some(json!({ "name": "foreign" })),
+    )
+    .await;
+    assert_eq!(
+        foreign_ws.status,
+        StatusCode::NOT_FOUND,
+        "other workspace PATCH name: {}",
+        foreign_ws.body
+    );
+    let foreign_member = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&other_jar),
+        Some(json!({ "name": "foreign" })),
+    )
+    .await;
+    assert_eq!(
+        foreign_member.status,
+        StatusCode::FORBIDDEN,
+        "non-member PATCH name: {}",
+        foreign_member.body
+    );
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "name": "  renamed-studio  " })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
+    assert_eq!(
+        patched.body["name"],
+        "renamed-studio",
+        "PATCH name trims: {}",
+        patched.body
+    );
+    assert_eq!(
+        patched.body["isolation"], isolation,
+        "rename must not change isolation: {}",
+        patched.body
+    );
+    let gen1 = patched.body["settings_gen"]
+        .as_i64()
+        .expect("patched settings_gen");
+    assert_eq!(
+        gen1,
+        gen0 + 1,
+        "name is a CP setting so rename bumps gen: {}",
+        patched.body
+    );
+
+    let blank = call(
+        &app,
+        "PATCH",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "name": "   " })),
+    )
+    .await;
+    assert_eq!(blank.status, StatusCode::OK, "blank: {}", blank.body);
+    assert_eq!(
+        blank.body["name"],
+        "renamed-studio",
+        "blank PATCH name must not wipe: {}",
+        blank.body
+    );
+    assert_eq!(
+        blank.body["settings_gen"].as_i64().expect("blank gen"),
+        gen1,
+        "blank PATCH name must not bump gen: {}",
+        blank.body
+    );
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("{}/{hid}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "get: {}", got.body);
+    assert_eq!(got.body["name"], "renamed-studio");
+    assert_eq!(got.body["settings_gen"].as_i64().expect("get gen"), gen1);
+
+    let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(list.status, StatusCode::OK, "list: {}", list.body);
+    let hosts = list.body["hosts"].as_array().expect("hosts array");
+    let host = hosts
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid.as_str()))
+        .unwrap_or_else(|| panic!("list missing renamed host: {}", list.body));
+    assert_eq!(host["name"], "renamed-studio", "list name: {}", list.body);
+}
+
+#[tokio::test]
+async fn list_starts_with_control_plane_runner() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
+    let plane_id = fleet_db::control_plane_runner_id(ws_id);
+
+    let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(list.status, StatusCode::OK, "list: {}", list.body);
+    let hosts = list.body["hosts"].as_array().expect("hosts");
+    assert!(!hosts.is_empty(), "expected plane row: {}", list.body);
+    assert_eq!(hosts[0]["kind"], "control_plane", "{}", list.body);
+    assert_eq!(hosts[0]["id"].as_str(), Some(plane_id.to_string().as_str()));
+    assert_eq!(hosts[0]["name"], "Control plane");
+    assert_eq!(hosts[0]["status"], "online");
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("{}/{plane_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "allow_host": false, "allow_container": false })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
+    assert_eq!(patched.body["allow_host"], false);
+    assert_eq!(patched.body["kind"], "control_plane");
+
+    let denied = call(
+        &app,
+        "DELETE",
+        &format!("{}/{plane_id}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::BAD_REQUEST, "{}", denied.body);
+}
+
+#[tokio::test]
+async fn control_plane_does_not_pair_or_appear_assignable() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("ws");
+    let plane_id = fleet_db::control_plane_runner_id(ws_id);
+
+    let pair = call(
+        &app,
+        "POST",
+        &format!("{}/{plane_id}/pair-tokens", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(pair.status, StatusCode::BAD_REQUEST, "{}", pair.body);
+
+    let listed = worker_hosts_assignable(&state, &ws).await;
+    assert!(
+        !listed.contains(&plane_id),
+        "plane must not be in list_assignable: {listed:?}"
+    );
+}
+
 #[tokio::test]
 async fn isolation_defaults_native_and_patch_sandboxed() {
     let (app, state) = app_with_state().await;
@@ -945,14 +1152,36 @@ async fn lease_returns_enqueued_spawn_session() {
     assert_eq!(done.status, StatusCode::OK, "complete: {}", done.body);
 }
 
+fn listed_host<'a>(listed: &'a Value, hid: &str) -> &'a Value {
+    listed["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid))
+        .unwrap_or_else(|| panic!("host {hid} missing: {listed}"))
+}
+
 #[tokio::test]
 async fn heartbeat_without_software_leaves_public_software_null() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let (id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "old-box", true, false).await;
+    let hid = id.to_string();
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    let host = &listed.body["hosts"][0];
+    assert_eq!(
+        listed.body["hosts"][0]["kind"],
+        "control_plane",
+        "plane is always first: {}",
+        listed.body
+    );
+    assert!(
+        listed.body["hosts"][0].get("software").is_none()
+            || listed.body["hosts"][0]["software"].is_null(),
+        "plane must not have a software line: {}",
+        listed.body["hosts"][0]
+    );
+    let host = listed_host(&listed.body, &hid);
     assert!(
         host.get("software").is_none() || host["software"].is_null(),
         "old host must not invent a version: {}",
@@ -974,8 +1203,14 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     .await;
     assert_eq!(hb.status, StatusCode::OK, "software heartbeat: {}", hb.body);
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    let host = &listed.body["hosts"][0];
+    let host = listed_host(&listed.body, &hid);
     assert_eq!(host["software"]["git_sha"], "abc123def456", "{}", host);
+    assert!(
+        listed.body["hosts"][0].get("software").is_none()
+            || listed.body["hosts"][0]["software"].is_null(),
+        "plane software stays none after a host report: {}",
+        listed.body["hosts"][0]
+    );
 
     let hb = call_bearer(
         &app,
@@ -992,7 +1227,7 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     .await;
     assert_eq!(hb.status, StatusCode::OK, "hardware heartbeat: {}", hb.body);
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    let host = &listed.body["hosts"][0];
+    let host = listed_host(&listed.body, &hid);
     assert_eq!(host["current_jobs"], 2, "{}", host);
     assert_eq!(host["hardware"]["cpu_cores"], 8, "{}", host);
     assert_eq!(host["hardware"]["mem_used_pct"], 41, "{}", host);
@@ -1793,5 +2028,175 @@ async fn new_pair_token_only_while_pending_and_old_token_dies() {
         StatusCode::CONFLICT,
         "rotate after pair: {}",
         again.body
+    );
+}
+
+/// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
+#[tokio::test]
+async fn request_update_marks_host() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) =
+        create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
+
+    let denied = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        None,
+        Some(json!({ "request_update": true })),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::UNAUTHORIZED, "{}", denied.body);
+
+    let before = call(
+        &app,
+        "GET",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(before.status, StatusCode::OK, "get: {}", before.body);
+    assert_eq!(
+        before.body["auto_update"], true,
+        "paired host defaults auto-update on: {}",
+        before.body
+    );
+    assert!(
+        before.body.get("update_requested_at").is_none()
+            || before.body["update_requested_at"].is_null(),
+        "no update requested yet: {}",
+        before.body
+    );
+    let gen_before = before.body["settings_gen"].as_i64().unwrap_or(0);
+
+    let no = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "request_update": false })),
+    )
+    .await;
+    assert_eq!(no.status, StatusCode::OK, "false: {}", no.body);
+    assert!(
+        no.body.get("update_requested_at").is_none() || no.body["update_requested_at"].is_null(),
+        "request_update=false must not mark: {}",
+        no.body
+    );
+    assert_eq!(
+        no.body["settings_gen"].as_i64().unwrap_or(0),
+        gen_before,
+        "request_update=false must not bump gen: {}",
+        no.body
+    );
+
+    let off = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "auto_update": false })),
+    )
+    .await;
+    assert_eq!(off.status, StatusCode::OK, "auto off: {}", off.body);
+    assert_eq!(off.body["auto_update"], false, "{}", off.body);
+    assert!(
+        off.body.get("update_requested_at").is_none()
+            || off.body["update_requested_at"].is_null(),
+        "turning auto-update off must not request: {}",
+        off.body
+    );
+    let gen_after_auto = off.body["settings_gen"].as_i64().unwrap_or(0);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "request_update": true })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "request: {}", patched.body);
+    assert_eq!(
+        patched.body["auto_update"], false,
+        "auto stays off: {}",
+        patched.body
+    );
+    assert!(
+        patched.body.get("request_update").is_none(),
+        "public host has no request_update field: {}",
+        patched.body
+    );
+    let requested = patched.body["update_requested_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("update_requested_at: {}", patched.body));
+    assert!(
+        !requested.trim().is_empty(),
+        "update_requested_at must be set: {}",
+        patched.body
+    );
+    assert_eq!(
+        patched.body["settings_gen"].as_i64().unwrap_or(0),
+        gen_after_auto,
+        "Update now is a one-shot, not a settings bump: {}",
+        patched.body
+    );
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "get after: {}", got.body);
+    assert_eq!(got.body["auto_update"], false, "{}", got.body);
+    assert_eq!(
+        got.body["update_requested_at"].as_str(),
+        Some(requested),
+        "GET must show the same request: {}",
+        got.body
+    );
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "heartbeat: {}", hb.body);
+    assert_eq!(
+        hb.body["host"]["update_requested_at"].as_str(),
+        Some(requested),
+        "host must see the request on the next heartbeat: {}",
+        hb.body
+    );
+    assert_eq!(hb.body["host"]["auto_update"], false, "{}", hb.body);
+
+    let ws_id = Uuid::parse_str(&ws).expect("ws");
+    let plane_id = fleet_db::control_plane_runner_id(ws_id);
+    let plane = call(
+        &app,
+        "PATCH",
+        &format!("{}/{plane_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "request_update": true })),
+    )
+    .await;
+    assert_eq!(plane.status, StatusCode::OK, "plane: {}", plane.body);
+    assert!(
+        plane.body.get("update_requested_at").is_none()
+            || plane.body["update_requested_at"].is_null(),
+        "control plane has no Update now: {}",
+        plane.body
     );
 }

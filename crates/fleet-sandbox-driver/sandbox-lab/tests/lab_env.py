@@ -25,6 +25,7 @@ ENABLE_NAMES = (
     "ENABLE_LMSTUDIO_PROXY",
     "ENABLE_GITSSH",
     "ENABLE_BROWSER_E2E",
+    "ENABLE_RUNNER_GUEST_E2E",
 )
 
 # Mirrors install-full-suite-deps.sh `case "${PROFILE}"`.
@@ -41,6 +42,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, bool]] = {
         "ENABLE_LMSTUDIO_PROXY": True,
         "ENABLE_GITSSH": True,
         "ENABLE_BROWSER_E2E": True,
+        "ENABLE_RUNNER_GUEST_E2E": True,
     },
     "lab": {
         "ENABLE_SANDBOX_LAB": True,
@@ -54,6 +56,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, bool]] = {
         "ENABLE_LMSTUDIO_PROXY": True,
         "ENABLE_GITSSH": True,
         "ENABLE_BROWSER_E2E": False,
+        "ENABLE_RUNNER_GUEST_E2E": True,
     },
     "minimal": {
         "ENABLE_SANDBOX_LAB": True,
@@ -67,6 +70,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, bool]] = {
         "ENABLE_LMSTUDIO_PROXY": False,
         "ENABLE_GITSSH": False,
         "ENABLE_BROWSER_E2E": False,
+        "ENABLE_RUNNER_GUEST_E2E": True,
     },
 }
 

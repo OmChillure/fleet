@@ -151,6 +151,10 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
 
 /// Today's host picker, then Native-only. No second list/query.
 /// Cloud / Partners / public-cloud cannot be chosen.
+///
+/// TODO: the workspace control-plane runner is not in this list (no lease /
+/// machine token). Local `SANDBOX_BACKEND` is that runner; `schedule_and_spawn`
+/// skips it when `plane_runners::taking_native_jobs` is false.
 pub fn pick_assignable_runner(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,

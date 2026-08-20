@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::Value;
 
-use super::api::{fetch_overview, Overview};
+use super::api::{Overview, fetch_overview};
 use crate::Route;
 
 fn short(id: &str) -> String {
@@ -145,7 +145,10 @@ pub fn Dashboard(workspace_id: String) -> Element {
                 a.get("profile")?.as_str()?.to_string(),
                 a.get("kind")?.as_str()?.to_string(),
                 a.get("text")?.as_str()?.to_string(),
-                a.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                a.get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             ))
         })
         .collect();

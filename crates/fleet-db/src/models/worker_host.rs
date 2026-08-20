@@ -15,6 +15,9 @@ pub const WORKER_HOST_STATUS_DISABLED: &str = "disabled";
 pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 
 /// Native host process (v1). Only this isolation is assignable.
+pub const WORKER_HOST_KIND_HOST: &str = "host";
+pub const WORKER_HOST_KIND_CONTROL_PLANE: &str = "control_plane";
+
 pub const WORKER_HOST_ISOLATION_NATIVE: &str = "native";
 /// Placeholder self-hosted sandbox. Not assignable; no k8s executor in v1.
 pub const WORKER_HOST_ISOLATION_SANDBOXED: &str = "sandboxed";
@@ -121,6 +124,9 @@ pub struct WorkerHostPublic {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub name: String,
+    /// `host` (paired fleet-host) or `control_plane` (this API process).
+    #[serde(default = "default_host_kind")]
+    pub kind: String,
     pub status: String,
     pub enabled: bool,
     pub paused: bool,
@@ -178,6 +184,10 @@ fn default_auto_update() -> bool {
 
 fn default_isolation() -> String {
     WORKER_HOST_ISOLATION_NATIVE.to_string()
+}
+
+fn default_host_kind() -> String {
+    WORKER_HOST_KIND_HOST.to_string()
 }
 
 fn default_software_status() -> String {
@@ -285,6 +295,7 @@ impl WorkerHostPublic {
             id: host.id,
             workspace_id: host.workspace_id,
             name: host.name.clone(),
+            kind: WORKER_HOST_KIND_HOST.to_string(),
             status: host.public_status(now).to_string(),
             enabled: host.enabled,
             paused: host.paused,

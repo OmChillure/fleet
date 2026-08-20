@@ -801,6 +801,19 @@ impl Store {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Local SANDBOX_BACKEND sessions that still hold a plane slot.
+    pub async fn count_local_capacity(&self, project_id: Uuid) -> Result<i32> {
+        let rows = self.list_sessions_for_project(project_id).await?;
+        Ok(rows
+            .iter()
+            .filter(|s| {
+                s.runtime_backend != crate::sandbox::remote::BACKEND
+                    && crate::domain::WorkerSessionStatus::from_db(&s.status)
+                        .is_some_and(|st| st.holds_capacity())
+            })
+            .count() as i32)
+    }
+
     pub async fn list_sessions_for_project(
         &self,
         project_id: Uuid,

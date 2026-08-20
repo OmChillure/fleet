@@ -84,9 +84,8 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(
         .await
         .map_err(|e| SandboxError::Network(e.to_string()))?;
     if status.is_success() {
-        serde_json::from_str(&text).map_err(|e| {
-            SandboxError::Network(format!("invalid JSON: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| SandboxError::Network(format!("invalid JSON: {e} ({text})")))
     } else {
         #[derive(Deserialize)]
         struct ErrBody {
@@ -115,4 +114,3 @@ pub async fn list_sandboxes(workspace_id: &str) -> Result<SandboxesResponse, San
     .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
-

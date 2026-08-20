@@ -12,6 +12,10 @@ use dioxus::prelude::*;
 use components::app_shell::AppShell;
 use components::navbar::Navbar;
 use components::toast::ToastProvider;
+use fleet_runners_view::routes::{
+    SEGMENT_CLOUD, SEGMENT_PARTNERS, runner_child_path, runners_index_target, self_hosted_path,
+    workers_redirect,
+};
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
 use pages::chat::{Chat, ChatThread};
@@ -113,14 +117,26 @@ fn App() -> Element {
     }
 }
 
+/// Map a host-tested runners path onto the typed Dioxus route.
+fn route_for_runners_path(workspace_id: String, path: &str) -> Route {
+    if path == self_hosted_path(&workspace_id) {
+        Route::SelfHosted { workspace_id }
+    } else if path == runner_child_path(&workspace_id, SEGMENT_CLOUD) {
+        Route::CloudPage { workspace_id }
+    } else if path == runner_child_path(&workspace_id, SEGMENT_PARTNERS) {
+        Route::PartnersPage { workspace_id }
+    } else {
+        Route::SelfHosted { workspace_id }
+    }
+}
+
 /// `/{ws}/runners` → current self-hosted workers UI.
 #[component]
 fn RunnersIndex(workspace_id: String) -> Element {
     let navigator = use_navigator();
     use_effect(move || {
-        navigator.replace(Route::SelfHosted {
-            workspace_id: workspace_id.clone(),
-        });
+        let dest = runners_index_target(&workspace_id);
+        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
     });
     rsx! {}
 }
@@ -130,9 +146,8 @@ fn RunnersIndex(workspace_id: String) -> Element {
 fn WorkersRedirect(workspace_id: String) -> Element {
     let navigator = use_navigator();
     use_effect(move || {
-        navigator.replace(Route::SelfHosted {
-            workspace_id: workspace_id.clone(),
-        });
+        let dest = workers_redirect(&workspace_id);
+        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
     });
     rsx! {}
 }

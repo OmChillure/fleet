@@ -2,13 +2,12 @@
 
 use dioxus::prelude::*;
 
-use crate::components::toast::show_toast;
-use crate::pages::chat::{delete_conversation, list_conversations, ConversationSummary};
 use crate::Route;
+use crate::components::toast::show_toast;
+use crate::pages::chat::{ConversationSummary, delete_conversation, list_conversations};
 
 use super::api::get_session_detail;
 use gloo_timers::future::TimeoutFuture;
-
 
 #[component]
 pub fn Sessions(workspace_id: String) -> Element {
@@ -175,12 +174,7 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                 loop {
                     match get_session_detail(&ws, &sid).await {
                         Ok(v) => {
-                            status.set(
-                                v["session"]["status"]
-                                    .as_str()
-                                    .unwrap_or("?")
-                                    .to_string(),
-                            );
+                            status.set(v["session"]["status"].as_str().unwrap_or("?").to_string());
                             progress.set(v["session"]["progress_pct"].as_i64().unwrap_or(0));
                             prompt.set(v["prompt"].as_str().unwrap_or("").to_string());
                             let mut buf = String::new();
@@ -201,11 +195,7 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                             let st = v["session"]["status"].as_str().unwrap_or("");
                             if matches!(
                                 st,
-                                "exited"
-                                    | "failed"
-                                    | "cancelled"
-                                    | "failed_spawn"
-                                    | "killing"
+                                "exited" | "failed" | "cancelled" | "failed_spawn" | "killing"
                             ) {
                                 running.set(false);
                                 break;

@@ -7,6 +7,10 @@ Self-hosted pairing, install, heartbeat, and lease stay in
 [`docs/components/worker-host/README.md`](../worker-host/README.md).
 This folder is the umbrella: kinds, isolation, nav, and routes.
 
+Testing (required three layers + how to run):
+[`testing-requirements.md`](testing-requirements.md),
+[`testing-procedures.md`](testing-procedures.md).
+
 ---
 
 ## Five kinds
@@ -20,8 +24,9 @@ This folder is the umbrella: kinds, isolation, nav, and routes.
 | Partners | Other people’s unused capacity | Sandboxed | **MR 3** — placeholder + [design](partners.md) |
 
 Tick already prefers an assignable remote host, else local
-`SANDBOX_BACKEND`. Later MRs extend *who* can be assignable. Do not
-invent a second spawn path.
+`SANDBOX_BACKEND` (the workspace **control plane** runner — always first
+on Self-hosted, enable/disable like the others). Later MRs extend *who*
+can be assignable. Do not invent a second spawn path.
 
 ---
 
@@ -68,6 +73,8 @@ job). **Workers** as a nav section collides with the per-job
 
 | Doc | Why |
 | --- | --- |
+| [`testing-requirements.md`](testing-requirements.md) | Every runner behavior needs unit, e2e, and real-life VM/OS tests |
+| [`testing-procedures.md`](testing-procedures.md) | How to run those three layers |
 | [`docs/components/runners/partners.md`](partners.md) | Partners credit, trust, kill-switch (design) |
 | [`docs/components/worker-host/README.md`](../worker-host/README.md) | Pair, install, heartbeat, lease, `fleet-host` |
 | [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick fallback |

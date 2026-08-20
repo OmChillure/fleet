@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 
-use super::api::{fetch_settings, save_settings, FleetSettingsPatch};
+use super::api::{FleetSettingsPatch, fetch_settings, save_settings};
 use crate::components::toast::show_toast;
-use crate::pages::chat::{fetch_chat_status, ChatModelInfo};
+use crate::pages::chat::{ChatModelInfo, fetch_chat_status};
 
 fn field_class() -> &'static str {
     "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)] outline-none focus:border-[var(--app-muted)]"

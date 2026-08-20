@@ -1917,6 +1917,7 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         posted.body
     );
 
+    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
     let hosts = call(
         &app,
         "GET",
@@ -1927,9 +1928,22 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
     .await;
     assert_eq!(hosts.status, StatusCode::OK, "hosts: {}", hosts.body);
     let host_list = hosts.body["hosts"].as_array().cloned().unwrap_or_default();
-    assert!(
-        host_list.is_empty(),
-        "ack must not create worker_hosts: {}",
+    assert_eq!(
+        host_list.len(),
+        1,
+        "ack must not create worker_hosts beyond the control plane: {}",
+        hosts.body
+    );
+    assert_eq!(
+        host_list[0]["kind"],
+        "control_plane",
+        "only the plane row may exist: {}",
+        hosts.body
+    );
+    assert_eq!(
+        host_list[0]["id"].as_str(),
+        Some(plane_id.to_string().as_str()),
+        "{}",
         hosts.body
     );
 

@@ -1,6 +1,11 @@
 //! Partners: other people's unused capacity. Placeholder + trust copy only.
 
 use dioxus::prelude::*;
+use fleet_runners_view::placeholders::{
+    COMING_SOON_BADGE, DISCLAIMER_DEFAULT_ACCEPTED, PARTNERS_TRUST_COPY,
+    disclaimer_ack_enables_lend, disclaimer_ack_makes_assignable,
+};
+use fleet_runners_view::routes::NAV_LABEL_PARTNERS;
 
 use super::api::{fetch_disclaimer_ack, post_disclaimer_ack};
 use crate::components::toast::show_toast;
@@ -16,7 +21,7 @@ fn btn_class() -> &'static str {
 /// Coming-soon Partners surface. Ack is a recorded timestamp only.
 #[component]
 pub fn PartnersPage(workspace_id: String) -> Element {
-    let mut acknowledged = use_signal(|| false);
+    let mut acknowledged = use_signal(|| DISCLAIMER_DEFAULT_ACCEPTED);
     let mut posting = use_signal(|| false);
 
     let ws_load = workspace_id.clone();
@@ -48,11 +53,11 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                 div { class: "min-w-0 flex-1",
                     div { class: "flex flex-wrap items-center gap-2",
                         h1 { class: "m-0 text-2xl font-semibold tracking-tight text-[var(--app-fg)]",
-                            "Partners"
+                            "{NAV_LABEL_PARTNERS}"
                         }
                         span {
                             class: "inline-flex items-center rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                            "Coming soon"
+                            "{COMING_SOON_BADGE}"
                         }
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
@@ -67,11 +72,8 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                     "Trust"
                 }
                 ul { class: "mt-2 m-0 list-disc space-y-2 pl-5 text-sm leading-5 text-[var(--app-fg)]",
-                    li { "Work and source leave your trust boundary." }
-                    li { "Fleet is not responsible for what a partner does with it." }
-                    li { "Verified vs open. Pick a partner, any verified, or any." }
-                    li {
-                        "Credits: earn by lending; buy credits; 0.9 per 1.0 generated (0.1 Fleet). Money-out is later; no cash-out button."
+                    for item in PARTNERS_TRUST_COPY {
+                        li { "{item}" }
                     }
                 }
             }
@@ -130,8 +132,8 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                 }
                 select {
                     class: field_class(),
-                    disabled: true,
-                    "aria-disabled": "true",
+                    disabled: !disclaimer_ack_makes_assignable(acknowledged()),
+                    "aria-disabled": if disclaimer_ack_makes_assignable(acknowledged()) { "false" } else { "true" },
                     option { value: "", selected: true, "Pick a partner" }
                     option { value: "verified", "Any verified partner" }
                     option { value: "any", "Any partner" }
@@ -149,15 +151,15 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                     button {
                         class: btn_class(),
                         r#type: "button",
-                        disabled: true,
-                        "aria-disabled": "true",
+                        disabled: !disclaimer_ack_enables_lend(acknowledged()),
+                        "aria-disabled": if disclaimer_ack_enables_lend(acknowledged()) { "false" } else { "true" },
                         "Lend capacity"
                     }
                     button {
                         class: btn_class(),
                         r#type: "button",
-                        disabled: true,
-                        "aria-disabled": "true",
+                        disabled: !disclaimer_ack_enables_lend(acknowledged()),
+                        "aria-disabled": if disclaimer_ack_enables_lend(acknowledged()) { "false" } else { "true" },
                         "Buy credits"
                     }
                 }

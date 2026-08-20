@@ -62,6 +62,15 @@ pub async fn schedule_and_spawn(
         spawn_failed: 0,
     };
     let mut plan_llms: HashMap<Uuid, crate::sandbox::agent_loop::WorkerLlm> = HashMap::new();
+    let mut local_in_use = snap
+        .sessions
+        .iter()
+        .filter(|s| {
+            s.runtime_backend != remote::BACKEND
+                && crate::domain::WorkerSessionStatus::from_db(&s.status)
+                    .is_some_and(|st| st.holds_capacity())
+        })
+        .count() as i32;
 
     for task in ready {
         if free <= 0 {
@@ -76,6 +85,38 @@ pub async fn schedule_and_spawn(
                 "paired host is applying a host-bin update; leaving task ready"
             );
             continue;
+        }
+        // Control plane is runner #1. Local SANDBOX_BACKEND is that runner.
+        // Missing row / query error keeps today's fallback (take jobs).
+        if remote_host.is_none() {
+            match fleet_db::repos::plane_runners::get_or_default(store.pool(), project_id).await {
+                Ok(plane) if !plane.taking_native_jobs() => {
+                    tracing::info!(
+                        task_id = %task.id,
+                        "control plane runner is not taking jobs; leaving task ready"
+                    );
+                    continue;
+                }
+                Ok(plane) => {
+                    let cap = plane.max_concurrent.clamp(1, 256);
+                    if local_in_use >= cap {
+                        tracing::info!(
+                            task_id = %task.id,
+                            local_in_use,
+                            cap,
+                            "control plane at max concurrent; leaving task ready"
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        project_id = %project_id,
+                        "plane runner settings unavailable; using local sandbox"
+                    );
+                }
+            }
         }
         let backend = if remote_host.is_some() {
             remote::BACKEND
@@ -223,6 +264,7 @@ pub async fn schedule_and_spawn(
                     )
                     .await?;
                 outcome.spawned += 1;
+                local_in_use += 1;
                 free -= 1;
             }
             Err(e) => {

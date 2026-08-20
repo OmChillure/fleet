@@ -168,11 +168,16 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Add worker — paste the install command on the machine." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; Native greyed off; cannot remove). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
+    "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
-    "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane." \
-    "Each card has Native and Sandboxed checkboxes. Sandboxed is not implemented yet. Both off is the same as stop taking new jobs. Changing a setting shows Apply; after Apply it says Pending apply until the box acks." \
-    "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." || return 0
+    "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
+    "Each card has Native and Sandboxed checkboxes. Sandboxed is not implemented yet. Both off is the same as stop taking new jobs. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Isolation, Auto-update, and Max jobs stay disabled until the runner acks." \
+    "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
+    "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
+    "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
+    "Click a card name (not Control plane) to rename; Enter saves, Escape cancels." \
+    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago). Control plane says this process, not last seen." || return 0
 
   pause_step "Workers" \
     "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \

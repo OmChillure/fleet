@@ -888,6 +888,7 @@ mod tests {
         );
     }
 
+    /// catalog:unit-request-update — Update now applies once even when auto is off.
     #[test]
     fn local_auto_update_false_does_not_apply() {
         let host = HostPublic {
@@ -920,6 +921,34 @@ mod tests {
             ..HostPublic::default()
         };
         assert!(should_apply_now(false, &requested, Some(&desired), false));
+
+        let state = UpdateState::new();
+        let cfg_off = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        assert!(
+            maybe_queue_auto(&state, &cfg_off, &off_cp, Some(&desired)).is_none(),
+            "auto off + no request must not apply"
+        );
+        assert!(
+            maybe_queue_auto(&state, &cfg_off, &requested, Some(&desired)).is_some(),
+            "Update now applies once even when local and CP auto are off"
+        );
+        assert!(
+            maybe_queue_auto(&state, &cfg_off, &requested, Some(&desired)).is_none(),
+            "the same request must not queue a second apply"
+        );
+        let again = HostPublic {
+            auto_update: Some(false),
+            update_requested_at: Some("2026-01-01T00:00:01Z".into()),
+            ..HostPublic::default()
+        };
+        state.finish();
+        assert!(
+            maybe_queue_auto(&state, &cfg_off, &again, Some(&desired)).is_some(),
+            "a later Update now (new timestamp) may apply again"
+        );
     }
 
     #[test]

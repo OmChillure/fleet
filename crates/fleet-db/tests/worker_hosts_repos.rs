@@ -271,6 +271,55 @@ async fn re_pair_same_hostname_without_machine_id_reclaims_existing_row() {
 }
 
 #[tokio::test]
+async fn two_machine_ids_same_hostname_stay_two_rows() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mid_a = Uuid::now_v7();
+    let mid_b = Uuid::now_v7();
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-a", expires).await;
+    let a = worker_hosts::consume_pair_token(
+        &pool,
+        &token_a,
+        "ubuntu",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid_a),
+    )
+    .await
+    .expect("pair a");
+    assert_eq!(a.host.id, first.id);
+    assert_eq!(a.host.machine_id, Some(mid_a));
+
+    let (second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-b", expires).await;
+    let b = worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        "ubuntu",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid_b),
+    )
+    .await
+    .expect("pair b");
+    assert_eq!(b.host.id, second.id, "distinct machine.id must not reclaim");
+    assert_eq!(b.host.machine_id, Some(mid_b));
+    assert_ne!(a.host.id, b.host.id);
+
+    let still = worker_hosts::get(&pool, first.id)
+        .await
+        .expect("get first")
+        .expect("first still exists");
+    assert_eq!(still.status, "online");
+    assert_eq!(still.machine_id, Some(mid_a));
+}
+
+#[tokio::test]
 async fn patch_bumps_settings_gen_until_ack() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -305,6 +354,152 @@ async fn patch_bumps_settings_gen_until_ack() {
         .expect("ack");
     assert_eq!(acked.settings_ack_gen, 1);
     assert!(!acked.settings_pending());
+}
+
+/// catalog:unit-patch-name — PATCH name persists and bumps settings_gen.
+#[tokio::test]
+async fn patch_name_persists_and_bumps_settings_gen() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, _token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "studio", expires).await;
+    assert_eq!(host.name, "studio");
+    assert_eq!(host.settings_gen, 0);
+
+    let same = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            name: Some("studio".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("same name");
+    assert_eq!(same.name, "studio");
+    assert_eq!(
+        same.settings_gen, 0,
+        "identical name must not bump settings_gen"
+    );
+
+    let renamed = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            name: Some("renamed-studio".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("rename");
+    assert_eq!(renamed.name, "renamed-studio");
+    assert_eq!(renamed.settings_gen, 1);
+    assert_eq!(renamed.isolation, host.isolation);
+    assert!(renamed.settings_pending());
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.name, "renamed-studio");
+    assert_eq!(loaded.settings_gen, 1);
+
+    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list");
+    let row = listed
+        .iter()
+        .find(|h| h.id == host.id)
+        .expect("list missing renamed host");
+    assert_eq!(row.name, "renamed-studio");
+}
+
+/// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
+#[tokio::test]
+async fn request_update_sets_timestamp_without_bumping_gen() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "upd", expires).await;
+    pair_host(&pool, &token, "upd-box").await;
+
+    let before = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert!(before.auto_update, "paired host defaults auto-update on");
+    assert!(
+        before.update_requested_at.is_none(),
+        "no update requested yet"
+    );
+    let settings_gen = before.settings_gen;
+
+    let off = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            auto_update: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("auto off");
+    assert!(!off.auto_update);
+    assert!(
+        off.update_requested_at.is_none(),
+        "turning auto-update off must not request"
+    );
+    assert_eq!(off.settings_gen, settings_gen + 1);
+
+    let ignored = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            request_update: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("request_update false");
+    assert!(ignored.update_requested_at.is_none());
+    assert_eq!(ignored.settings_gen, off.settings_gen);
+
+    let requested = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            request_update: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("request_update");
+    assert!(!requested.auto_update, "auto stays off");
+    let at = requested
+        .update_requested_at
+        .expect("update_requested_at must be set");
+    assert_eq!(
+        requested.settings_gen, off.settings_gen,
+        "Update now is a one-shot, not a settings bump"
+    );
+
+    let again = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            request_update: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("request again");
+    assert!(
+        again.update_requested_at.expect("still set") >= at,
+        "a second Update now refreshes the timestamp"
+    );
+    assert_eq!(again.settings_gen, off.settings_gen);
 }
 
 #[tokio::test]

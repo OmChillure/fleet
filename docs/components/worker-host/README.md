@@ -437,7 +437,13 @@ token **unchanged**):
 4. If a host is chosen: enqueue `work_claims` `spawn_session` with the
    payload above; `complete_spawn_success` with handle `host:{id}` and
    backend `remote`. Do **not** `ProcessRuntime::spawn` on the API box.
-5. If none: existing local `runtime.spawn` (stub/process/local/docker).
+5. If none: existing local `runtime.spawn` (stub/process/local/docker),
+   unless the workspace **control plane runner** is not taking native jobs
+   (`workspace_plane_runners.allow_host = false`). That runner is always
+   first on `GET …/worker-hosts` (`kind=control_plane`); it is not a
+   `worker_hosts` row and has no lease/heartbeat.
+   TODO: count local sessions against plane `max_concurrent`; show them
+   on the card; do not invent a claim for the plane.
 6. **Exception:** if no assignable host but a paired host in this workspace
    is `software_updating` and `last_seen` within ~2 minutes, **do not**
    local-spawn. Leave the task `ready`. Offline without that flag keeps
@@ -557,6 +563,11 @@ Human-test + `record_demo.py` scene `workers` in the same change.
 ---
 
 ## Tests
+
+Existing SUT → path (partial coverage). **Required** layers for every
+behavior: [`../runners/testing-requirements.md`](../runners/testing-requirements.md)
+(unit / browser e2e / real-life VM install on every OS). That file is
+the requirement list, not the implementation.
 
 | SUT | Where |
 | --- | --- |

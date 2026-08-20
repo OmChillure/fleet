@@ -86,9 +86,10 @@ same change. The walkthrough is allowed to go stale only if the product did.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
 8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
-   paste the install command on the machine (Linux/macOS or Windows). Token
-   panel is success — do not require a second machine. `/{ws}/workers`
-   redirects here (`workers` scene is an alias).
+   paste the install command on the machine (Linux/macOS or Windows). Copy
+   Unix, Windows, and token (works on HTTP LAN). Token panel is success —
+   do not require a second machine. `/{ws}/workers` redirects here
+   (`workers` scene is an alias).
 9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
    (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
 10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;

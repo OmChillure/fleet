@@ -2,12 +2,15 @@
 
 use dioxus::prelude::*;
 
+use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
-    create_workspace, list_workspaces, logout, me, CreateWorkspaceBody, UserPublic, WorkspacePublic,
+    CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
-use crate::theme::{use_theme, Theme};
-use crate::Route;
+use crate::theme::{Theme, use_theme};
+use fleet_runners_view::routes::{
+    RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
+};
 
 /// Which top-level nav sections are expanded.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -350,7 +353,7 @@ pub fn Sidebar() -> Element {
                 }
 
                 NavAccordion {
-                    title: "Runners",
+                    title: RUNNERS_NAV_TITLE,
                     expanded: expanded().contains(&NavSection::Runners),
                     on_toggle: move |_| {
                         let mut set = expanded();
@@ -360,17 +363,24 @@ pub fn Sidebar() -> Element {
                         expanded.set(set);
                     },
                     icon: rsx! { IconServer {} },
-                    NavSubLink {
-                        to: Route::SelfHosted { workspace_id: workspace_id.clone() },
-                        label: "Self-hosted",
-                    }
-                    NavSubLink {
-                        to: Route::CloudPage { workspace_id: workspace_id.clone() },
-                        label: "Cloud",
-                    }
-                    NavSubLink {
-                        to: Route::PartnersPage { workspace_id: workspace_id.clone() },
-                        label: "Partners",
+                    for child in RUNNER_NAV_CHILDREN {
+                        NavSubLink {
+                            to: match child.slug {
+                                SEGMENT_SELF_HOSTED => Route::SelfHosted {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                SEGMENT_CLOUD => Route::CloudPage {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                SEGMENT_PARTNERS => Route::PartnersPage {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                _ => Route::SelfHosted {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                            },
+                            label: child.label,
+                        }
                     }
                 }
 

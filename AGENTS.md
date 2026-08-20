@@ -29,6 +29,15 @@ flags, OS/kind/lab behavior) and whether any tests must be added. No
 regressions — run the relevant suite (`run-full-suite.sh` / cargo / lab
 unittests) and do not leave install or tests worse than you found it.
 
+Do **not** create a recurring test-writer loop (scheduler / 5-minute
+fire that implements or relaunches catalog holes). Do not spawn one
+agent per catalog row on a timer. A missing child id is not a relaunch.
+Harvest from suite commands (`just test`, `just test-integration`,
+`scripts/harvest-runner-catalog.sh`, Playwright). One rebuild, then one
+e2e pass. Stop when the suite is green or the hole is an explicit skip
+(`LIVE_SKIPPED`). Editing a file after e2e dirties `tree-id`; that is
+not a reason to start another writer loop.
+
 ## Fail-closed builds and identity
 
 A missing tool, missing build, or foreign stack is a **fail**, not a WARN.

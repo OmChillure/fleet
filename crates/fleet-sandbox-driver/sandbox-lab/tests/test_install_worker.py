@@ -30,6 +30,15 @@ PLATFORMS = (
 
 
 class InstallWorkerTests(unittest.TestCase):
+    def test_pair_token_env_in_unix_and_windows(self):
+        unix = (SCRIPT_DIR / "_unix_common.sh").read_text(encoding="utf-8")
+        bootstrap = (SCRIPT_DIR / "install-worker.sh").read_text(encoding="utf-8")
+        win = (SCRIPT_DIR / "windows-x86_64.ps1").read_text(encoding="utf-8")
+        self.assertIn("FLEET_PAIR_TOKEN", unix)
+        self.assertIn("FLEET_URL", bootstrap)
+        self.assertIn("FLEET_PAIR_TOKEN", win)
+        self.assertIn("FLEET_URL", win)
+
     def test_bootstrap_exists_and_executable(self):
         self.assertTrue(BOOTSTRAP.is_file(), BOOTSTRAP)
         self.assertTrue(BOOTSTRAP.stat().st_mode & 0o111, "bootstrap must be executable")
