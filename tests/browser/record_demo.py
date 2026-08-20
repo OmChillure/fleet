@@ -92,6 +92,13 @@ def expand_agents_nav(page) -> None:
         pause(page, 400)
 
 
+def expand_runners_nav(page) -> None:
+    runners = page.get_by_text("Runners", exact=True).first
+    if runners.count():
+        runners.click()
+        pause(page, 400)
+
+
 class Demo:
     def __init__(self, page, out_dir: Path):
         self.page = page
@@ -283,6 +290,81 @@ class Demo:
         """Alias: /{ws}/workers redirects to the self-hosted runners page."""
         self._film_self_hosted("/workers")
 
+    def _film_network_runners(
+        self,
+        rel: str,
+        heading_labels: tuple[str, ...],
+        copy_labels: tuple[str, ...],
+        nav_label: str,
+    ) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/dashboard", wait_until="networkidle")
+        pause(p)
+        expand_runners_nav(p)
+        link = p.get_by_role("link", name=nav_label, exact=True)
+        if link.count():
+            link.first.click()
+            pause(p, 800)
+        else:
+            p.goto(f"{base}{rel}", wait_until="networkidle")
+            pause(p, 1000)
+        p.wait_for_url(f"**{rel}", timeout=15_000)
+        heading = ""
+        if p.locator("h1").count():
+            heading = p.locator("h1").first.inner_text()
+        if not any(label in heading for label in heading_labels):
+            raise RuntimeError(
+                f"{rel} missing heading {heading_labels}: {heading!r}"
+            )
+        # Prefer <main> so sidebar "Cloud" / "Partners" labels cannot false-green.
+        main = p.locator("main")
+        text = main.inner_text() if main.count() else p.inner_text("body")
+        if not any(label in text for label in copy_labels):
+            raise RuntimeError(
+                f"{rel} missing expected copy {copy_labels}: {text[:400]}"
+            )
+        pause(p, 1500)
+
+    def scene_cloud(self) -> None:
+        self._film_network_runners(
+            "/runners/cloud",
+            ("Cloud",),
+            (
+                "AWS",
+                "GCP",
+                "Azure",
+                "Fleet Cloud",
+                "Public cloud",
+                "public cloud",
+                "Coming soon",
+                "placeholder",
+                "Placeholder",
+            ),
+            "Cloud",
+        )
+
+    def scene_partners(self) -> None:
+        self._film_network_runners(
+            "/runners/partners",
+            ("Partners",),
+            (
+                "Trust",
+                "Disclaimer",
+                "unused capacity",
+                "Sandboxed",
+                "Verified",
+                "verified",
+                "acknowledge",
+            ),
+            "Partners",
+        )
+        p = self.page
+        ack = p.get_by_role("checkbox")
+        if ack.count() and ack.first.is_visible():
+            ack.first.check()
+            pause(p, 1200)
+
     def scene_sessions(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -365,6 +447,8 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "settings": Demo.scene_settings,
     "runners": Demo.scene_runners,
     "workers": Demo.scene_workers,
+    "cloud": Demo.scene_cloud,
+    "partners": Demo.scene_partners,
     "sessions": Demo.scene_sessions,
     "dashboard": Demo.scene_dashboard,
     "lab": Demo.scene_lab,
@@ -384,6 +468,8 @@ CORE = [
     "integrations",
     "settings",
     "runners",
+    "cloud",
+    "partners",
     "sessions",
     "dashboard",
 ]

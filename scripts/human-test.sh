@@ -156,7 +156,8 @@ cmd_guide() {
     "Chat: New chat, Chat history." \
     "Monitoring: Dashboard, Fleet, Sandboxes." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
-    "Workspace (expand it): Integrations, Settings, Runners → Self-hosted." \
+    "Runners (expand it): Self-hosted, Cloud, Partners." \
+    "Workspace (expand it): Integrations, Settings." \
     "Workers is gone from the sidebar; /{ws}/workers still redirects." || return 0
 
   pause_step "Workspace switcher" \
@@ -175,6 +176,15 @@ cmd_guide() {
   pause_step "Workers" \
     "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \
     "/{ws}/runners also lands on Self-hosted. Record scene is runners (workers alias)." || return 0
+
+  pause_step "Runners / Cloud" \
+    "Runners → Cloud (/{ws}/runners/cloud). Placeholder cards for public cloud (AWS / GCP / Azure) and Fleet Cloud." \
+    "Do not enter provider keys. Coming-soon / placeholder is success." || return 0
+
+  pause_step "Runners / Partners" \
+    "Runners → Partners (/{ws}/runners/partners). Trust copy first: unused capacity, Sandboxed only, verified vs open." \
+    "Disclaimer + acknowledge checkbox — ack does not enable lending. Lend / Buy credits stay disabled." \
+    "Do not pair a partner machine. Reading the page is success." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0

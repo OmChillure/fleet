@@ -79,30 +79,34 @@ same change. The walkthrough is allowed to go stale only if the product did.
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
-   Sandboxes), Agents (All agents, Live sessions), Workspace (Integrations,
-   Settings, Runners → Self-hosted). Expand collapsed sections. `/workers`
-   still redirects.
+   Sandboxes), Agents (All agents, Live sessions), Runners (Self-hosted,
+   Cloud, Partners), Workspace (Integrations, Settings). Expand collapsed
+   sections. `/workers` still redirects.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
 8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
    paste the install command on the machine (Linux/macOS or Windows). Token
    panel is success — do not require a second machine. `/{ws}/workers`
    redirects here (`workers` scene is an alias).
-9. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
-10. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
+9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
+   (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
+10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;
+    acknowledge does not enable lending. Lend / buy stay disabled.
+11. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
+12. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
     are in `.env`.
-11. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
+13. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
     actually up. Otherwise still open the page (empty composer is success).
     `@fleet monitor` watches connected GitHub / Jira / Linear. `@fleet finish KEY`
     launches implementer + reviewer on that ticket.
-12. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
+14. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
     backend is `stub` (fine). Board columns move; background ticker may also
     tick. With Fleet LLM on, agents talk mid-run (`TEAM_CHAT.md`; chat
     tools `read_team_chat` / `send_team_message`).
-13. **Sandboxes** — same worker sessions as Fleet.
-14. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
-15. **User menu** — theme Black/White (not persisted), Log out → `/login`.
-16. **This MR** — do the new thing this change added. If the script has no
+15. **Sandboxes** — same worker sessions as Fleet.
+16. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
+17. **User menu** — theme Black/White (not persisted), Log out → `/login`.
+18. **This MR** — do the new thing this change added. If the script has no
     step for it, the change is incomplete.
 
 Logs: `./scripts/fleet-dev.sh logs`. Stop: `./scripts/human-test.sh stop`.
@@ -158,6 +162,8 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). `/{ws}/workers` redirects |
+| `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
+| `crates/fleet-ui` Partners `/{ws}/runners/partners` | `partners` | trust copy, disclaimer, verified vs open. Ack does not enable lending |
 | `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
@@ -168,9 +174,9 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |
 
 `all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, agents,
-integrations, settings, runners, sessions (logout at the end of `auth`/`shell`
-as needed). `workers` is an alias for `runners`. `lab` and `kind` are extra —
-pass them when that is the MR.
+integrations, settings, runners, cloud, partners, sessions (logout at the
+end of `auth`/`shell` as needed). `workers` is an alias for `runners`.
+`lab` and `kind` are extra — pass them when that is the MR.
 
 ### Adding a scene (required when you add a surface)
 
