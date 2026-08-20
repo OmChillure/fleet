@@ -2,6 +2,8 @@
 //!
 //! Uses `fleet_db::repos::worker_hosts::list_assignable`. Missing table /
 //! query error → no host (local `SANDBOX_BACKEND` still works).
+//! Cloud / Partners / public-cloud are not assignable and are not a
+//! second spawn path.
 
 use super::Store;
 use crate::sandbox::{SpawnRequest, remote};
@@ -20,6 +22,32 @@ pub enum RunnerIsolation {
 impl RunnerIsolation {
     pub fn is_assignable(self) -> bool {
         matches!(self, Self::Native)
+    }
+}
+
+/// Product execution kind. Only self-hosted native is assignable.
+/// Cloud / Partners / public-cloud stay off the picker (no k8s executor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerKind {
+    SelfHostedNative,
+    SelfHostedSandbox,
+    PublicCloud,
+    FleetCloud,
+    Partners,
+}
+
+impl RunnerKind {
+    pub fn is_assignable(self) -> bool {
+        matches!(self, Self::SelfHostedNative)
+    }
+
+    pub fn isolation(self) -> RunnerIsolation {
+        match self {
+            Self::SelfHostedNative => RunnerIsolation::Native,
+            Self::SelfHostedSandbox | Self::PublicCloud | Self::FleetCloud | Self::Partners => {
+                RunnerIsolation::Sandboxed
+            }
+        }
     }
 }
 
@@ -122,6 +150,7 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
 }
 
 /// Today's host picker, then Native-only. No second list/query.
+/// Cloud / Partners / public-cloud cannot be chosen.
 pub fn pick_assignable_runner(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,
@@ -135,6 +164,7 @@ pub fn pick_assignable_runner(
 }
 
 /// Wraps [`select_assignable_host`]. Tick fallback is unchanged.
+/// Cloud / Partners / public-cloud cannot be chosen.
 pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
     select_assignable_host(store, project_id)
         .await
