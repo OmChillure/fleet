@@ -118,6 +118,21 @@ fn replace_host(list: &mut Vec<HostPublic>, updated: HostPublic) {
     }
 }
 
+fn status_rank(status: &str) -> u8 {
+    match status {
+        "online" => 0,
+        "pending" => 1,
+        "error" => 2,
+        "offline" => 3,
+        "disabled" => 4,
+        _ => 5,
+    }
+}
+
+fn is_removed(host: &HostPublic) -> bool {
+    host.status == "disabled"
+}
+
 #[component]
 pub fn Workers(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
@@ -125,6 +140,7 @@ pub fn Workers(workspace_id: String) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut hosts = use_signal(Vec::<HostPublic>::new);
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
+    let mut show_removed = use_signal(|| false);
 
     // Do not read `hosts` / `loading` here — a write-triggered effect loops
     // and Firefox OOMs when the first card mounts.
@@ -181,6 +197,16 @@ pub fn Workers(workspace_id: String) -> Element {
         });
     };
 
+    let all = hosts();
+    let mut active: Vec<HostPublic> = all.iter().filter(|h| !is_removed(h)).cloned().collect();
+    active.sort_by(|a, b| {
+        status_rank(&a.status)
+            .cmp(&status_rank(&b.status))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let removed: Vec<HostPublic> = all.iter().filter(|h| is_removed(h)).cloned().collect();
+    let removed_n = removed.len();
+
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-3xl flex-col overflow-auto px-4 py-6 md:px-6",
             div { class: "flex flex-wrap items-start justify-between gap-3",
@@ -215,7 +241,7 @@ pub fn Workers(workspace_id: String) -> Element {
                     p { class: "mt-4 text-sm text-red-400", "{err}" }
                 }
 
-                if hosts().is_empty() {
+                if active.is_empty() && removed_n == 0 {
                     div {
                         class: "mt-6 rounded-xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-8 text-center",
                         p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
@@ -226,24 +252,66 @@ pub fn Workers(workspace_id: String) -> Element {
                         }
                     }
                 } else {
-                    div { class: "mt-6 flex flex-col gap-3",
-                        for host in hosts() {
-                            HostCard {
-                                key: "{host.id}",
-                                workspace_id: workspace_id.clone(),
-                                host,
-                                on_updated: move |updated: HostPublic| {
-                                    let mut list = hosts();
-                                    replace_host(&mut list, updated);
-                                    hosts.set(list);
-                                },
-                                on_revoked: move |id: String| {
-                                    let mut list = hosts();
-                                    if let Some(slot) = list.iter_mut().find(|h| h.id == id) {
-                                        slot.status = "disabled".into();
+                    if active.is_empty() {
+                        p { class: "mt-6 text-sm text-[var(--app-muted)]",
+                            "No active workers."
+                        }
+                    } else {
+                        div { class: "mt-6 flex flex-col gap-3",
+                            for host in active {
+                                HostCard {
+                                    key: "{host.id}",
+                                    workspace_id: workspace_id.clone(),
+                                    host,
+                                    on_updated: move |updated: HostPublic| {
+                                        let mut list = hosts();
+                                        replace_host(&mut list, updated);
+                                        hosts.set(list);
+                                    },
+                                    on_revoked: move |id: String| {
+                                        let mut list = hosts();
+                                        if let Some(slot) = list.iter_mut().find(|h| h.id == id) {
+                                            slot.status = "disabled".into();
+                                        }
+                                        hosts.set(list);
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    if removed_n > 0 {
+                        button {
+                            class: "mt-4 text-xs font-medium text-[var(--app-muted)] hover:text-[var(--app-fg)]",
+                            r#type: "button",
+                            onclick: move |_| show_removed.set(!show_removed()),
+                            if show_removed() {
+                                {format!("Hide removed ({removed_n})")}
+                            } else {
+                                {format!("Show removed ({removed_n})")}
+                            }
+                        }
+                        if show_removed() {
+                            div { class: "mt-3 flex flex-col gap-3",
+                                for host in removed {
+                                    HostCard {
+                                        key: "rm-{host.id}",
+                                        workspace_id: workspace_id.clone(),
+                                        host,
+                                        on_updated: move |updated: HostPublic| {
+                                            let mut list = hosts();
+                                            replace_host(&mut list, updated);
+                                            hosts.set(list);
+                                        },
+                                        on_revoked: move |id: String| {
+                                            let mut list = hosts();
+                                            if let Some(slot) = list.iter_mut().find(|h| h.id == id)
+                                            {
+                                                slot.status = "disabled".into();
+                                            }
+                                            hosts.set(list);
+                                        },
                                     }
-                                    hosts.set(list);
-                                },
+                                }
                             }
                         }
                     }
@@ -469,10 +537,9 @@ fn HostCard(
                 }
             }
 
-            p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "software {software_line(&host)}"
-                if host.software.as_ref().is_none_or(|s| s.git_sha.as_ref().is_none_or(|g| g.trim().is_empty())) {
-                    " · re-run the install command to report a version"
+            if host.status != "pending" && host.status != "disabled" {
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "software {software_line(&host)}"
                 }
             }
 

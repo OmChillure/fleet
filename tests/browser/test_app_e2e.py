@@ -237,7 +237,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(page.get_by_role("button", name="Pause").first.is_visible())
         self.assertIn("pending", card.lower())
         self.assertIn("Waiting to pair", card)
-        self.assertIn("software unknown", card.lower())
+        self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
         self.assertNotIn("Allow host", card)
         self.assertNotIn("Allow container", card)
