@@ -10,8 +10,8 @@ use crate::sandbox::{SpawnRequest, remote};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Isolation of a runner. Only Native is assignable. Host rows have no
-/// isolation column yet (A3b); mapped hosts are Native.
+/// Isolation of a runner. Only Native is assignable.
+/// Copied from `worker_hosts.isolation` (`native` / `sandboxed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunnerIsolation {
     #[default]
@@ -239,7 +239,10 @@ impl From<&fleet_db::WorkerHost> for AssignableHost {
             max_concurrent: h.max_concurrent,
             advertised_max_concurrent: h.advertised_max_concurrent,
             max_job_timeout_s: h.max_job_timeout_s,
-            isolation: RunnerIsolation::Native,
+            isolation: match h.isolation.as_str() {
+                fleet_db::WORKER_HOST_ISOLATION_SANDBOXED => RunnerIsolation::Sandboxed,
+                _ => RunnerIsolation::Native,
+            },
         }
     }
 }
@@ -433,5 +436,55 @@ mod tests {
         let chosen = pick_assignable_runner(&[sandboxed, native], &HashMap::new()).unwrap();
         assert_eq!(chosen.id(), native_id);
         assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
+    }
+
+    fn worker_host(isolation: &str) -> fleet_db::WorkerHost {
+        let now = chrono::Utc::now();
+        fleet_db::WorkerHost {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            name: "box".into(),
+            status: fleet_db::WORKER_HOST_STATUS_ONLINE.into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            isolation: isolation.into(),
+            allow_host: true,
+            allow_container: true,
+            max_concurrent: 4,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: None,
+            advertised_host: true,
+            advertised_container: false,
+            platform: None,
+            hostname: None,
+            last_seen_at: Some(now),
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: None,
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            created_by: None,
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn from_worker_host_maps_isolation() {
+        let native = AssignableHost::from(&worker_host(fleet_db::WORKER_HOST_ISOLATION_NATIVE));
+        assert_eq!(native.isolation, RunnerIsolation::Native);
+        let boxed = AssignableHost::from(&worker_host(fleet_db::WORKER_HOST_ISOLATION_SANDBOXED));
+        assert_eq!(boxed.isolation, RunnerIsolation::Sandboxed);
+        let unknown = AssignableHost::from(&worker_host("k8s"));
+        assert_eq!(unknown.isolation, RunnerIsolation::Native);
     }
 }
