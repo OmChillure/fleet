@@ -9,6 +9,7 @@ Does not skip when the stack is down — fail so the suite cannot go green blind
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import unittest
@@ -59,6 +60,25 @@ def _require_playwright():
     return sync_playwright
 
 
+# Mutating control-plane paths these placeholder pages must not hit.
+_REMOTE_ENQUEUE_RE = re.compile(
+    r"/(?:spawn|enqueue|lease|tick|fleet/runs|worker-hosts|jobs|claims|lend)(?:/|$|\?)",
+    re.I,
+)
+_LEND_CONTROL_RE = re.compile(
+    r"^(lend|lend capacity|enable lending|start lending|offer capacity|begin lending)$",
+    re.I,
+)
+
+
+def _is_remote_enqueue_or_spawn(method: str, url: str) -> bool:
+    if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    if "lend" in url.lower():
+        return True
+    return _REMOTE_ENQUEUE_RE.search(url) is not None
+
+
 class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -81,6 +101,40 @@ class BrowserE2ETests(unittest.TestCase):
         )
         cls.page = cls._context.new_page()
         cls.page.set_default_timeout(20_000)
+
+    def _assert_no_lend_enablement(self, page, where: str) -> None:
+        body = page.inner_text("body").lower()
+        self.assertNotIn("lending enabled", body, f"{where}: lend must stay off")
+        for i in range(page.get_by_role("button").count()):
+            btn = page.get_by_role("button").nth(i)
+            if not btn.is_visible():
+                continue
+            name = " ".join((btn.inner_text() or "").split())
+            if not name or _LEND_CONTROL_RE.search(name) is None:
+                continue
+            self.assertFalse(
+                btn.is_enabled(),
+                f"{where}: lend control {name!r} must not be enabled",
+            )
+        for role in ("checkbox", "switch"):
+            loc = page.get_by_role(role)
+            for i in range(loc.count()):
+                ctl = loc.nth(i)
+                if not ctl.is_visible():
+                    continue
+                label = " ".join(
+                    (ctl.get_attribute("aria-label") or ctl.inner_text() or "").split()
+                )
+                if _LEND_CONTROL_RE.search(label) is None:
+                    continue
+                self.assertFalse(
+                    ctl.is_checked(),
+                    f"{where}: lend control {label!r} must not be on",
+                )
+                self.assertFalse(
+                    ctl.is_enabled(),
+                    f"{where}: lend control {label!r} must not be enabled",
+                )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -206,6 +260,10 @@ class BrowserE2ETests(unittest.TestCase):
             "No workers yet" in runners_body or "last seen" in runners_body,
             "Self-hosted empty state or runner card missing",
         )
+        cloud = nav.get_by_role("link", name="Cloud", exact=True)
+        self.assertTrue(cloud.first.is_visible(), "sidebar missing Cloud")
+        partners = nav.get_by_role("link", name="Partners", exact=True)
+        self.assertTrue(partners.first.is_visible(), "sidebar missing Partners")
 
         page.get_by_role("link", name="Settings", exact=True).click()
         page.wait_for_url("**/settings", timeout=10_000)
@@ -313,6 +371,14 @@ class BrowserE2ETests(unittest.TestCase):
             runners.first.click()
             self_hosted = nav.get_by_role("link", name="Self-hosted", exact=True)
         self.assertTrue(self_hosted.first.is_visible(), "sidebar missing Self-hosted")
+        cloud = nav.get_by_role("link", name="Cloud", exact=True)
+        partners = nav.get_by_role("link", name="Partners", exact=True)
+        if cloud.count() == 0 or not cloud.first.is_visible():
+            runners.first.click()
+            cloud = nav.get_by_role("link", name="Cloud", exact=True)
+            partners = nav.get_by_role("link", name="Partners", exact=True)
+        self.assertTrue(cloud.first.is_visible(), "sidebar missing Cloud")
+        self.assertTrue(partners.first.is_visible(), "sidebar missing Partners")
 
     def test_08_workers_redirects_to_self_hosted(self) -> None:
         base = getattr(type(self), "workspace_url", None)
@@ -330,7 +396,128 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_url("**/runners/self-hosted", timeout=15_000)
         self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$")
 
-    def test_10_logout_returns_to_login(self) -> None:
+    def test_10_nav_links_to_cloud_and_partners(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/dashboard", wait_until="networkidle")
+        page.wait_for_selector("h1")
+        nav = page.locator("aside nav")
+        runners = nav.get_by_text("Runners", exact=True)
+        self.assertTrue(runners.first.is_visible(), "sidebar missing Runners")
+        cloud = nav.get_by_role("link", name="Cloud", exact=True)
+        partners = nav.get_by_role("link", name="Partners", exact=True)
+        if (
+            cloud.count() == 0
+            or not cloud.first.is_visible()
+            or partners.count() == 0
+            or not partners.first.is_visible()
+        ):
+            runners.first.click()
+            cloud = nav.get_by_role("link", name="Cloud", exact=True)
+            partners = nav.get_by_role("link", name="Partners", exact=True)
+        self.assertTrue(cloud.first.is_visible(), "sidebar missing Cloud link")
+        self.assertTrue(partners.first.is_visible(), "sidebar missing Partners link")
+
+        cloud.first.click()
+        page.wait_for_url("**/runners/cloud", timeout=10_000)
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$")
+
+        partners = nav.get_by_role("link", name="Partners", exact=True)
+        if partners.count() == 0 or not partners.first.is_visible():
+            nav.get_by_text("Runners", exact=True).first.click()
+            partners = nav.get_by_role("link", name="Partners", exact=True)
+        partners.first.click()
+        page.wait_for_url("**/runners/partners", timeout=10_000)
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
+
+    def test_11_cloud_page_coming_soon(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/runners/cloud", wait_until="networkidle")
+        page.wait_for_selector("h1")
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$")
+        h1 = page.locator("h1").first.inner_text().strip()
+        self.assertIn("Cloud", h1, f"unexpected cloud heading {h1!r}")
+        body = page.inner_text("body")
+        for label in ("AWS", "GCP", "Azure", "Fleet Cloud"):
+            self.assertIn(label, body, f"cloud page missing {label}")
+        self.assertIn(
+            "coming soon",
+            body.lower(),
+            "cloud providers must be coming-soon placeholders",
+        )
+        self._assert_no_lend_enablement(page, "cloud")
+
+    def test_12_partners_page_trust_disclaimer(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        page.goto(f"{base}/runners/partners", wait_until="networkidle")
+        page.wait_for_selector("h1")
+        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
+        h1 = page.locator("h1").first.inner_text().strip()
+        self.assertIn("Partners", h1, f"unexpected partners heading {h1!r}")
+        body = page.inner_text("body")
+        body_l = body.lower()
+        self.assertIn("trust", body_l, "partners page missing trust copy")
+        self.assertIn("disclaimer", body_l, "partners page missing disclaimer copy")
+        boxes = page.get_by_role("checkbox", name=re.compile(r"disclaimer", re.I))
+        if boxes.count() == 0:
+            boxes = page.get_by_role("checkbox")
+        visible = [
+            boxes.nth(i) for i in range(boxes.count()) if boxes.nth(i).is_visible()
+        ]
+        self.assertGreater(
+            len(visible),
+            0,
+            "partners disclaimer control missing (expected an unchecked checkbox)",
+        )
+        for box in visible:
+            self.assertFalse(box.is_checked(), "partners disclaimer must default off")
+        lend = page.get_by_role("button", name="Lend capacity")
+        self.assertTrue(lend.first.is_visible(), "partners page missing Lend capacity")
+        self.assertFalse(lend.first.is_enabled(), "Lend capacity must stay disabled")
+        self._assert_no_lend_enablement(page, "partners")
+
+    def test_13_no_remote_enqueue_from_cloud_or_partners(self) -> None:
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+        mutating: list[tuple[str, str]] = []
+
+        def on_request(req) -> None:
+            method = req.method.upper()
+            if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                mutating.append((method, req.url))
+
+        page.on("request", on_request)
+        try:
+            for path in ("/runners/cloud", "/runners/partners"):
+                page.goto(f"{base}{path}", wait_until="networkidle")
+                page.wait_for_selector("h1")
+                self._assert_no_lend_enablement(page, path)
+                self.assertEqual(
+                    page.get_by_role("button", name="Add worker").count(),
+                    0,
+                    f"{path} must not pair workers",
+                )
+        finally:
+            page.remove_listener("request", on_request)
+
+        forbidden = [
+            (method, url)
+            for method, url in mutating
+            if _is_remote_enqueue_or_spawn(method, url)
+        ]
+        self.assertEqual(
+            forbidden,
+            [],
+            "cloud/partners pages must not enqueue, spawn, or lend via API",
+        )
+
+    def test_14_logout_returns_to_login(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
