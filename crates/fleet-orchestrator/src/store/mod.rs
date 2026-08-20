@@ -6,9 +6,10 @@ mod pool;
 mod tick_ops;
 
 pub use host_pool::{
-    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, effective_runtime,
-    enqueue_remote_spawn, hold_ready_for_host_update, host_at_capacity, pick_assignable_host,
-    select_assignable_host, workspace_has_updating_host,
+    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation,
+    effective_runtime, enqueue_remote_spawn, hold_ready_for_host_update, host_at_capacity,
+    pick_assignable_host, pick_assignable_runner, select_assignable_host, select_assignable_runner,
+    workspace_has_updating_host,
 };
 pub use models::*;
 pub use pool::*;

@@ -8,6 +8,21 @@ use crate::sandbox::{SpawnRequest, remote};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Isolation of a runner. Only Native is assignable. Host rows have no
+/// isolation column yet (A3b); mapped hosts are Native.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RunnerIsolation {
+    #[default]
+    Native,
+    Sandboxed,
+}
+
+impl RunnerIsolation {
+    pub fn is_assignable(self) -> bool {
+        matches!(self, Self::Native)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignableHost {
     pub id: Uuid,
@@ -18,6 +33,7 @@ pub struct AssignableHost {
     pub max_concurrent: i32,
     pub advertised_max_concurrent: Option<i32>,
     pub max_job_timeout_s: i32,
+    pub isolation: RunnerIsolation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +121,26 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
     pick_assignable_host(&hosts, &in_flight)
 }
 
+/// Today's host picker, then Native-only. No second list/query.
+pub fn pick_assignable_runner(
+    hosts: &[AssignableHost],
+    in_flight: &HashMap<Uuid, i64>,
+) -> Option<ChosenHost> {
+    let native: Vec<AssignableHost> = hosts
+        .iter()
+        .filter(|h| h.isolation.is_assignable())
+        .cloned()
+        .collect();
+    pick_assignable_host(&native, in_flight)
+}
+
+/// Wraps [`select_assignable_host`]. Tick fallback is unchanged.
+pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
+    select_assignable_host(store, project_id)
+        .await
+        .filter(|chosen| chosen.host.isolation.is_assignable())
+}
+
 /// How long after last_seen a `software_updating` host still holds ready tasks.
 pub const HOST_UPDATE_HOLD_SECS: i64 = 120;
 
@@ -173,6 +209,7 @@ impl From<&fleet_db::WorkerHost> for AssignableHost {
             max_concurrent: h.max_concurrent,
             advertised_max_concurrent: h.advertised_max_concurrent,
             max_job_timeout_s: h.max_job_timeout_s,
+            isolation: RunnerIsolation::Native,
         }
     }
 }
@@ -245,6 +282,7 @@ mod tests {
             max_concurrent: max,
             advertised_max_concurrent: None,
             max_job_timeout_s: 3600,
+            isolation: RunnerIsolation::Native,
         }
     }
 
@@ -340,5 +378,30 @@ mod tests {
         assert!(!hold_ready_for_host_update(true, true));
         assert!(!hold_ready_for_host_update(false, false));
         assert!(!hold_ready_for_host_update(true, false));
+    }
+
+    #[test]
+    fn runner_default_is_native_and_picks_paired_host() {
+        let h = host(Uuid::new_v4(), true, true, true, true, 4);
+        assert_eq!(h.isolation, RunnerIsolation::Native);
+        let chosen = pick_assignable_runner(&[h.clone()], &HashMap::new()).unwrap();
+        assert_eq!(chosen.id(), h.id);
+        assert_eq!(chosen.runtime, HostRuntime::Host);
+        assert_eq!(
+            pick_assignable_runner(&[h.clone()], &HashMap::new()),
+            pick_assignable_host(&[h], &HashMap::new())
+        );
+    }
+
+    #[test]
+    fn runner_skips_sandboxed_and_picks_native() {
+        let native_id = Uuid::new_v4();
+        let mut sandboxed = host(Uuid::new_v4(), true, true, true, true, 4);
+        sandboxed.isolation = RunnerIsolation::Sandboxed;
+        let native = host(native_id, true, true, true, true, 4);
+        assert!(pick_assignable_runner(&[sandboxed.clone()], &HashMap::new()).is_none());
+        let chosen = pick_assignable_runner(&[sandboxed, native], &HashMap::new()).unwrap();
+        assert_eq!(chosen.id(), native_id);
+        assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
     }
 }

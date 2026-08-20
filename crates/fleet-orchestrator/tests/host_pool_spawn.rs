@@ -5,7 +5,7 @@ use fleet_orchestrator::sandbox::remote::{
 };
 use fleet_orchestrator::sandbox::{RuntimeBuildOpts, SpawnRequest, build_runtime};
 use fleet_orchestrator::store::{
-    AssignableHost, HostRuntime, host_at_capacity, pick_assignable_host,
+    AssignableHost, HostRuntime, RunnerIsolation, host_at_capacity, pick_assignable_host,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ fn host(
         max_concurrent,
         advertised_max_concurrent: None,
         max_job_timeout_s: 3600,
+        isolation: RunnerIsolation::Native,
     }
 }
 
