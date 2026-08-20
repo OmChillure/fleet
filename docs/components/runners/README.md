@@ -15,9 +15,9 @@ This folder is the umbrella: kinds, isolation, nav, and routes.
 | --- | --- | --- | --- |
 | Self-hosted native | Customer PC / server / VPS | **Native** (not a sandbox) | **MR 1** — paired `fleet-host` |
 | Self-hosted sandbox | Same machine, k8s/containers on it | Sandboxed | **MR 2** toggle placeholder; executor is not v1 |
-| Public cloud | Customer AWS / GCP / Azure keys | Sandboxed | Next MR (placeholder) |
-| Fleet Cloud | Our paid pool | Sandboxed | Next MR (placeholder) |
-| Partners | Other people’s unused capacity | Sandboxed | Next MR (placeholder + design) |
+| Public cloud | Customer AWS / GCP / Azure keys | Sandboxed | **MR 3** — placeholder |
+| Fleet Cloud | Our paid pool | Sandboxed | **MR 3** — placeholder |
+| Partners | Other people’s unused capacity | Sandboxed | **MR 3** — placeholder + [design](partners.md) |
 
 Tick already prefers an assignable remote host, else local
 `SANDBOX_BACKEND`. Later MRs extend *who* can be assignable. Do not
@@ -37,9 +37,9 @@ Isolation is a property of a runner, not a sidebar item:
   here. Self-hosted sandbox is a visible toggle only; it is not
   assignable.
 
-Sidebar after MR 2: **Runners** accordion (same rank as Monitoring and
+Sidebar after MR 3: **Runners** accordion (same rank as Monitoring and
 Agents). Children: **Self-hosted** (live), **Cloud** and **Partners**
-(coming soon until the next MR). Workspace keeps Integrations + Settings.
+(placeholders this MR). Workspace keeps Integrations + Settings.
 
 ---
 
@@ -55,20 +55,15 @@ job). **Workers** as a nav section collides with the per-job
 
 ---
 
-## Routes after MR 2
+## Routes after MR 3
 
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/runners` | Redirect to `/runners/self-hosted` |
 | `/{workspace_id}/runners/self-hosted` | Current Workers UI (pair + list) |
 | `/{workspace_id}/workers` | Redirect to `/runners/self-hosted` |
-
-Routes added in the next MR (not this one):
-
-| Path | Page |
-| --- | --- |
 | `/{workspace_id}/runners/cloud` | Cloud placeholders |
-| `/{workspace_id}/runners/partners` | Partners + trust copy |
+| `/{workspace_id}/runners/partners` | Partners + trust copy ([design](partners.md)) |
 
 ---
 
@@ -76,6 +71,7 @@ Routes added in the next MR (not this one):
 
 | Doc | Why |
 | --- | --- |
+| [`docs/components/runners/partners.md`](partners.md) | Partners credit, trust, kill-switch (design) |
 | [`docs/components/worker-host/README.md`](../worker-host/README.md) | Pair, install, heartbeat, lease, `fleet-host` |
 | [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick fallback |
 | [`docs/components/sandbox-manager/README.md`](../sandbox-manager/README.md) | Sandbox create / observe / destroy |
