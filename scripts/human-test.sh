@@ -167,7 +167,9 @@ cmd_guide() {
 
   pause_step "Workers" \
     "Workspace → Workers (/{ws}/workers). Add worker — paste the install command on the machine." \
-    "Token panel is enough. Do not require a second machine; pairing is outbound." || return 0
+    "Token panel is enough. Do not require a second machine; pairing is outbound." \
+    "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane." \
+    "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0

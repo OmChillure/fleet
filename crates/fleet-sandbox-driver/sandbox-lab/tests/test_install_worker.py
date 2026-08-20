@@ -245,6 +245,66 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn("--progress-bar", text, name)
             self.assertIn("Format-Bytes", text, name)
 
+    def test_stage_write_manifest_for_existing_dir(self):
+        """--write-manifest hashes already-staged bins without rebuilding."""
+        import hashlib
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            linux = root / "linux-x86_64"
+            win = root / "windows-x86_64"
+            linux.mkdir()
+            win.mkdir()
+            for name in ("fleet-host", "fleet-worker", "fleet-driver"):
+                (linux / name).write_bytes(name.encode())
+            for name in ("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe"):
+                (win / name).write_bytes(name.encode())
+            r = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "FLEET_GIT_SHA": "test-tree-id"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            linux_man = json.loads((linux / "manifest.json").read_text())
+            # Refresh of unbaked bytes must not stamp FLEET_GIT_SHA.
+            self.assertEqual(linux_man["git_sha"], "")
+            self.assertEqual(linux_man["platform"], "linux-x86_64")
+            want = hashlib.sha256(b"fleet-host").hexdigest()
+            self.assertEqual(linux_man["bins"]["fleet-host"]["sha256"], want)
+            self.assertEqual(linux_man["bins"]["fleet-host"]["size"], len(b"fleet-host"))
+            win_man = json.loads((win / "manifest.json").read_text())
+            self.assertEqual(win_man["platform"], "windows-x86_64")
+            self.assertIn("fleet-host.exe", win_man["bins"])
+            self.assertNotIn("fleet-host", win_man["bins"])
+            self.assertEqual(win_man["git_sha"], "")
+
+            stamped = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(linux),
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "FLEET_GIT_SHA": "test-tree-id",
+                    "FLEET_MANIFEST_STAMP": "1",
+                },
+            )
+            self.assertEqual(stamped.returncode, 0, stamped.stderr + stamped.stdout)
+            stamped_man = json.loads((linux / "manifest.json").read_text())
+            self.assertEqual(stamped_man["git_sha"], "test-tree-id")
+
     def test_install_skips_download_when_sha256_matches(self):
         """Reuse a local bin only when it matches the CP checksum; else refetch."""
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
@@ -258,6 +318,11 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("write_sha256()", docker)
         self.assertIn(".sha256", stage)
         self.assertIn(".sha256", docker)
+        self.assertIn("write_manifest()", stage)
+        self.assertIn("write_manifest()", docker)
+        self.assertIn("manifest.json", stage)
+        self.assertIn("manifest.json", docker)
+        self.assertIn("--write-manifest", stage)
         for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
             self.assertIn("Get-FileHash", text, name)
@@ -308,15 +373,46 @@ class InstallWorkerTests(unittest.TestCase):
         boot = (SCRIPT_DIR / "install-worker.ps1").read_text(encoding="ascii")
         self.assertIn("machine arch:", boot)
 
+    def test_reinstall_restarts_already_paired_host(self):
+        """Re-run without a pair token must still restart so new bins heartbeat."""
+        common = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        self.assertIn("stop_host_service()", common)
+        self.assertIn("stopping fleet-host if it is running", common)
+        self.assertIn("already paired; restarting fleet-host", common)
+        self.assertIn("machine.token", common)
+        # enable --now is a no-op when the unit is already active.
+        self.assertIn("systemctl --user restart fleet-host", common)
+        self.assertIn("systemctl restart fleet-host", common)
+        stop_fn = common.split("stop_host_service()", 1)[1]
+        self.assertIn("systemctl --user stop fleet-host", stop_fn)
+        self.assertIn("launchctl bootout", stop_fn)
+        main = common.split("# --- main ---", 1)[1]
+        self.assertLess(
+            main.find("stop_host_service || true"),
+            main.find("install_bins_from_cp"),
+            "must stop the running host before replacing bins",
+        )
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("Stop-Process", text, name)
+            self.assertIn("already paired; starting fleet-host", text, name)
+            self.assertIn("machine.token", text, name)
+            self.assertLess(
+                text.find("Stop-Process"),
+                text.find("stale; downloading again"),
+                f"{name} must stop fleet-host before replacing the PE",
+            )
+
     def test_every_platform_starts_daemon_after_pair(self):
         """Pair is a handshake. Every OS installer must start run after pair.
 
-        A Linux-only fix leaves Darwin/FreeBSD/Windows offline after 30s.
+        A Linux-only fix leaves Darwin/FreeBSD/Windows offline after 90s.
         """
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
         self.assertIn("start_host_service()", common)
         self.assertIn("start_host_service || true", common)
-        self.assertIn("enable --now fleet-host", common)
+        self.assertIn("systemctl --user restart fleet-host", common)
+        self.assertIn("systemctl restart fleet-host", common)
         self.assertIn("launchctl bootstrap", common)
         self.assertIn("launchctl load", common)
         self.assertIn("/usr/local/etc/rc.d/fleet-host start", common)

@@ -266,6 +266,10 @@ class Demo:
         if add.count():
             add.first.click()
             pause(p, 1500)
+        hold = p.get_by_role("button", name="Stop taking new jobs")
+        if hold.count() and hold.first.is_visible():
+            hold.first.click()
+            pause(p, 1500)
 
     def scene_sessions(self) -> None:
         base = self.ensure_session()

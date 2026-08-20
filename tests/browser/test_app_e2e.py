@@ -234,11 +234,15 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(
             page.get_by_role("button", name="Remove worker").first.is_visible()
         )
-        self.assertTrue(page.get_by_role("button", name="Pause").first.is_visible())
+        self.assertTrue(
+            page.get_by_role("button", name="Stop taking new jobs").first.is_visible()
+        )
         self.assertIn("pending", card.lower())
         self.assertIn("Waiting to pair", card)
         self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
+        self.assertIn("Auto-update", card)
+        self.assertRegex(card, r"worker [0-9a-f]{8}")
         self.assertRegex(card.lower(), r"jobs\s+0\s*/\s*4")
         self.assertNotIn("Allow host", card)
         self.assertNotIn("Allow container", card)
