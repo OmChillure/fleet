@@ -122,6 +122,10 @@ Write-Host "  fleet-host   stays up; pairs and takes jobs"
 Write-Host "  fleet-worker runs each job"
 Write-Host "  fleet-driver runs jobs that use an agent harness (Grok)"
 
+# A running fleet-host.exe locks the PE; replace would leave the old process.
+Get-Process -Name fleet-host -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 400
+
 $base = "$Origin/install/worker/bin/windows-x86_64"
 $hostReady = $false
 foreach ($bin in @("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe")) {
@@ -185,10 +189,16 @@ $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup
 "@echo off`r`n`"$BinDir\fleet-host.exe`" run`r`n" | Set-Content -Path $startup -Encoding ASCII
 Write-Host "startup shortcut: $startup"
 
+$cfgDir = if ($env:FLEET_HOST_CONFIG_DIR) { $env:FLEET_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".config\fleet-host" }
+$alreadyPaired = Test-Path (Join-Path $cfgDir "machine.token")
 if ($env:FLEET_PAIR_TOKEN) {
     Write-Host "pairing with the control plane"
     & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $env:FLEET_PAIR_TOKEN
-    Write-Host "starting fleet-host (heartbeats; offline after 30s if this fails)"
+    Write-Host "starting fleet-host (heartbeats; offline after 90s if this fails)"
+    Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
+    Write-Host "started fleet-host run (also at logon: $startup)"
+} elseif ($alreadyPaired) {
+    Write-Host "already paired; starting fleet-host so the new bins are what heartbeats"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
     Write-Host "started fleet-host run (also at logon: $startup)"
 } else {

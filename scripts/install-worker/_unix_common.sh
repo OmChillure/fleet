@@ -156,14 +156,20 @@ install_bins_from_source() {
     [ -n "$src" ] || die "set FLEET_REPO to the agent-fleet checkout to build from source"
     info "building fleet-host + fleet-worker + fleet-driver from $src"
     (cd "$src" && cargo build --release -p fleet-host -p fleet-orchestrator -p fleet-driver)
-    cp "$src/target/release/fleet-host" "$BIN_DIR/fleet-host"
+    # mv over a running dest works; cp does not (ETXTBSY).
+    cp "$src/target/release/fleet-host" "$BIN_DIR/fleet-host.tmp"
+    chmod 755 "$BIN_DIR/fleet-host.tmp"
+    mv "$BIN_DIR/fleet-host.tmp" "$BIN_DIR/fleet-host"
     if [ -f "$src/target/release/fleet-worker" ]; then
-        cp "$src/target/release/fleet-worker" "$BIN_DIR/fleet-worker"
+        cp "$src/target/release/fleet-worker" "$BIN_DIR/fleet-worker.tmp"
+        chmod 755 "$BIN_DIR/fleet-worker.tmp"
+        mv "$BIN_DIR/fleet-worker.tmp" "$BIN_DIR/fleet-worker"
     fi
     if [ -f "$src/target/release/fleet-driver" ]; then
-        cp "$src/target/release/fleet-driver" "$BIN_DIR/fleet-driver"
+        cp "$src/target/release/fleet-driver" "$BIN_DIR/fleet-driver.tmp"
+        chmod 755 "$BIN_DIR/fleet-driver.tmp"
+        mv "$BIN_DIR/fleet-driver.tmp" "$BIN_DIR/fleet-driver"
     fi
-    chmod 755 "$BIN_DIR/fleet-host"
     info "installed $BIN_DIR/fleet-host (from source)"
 }
 
@@ -201,16 +207,48 @@ EOF
     fi
 }
 
+stop_host_service() {
+    # Replace-on-disk leaves a running process on the old inode (Linux), and
+    # a locked PE cannot be replaced at all (Windows — handled in the .ps1).
+    # enable --now is a no-op when the unit is already active.
+    case ${PLATFORM:-} in
+        linux-*)
+            if have systemctl; then
+                if [ "$(id -u)" -eq 0 ]; then
+                    systemctl stop fleet-host 2>/dev/null || true
+                else
+                    systemctl --user stop fleet-host 2>/dev/null || true
+                fi
+            fi
+            ;;
+        darwin-*)
+            plist="${HOME}/Library/LaunchAgents/ai.agentfleet.host.plist"
+            uid=$(id -u)
+            if have launchctl && [ -f "$plist" ]; then
+                launchctl bootout "gui/${uid}" "$plist" 2>/dev/null || true
+                launchctl unload "$plist" 2>/dev/null || true
+            fi
+            ;;
+        freebsd-*)
+            if [ "$(id -u)" -eq 0 ] && [ -x /usr/local/etc/rc.d/fleet-host ]; then
+                /usr/local/etc/rc.d/fleet-host stop 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
 start_host_service() {
     case ${PLATFORM:-} in
         linux-*)
             if have systemctl; then
                 if [ "$(id -u)" -eq 0 ]; then
-                    systemctl enable --now fleet-host
+                    systemctl enable fleet-host
+                    systemctl restart fleet-host
                     info "started systemd unit fleet-host (systemctl status fleet-host)"
                     return 0
                 fi
-                systemctl --user enable --now fleet-host
+                systemctl --user enable fleet-host
+                systemctl --user restart fleet-host
                 info "started systemd user unit fleet-host (systemctl --user status fleet-host)"
                 return 0
             fi
@@ -235,7 +273,8 @@ start_host_service() {
         freebsd-*)
             if [ "$(id -u)" -eq 0 ] && [ -x /usr/local/etc/rc.d/fleet-host ]; then
                 sysrc fleet_host_enable=YES 2>/dev/null || true
-                /usr/local/etc/rc.d/fleet-host start
+                /usr/local/etc/rc.d/fleet-host restart 2>/dev/null \
+                    || /usr/local/etc/rc.d/fleet-host start
                 info "started rc.d fleet-host"
                 return 0
             fi
@@ -302,10 +341,23 @@ info "  platform: $PLATFORM"
 info "  origin:   $ORIGIN"
 info "  prefix:   $PREFIX"
 
+token_file="${FLEET_HOST_CONFIG_DIR:-$HOME/.config/fleet-host}/machine.token"
+already_paired=0
+[ -f "$token_file" ] && already_paired=1
+
+# Stop before replace. A running fleet-host keeps the old inode; `cp` hits
+# ETXTBSY; `systemctl enable --now` will not restart an already-active unit.
+info "stopping fleet-host if it is running (so the new bins can replace it)"
+stop_host_service || true
+
 if ! install_bins_from_cp; then
     if [ "${FLEET_WORKER_BUILD_FROM_SOURCE:-}" = 1 ]; then
         install_bins_from_source
     else
+        if [ "$already_paired" = 1 ]; then
+            err "bin install failed; restarting the previous fleet-host"
+            start_host_service || true
+        fi
         die "no $PLATFORM bins from $ORIGIN; on the CP run: just stage-worker-dist  (or FLEET_WORKER_BUILD_FROM_SOURCE=1 FLEET_REPO=/path/to/agent-fleet FLEET_URL=$ORIGIN sh $0)"
     fi
 fi
@@ -334,7 +386,11 @@ esac
 if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
     info "pairing with the control plane"
     "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
-    info "starting fleet-host (heartbeats; offline after 30s if this fails)"
+    info "starting fleet-host (heartbeats; offline after 90s if this fails)"
+    start_host_service || true
+elif [ "$already_paired" = 1 ]; then
+    # We stopped the unit before replacing bins; start the new inode.
+    info "already paired; restarting fleet-host so the new bins are what heartbeats"
     start_host_service || true
 else
     info "next: fleet-host pair --url $ORIGIN --token <pair-token-from-ui>"
