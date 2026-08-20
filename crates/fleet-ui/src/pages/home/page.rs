@@ -5,7 +5,6 @@ use crate::Route;
 #[component]
 pub fn Home() -> Element {
     rsx! {
-        // Pure black landing — no color accents
         section { class: "w-full bg-black pb-16 pt-16 text-white",
             div { class: "w-full px-4",
                 span { class: "inline-flex items-center rounded-full border border-neutral-800 bg-neutral-950 px-2.5 py-1 text-[0.78rem] font-semibold uppercase tracking-wide text-neutral-400",

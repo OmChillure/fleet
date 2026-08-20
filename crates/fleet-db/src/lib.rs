@@ -21,5 +21,8 @@ pub mod repos;
 
 pub use error::{DbError, DbResult};
 pub use models::*;
-pub use pool::{PoolConfig, connect, connect_and_migrate, connect_and_migrate_with, migrate};
+pub use pool::{
+    PoolConfig, connect, connect_and_migrate, connect_and_migrate_with, migrate,
+    normalize_database_url,
+};
 pub use sqlx::{PgPool, Postgres, Transaction};

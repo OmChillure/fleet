@@ -467,15 +467,23 @@ impl Store {
     }
 
     /// Acquire session-held advisory lock for a project tick (hold `conn` until unlock).
+    ///
+    /// Uses `pg_try_advisory_lock` so a second ticker cannot block a pool slot
+    /// forever if another tick already holds the project.
     pub async fn lock_project(
         &self,
         project_id: Uuid,
     ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
         let mut conn = self.pool.acquire().await?;
-        sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext($1::text))")
             .bind(project_id.to_string())
-            .execute(&mut *conn)
+            .fetch_one(&mut *conn)
             .await?;
+        if !locked {
+            return Err(StoreError::Conflict(format!(
+                "project {project_id} tick already running"
+            )));
+        }
         Ok(conn)
     }
 
@@ -483,8 +491,8 @@ impl Store {
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
         project_id: Uuid,
     ) -> Result<()> {
-        sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
-            .bind(project_id.to_string())
+        let _ = project_id;
+        sqlx::query("SELECT pg_advisory_unlock_all()")
             .execute(&mut **conn)
             .await?;
         Ok(())

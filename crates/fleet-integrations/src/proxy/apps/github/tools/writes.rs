@@ -163,7 +163,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    // Resolve default branch + base commit.
     let (st, repo_body) =
         github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
     if !(200..300).contains(&st) {
@@ -248,7 +247,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
                 .to_string();
         }
     } else {
-        // Create branch ref from base.
         let (st, created) = github_post(
             http,
             token,
@@ -264,7 +262,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         }
     }
 
-    // Create blobs + tree entries.
     let mut tree_items = Vec::new();
     let mut paths = Vec::new();
     for f in files {
@@ -369,7 +366,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         .unwrap_or("")
         .to_string();
 
-    // Move branch pointer.
     let (st, updated) = github_patch(
         http,
         token,

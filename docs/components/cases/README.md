@@ -2,7 +2,8 @@
 
 Cases are the **generalized platform layer**: long-lived work with backend-owned
 state. Coding agent fleets (orchestrator runs) are an **optional executor**.
-Integrations (email, calendar, …) plug in later as tools.
+Integrations (Slack, GitHub, Notion, …) run via `use_tool` → control-plane
+`integration_query`. Coding fleets are an **optional executor**.
 
 ## Mental model
 
@@ -55,8 +56,16 @@ The LLM (or heuristic) is **not** the runtime. Postgres is.
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `CASE_AUTO_DECIDE` | on | Claim due cases and apply decisions |
-| `CASE_LLM_DECIDE` | off | Reserved for LLM JSON decisions (heuristic used today) |
+| `CASE_LLM_DECIDE` | on if Grok or Ollama is enabled; set `0` to force heuristic | JSON decide via Grok, else Ollama |
 | `CASE_WAKE_INTERVAL_S` | 15 | Poll interval |
+
+`use_tool` calls the same proxy as chat (`integration_query`). Tokens stay on
+the control plane. `launch_agents` accepts a plan, sets `status=acting` +
+`run_id`, and the wake loop resumes the case when that fleet run is terminal.
+The wake payload includes task statuses and shared `work/` file names so the
+next `use_tool` (GitHub PR / Notion) can see what shipped.
+
+UI: `/{workspace_id}/cases` and `/{workspace_id}/cases/{case_id}`.
 
 ## Example policy (no email integration yet)
 
@@ -68,8 +77,8 @@ Otherwise wait 1 hour between checks.
 ```
 
 Human: `observe_case` “Jane said Thursday 3pm works” → engine advances stage.
-When Gmail/Calendar tools exist, decisions can call `use_tool` without changing
-this case engine.
+The LLM can also `use_tool` (Slack history, GitHub PR, Notion page) without a
+hardcoded playbook.
 
 ## Schema
 

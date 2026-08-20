@@ -79,7 +79,7 @@ same change. The walkthrough is allowed to go stale only if the product did.
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
-   Sandboxes), Agents (All agents, Live sessions), Workspace (Integrations,
+   Sandboxes, Cases), Agents (All agents, Live sessions), Workspace (Integrations,
    Settings). Expand collapsed sections.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
@@ -88,16 +88,18 @@ same change. The walkthrough is allowed to go stale only if the product did.
    are in `.env`.
 10. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
     actually up. Otherwise still open the page (empty composer is success).
-    `@fleet monitor` watches connected GitHub / Jira / Linear. `@fleet finish KEY`
+    Plain language is enough (read Slack, implement, push GitHub, write Notion). Connect apps first.
     launches implementer + reviewer on that ticket.
 11. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
     backend is `stub` (fine). Board columns move; background ticker may also
     tick. With Fleet LLM on, agents talk mid-run (`TEAM_CHAT.md`; chat
     tools `read_team_chat` / `send_team_message`).
 12. **Sandboxes** — same worker sessions as Fleet.
-13. **Chat history** — `/{ws}/sessions` lists **chats**, not workers.
-14. **User menu** — theme Black/White (not persisted), Log out → `/login`.
-15. **This MR** — do the new thing this change added. If the script has no
+13. **Cases** — `/{ws}/cases` list (empty is OK). Open a case if chat started one;
+    events + Observe / Cancel. The LLM invents the workflow; this page is the log.
+14. **Chat history** — `/{ws}/sessions` lists **chats**, not workers.
+15. **User menu** — theme Black/White (not persisted), Log out → `/login`.
+16. **This MR** — do the new thing this change added. If the script has no
     step for it, the change is incomplete.
 
 Logs: `./scripts/fleet-dev.sh logs`. Stop: `./scripts/human-test.sh stop`.
@@ -149,6 +151,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
 | `crates/fleet-driver`, `fleet-worker`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
+| `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | list (empty OK) + sidebar Cases; detail if a case exists |
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
@@ -161,7 +164,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | Docs-only product wording | — | no video |
 | `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |
 
-`all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, agents,
+`all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, cases, agents,
 integrations, settings, sessions (logout at the end of `auth`/`shell` as
 needed). `lab` and `kind` are extra — pass them when that is the MR.
 

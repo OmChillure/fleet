@@ -1683,7 +1683,7 @@ async fn chat_tools_human_can_talk_on_team_channel() {
 }
 
 #[tokio::test]
-async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
+async fn chat_tools_reject_removed_monitor_and_overview_has_no_ticket_inbox() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
@@ -1694,95 +1694,23 @@ async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
         model: "grok-4.5".into(),
     };
 
-    let (denied, deny_action) = fleet_server::chat_tools::execute_tool(
-        &state,
-        workspace_id,
-        user_id,
-        "monitor_tickets",
-        &json!({}),
-        &llm,
-    )
-    .await;
-    assert!(!deny_action.ok, "{deny_action:?} {denied}");
-    let err = denied["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("Connect") || err.contains("connected"),
-        "{denied}"
-    );
-
-    fleet_db::repos::tickets::upsert_inbox(
-        &state.db,
-        &fleet_db::repos::tickets::UpsertInbox {
+    for name in ["monitor_tickets", "list_tickets", "finish_ticket"] {
+        let (denied, deny_action) = fleet_server::chat_tools::execute_tool(
+            &state,
             workspace_id,
-            provider: "linear".into(),
-            external_key: "ENG-42".into(),
-            title: "Ship the inbox".into(),
-            url: Some("https://linear.app/eng-42".into()),
-            summary: "Do the thing described on the ticket.".into(),
-            provider_closed: false,
-        },
-    )
-    .await
-    .expect("seed inbox");
-
-    let listed = call(
-        &app,
-        "GET",
-        &fleet(&ws, "/tickets"),
-        Some(&jar),
-        None,
-    )
-    .await;
-    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    assert_eq!(listed.body["count"], 1, "{}", listed.body);
-    assert_eq!(listed.body["tickets"][0]["key"], "ENG-42");
-
-    let prepared = fleet_server::tickets::prepare_finish(
-        &state,
-        workspace_id,
-        user_id,
-        fleet_server::tickets::FinishTicketArgs {
-            ticket: Some("ENG-42".into()),
-            provider: None,
-            key: None,
-        },
-    )
-    .await
-    .expect("prepare");
-    assert_eq!(prepared.item.external_key, "ENG-42");
-    assert_eq!(prepared.tasks.len(), 2);
-    assert_eq!(
-        prepared.tasks[0].external_ref.as_ref().map(|e| e.key.as_str()),
-        Some("ENG-42")
-    );
-    assert_eq!(prepared.tasks[1].worker_profile, "reviewer");
-
-    let run_id = Uuid::now_v7();
-    fleet_server::tickets::mark_ticket_launched(
-        &state,
-        workspace_id,
-        "linear",
-        "ENG-42",
-        run_id,
-    )
-    .await
-    .expect("mark launched");
-
-    let again = call(
-        &app,
-        "GET",
-        &fleet(&ws, "/tickets"),
-        Some(&jar),
-        None,
-    )
-    .await;
-    assert_eq!(again.body["tickets"][0]["state"], "launched", "{}", again.body);
-    assert_eq!(
-        again.body["tickets"][0]["run_id"].as_str(),
-        Some(run_id.to_string().as_str()),
-        "{}",
-        again.body
-    );
+            user_id,
+            name,
+            &json!({}),
+            &llm,
+        )
+        .await;
+        assert!(!deny_action.ok, "{name} {deny_action:?} {denied}");
+        let err = denied["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("unknown tool"),
+            "{name} should be gone: {denied}"
+        );
+    }
 
     let overview = call(
         &app,
@@ -1793,24 +1721,129 @@ async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
     )
     .await;
     assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
-    let tickets = overview.body["tickets"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{}", overview.body));
     assert!(
-        tickets.iter().any(|t| t["key"] == "ENG-42"),
-        "{}",
+        overview.body.get("tickets").is_none(),
+        "overview must not expose a ticket inbox: {}",
         overview.body
     );
+}
 
-    let (replay, replay_action) = fleet_server::chat_tools::execute_tool(
-        &state,
-        workspace_id,
-        user_id,
-        "finish_ticket",
-        &json!({ "ticket": "ENG-42" }),
-        &llm,
+#[tokio::test]
+async fn cases_create_list_observe_use_tool_and_cancel() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases"),
+        Some(&jar),
+        Some(json!({
+            "title": "Slack feature",
+            "policy_md": "Read #eng, implement, PR, Notion page.",
+            "wake_in_s": 3600
+        })),
     )
     .await;
-    assert!(replay_action.ok, "{replay_action:?} {replay}");
-    assert_eq!(replay["already_launched"], true, "{replay}");
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let case_id = created.body["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", created.body))
+        .to_string();
+    assert_eq!(created.body["status"], "open");
+    assert_eq!(created.body["stage"], "start");
+
+    let list = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/cases"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+    assert!(
+        list.body["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == case_id),
+        "{}",
+        list.body
+    );
+
+    let observed = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/observe"),
+        Some(&jar),
+        Some(json!({ "note": "eng wants dark mode", "wake": false })),
+    )
+    .await;
+    assert_eq!(observed.status, StatusCode::OK, "{}", observed.body);
+
+    let decided = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/decide"),
+        Some(&jar),
+        Some(json!({
+            "decision": {
+                "action": "use_tool",
+                "tool": {
+                    "provider": "slack",
+                    "operation": "get_channel_history",
+                    "args": { "channel": "Cdoesnotexist" }
+                },
+                "wait_seconds": 30,
+                "reason": "read eng"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
+    let err = decided.body["last_error"].as_str().unwrap_or("");
+    assert!(
+        !err.contains("not wired"),
+        "use_tool should invoke the proxy: {err}"
+    );
+    assert!(
+        decided.body["context"]["last_tool_result"].is_object(),
+        "{}",
+        decided.body
+    );
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/cases/{case_id}"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let kinds: Vec<&str> = got.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"created"), "{kinds:?}");
+    assert!(kinds.contains(&"observed"), "{kinds:?}");
+    assert!(
+        kinds.iter().any(|k| *k == "tool_ok" || *k == "tool_error"),
+        "{kinds:?}"
+    );
+
+    let cancelled = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/cancel"),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+    assert_eq!(cancelled.body["status"], "cancelled");
 }

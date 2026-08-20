@@ -223,7 +223,19 @@ impl SandboxRuntime for ProcessRuntime {
                 .stdin(Stdio::null())
                 .stdout(Stdio::from(stdout))
                 .stderr(Stdio::from(stderr))
-                .envs(req.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+                )
+                .env("HOME", &work_dir)
+                .env("TMPDIR", &work_dir)
+                .env("LANG", "C.UTF-8");
+            for (k, v) in &req.env {
+                if k.starts_with("FLEET_") {
+                    cmd.env(k, v);
+                }
+            }
 
             // New process group so we can signal the whole tree.
             unsafe {
@@ -331,6 +343,15 @@ impl SandboxRuntime for ProcessRuntime {
             .join(project_id.to_string())
             .join("sessions");
         let mut out = Vec::new();
+        {
+            let jobs = self.agent_jobs.lock().await;
+            for id in jobs.keys() {
+                out.push(RuntimeHandle {
+                    backend: "process".into(),
+                    id: id.clone(),
+                });
+            }
+        }
         let mut dirs = match tokio::fs::read_dir(&sessions_root).await {
             Ok(d) => d,
             Err(_) => return Ok(out),
@@ -350,6 +371,9 @@ impl SandboxRuntime for ProcessRuntime {
             let Ok(session_id) = Uuid::parse_str(session_name) else {
                 continue;
             };
+            if out.iter().any(|h| h.id == session_id.to_string()) {
+                continue;
+            }
             if let Some(pid) = Self::read_pidfile(&path).await {
                 if Self::process_alive(pid) || Self::wait_nonblock_exit_code(pid).is_none() {
                     // alive or zombie not yet fully gone with pidfile present
@@ -422,6 +446,7 @@ mod tests {
             persona_md: None,
             agent_backend: None,
             agent_model: None,
+            io: crate::sandbox::io::IntegrationHandle::none(),
         };
         req.env = fleet_worker_env(&req, "http://127.0.0.1:8080");
         req
@@ -446,7 +471,6 @@ mod tests {
         assert_eq!(h.id, session.to_string());
         assert!(work.join("pid").exists());
 
-        // Allow process to start
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(rt.state(&h).await.unwrap(), SandboxState::Running);
 
@@ -459,7 +483,6 @@ mod tests {
         match rt.state(&h).await.unwrap() {
             SandboxState::Exited { .. } | SandboxState::Unknown => {}
             SandboxState::Running => {
-                // force
                 rt.destroy(&h).await.unwrap();
             }
         }

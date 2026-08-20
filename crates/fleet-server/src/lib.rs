@@ -12,6 +12,7 @@ pub mod grok;
 pub mod retry;
 pub mod state;
 pub mod tickets;
+pub mod work_io;
 
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
@@ -42,13 +43,9 @@ pub fn build_router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/api", get(api_index))
         .merge(fleet_auth::router::<AppState>())
-        // Integrations catalog (GitHub, Jira, Slack, …)
         .merge(fleet_integrations::router::<AppState>())
-        // Workspace chat → Grok (xAI) + Ollama
         .merge(chat::router())
-        // Durable general-purpose cases (state machine + wake loop)
         .merge(cases::router())
-        // Workspace-scoped fleet / orchestrator UI routes
         .merge(fleet_routes::router())
 }
 
@@ -61,7 +58,6 @@ pub fn build_http_app(
     orch: fleet_orchestrator::api::AppState,
     config: &ServerConfig,
 ) -> anyhow::Result<Router> {
-    // Admin / worker bearer routes remain on orch_router (/v1, /healthz).
     let orch_service = orch_router(orch);
 
     Ok(build_router()

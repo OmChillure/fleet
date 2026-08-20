@@ -188,7 +188,6 @@ async fn exchange_github(
         .unwrap_or("bearer")
         .to_string();
 
-    // Optional: resolve login for account_label
     let account_label = fetch_github_login(&http, &access_token).await;
 
     Ok(TokenBundle {

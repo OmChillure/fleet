@@ -154,7 +154,7 @@ cmd_guide() {
 
   pause_step "Sidebar" \
     "Chat: New chat, Chat history." \
-    "Monitoring: Dashboard, Fleet, Sandboxes." \
+    "Monitoring: Dashboard, Fleet, Sandboxes, Cases." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
     "Workspace (expand it): Integrations, Settings." || return 0
 
@@ -177,7 +177,7 @@ cmd_guide() {
   pause_step "Chat" \
     "New chat: provider/model dropdown." \
     "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." \
-    "@fleet monitor watches connected GitHub/Jira/Linear. @fleet finish KEY launches implementer + reviewer." || return 0
+    "Plain language is enough: read Slack / implement / push GitHub / write Notion. Connect apps under Integrations." || return 0
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \
@@ -186,6 +186,11 @@ cmd_guide() {
 
   pause_step "Sandboxes" \
     "Same worker sessions as Fleet (status, backend, work dir)." || return 0
+
+  pause_step "Cases" \
+    "/{ws}/cases — durable workflows (empty is OK)." \
+    "If chat started a case: open it, events show, Observe / Cancel work." \
+    "The LLM invents Slack/GitHub/Notion steps; this page is the log." || return 0
 
   pause_step "Chat history" \
     "/{ws}/sessions lists saved chats, not workers." \

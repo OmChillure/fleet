@@ -97,7 +97,7 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "bitbucket".into(),
             name: "Bitbucket".into(),
-            description: "Connect Bitbucket Cloud for PRs and pipelines. Coming soon.".into(),
+            description: "Connect Bitbucket Cloud for PRs and pipelines. Tools are ready; OAuth connect is coming soon.".into(),
             category: IntegrationCategory::CodeVersioning,
             category_label: "Source control".into(),
             availability: IntegrationAvailability::ComingSoon,
@@ -182,7 +182,7 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "confluence".into(),
             name: "Confluence".into(),
-            description: "Pull Confluence pages as agent context and publish status. Coming soon.".into(),
+            description: "Pull Confluence pages as agent context and publish status. Tools are ready; OAuth connect is coming soon.".into(),
             category: IntegrationCategory::TaskControl,
             category_label: "Docs".into(),
             availability: IntegrationAvailability::ComingSoon,

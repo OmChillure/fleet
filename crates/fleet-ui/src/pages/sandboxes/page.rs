@@ -64,9 +64,9 @@ pub fn Sandboxes(workspace_id: String) -> Element {
     });
 
     let ws_poll = workspace_id.clone();
-    use_effect(move || {
+    use_future(move || {
         let ws = ws_poll.clone();
-        spawn(async move {
+        async move {
             loop {
                 TimeoutFuture::new(2500).await;
                 if let Ok(resp) = list_sandboxes(&ws).await {
@@ -78,7 +78,7 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                     });
                 }
             }
-        });
+        }
     });
 
     rsx! {

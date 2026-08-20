@@ -106,6 +106,10 @@ pub(crate) async fn post_message(
         Ok(c) => c,
         Err(e) => return ProxyResult::err("slack", "post_message", "bad_args", e, None),
     };
+    let channel = match resolve_channel_id(http, token, &channel).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
     let text = match args
         .get("text")
         .or_else(|| args.get("message"))
@@ -164,6 +168,10 @@ pub(crate) async fn get_channel_history(
             return ProxyResult::err("slack", "get_channel_history", "bad_args", e, None);
         }
     };
+    let channel = match resolve_channel_id(http, token, &channel).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -218,6 +226,10 @@ pub(crate) async fn get_thread(http: &reqwest::Client, token: &str, args: &Value
     let channel = match req_str(args, "channel") {
         Ok(c) => c,
         Err(e) => return ProxyResult::err("slack", "get_thread", "bad_args", e, None),
+    };
+    let channel = match resolve_channel_id(http, token, &channel).await {
+        Ok(id) => id,
+        Err(e) => return e,
     };
     let ts = match args
         .get("thread_ts")
@@ -275,4 +287,82 @@ pub(crate) async fn get_thread(http: &reqwest::Client, token: &str, args: &Value
         json!({ "channel": channel, "thread_ts": ts, "count": n, "items": items }),
         Some(status),
     )
+}
+
+/// Accept Slack channel id (`C…`) or a human name (`#eng` / `eng`).
+pub(crate) fn match_listed_channel(items: &[Value], raw: &str) -> Option<String> {
+    let want = raw.trim().trim_start_matches('#').to_ascii_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    for c in items {
+        let name = c
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        if name == want || id.eq_ignore_ascii_case(raw.trim()) {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+fn looks_like_slack_channel_id(raw: &str) -> bool {
+    let s = raw.trim();
+    s.len() >= 8
+        && s.starts_with('C')
+        && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+async fn resolve_channel_id(
+    http: &reqwest::Client,
+    token: &str,
+    raw: &str,
+) -> Result<String, ProxyResult> {
+    let raw = raw.trim();
+    if looks_like_slack_channel_id(raw) {
+        return Ok(raw.to_string());
+    }
+    let listed = list_channels(http, token, &json!({ "limit": 200 })).await;
+    if !listed.ok {
+        return Err(listed);
+    }
+    let items = listed
+        .data
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(id) = match_listed_channel(&items, raw) {
+        return Ok(id);
+    }
+    Err(ProxyResult::err(
+        "slack",
+        "resolve_channel",
+        "bad_args",
+        format!("no Slack channel named `{raw}` — pass the channel id or connect a workspace that has it"),
+        None,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_hash_eng_name() {
+        let items = vec![
+            json!({"id": "C111", "name": "general"}),
+            json!({"id": "CENG", "name": "eng"}),
+        ];
+        assert_eq!(match_listed_channel(&items, "#eng").as_deref(), Some("CENG"));
+        assert_eq!(match_listed_channel(&items, "eng").as_deref(), Some("CENG"));
+        assert_eq!(match_listed_channel(&items, "C111").as_deref(), Some("C111"));
+        assert!(match_listed_channel(&items, "missing").is_none());
+    }
 }

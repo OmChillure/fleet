@@ -28,9 +28,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool_with_retry, system_prompt_for_workspace, system_prompt_with_tools, tool_definitions,
-    ChatLlmContext,
-    ChatAction, MAX_TOOL_ROUNDS,
+    execute_tool_with_retry, fleet_implement_nudge, last_user_text, rewrite_if_asked_to_continue,
+    should_nudge_fleet,
+    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, ChatAction,
+    ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -553,6 +554,32 @@ fn ollama_provider(
     }
 }
 
+/// One-shot text completion (no tools). Used by the case wake loop.
+pub async fn complete_text(
+    cfg: &OllamaConfig,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> AppResult<String> {
+    if !cfg.enabled {
+        return Err(AppError::bad_request("Ollama is disabled"));
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AppError::bad_request("Ollama model is required"));
+    }
+    let messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    let parsed = ollama_chat(cfg, model, &messages, false).await?;
+    let content = parsed.message.content.trim().to_string();
+    if content.is_empty() {
+        return Err(AppError::bad_request("ollama returned empty decision"));
+    }
+    Ok(content)
+}
+
 /// One Ollama chat turn. When `with_tools` is true, sends tool definitions.
 async fn ollama_chat(
     cfg: &OllamaConfig,
@@ -684,7 +711,22 @@ async fn chat_with_tools(
         }
 
         if parsed.message.tool_calls.is_empty() {
-            let content = parsed.message.content.trim().to_string();
+            if should_nudge_fleet(&last_user_text(&history), &actions) {
+                history.push(json!({
+                    "role": "system",
+                    "content": fleet_implement_nudge(),
+                }));
+                let extra = max_rounds - MAX_TOOL_ROUNDS;
+                if extra < crate::retry::EXTRA_ROUNDS_ON_FAIL {
+                    max_rounds += 1;
+                }
+                round += 1;
+                continue;
+            }
+            let mut content = parsed.message.content.trim().to_string();
+            if let Some(rewritten) = rewrite_if_asked_to_continue(&content, &actions) {
+                content = rewritten;
+            }
             if content.is_empty() && !actions.is_empty() {
                 // Model returned only tool calls earlier; synthesize a short summary.
                 let summary = actions
@@ -795,7 +837,6 @@ async fn chat_status(
     let cfg = &state.ollama;
     let grok = crate::grok::provider_status(&state.grok).await;
 
-    // Ollama entry
     let (ollama, ollama_models, ollama_err) = if !cfg.enabled {
         (
             ollama_provider(
@@ -910,7 +951,6 @@ async fn chat_complete(
         return Err(AppError::bad_request("messages must not be empty"));
     }
 
-    // Validate roles / trim empty content (shared).
     let mut pairs: Vec<(String, String)> = Vec::new();
     for m in &body.messages {
         let role = m.role.trim().to_lowercase();
@@ -949,7 +989,9 @@ async fn chat_complete(
         .ok_or_else(|| AppError::bad_request("last turn must include a user message"))?;
 
     // Prefer DB history when resuming a conversation.
-    let pairs_for_llm = if let Some(cid) = body.conversation_id {
+    // Cap turns sent to the model so a long thread cannot grow without bound.
+    const MAX_LLM_HISTORY_TURNS: usize = 40;
+    let mut pairs_for_llm = if let Some(cid) = body.conversation_id {
         let stored = chat_repo::list_messages(&state.db, cid)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
@@ -961,7 +1003,6 @@ async fn chat_complete(
                 .filter(|m| m.role == "user" || m.role == "assistant")
                 .map(|m| (m.role, m.content))
                 .collect();
-            // Append new user message if not already last.
             match hist.last() {
                 Some((r, c)) if r == "user" && c == &last_user => {}
                 _ => hist.push(("user".into(), last_user.clone())),
@@ -971,6 +1012,10 @@ async fn chat_complete(
     } else {
         pairs.clone()
     };
+    if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
+        pairs_for_llm = pairs_for_llm
+            .split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+    }
 
     match provider.as_str() {
         "grok" | "xai" => {

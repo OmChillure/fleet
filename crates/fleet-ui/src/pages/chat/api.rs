@@ -1,6 +1,7 @@
 //! Browser client for workspace chat (Grok + Ollama + saved conversations).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::pages::auth::api::{auth_base_url, refresh_session};
 
@@ -188,6 +189,8 @@ pub struct ChatActionDto {
     pub run_id: Option<String>,
     #[serde(default)]
     pub sandbox_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub detail: Option<Value>,
 }
 
 /// Wire format from POST /chat (extra fields kept for API stability).
@@ -318,7 +321,6 @@ pub async fn create_conversation(
     Ok(body.conversation)
 }
 
-/// Load one conversation + messages.
 pub async fn get_conversation(
     workspace_id: &str,
     conversation_id: &str,
@@ -331,7 +333,6 @@ pub async fn get_conversation(
     Ok((body.conversation, body.messages))
 }
 
-/// Delete a conversation.
 pub async fn delete_conversation(
     workspace_id: &str,
     conversation_id: &str,
@@ -361,6 +362,42 @@ pub async fn complete_chat(
             conversation_id,
         },
     )
+    .await?;
+    parse_json(res).await
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FleetLiveSnapshot {
+    #[serde(default)]
+    pub live_agents: u64,
+    #[serde(default)]
+    pub runs: Vec<Value>,
+    #[serde(default)]
+    pub tasks: Vec<Value>,
+    #[serde(default)]
+    pub activity: Vec<Value>,
+    #[serde(default)]
+    pub chat: Vec<Value>,
+}
+
+pub async fn fetch_fleet_live(workspace_id: &str) -> Result<FleetLiveSnapshot, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/fleet/overview"
+    ))
+    .await?;
+    parse_json(res).await
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FleetTasksSnapshot {
+    #[serde(default)]
+    pub tasks: Vec<Value>,
+}
+
+pub async fn fetch_fleet_tasks(workspace_id: &str) -> Result<FleetTasksSnapshot, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/fleet/tasks"
+    ))
     .await?;
     parse_json(res).await
 }

@@ -339,7 +339,6 @@ pub fn write_tools_file(
     work_dir: &Path,
     tools: &std::collections::BTreeMap<String, crate::job::WorkspaceTool>,
 ) -> Result<()> {
-    // Reject bad argv before writing
     for name in tools.keys() {
         crate::policy::resolve_named_tool(tools, name)
             .with_context(|| format!("invalid tool {name}"))?;

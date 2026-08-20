@@ -16,6 +16,7 @@
 
 pub mod agents;
 pub mod auth;
+pub mod cases;
 pub mod chat;
 pub mod dashboard;
 pub mod fleet;

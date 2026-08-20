@@ -51,9 +51,7 @@ async fn seed_user_with_workspace(pool: &fleet_db::PgPool) -> (Uuid, Uuid) {
     (user_id, workspace_id)
 }
 
-// ---------------------------------------------------------------------------
 // 1. users::insert_tx — duplicate email_normalized
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn insert_tx_duplicate_email_normalized_is_conflict_with_exact_message() {
@@ -112,9 +110,7 @@ async fn insert_tx_duplicate_email_normalized_is_conflict_with_exact_message() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 2. workspace slug unique → Conflict
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn workspace_slug_unique_is_conflict() {
@@ -150,9 +146,7 @@ async fn workspace_slug_unique_is_conflict() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 3. session insert + find by refresh hash
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn session_insert_and_find_by_refresh_hash() {
@@ -202,9 +196,7 @@ async fn session_insert_and_find_by_refresh_hash() {
     assert!(missing.is_none(), "unknown refresh hash must yield None");
 }
 
-// ---------------------------------------------------------------------------
 // 4. chat conversation belongs to user+workspace
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn chat_conversation_scoped_to_user_and_workspace() {
@@ -230,7 +222,6 @@ async fn chat_conversation_scoped_to_user_and_workspace() {
     assert_eq!(created.user_id, owner_id);
     assert_eq!(created.workspace_id, workspace_id);
 
-    // Owner can fetch.
     let ok = chats::get_conversation(&pool, conv_id, workspace_id, owner_id)
         .await
         .expect("get as owner")
@@ -256,9 +247,7 @@ async fn chat_conversation_scoped_to_user_and_workspace() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 5. from_sqlx / is_unique_violation mapping honesty
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn from_sqlx_maps_23505_to_conflict_and_is_unique_violation() {
@@ -330,6 +319,9 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
             providers: vec!["linear".into(), "jira".into()],
             github_repos: vec![],
             jira_jql: None,
+            slack_channels: vec![],
+            notion_databases: vec![],
+            auto_launch: false,
             started_by: Some(user_id),
         },
     )
@@ -403,9 +395,7 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
     assert_eq!(after_close.summary, "second");
 }
 
-// ---------------------------------------------------------------------------
 // cases: create → claim wake → patch complete
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn case_create_claim_and_complete() {

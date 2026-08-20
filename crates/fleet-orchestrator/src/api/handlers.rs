@@ -219,7 +219,6 @@ pub async fn fixture_run(
     Path(project_id): Path<Uuid>,
     Json(body): Json<FixtureBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    // Ensure project exists
     state
         .store
         .get_project(project_id)

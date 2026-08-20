@@ -8,7 +8,6 @@ use crate::Route;
 pub fn AuthSplit(form: Element, right_title: String, right_subtitle: String) -> Element {
     rsx! {
         div { class: "grid min-h-[calc(100vh-4rem)] w-full bg-black text-white lg:grid-cols-2",
-            // —— Left: form ——
             div { class: "flex flex-col justify-center px-6 py-10 sm:px-10 lg:px-14 xl:px-20",
                 div { class: "mb-8 lg:hidden",
                     Link { class: "inline-flex items-center gap-2 font-bold text-white", to: Route::Home {},
@@ -21,9 +20,7 @@ pub fn AuthSplit(form: Element, right_title: String, right_subtitle: String) -> 
                 }
             }
 
-            // —— Right: half-page story panel ——
             div { class: "relative hidden overflow-hidden border-l border-neutral-900 bg-neutral-950 lg:flex lg:flex-col lg:justify-between",
-                // subtle grid
                 div {
                     class: "pointer-events-none absolute inset-0 opacity-[0.35]",
                     style: "background-image: linear-gradient(to right, #262626 1px, transparent 1px), linear-gradient(to bottom, #262626 1px, transparent 1px); background-size: 48px 48px;",

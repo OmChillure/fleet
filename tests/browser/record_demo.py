@@ -219,6 +219,16 @@ class Demo:
         p.goto(f"{base}/sandboxes", wait_until="networkidle")
         pause(p, 1500)
 
+    def scene_cases(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/cases", wait_until="networkidle")
+        pause(p, 1500)
+        first = p.locator("a[href*='/cases/']")
+        if first.count():
+            first.first.click()
+            pause(p, 1500)
+
     def scene_agents(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -326,6 +336,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "chat": Demo.scene_chat,
     "fleet": Demo.scene_fleet,
     "sandboxes": Demo.scene_sandboxes,
+    "cases": Demo.scene_cases,
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
@@ -344,6 +355,7 @@ CORE = [
     "chat",
     "fleet",
     "sandboxes",
+    "cases",
     "agents",
     "integrations",
     "settings",

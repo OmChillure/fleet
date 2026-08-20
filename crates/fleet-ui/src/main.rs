@@ -13,6 +13,7 @@ use components::navbar::Navbar;
 use components::toast::ToastProvider;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
+use pages::cases::{CaseDetail, Cases};
 use pages::chat::{Chat, ChatThread};
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
@@ -55,6 +56,10 @@ pub enum Route {
         Agents { workspace_id: String },
         #[route("/:workspace_id/sandboxes")]
         Sandboxes { workspace_id: String },
+        #[route("/:workspace_id/cases/:case_id")]
+        CaseDetail { workspace_id: String, case_id: String },
+        #[route("/:workspace_id/cases")]
+        Cases { workspace_id: String },
         #[route("/:workspace_id/integrations")]
         Integrations { workspace_id: String },
         #[route("/:workspace_id/settings")]
@@ -73,6 +78,8 @@ impl Route {
             | Route::SessionDetail { workspace_id, .. }
             | Route::Agents { workspace_id }
             | Route::Sandboxes { workspace_id }
+            | Route::Cases { workspace_id }
+            | Route::CaseDetail { workspace_id, .. }
             | Route::Integrations { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,

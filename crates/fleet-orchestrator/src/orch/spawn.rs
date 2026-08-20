@@ -27,6 +27,7 @@ pub async fn schedule_and_spawn(
     default_timeout_s: i32,
     fleet_llm: &str,
     fleet_llm_model: &str,
+    integrations: crate::sandbox::io::IntegrationHandle,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -138,6 +139,7 @@ pub async fn schedule_and_spawn(
             persona_md: Some(persona.body.clone()),
             agent_backend: llm.backend,
             agent_model: llm.model,
+            io: integrations.clone(),
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env
@@ -180,7 +182,6 @@ pub async fn schedule_and_spawn(
             Err(e) => {
                 tracing::warn!(error = %e, task_id = %task.id, "spawn failed");
                 store.complete_spawn_failure(assignment.session_id).await?;
-                // retry policy on task
                 apply_retry_after_failure(
                     store,
                     task.id,

@@ -164,7 +164,6 @@ async fn worker_report_inbox_idempotent_seq() {
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
 
-    // mark ready + assign via SQL helpers on store
     sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
         .bind(task.id)
         .execute(store.pool())

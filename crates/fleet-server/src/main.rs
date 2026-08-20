@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 
 use fleet_auth::validate_cookie_policy;
 use fleet_db::connect_and_migrate;
-use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::Config as OrchConfig;
 use fleet_server::{build_http_app, AppState, ServerConfig};
 use tracing_subscriber::EnvFilter;
@@ -101,10 +100,21 @@ async fn run() -> anyhow::Result<()> {
             tracing::error!(error = %e, "orchestrator config failed");
             e
         })?;
-    let orch = build_app_state(&orch_cfg).await.map_err(|e| {
-        tracing::error!(error = %e, "orchestrator state init failed");
-        e
-    })?;
+    let io: std::sync::Arc<dyn fleet_orchestrator::sandbox::io::IntegrationInvoker> =
+        std::sync::Arc::new(fleet_server::work_io::ControlPlaneIo {
+            db: db.clone(),
+            key: config.integrations.credentials_key.clone(),
+        });
+    let orch = fleet_orchestrator::api::build_app_state_with_pool_io(
+        &orch_cfg,
+        db.clone(),
+        Some(io),
+    )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "orchestrator state init failed");
+            e
+        })?;
     tracing::info!("orchestrator state ready");
 
     // Local drain loop: queue thousands of tasks, run FLEET_MAX_AGENTS at a time (no k8s).
@@ -143,17 +153,6 @@ async fn run() -> anyhow::Result<()> {
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
     };
-
-    {
-        let ticket_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
-            }
-        });
-        tracing::info!("background ticket monitor started");
-    }
 
     {
         let case_state = state.clone();

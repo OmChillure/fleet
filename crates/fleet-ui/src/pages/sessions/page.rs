@@ -135,7 +135,6 @@ pub fn Sessions(workspace_id: String) -> Element {
                                         spawn(async move {
                                             match delete_conversation(&ws, &id).await {
                                                 Ok(()) => {
-                                                    // Reload list
                                                     match list_conversations(&ws).await {
                                                         Ok(list) => conversations.set(list),
                                                         Err(e) => show_toast().error(e.message()),
@@ -168,10 +167,10 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
     {
         let ws = workspace_id.clone();
         let sid = session_id.clone();
-        use_effect(move || {
+        use_future(move || {
             let ws = ws.clone();
             let sid = sid.clone();
-            spawn(async move {
+            async move {
                 loop {
                     match get_session_detail(&ws, &sid).await {
                         Ok(v) => {
@@ -218,7 +217,7 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                         break;
                     }
                 }
-            });
+            }
         });
     }
 

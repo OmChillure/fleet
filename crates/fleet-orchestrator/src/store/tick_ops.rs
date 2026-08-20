@@ -698,7 +698,6 @@ impl Store {
         run_id: Option<Uuid>,
         status: Option<&str>,
     ) -> Result<Vec<super::BoardTaskRow>> {
-        // Simple filter in SQL with optional binds via dynamic approach
         let tasks = sqlx::query_as::<_, super::BoardTaskRow>(
             r#"
             SELECT id, project_id, run_id, plan_id, plan_task_id, title, summary, spec_md,

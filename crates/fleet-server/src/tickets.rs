@@ -1,7 +1,8 @@
-//! Ticket ingest: `@fleet monitor` watches connected boards; `@fleet finish`
-//! launches a specialist plan for one issue.
+//! Inbox ingest: `@fleet monitor` watches connected sources; `@fleet finish`
+//! launches a specialist plan for one item.
 //!
-//! Providers: GitHub issues, Jira, Linear. Tokens stay on the control plane.
+//! Sources: GitHub / GitLab issues, Jira, Linear, Slack, Notion.
+//! Tokens stay on the control plane.
 
 use std::time::Duration;
 
@@ -19,7 +20,11 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
-pub const TASK_PROVIDERS: &[&str] = &["github", "jira", "linear"];
+pub const TASK_PROVIDERS: &[&str] = &[
+    "github", "gitlab", "jira", "linear", "slack", "notion", "trello", "asana",
+];
+/// Auto-launch only these — chat/page queries, not every old Jira issue.
+pub const AUTO_LAUNCH_PROVIDERS: &[&str] = &["slack", "notion", "teams"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitorArgs {
@@ -31,6 +36,12 @@ pub struct MonitorArgs {
     pub github_repos: Option<Vec<String>>,
     #[serde(default)]
     pub jira_jql: Option<String>,
+    #[serde(default)]
+    pub slack_channels: Option<Vec<String>>,
+    #[serde(default)]
+    pub notion_databases: Option<Vec<String>>,
+    #[serde(default)]
+    pub auto_launch: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,7 +68,7 @@ pub fn parse_ticket_ref(raw: &str) -> Option<ParsedTicket> {
     }
     if let Some((prefix, rest)) = s.split_once(':') {
         let provider = prefix.trim().to_ascii_lowercase();
-        if matches!(provider.as_str(), "github" | "jira" | "linear") {
+        if TASK_PROVIDERS.contains(&provider.as_str()) {
             let key = rest.trim();
             if key.is_empty() {
                 return None;
@@ -143,7 +154,7 @@ pub async fn monitor_tickets(
     }
     if enabled && providers.is_empty() {
         return Err(AppError::bad_request(
-            "no ticket board connected — open Integrations and Connect GitHub, Jira, or Linear, then say @fleet monitor",
+            "no listen source connected — open Integrations and Connect Slack, Notion, GitHub, Jira, Linear, … then say @fleet monitor",
         ));
     }
     providers.sort();
@@ -160,6 +171,21 @@ pub async fn monitor_tickets(
         .jira_jql
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let slack_channels: Vec<String> = args
+        .slack_channels
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let notion_databases: Vec<String> = args
+        .notion_databases
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let auto_launch = args.auto_launch.unwrap_or(false);
 
     let monitor = ticket_repo::upsert_monitor(
         &state.db,
@@ -169,6 +195,9 @@ pub async fn monitor_tickets(
             providers: providers.clone(),
             github_repos,
             jira_jql,
+            slack_channels,
+            notion_databases,
+            auto_launch,
             started_by: Some(user_id),
         },
     )
@@ -188,6 +217,9 @@ pub async fn monitor_tickets(
         "providers": monitor.providers,
         "github_repos": monitor.github_repos,
         "jira_jql": monitor.jira_jql,
+        "slack_channels": monitor.slack_channels,
+        "notion_databases": monitor.notion_databases,
+        "auto_launch": monitor.auto_launch,
         "last_poll_at": monitor.last_poll_at,
         "last_error": monitor.last_error,
         "poll": poll,
@@ -234,7 +266,17 @@ pub async fn prepare_finish(
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
-    let spec = ticket_spec_md(&item, live.as_ref());
+    let spec = format!(
+        "{}\n\n# I/O\n\
+         Source: `{provider}` `{key}`.\n\
+         Use `use_integration` to read/write any connected app (Slack, Notion, GitHub, git, …). \
+         Tokens stay on the control plane.\n\
+         When you finish, write `result.md`. The control plane will also reply on this source \
+         (Slack thread, Notion page, or ticket comment).",
+        ticket_spec_md(&item, live.as_ref()),
+        provider = item.provider,
+        key = item.external_key,
+    );
     let title = format!("{}: {}", item.external_key, item.title);
     let ext = ExternalRef {
         provider: item.provider.clone(),
@@ -332,6 +374,21 @@ pub async fn poll_workspace(
                 Ok(n) => seen += n,
                 Err(e) => errors.push(format!("linear: {e}")),
             },
+            "gitlab" => match poll_gitlab(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("gitlab: {e}")),
+            },
+            "slack" => match poll_slack(state, workspace_id, &monitor.slack_channels, &caller).await
+            {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("slack: {e}")),
+            },
+            "notion" => {
+                match poll_notion(state, workspace_id, &monitor.notion_databases, &caller).await {
+                    Ok(n) => seen += n,
+                    Err(e) => errors.push(format!("notion: {e}")),
+                }
+            }
             _ => {}
         }
     }
@@ -347,6 +404,35 @@ pub async fn poll_workspace(
         "seen": seen,
         "errors": errors,
     }))
+}
+
+/// New Slack/Notion (etc.) inbox rows that should start a fleet without a human click.
+pub async fn list_auto_launch_items(
+    state: &AppState,
+    workspace_id: Uuid,
+) -> AppResult<Vec<TicketInboxItem>> {
+    let Some(monitor) = ticket_repo::get_monitor(&state.db, workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+    else {
+        return Ok(Vec::new());
+    };
+    if !monitor.enabled || !monitor.auto_launch {
+        return Ok(Vec::new());
+    }
+    let open = ticket_repo::list_inbox(&state.db, workspace_id, Some("open"))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let cutoff = Utc::now() - chrono::Duration::minutes(5);
+    Ok(open
+        .into_iter()
+        .filter(|i| {
+            AUTO_LAUNCH_PROVIDERS.contains(&i.provider.as_str())
+                && i.run_id.is_none()
+                && i.created_at >= cutoff
+        })
+        .take(3)
+        .collect())
 }
 
 pub async fn poll_due_workspaces(state: &AppState) {
@@ -631,6 +717,258 @@ async fn poll_linear(
     Ok(n)
 }
 
+async fn poll_gitlab(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let listed = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "gitlab",
+        "list_issues",
+        json!({ "state": "opened", "per_page": 20 }),
+    )
+    .await;
+    if !listed.ok {
+        return Err(listed.summary);
+    }
+    let items = listed
+        .data
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut n = 0usize;
+    for i in items {
+        let iid = i
+            .get("iid")
+            .or_else(|| i.get("number"))
+            .and_then(|v| v.as_u64())
+            .or_else(|| i.get("iid").and_then(|v| v.as_i64()).map(|n| n as u64));
+        let path = i
+            .get("project")
+            .or_else(|| i.get("project_path"))
+            .or_else(|| i.get("references"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let Some(iid) = iid else {
+            continue;
+        };
+        let key = if path.contains('/') {
+            format!("{path}#{iid}")
+        } else if let Some(p) = i.get("web_url").and_then(|v| v.as_str()) {
+            p.to_string()
+        } else {
+            format!("#{iid}")
+        };
+        let title = i
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("untitled")
+            .to_string();
+        ticket_repo::upsert_inbox(
+            &state.db,
+            &UpsertInbox {
+                workspace_id,
+                provider: "gitlab".into(),
+                external_key: key,
+                title,
+                url: i.get("web_url").and_then(|v| v.as_str()).map(|s| s.into()),
+                summary: i
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(4000)
+                    .collect(),
+                provider_closed: i.get("state").and_then(|v| v.as_str()) == Some("closed"),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+async fn poll_slack(
+    state: &AppState,
+    workspace_id: Uuid,
+    channels: &[String],
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let mut targets = channels.to_vec();
+    if targets.is_empty() {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "slack",
+            "list_channels",
+            json!({ "limit": 15 }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        if let Some(arr) = listed.data.get("items").and_then(|v| v.as_array()) {
+            for c in arr.iter().take(8) {
+                if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                    targets.push(id.to_string());
+                }
+            }
+        }
+    }
+    let mut n = 0usize;
+    for channel in targets.iter().take(8) {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "slack",
+            "get_channel_history",
+            json!({ "channel": channel, "limit": 15 }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(format!("{channel}: {}", listed.summary));
+        }
+        let items = listed
+            .data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for m in items {
+            let ts = m.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+            if ts.is_empty() {
+                continue;
+            }
+            let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            if text.starts_with("Fleet run ") {
+                continue;
+            }
+            let title: String = text.chars().take(80).collect();
+            ticket_repo::upsert_inbox(
+                &state.db,
+                &UpsertInbox {
+                    workspace_id,
+                    provider: "slack".into(),
+                    external_key: format!("{channel}:{ts}"),
+                    title,
+                    url: None,
+                    summary: text.chars().take(4000).collect(),
+                    provider_closed: false,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+async fn poll_notion(
+    state: &AppState,
+    workspace_id: Uuid,
+    databases: &[String],
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let mut n = 0usize;
+    if databases.is_empty() {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "notion",
+            "search",
+            json!({ "page_size": 15, "filter": { "value": "page", "property": "object" } }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        n += upsert_notion_items(state, workspace_id, &listed.data).await?;
+    } else {
+        for db in databases.iter().take(6) {
+            let listed = proxy_op(
+                state,
+                workspace_id,
+                caller,
+                "notion",
+                "query_database",
+                json!({ "database_id": db, "page_size": 15 }),
+            )
+            .await;
+            if !listed.ok {
+                return Err(format!("{db}: {}", listed.summary));
+            }
+            n += upsert_notion_items(state, workspace_id, &listed.data).await?;
+        }
+    }
+    Ok(n)
+}
+
+async fn upsert_notion_items(
+    state: &AppState,
+    workspace_id: Uuid,
+    data: &Value,
+) -> Result<usize, String> {
+    let items = data
+        .get("items")
+        .or_else(|| data.get("results"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut n = 0usize;
+    for i in items {
+        let id = i
+            .get("id")
+            .or_else(|| i.get("page_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let title = i
+            .get("title")
+            .and_then(|v| v.as_str())
+            .or_else(|| i.get("name").and_then(|v| v.as_str()))
+            .unwrap_or("Notion page")
+            .to_string();
+        let url = i.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
+        ticket_repo::upsert_inbox(
+            &state.db,
+            &UpsertInbox {
+                workspace_id,
+                provider: "notion".into(),
+                external_key: id.to_string(),
+                title,
+                url,
+                summary: i
+                    .get("plain_text")
+                    .or_else(|| i.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(4000)
+                    .collect(),
+                provider_closed: false,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 fn status_done(status: &str) -> bool {
     let s = status.to_ascii_lowercase();
     s.contains("done") || s.contains("closed") || s.contains("resolved") || s.contains("complete")
@@ -836,5 +1174,15 @@ mod tests {
         assert_eq!(p.key, "acme/app#7");
         let (o, r, n) = parse_github_owner_repo_num("acme/app#7").unwrap();
         assert_eq!((o, r, n), ("acme".into(), "app".into(), 7));
+    }
+
+    #[test]
+    fn parses_slack_and_notion_keys() {
+        let p = parse_ticket_ref("slack:C123:171.1").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("slack"));
+        assert_eq!(p.key, "C123:171.1");
+        let p = parse_ticket_ref("notion:page-abc").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("notion"));
+        assert_eq!(p.key, "page-abc");
     }
 }

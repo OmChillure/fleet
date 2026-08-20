@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, system_prompt_for_workspace, tool_definitions, ChatAction,
-    ChatLlmContext,
-    MAX_TOOL_ROUNDS,
+    execute_tool_with_retry, fleet_implement_nudge, last_user_text, rewrite_if_asked_to_continue,
+    should_nudge_fleet,
+    system_prompt_for_workspace, tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -621,7 +621,8 @@ async fn chat_completions_once(
     })?;
 
     if !status.is_success() {
-        tracing::error!(%status, body = %text, model = %model, "grok API error");
+        let preview: String = text.chars().take(400).collect();
+        tracing::error!(%status, body = %preview, model = %model, "grok API error");
         let lower = text.to_lowercase();
         if status.as_u16() == 401 || lower.contains("unauthorized") {
             return Err(AppError::bad_request(
@@ -642,13 +643,15 @@ async fn chat_completions_once(
             && let Some(msg) = v.pointer("/error/message").and_then(|m| m.as_str()) {
                 return Err(AppError::bad_request(format!("Grok error: {msg}")));
             }
+        let preview: String = text.chars().take(400).collect();
         return Err(AppError::bad_request(format!(
-            "Grok error ({status}): {text}"
+            "Grok error ({status}): {preview}"
         )));
     }
 
     let parsed: CompletionsResponse = serde_json::from_str(&text).map_err(|e| {
-        tracing::error!(error = %e, body = %text, "grok parse failed");
+        let preview: String = text.chars().take(400).collect();
+        tracing::error!(error = %e, body = %preview, "grok parse failed");
         AppError::internal(format!("grok response parse: {e}"))
     })?;
 
@@ -657,6 +660,45 @@ async fn chat_completions_once(
     }
 
     Ok(parsed)
+}
+
+/// One-shot JSON/text completion (no tools). Used by the case wake loop.
+pub async fn complete_text(
+    cfg: &GrokConfig,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> AppResult<String> {
+    if !cfg.enabled {
+        return Err(AppError::bad_request(
+            "Grok is disabled (set GROK_ENABLED=true)".to_string(),
+        ));
+    }
+    let auth = resolve_auth(cfg)
+        .await
+        .map_err(AppError::bad_request)?;
+    let bearer = auth_bearer(&auth);
+    let model = if model.trim().is_empty() {
+        GROK_MODEL
+    } else {
+        model.trim()
+    };
+    let messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    let parsed = chat_completions(cfg, bearer, model, &messages, false).await?;
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return Err(AppError::bad_request("grok returned empty decision"));
+    }
+    Ok(content)
 }
 
 /// Grok tool loop for fleet sandbox tools (OpenAI-compatible tool_calls).
@@ -720,7 +762,22 @@ pub async fn chat_with_tools(
         let msg = &choice.message;
 
         if msg.tool_calls.is_empty() {
-            let content = msg.content.as_deref().unwrap_or("").trim().to_string();
+            if should_nudge_fleet(&last_user_text(&messages), &actions) {
+                messages.push(json!({
+                    "role": "system",
+                    "content": fleet_implement_nudge(),
+                }));
+                let extra = max_rounds - MAX_TOOL_ROUNDS;
+                if extra < crate::retry::EXTRA_ROUNDS_ON_FAIL {
+                    max_rounds += 1;
+                }
+                round += 1;
+                continue;
+            }
+            let mut content = msg.content.as_deref().unwrap_or("").trim().to_string();
+            if let Some(rewritten) = rewrite_if_asked_to_continue(&content, &actions) {
+                content = rewritten;
+            }
             if content.is_empty() && !actions.is_empty() {
                 let summary = actions
                     .iter()

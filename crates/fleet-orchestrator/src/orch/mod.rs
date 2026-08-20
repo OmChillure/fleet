@@ -8,12 +8,15 @@ mod materialize_step;
 mod reap;
 mod review;
 mod rollup;
-mod session_context;
+pub(crate) mod session_context;
 mod spawn;
 mod stuck;
 mod tick;
+pub(crate) mod validate_done;
 
 pub use board_sync_step::sync_external_board;
+pub use session_context::{list_shared_files, write_run_context};
+pub use validate_done::{default_acceptance, validate_task_done};
 pub use deps_step::*;
 pub use materialize_step::*;
 pub use rollup::*;

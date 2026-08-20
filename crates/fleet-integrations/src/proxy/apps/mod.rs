@@ -1,6 +1,8 @@
 //! Per-provider apps. Add: `apps/<name>/{client,tools}` + register here + OAuth.
 
 pub mod asana;
+pub mod bitbucket;
+pub mod confluence;
 pub mod discord;
 pub mod figma;
 pub mod github;
@@ -31,6 +33,8 @@ pub fn supported_providers() -> &'static [&'static str] {
         "discord",
         "trello",
         "asana",
+        "bitbucket",
+        "confluence",
     ]
 }
 
@@ -48,6 +52,8 @@ pub fn operations_for(provider: &str) -> &'static [&'static str] {
         "discord" => discord::OPERATIONS,
         "trello" => trello::OPERATIONS,
         "asana" => asana::OPERATIONS,
+        "bitbucket" => bitbucket::OPERATIONS,
+        "confluence" => confluence::OPERATIONS,
         _ => &[],
     }
 }
@@ -85,6 +91,14 @@ pub async fn dispatch(
             trello::invoke(http, access_token, api_key, operation, args).await
         }
         "asana" => asana::invoke(http, access_token, operation, args).await,
+        "bitbucket" => bitbucket::invoke(http, access_token, operation, args).await,
+        "confluence" => {
+            let cloud_id = config
+                .get("cloud_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            confluence::invoke(http, access_token, cloud_id, operation, args).await
+        }
         _ => ProxyResult::err(provider, operation, "unknown_provider", "unsupported", None),
     }
 }
@@ -97,12 +111,20 @@ mod tests {
     #[test]
     fn supported_providers_has_unique_ids() {
         let ids = supported_providers();
-        assert_eq!(ids.len(), 12);
+        assert_eq!(ids.len(), 14);
         let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), 12);
+        assert_eq!(unique.len(), 14);
         assert!(ids.contains(&"gitlab"));
         assert!(ids.contains(&"trello"));
         assert!(ids.contains(&"asana"));
+        assert!(ids.contains(&"bitbucket"));
+        assert!(ids.contains(&"confluence"));
+    }
+
+    #[test]
+    fn bitbucket_and_confluence_ops_registered() {
+        assert!(operations_for("bitbucket").contains(&"create_pr"));
+        assert!(operations_for("confluence").contains(&"create_page"));
     }
 
     #[test]

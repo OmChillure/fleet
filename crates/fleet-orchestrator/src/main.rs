@@ -46,9 +46,7 @@ async fn run() -> anyhow::Result<()> {
         e
     })?;
 
-    // Optional background tick loop for all projects is phase 2;
-    // operators force ticks via POST /v1/projects/{id}/admin/tick.
-    // Keep a wake channel future for multi-project loop later.
+    // Operators force ticks via POST /v1/projects/{id}/admin/tick.
     let _tick_interval = cfg.tick_interval;
 
     let app = router_standalone(state);

@@ -6,6 +6,7 @@
 pub mod agent_loop;
 mod docker;
 pub(crate) mod git_isolate;
+pub mod io;
 pub mod share;
 pub mod team;
 pub mod team_chat;
@@ -51,6 +52,8 @@ pub struct SpawnRequest {
     pub agent_backend: Option<String>,
     /// Model id for the worker LLM (e.g. grok-4.5, llama3.2).
     pub agent_model: Option<String>,
+    /// Control-plane integration proxy (tokens never enter the sandbox).
+    pub io: io::IntegrationHandle,
 }
 
 /// Opaque handle returned by a successful spawn (pid, container id, stub key, …).
@@ -124,8 +127,6 @@ pub fn fleet_worker_env(req: &SpawnRequest, orchestrator_url: &str) -> HashMap<S
     );
     env
 }
-
-// --- Stub backend ---
 
 #[derive(Debug, Clone)]
 struct StubEntry {
@@ -298,6 +299,7 @@ mod tests {
             persona_md: None,
             agent_backend: None,
             agent_model: None,
+            io: io::IntegrationHandle::none(),
         }
     }
 

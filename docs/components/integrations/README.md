@@ -30,13 +30,12 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 Other catalog entries (Bitbucket, Confluence, …) may appear as
 **Coming soon** until OAuth is wired.
 
-### Ticket ingest (chat)
+### Chat + apps
 
-`@fleet monitor` starts a workspace watch on connected **GitHub / Jira / Linear**.
-Open issues land in an inbox (`GET /api/workspaces/{id}/fleet/tickets`, Dashboard
-→ Tickets). `@fleet finish ENG-123` (or `owner/repo#12`) launches implementer +
-reviewer against that ticket. The background ticker re-polls about once a minute.
-Tokens stay on the control plane.
+Say what you want in Chat. The assistant calls `integration_query` on the
+control plane (Slack history, Notion pages, GitHub commit/PR, …) and
+`launch_agent_plan` when work needs specialists. Tokens stay on the control
+plane.
 
 If a provider’s client id/secret is unset, **Connect** still starts the
 provider flow (GitHub App Manifest, or a one-time OAuth app form for Jira
@@ -125,8 +124,8 @@ Ops (all via `integration_query` — the model invents the workflow, we do not
 register playbooks): GitHub and GitLab read/write; Slack channels/messages/threads;
 Notion search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
 Drive list/export; Teams chat/channel send; Discord identity + guilds;
-Trello boards/cards; Asana tasks.
-Coming soon (no OAuth): Bitbucket, Confluence.
+Trello boards/cards; Asana tasks; Bitbucket repos/PRs/issues; Confluence pages.
+Coming soon (OAuth not wired; tools already exist): Bitbucket, Confluence.
 
 ---
 

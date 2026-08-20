@@ -33,7 +33,6 @@ pub fn resolve_harness(job: &Job) -> Result<HarnessSpec> {
         }
         "opencode" => {
             ensure_bin("opencode")?;
-            // Allow override
             if let Some(cmd) = &job.command {
                 return Ok(HarnessSpec {
                     name: "opencode".into(),

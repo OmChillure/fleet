@@ -121,6 +121,51 @@ pub async fn process_sessions(
                             out.reviews_bounced += n;
                             continue;
                         }
+                        let check = super::validate_done::validate_task_done(
+                            task,
+                            &work,
+                            &session.runtime_backend,
+                        );
+                        if !check.ok {
+                            let bounces = task
+                                .hitl_notes
+                                .as_deref()
+                                .unwrap_or("")
+                                .matches("Task validation failed")
+                                .count();
+                            if bounces >= 2 {
+                                store
+                                    .set_task_done_failed(
+                                        session.board_task_id,
+                                        "validation_failed_exhausted",
+                                    )
+                                    .await?;
+                                store
+                                    .free_session_claim(
+                                        session.board_task_id,
+                                        session.id,
+                                        "validation_failed_exhausted",
+                                    )
+                                    .await?;
+                            } else {
+                                store
+                                    .reopen_task_for_changes(
+                                        session.board_task_id,
+                                        "validation_failed",
+                                        &check.notes(),
+                                    )
+                                    .await?;
+                                store
+                                    .free_session_claim(
+                                        session.board_task_id,
+                                        session.id,
+                                        "validation_failed",
+                                    )
+                                    .await?;
+                            }
+                            out.retried += 1;
+                            continue;
+                        }
                     }
                     store
                         .apply_task_terminal(
@@ -226,8 +271,14 @@ pub async fn process_sessions(
                 .last_heartbeat_at
                 .or(session.started_at)
                 .unwrap_or(session.created_at);
-            let stale = now.signed_duration_since(hb_base)
+            let mut stale = now.signed_duration_since(hb_base)
                 > ChronoDuration::seconds(heartbeat_stale_s as i64);
+            if stale {
+                let work = session_work_dir(data_dir, session, project_id);
+                if heartbeat_file_fresh(&work, now, heartbeat_stale_s) {
+                    stale = false;
+                }
+            }
 
             let timeout_s = task
                 .and_then(|t| t.timeout_s)
@@ -292,6 +343,18 @@ pub async fn process_sessions(
         }
     }
     Ok(out)
+}
+
+fn heartbeat_file_fresh(work: &Path, now: chrono::DateTime<Utc>, stale_s: i32) -> bool {
+    let p = work.join(".heartbeat");
+    let Ok(meta) = std::fs::metadata(&p) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    let mtime = chrono::DateTime::<Utc>::from(mtime);
+    now.signed_duration_since(mtime) <= ChronoDuration::seconds(stale_s as i64)
 }
 
 fn session_work_dir(

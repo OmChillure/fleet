@@ -279,7 +279,9 @@ mod tests {
         assert!(operations_for("trello").contains(&"create_card"));
         assert!(operations_for("asana").contains(&"list_tasks"));
         assert!(operations_for("asana").contains(&"create_task"));
-        assert_eq!(supported_providers().len(), 12);
+        assert!(operations_for("bitbucket").contains(&"create_pr"));
+        assert!(operations_for("confluence").contains(&"create_page"));
+        assert_eq!(supported_providers().len(), 14);
     }
 
     #[test]

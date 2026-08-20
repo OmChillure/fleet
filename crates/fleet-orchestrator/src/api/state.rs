@@ -4,6 +4,7 @@ use crate::sandbox::{build_runtime, RuntimeBuildOpts};
 use crate::store::{connect, migrate, Store};
 use crate::sync::LogBoardSync;
 use anyhow::Context;
+use sqlx::PgPool;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -15,12 +16,22 @@ pub struct AppState {
 }
 
 pub async fn build_app_state(cfg: &Config) -> anyhow::Result<AppState> {
-    build_app_state_from_parts(cfg).await
+    let pool = connect(&cfg.database_url).await?;
+    build_app_state_with_pool(cfg, pool).await
 }
 
-/// Build orchestrator state (used by standalone binary and fleet-server mount).
-pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState> {
-    let pool = connect(&cfg.database_url).await?;
+/// Reuse an existing pool (fleet-server already opened fleet-db).
+pub async fn build_app_state_with_pool(cfg: &Config, pool: PgPool) -> anyhow::Result<AppState> {
+    build_app_state_with_pool_io(cfg, pool, None).await
+}
+
+/// Same as [`build_app_state_with_pool`] plus a control-plane integration proxy
+/// so workers can `use_integration` and finished runs can write back.
+pub async fn build_app_state_with_pool_io(
+    cfg: &Config,
+    pool: PgPool,
+    io: Option<std::sync::Arc<dyn crate::sandbox::io::IntegrationInvoker>>,
+) -> anyhow::Result<AppState> {
     migrate(&pool).await?;
     let store = Store::new(pool);
     tokio::fs::create_dir_all(&cfg.data_dir)
@@ -36,13 +47,17 @@ pub async fn build_app_state_from_parts(cfg: &Config) -> anyhow::Result<AppState
     let orch_url = cfg.orchestrator_public_url.clone();
     // PR10: LogBoardSync adapter; per-project `auto_sync_external` gates tick calls.
     let board_sync = Arc::new(LogBoardSync);
-    let tick = Arc::new(TickRunner::with_board_sync(
+    let mut runner = TickRunner::with_board_sync(
         store.clone(),
         runtime,
         board_sync,
         cfg.data_dir.clone(),
         orch_url,
-    ));
+    );
+    if let Some(inv) = io {
+        runner = runner.with_integrations(inv);
+    }
+    let tick = Arc::new(runner);
 
     Ok(AppState {
         store,

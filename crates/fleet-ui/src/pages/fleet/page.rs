@@ -217,9 +217,9 @@ pub fn Fleet(workspace_id: String) -> Element {
     });
 
     let ws_poll = workspace_id.clone();
-    use_effect(move || {
+    use_future(move || {
         let ws = ws_poll.clone();
-        spawn(async move {
+        async move {
             loop {
                 TimeoutFuture::new(2500).await;
                 if let Ok(t) = list_tasks(&ws).await {
@@ -232,7 +232,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                     sessions.set(parse_sessions(&s));
                 }
             }
-        });
+        }
     });
 
     let columns = ["Ready", "In progress", "Blocked", "Done", "Failed"];
@@ -445,7 +445,6 @@ pub fn Fleet(workspace_id: String) -> Element {
 
             p { class: "text-sm text-[var(--app-fg)]", "{status_line}" }
 
-            // Runs strip
             section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs" }
                 if runs().is_empty() {
@@ -513,7 +512,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                 }
             }
 
-            // Kanban-ish board
             section {
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Board" }
                 div { class: "grid gap-3 md:grid-cols-5",
