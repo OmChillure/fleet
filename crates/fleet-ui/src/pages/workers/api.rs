@@ -44,8 +44,18 @@ pub struct HostPublic {
     pub paired_at: Option<String>,
     #[serde(default)]
     pub software: Option<HostSoftware>,
+    #[serde(default)]
+    pub desired: Option<HostDesiredSoftware>,
+    #[serde(default)]
+    pub software_status: Option<String>,
+    #[serde(default)]
+    pub outdated: bool,
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    #[serde(default)]
+    pub update_requested_at: Option<String>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     #[serde(default)]
     pub current_jobs: i32,
     #[serde(default)]
@@ -54,7 +64,7 @@ pub struct HostPublic {
     pub hardware: Option<HostHardware>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
 pub struct HostHardware {
     #[serde(default)]
     pub cpu_cores: Option<u32>,
@@ -64,6 +74,28 @@ pub struct HostHardware {
     pub mem_used_pct: Option<u8>,
     #[serde(default)]
     pub os: Option<String>,
+    #[serde(default)]
+    pub cpu_model: Option<String>,
+    #[serde(default)]
+    pub cpu_used_pct: Option<u8>,
+    #[serde(default)]
+    pub mem_speed_mts: Option<u32>,
+    #[serde(default)]
+    pub mem_type: Option<String>,
+    #[serde(default)]
+    pub gpus: Option<Vec<HostGpu>>,
+    #[serde(default)]
+    pub gpu_used_pct: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct HostGpu {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vram_bytes: Option<u64>,
+    #[serde(default)]
+    pub used_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -71,7 +103,30 @@ pub struct HostSoftware {
     #[serde(default)]
     pub git_sha: Option<String>,
     #[serde(default)]
+    pub bins: Option<serde_json::Value>,
+    #[serde(default)]
     pub updating: bool,
+}
+
+/// Staged dist for this host's platform (`GET …/manifest.json`).
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct HostDesiredSoftware {
+    #[serde(default)]
+    pub git_sha: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub staged_at: Option<String>,
+    #[serde(default)]
+    pub bins: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct PackageInventory {
+    #[serde(default)]
+    pub packages: Vec<HostDesiredSoftware>,
+    #[serde(default)]
+    pub plane_git_sha: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -109,17 +164,27 @@ pub struct HostPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_host: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_container: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_update: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct HostListResponse {
     #[serde(default)]
     hosts: Vec<HostPublic>,
+    #[serde(default)]
+    packages: Vec<HostDesiredSoftware>,
+    #[serde(default)]
+    plane_git_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +312,9 @@ fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
     if let Some(v) = patch.paused {
         host.paused = v;
     }
+    if let Some(v) = patch.drain {
+        host.drain = v;
+    }
     if let Some(v) = patch.allow_host {
         host.allow_host = v;
     }
@@ -256,14 +324,32 @@ fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
     if let Some(v) = patch.max_concurrent {
         host.max_concurrent = v;
     }
+    if let Some(v) = patch.auto_update {
+        host.auto_update = v;
+    }
+    if patch.request_update == Some(true) {
+        host.update_requested_at = Some("requested".into());
+    }
     host
 }
 
 /// `GET /api/workspaces/{id}/worker-hosts`
 pub async fn list_hosts(workspace_id: &str) -> Result<Vec<HostPublic>, String> {
+    Ok(list_workers_page(workspace_id).await?.0)
+}
+
+pub async fn list_workers_page(
+    workspace_id: &str,
+) -> Result<(Vec<HostPublic>, PackageInventory), String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/worker-hosts")).await?;
     let body: HostListResponse = parse_json(res).await?;
-    Ok(body.hosts)
+    Ok((
+        body.hosts,
+        PackageInventory {
+            packages: body.packages,
+            plane_git_sha: body.plane_git_sha,
+        },
+    ))
 }
 
 /// `POST /api/workspaces/{id}/worker-hosts` — pair token is in the response once.
@@ -355,4 +441,71 @@ pub fn windows_install_command(created: &CreateHostResponse) -> String {
         "$env:FLEET_URL='{api}'; $env:FLEET_PAIR_TOKEN='{}'; irm \"$env:FLEET_URL/install-worker.ps1\" | iex",
         created.pair_token
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_host() -> HostPublic {
+        serde_json::from_str(r#"{"id":"h1","workspace_id":"w1","name":"box","status":"online"}"#)
+            .expect("sample host")
+    }
+
+    #[test]
+    fn host_patch_drain_serializes_when_set() {
+        let hold = HostPatch {
+            paused: Some(true),
+            ..HostPatch::default()
+        };
+        let hold_json = serde_json::to_value(&hold).expect("serialize hold");
+        assert_eq!(hold_json["paused"], true);
+        assert!(hold_json.get("drain").is_none());
+
+        let release = HostPatch {
+            paused: Some(false),
+            drain: Some(false),
+            ..HostPatch::default()
+        };
+        let release_json = serde_json::to_value(&release).expect("serialize release");
+        assert_eq!(release_json["paused"], false);
+        assert_eq!(release_json["drain"], false);
+    }
+
+    #[test]
+    fn apply_patch_sets_and_clears_drain() {
+        let host = sample_host();
+        assert!(!host.drain);
+        assert!(!host.paused);
+
+        let held = apply_patch(
+            host,
+            &HostPatch {
+                paused: Some(true),
+                ..HostPatch::default()
+            },
+        );
+        assert!(held.paused);
+        assert!(!held.drain);
+
+        let drained = apply_patch(
+            held,
+            &HostPatch {
+                drain: Some(true),
+                ..HostPatch::default()
+            },
+        );
+        assert!(drained.drain);
+
+        let released = apply_patch(
+            drained,
+            &HostPatch {
+                paused: Some(false),
+                drain: Some(false),
+                ..HostPatch::default()
+            },
+        );
+        assert!(!released.paused);
+        assert!(!released.drain);
+    }
 }
