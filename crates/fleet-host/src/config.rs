@@ -62,6 +62,9 @@ pub struct LocalConfig {
     pub allow_privileged: bool,
     #[serde(default = "default_true")]
     pub use_host_git_credentials: bool,
+    /// This box will apply CP-served updates. Intersected with CP `auto_update`.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     #[serde(default = "default_worker_bin")]
     pub fleet_worker_bin: String,
     #[serde(default = "default_driver_bin")]
@@ -131,6 +134,7 @@ impl Default for LocalConfig {
             docker_network: default_docker_network(),
             allow_privileged: false,
             use_host_git_credentials: true,
+            auto_update: true,
             fleet_worker_bin: default_worker_bin(),
             fleet_driver_bin: default_driver_bin(),
             log_level: default_log_level(),
@@ -334,6 +338,19 @@ mod tests {
         assert_eq!(cfg.docker_network, "bridge");
         let parsed: LocalConfig = toml::from_str("").expect("empty toml");
         assert_eq!(parsed.docker_network, "bridge");
+    }
+
+    #[test]
+    fn auto_update_defaults_true_and_can_be_disabled() {
+        let cfg = LocalConfig::defaults();
+        assert!(cfg.auto_update);
+        let parsed: LocalConfig = toml::from_str("").expect("empty toml");
+        assert!(
+            parsed.auto_update,
+            "missing auto_update must default true: operator opt-out only"
+        );
+        let off: LocalConfig = toml::from_str("auto_update = false").expect("toml");
+        assert!(!off.auto_update);
     }
 
     #[test]

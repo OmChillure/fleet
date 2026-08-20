@@ -7,6 +7,7 @@ Config lives on the box and is **never** accepted from the control plane:
 
 ```
 ~/.config/fleet-host/config.toml     # 0700 directory
+~/.config/fleet-host/machine.id      # durable box id; survives unpair
 ~/.config/fleet-host/machine.token   # 0600, written by `pair`
 ```
 
@@ -31,6 +32,7 @@ the file already exists (so `unpair` + re-pair keeps your settings).
 ```bash
 fleet-host status    # host_id, url, run_host, run_container, token present
 fleet-host run       # heartbeat + lease loop (systemd / tmux / foreground)
+fleet-host update    # apply CP-served bins (same path as auto-update)
 fleet-host unpair    # delete machine.token only; config stays
 ```
 
@@ -65,6 +67,12 @@ script). Do not enable `run_container` expecting k3d or Docker jobs to work.
 ```
 fleet-host pair --url URL --token TOKEN
 fleet-host run
+fleet-host update
 fleet-host status
 fleet-host unpair
 ```
+
+`auto_update` in `config.toml` defaults **true**. Effective auto is that
+flag **and** the plane `host.auto_update` (also default true). Auto apply
+runs after heartbeat when `desired` bins differ; it never sets CP
+`paused`/`drain`. `fleet-host update` is the same apply path, forced.

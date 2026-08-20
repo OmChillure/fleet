@@ -2,45 +2,45 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::LocalConfig;
 
+/// Logical package names (no `.exe`). On-disk Windows names add the suffix.
+pub const PACKAGE_BINS: [&str; 3] = ["fleet-host", "fleet-worker", "fleet-driver"];
+
 /// Compile-time tree-id (`FLEET_GIT_SHA`), same bake as fleet-server.
+/// `build.rs` reruns rustc when the env changes so a cached object without
+/// the sha cannot be reused.
 pub fn baked_git_sha() -> Option<&'static str> {
     option_env!("FLEET_GIT_SHA").filter(|s| !s.is_empty())
 }
 
-pub fn heartbeat_software(cfg: &LocalConfig) -> Value {
+/// `updating` is true only while a **host-bin** apply is waiting / restarting.
+pub fn heartbeat_software(cfg: &LocalConfig, updating: bool) -> Value {
     json!({
         "git_sha": baked_git_sha(),
         "bins": bin_shas(cfg),
-        "updating": false,
+        "updating": updating,
     })
 }
 
 fn bin_shas(cfg: &LocalConfig) -> Value {
-    static CACHED: OnceLock<Value> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            let host = std::env::current_exe().ok();
-            json!({
-                "fleet-host": host.as_deref().and_then(file_sha256),
-                "fleet-worker": resolve_bin(&cfg.fleet_worker_bin, host.as_deref())
-                    .as_deref()
-                    .and_then(file_sha256),
-                "fleet-driver": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
-                    .as_deref()
-                    .and_then(file_sha256),
-            })
-        })
-        .clone()
+    let host = std::env::current_exe().ok();
+    json!({
+        "fleet-host": host.as_deref().and_then(file_sha256),
+        "fleet-worker": resolve_bin(&cfg.fleet_worker_bin, host.as_deref())
+            .as_deref()
+            .and_then(file_sha256),
+        "fleet-driver": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
+            .as_deref()
+            .and_then(file_sha256),
+    })
 }
 
-fn resolve_bin(name: &str, host_exe: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn resolve_bin(name: &str, host_exe: Option<&Path>) -> Option<PathBuf> {
     let p = Path::new(name);
     if p.is_absolute() && p.is_file() {
         return Some(p.to_path_buf());
@@ -72,16 +72,46 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn file_sha256(path: &Path) -> Option<String> {
+pub(crate) fn file_sha256(path: &Path) -> Option<String> {
     let bytes = fs::read(path).ok()?;
+    Some(sha256_hex(&bytes))
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(&bytes);
-    Some(hex::encode(h.finalize()))
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// On-disk file name for a package bin (`fleet-host.exe` on Windows).
+pub fn package_bin_file_name(logical: &str, windows: bool) -> String {
+    if windows && !logical.ends_with(".exe") {
+        format!("{logical}.exe")
+    } else {
+        logical.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_software_always_sends_git_sha_key() {
+        let v = heartbeat_software(&LocalConfig::default(), false);
+        assert!(v.get("git_sha").is_some(), "git_sha key must be present");
+        assert!(v.get("bins").is_some());
+        assert_eq!(v.get("updating"), Some(&json!(false)));
+        let updating = heartbeat_software(&LocalConfig::default(), true);
+        assert_eq!(updating.get("updating"), Some(&json!(true)));
+        match baked_git_sha() {
+            Some(s) => {
+                assert!(!s.is_empty());
+                assert_eq!(v.get("git_sha"), Some(&json!(s)));
+            }
+            None => assert!(v.get("git_sha").unwrap().is_null()),
+        }
+    }
 
     #[test]
     fn file_sha256_hashes_bytes() {

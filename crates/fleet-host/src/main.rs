@@ -6,6 +6,7 @@ use fleet_host::run;
 enum Cmd {
     Pair { url: String, token: String },
     Run,
+    Update,
     Status,
     Unpair,
     Help,
@@ -47,6 +48,12 @@ fn real_main() -> Result<()> {
                 .build()?;
             rt.block_on(run::run())
         }
+        Cmd::Update => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(run::update())
+        }
     }
 }
 
@@ -62,6 +69,7 @@ fn parse_args(args: Vec<String>) -> Result<Cmd> {
         "status" => Ok(Cmd::Status),
         "unpair" => Ok(Cmd::Unpair),
         "run" => Ok(Cmd::Run),
+        "update" => Ok(Cmd::Update),
         "pair" => parse_pair(it.collect()),
         other => {
             bail!("unknown command: {other}\n\nSee `fleet-host --help`");

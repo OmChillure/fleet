@@ -88,6 +88,7 @@ impl HostClient {
             platform: detect_platform(),
             advertised_host: advertised_host(cfg),
             advertised_container: advertised_container(cfg),
+            machine_id: crate::paths::load_or_create_machine_id().ok(),
         };
         let resp = self
             .http
@@ -104,6 +105,7 @@ impl HostClient {
         cfg: &LocalConfig,
         current_jobs: u32,
         error: Option<&str>,
+        updating: bool,
     ) -> Result<HeartbeatResponse> {
         let token = self.bearer()?;
         let body = HeartbeatRequest {
@@ -114,8 +116,9 @@ impl HostClient {
             current_jobs,
             max_concurrent: cfg.max_concurrent,
             error: error.map(|s| s.to_string()),
-            software: Some(crate::software::heartbeat_software(cfg)),
+            software: Some(crate::software::heartbeat_software(cfg, updating)),
             hardware: Some(crate::hardware::heartbeat_hardware()),
+            machine_id: crate::paths::load_or_create_machine_id().ok(),
         };
         let resp = self
             .http
@@ -174,6 +177,61 @@ impl HostClient {
         }
         Ok(())
     }
+
+    /// GET `{control_plane_url}/install/worker/bin/{platform}/{bin}` (or `.sha256`).
+    /// Bins are only fetched from the paired origin. Missing sidecar is a hard fail.
+    pub async fn fetch_install_bytes(&self, platform: &str, name: &str) -> Result<Vec<u8>> {
+        let platform = safe_install_segment(platform)?;
+        let name = safe_install_segment(name)?;
+        let path = format!("/install/worker/bin/{platform}/{name}");
+        let resp = self
+            .http
+            .get(self.url(&path))
+            .timeout(Duration::from_secs(600))
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
+            bail!("no prebuilt {name} for {platform}");
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("HTTP {status}: {}", body.trim());
+        }
+        let bytes = resp.bytes().await.context("read install body")?;
+        Ok(bytes.to_vec())
+    }
+
+    pub async fn fetch_install_sha256(&self, platform: &str, name: &str) -> Result<String> {
+        let sidecar = format!("{name}.sha256");
+        let bytes = self.fetch_install_bytes(platform, &sidecar).await?;
+        parse_sha256_sidecar(&bytes)
+            .ok_or_else(|| anyhow::anyhow!("invalid sha256 sidecar for {name}"))
+    }
+}
+
+pub(crate) fn parse_sha256_sidecar(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let token = text.split_whitespace().next()?.trim();
+    if token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(token.to_ascii_lowercase())
+}
+
+pub(crate) fn safe_install_segment(s: &str) -> Result<&str> {
+    let s = s.trim();
+    if s.is_empty() || s.contains('/') || s.contains('\\') || s.contains("..") {
+        bail!("invalid install path segment");
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        bail!("invalid install path segment");
+    }
+    Ok(s)
 }
 
 fn normalize_base(url: &str) -> String {
@@ -209,6 +267,8 @@ struct PairRequest {
     platform: String,
     advertised_host: bool,
     advertised_container: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +299,8 @@ struct HeartbeatRequest {
     software: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hardware: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +309,26 @@ pub struct HeartbeatResponse {
     pub host: HostPublic,
     #[serde(default)]
     pub effective: EffectiveModes,
+    /// Served dist for this host's platform. `null` / omitted = no prebuilt.
+    #[serde(default)]
+    pub desired: Option<DesiredSoftware>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DesiredSoftware {
+    #[serde(default)]
+    pub git_sha: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub bins: HashMap<String, DesiredBin>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DesiredBin {
+    pub sha256: String,
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -263,9 +345,19 @@ pub struct HostPublic {
     pub paused: Option<bool>,
     #[serde(default)]
     pub drain: Option<bool>,
+    /// Plane allows this host to self-update. Missing (old CP) defaults true.
+    #[serde(default)]
+    pub auto_update: Option<bool>,
+    /// One-shot Update click. Host applies once even when auto is off.
+    #[serde(default)]
+    pub update_requested_at: Option<String>,
 }
 
 impl HostPublic {
+    pub fn auto_update_or_default(&self) -> bool {
+        self.auto_update.unwrap_or(true)
+    }
+
     pub fn accepts_leases(&self) -> bool {
         if self.enabled == Some(false) {
             return false;
@@ -388,4 +480,53 @@ struct CompleteRequest {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_parses_desired_and_auto_update() {
+        let raw = r#"{
+            "host": { "auto_update": true, "paused": false, "drain": false },
+            "effective": { "host": true, "container": false, "max_concurrent": 4 },
+            "desired": {
+                "git_sha": "abc123",
+                "platform": "windows-x86_64",
+                "bins": {
+                    "fleet-host.exe": { "sha256": "aa", "size": 1 },
+                    "fleet-worker.exe": { "sha256": "bb", "size": 2 },
+                    "fleet-driver.exe": { "sha256": "cc", "size": 3 }
+                }
+            }
+        }"#;
+        let resp: HeartbeatResponse = serde_json::from_str(raw).expect("parse");
+        assert!(resp.host.auto_update_or_default());
+        let d = resp.desired.expect("desired");
+        assert_eq!(d.git_sha, "abc123");
+        assert_eq!(d.platform, "windows-x86_64");
+        assert_eq!(d.bins["fleet-host.exe"].size, Some(1));
+    }
+
+    #[test]
+    fn heartbeat_without_desired_is_null() {
+        let resp: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{},"effective":{}}"#).expect("parse");
+        assert!(resp.desired.is_none());
+        assert!(resp.host.auto_update_or_default());
+        assert!(resp.host.update_requested_at.is_none());
+    }
+
+    #[test]
+    fn parse_sha256_sidecar_takes_first_token() {
+        assert_eq!(
+            parse_sha256_sidecar(
+                b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  fleet-host\n"
+            )
+            .as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert!(parse_sha256_sidecar(b"not-a-hash").is_none());
+    }
 }

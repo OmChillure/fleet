@@ -8,6 +8,7 @@ pub mod platform;
 pub mod run;
 pub mod software;
 pub mod spawn;
+pub mod update;
 
 pub use config::{ContainerBackend, LocalConfig, merge_child_env};
 pub use paths::{config_dir, config_path, token_path};
