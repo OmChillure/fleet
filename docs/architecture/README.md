@@ -21,6 +21,7 @@ Related component folders (stubs for deeper specs):
 | Web UI | [`docs/components/ui/`](../components/ui/) | Browser app (Dioxus): landing, auth, workspace-scoped shell |
 | Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
 | Worker hosts | [`docs/components/worker-host/`](../components/worker-host/) | Paired self-hosted machines; outbound HTTPS pair + lease |
+| Runners | [`docs/components/runners/`](../components/runners/) | Product surface for where work runs (kinds + isolation) |
 
 **Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
 (auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
