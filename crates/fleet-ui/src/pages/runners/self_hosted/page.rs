@@ -113,31 +113,48 @@ fn package_line(inv: &PackageInventory) -> Option<String> {
     if inv.packages.is_empty() {
         return None;
     }
-    let bits: Vec<String> = inv
-        .packages
+    let mut rows: Vec<(String, Option<String>)> = Vec::new();
+    for p in &inv.packages {
+        let Some(plat) = p
+            .platform
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let sha = p
+            .git_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        rows.push((plat.to_string(), sha));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let shas: Vec<&str> = rows
         .iter()
-        .filter_map(|p| {
-            let plat = p
-                .platform
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())?;
-            let sha = p
-                .git_sha
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            Some(match sha {
-                Some(s) => format!("{plat} {}", short_sha(s)),
-                None => format!("{plat} no build id"),
-            })
+        .filter_map(|(_, s)| s.as_deref())
+        .collect();
+    let same = !shas.is_empty() && shas.iter().all(|s| *s == shas[0]);
+    if same && shas.len() == rows.len() {
+        let plats: Vec<&str> = rows.iter().map(|(p, _)| p.as_str()).collect();
+        return Some(format!(
+            "Served packages {} · {}",
+            short_sha(shas[0]),
+            plats.join(" · ")
+        ));
+    }
+    let bits: Vec<String> = rows
+        .into_iter()
+        .map(|(plat, sha)| match sha {
+            Some(s) => format!("{plat} {}", short_sha(&s)),
+            None => format!("{plat} no build id"),
         })
         .collect();
-    if bits.is_empty() {
-        None
-    } else {
-        Some(format!("Served packages: {}", bits.join(" · ")))
-    }
+    Some(format!("Served packages: {}", bits.join(" · ")))
 }
 
 fn packages_need_restage(inv: &PackageInventory) -> bool {
@@ -407,7 +424,11 @@ fn fmt_mem(bytes: u64, speed_mts: Option<u32>, mem_type: Option<&str>) -> String
 }
 
 fn clean_cpu_model(raw: &str) -> String {
-    let mut s = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut s = raw.to_string();
+    for tok in ["(R)", "(TM)", "(C)", "®", "™"] {
+        s = s.replace(tok, "");
+    }
+    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     for suffix in [
         " with Radeon Graphics",
         " with Radeon Vega Graphics",
