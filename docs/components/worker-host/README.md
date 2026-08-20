@@ -34,7 +34,9 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   build hint. Dev can set `FLEET_WORKER_BUILD_FROM_SOURCE=1` on the
   **machine** (not the CP) so the platform script runs `cargo build`.
 - Identity: served binaries, if any, should match `scripts/tree-id.sh`
-  (same fail-closed rule as API/UI images).
+  (same fail-closed rule as API/UI images). Stage writes `manifest.json`
+  next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
+  outdated” compares the box report to that file, not `/health.git_sha`.
 
 ### Worker machine
 
@@ -119,6 +121,7 @@ Never accepted from the control plane. Editing requires shell on the box.
 | `extra_env` | map | {} | Injected into children (no `FLEET_WORKER_TOKEN` override) |
 | `control_plane_url` | url | from pair | Written at pair time |
 | `host_id` | uuid | from pair | Written at pair time |
+| `auto_update` | bool | **true** | This box will apply CP-served updates. Intersected with plane `auto_update` |
 
 `run_host` / `run_container` is the worker-side “run agents containerized
 and/or directly on the host” switch. Advertised on every heartbeat as
@@ -272,6 +275,9 @@ fleet-host pair --url {api} --token {pair_token}
   "created_at": "…",
   "paired_at": null,
   "software": null,
+  "desired": null,
+  "software_status": "unknown",
+  "outdated": false,
   "auto_update": true,
   "current_jobs": 0,
   "hardware": null
@@ -279,14 +285,48 @@ fleet-host pair --url {api} --token {pair_token}
 ```
 
 `offline` is computed: `status` stored as `online` but `last_seen_at`
-older than 30s → serialize as `offline`.
+older than 90s → serialize as `offline`.
+
+`desired` is the staged dist `manifest.json` for `host.platform`, or
+`null` if that platform was not staged. Source of truth is the **served
+dist**, not `/health.git_sha`.
+
+`software_status` is `current` | `behind` | `unknown`. `outdated` is
+true only when the status is `behind`.
+
+- No software report → `unknown` (not outdated).
+- No manifest for `host.platform` → `unknown` (no prebuilt).
+- Any of the three present package bins (`fleet-host` /
+  `fleet-host.exe`, worker, driver) whose sha256 disagrees with the
+  manifest → `behind`. Mixed match/mismatch is behind.
+- If no bin pair exists, fall back to `software.git_sha` vs
+  `manifest.git_sha` when both are non-empty.
+- All compared bins (or both git shas) match → `current`.
 
 ### Pair / machine (no cookie)
 
 | Method | Path | Auth | Body |
 | --- | --- | --- | --- |
 | `POST` | `/api/worker-hosts/pair` | pair token once | `{ "token", "hostname", "platform", "advertised_host", "advertised_container" }` → `{ "host_id", "machine_token", "workspace_id", "control_plane_url", "cp_settings" }` |
-| `POST` | `/api/worker-hosts/me/heartbeat` | `Authorization: Bearer flm_…` | `{ "advertised_host", "advertised_container", "platform"?, "hostname"?, "current_jobs": n, "error"?: str, "software"?: { "git_sha", "bins", "updating" } }` → `{ "host": HostPublic, "effective": { "host", "container", "max_concurrent" } }` |
+| `POST` | `/api/worker-hosts/me/heartbeat` | `Authorization: Bearer flm_…` | `{ "advertised_host", "advertised_container", "platform"?, "hostname"?, "current_jobs": n, "error"?: str, "software"?: { "git_sha", "bins", "updating" }, "hardware"?: { … } }` → `{ "host": HostPublic, "effective": { "host", "container", "max_concurrent" }, "desired": { "git_sha", "platform", "bins" } \| null }` |
+
+`hardware` is a one-shot jsonb snapshot (not a series). Keep existing keys; new keys are optional and omitted when the box cannot read them. Never fail the heartbeat.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `cpu_cores` | u32 | logical CPUs |
+| `cpu_model` | string? | e.g. `AMD Ryzen 7 5700G with Radeon Graphics` |
+| `cpu_used_pct` | u8? | 0–100, delta across heartbeats; first sample may omit |
+| `mem_total_bytes` | u64 | |
+| `mem_used_pct` | u8 | |
+| `mem_speed_mts` | u32? | DIMM MT/s; often unavailable without readable DMI |
+| `mem_type` | string? | `DDR4` / `DDR5` when DMI/WMI has it |
+| `gpus` | `[{ "name", "vram_bytes"?, "used_pct"? }]?` | nvidia-smi / DXGI / lspci / sysfs; iGPU counts |
+| `gpu_used_pct` | u8? | 0–100, max of readable GPUs (`nvidia-smi` util or amdgpu `gpu_busy_percent`) |
+| `os` | string | |
+
+| Method | Path | Auth | Body |
+| --- | --- | --- | --- |
 | `POST` | `/api/worker-hosts/me/lease` | machine bearer | `{ }` → `{ "claim": null }` or `{ "claim": { "id", "lease_token", "payload": SpawnPayload } }` |
 | `POST` | `/api/worker-hosts/me/lease/{claim_id}/complete` | machine bearer | `{ "lease_token", "ok": bool, "error"?: str }` |
 
@@ -325,6 +365,7 @@ Use existing `work_claims` (`kind = spawn_session`,
 | `/install-worker.ps1` | `scripts/install-worker/install-worker.ps1` |
 | `/install/worker/{name}` | `scripts/install-worker/{name}` (`..` rejected) |
 | `/install/worker/bin/{platform}/{bin}` | `$FLEET_WORKER_DIST_DIR/{platform}/{bin}` or 404 |
+| `/install/worker/bin/{platform}/manifest.json` | staged package identity (`git_sha`, `platform`, `bins.{name}.{sha256,size}`). 404 if that platform is not staged. Windows keys are `fleet-host.exe` etc. |
 
 ---
 
@@ -385,7 +426,7 @@ token **unchanged**):
 
 1. List worker_hosts for `project_id` (= workspace_id) that are
    `enabled`, not `paused`, not `drain`, `status` stored `online`,
-   `last_seen_at` within 30s, `machine_token_hash` set.
+   `last_seen_at` within 90s, `machine_token_hash` set.
 2. Compute effective modes; skip hosts that cannot run **host**. v1 is
    host-only (container / k3d is not a working executor). Do not enqueue
    `runtime=container`. Planned later: prefer container if the host can
@@ -397,6 +438,10 @@ token **unchanged**):
    payload above; `complete_spawn_success` with handle `host:{id}` and
    backend `remote`. Do **not** `ProcessRuntime::spawn` on the API box.
 5. If none: existing local `runtime.spawn` (stub/process/local/docker).
+6. **Exception:** if no assignable host but a paired host in this workspace
+   is `software_updating` and `last_seen` within ~2 minutes, **do not**
+   local-spawn. Leave the task `ready`. Offline without that flag keeps
+   today's fallback.
 
 `fleet-orchestrator` may depend on `fleet-db` for `work_claims::enqueue`
 and `worker_hosts` list. Do not invent a second claims table.
@@ -413,6 +458,7 @@ New workspace member `crates/fleet-host`. Binary `fleet-host`.
 ```
 fleet-host pair --url URL --token TOKEN
 fleet-host run
+fleet-host update
 fleet-host status
 fleet-host unpair
 ```
@@ -438,14 +484,71 @@ Job child still POSTs `/v1/.../heartbeat|status` with the **job** token.
 
 ---
 
+## Apply (software update)
+
+Manual (`fleet-host update`) and auto share one path. **Never set CP
+`paused` / `drain` for an update** — those flags drop the host from
+`list_assignable` and tick would run local `SANDBOX_BACKEND`.
+
+Heartbeat response (host client parses even if an older CP omits it):
+
+```
+{ "host": { "auto_update": true, "paused", "drain", … },
+  "effective": { … },
+  "desired": {
+    "git_sha": "…",
+    "platform": "windows-x86_64",
+    "bins": {
+      "fleet-host.exe": { "sha256": "…", "size": N },
+      "fleet-worker.exe": { … },
+      "fleet-driver.exe": { … }
+    }
+  } | null }
+```
+
+Unix bin names omit `.exe`. Platform IDs match `detect_platform()` /
+install (`linux-x86_64`, `windows-x86_64`, …).
+
+1. Effective auto = `host.auto_update` (default **true**) **and** local
+   `config.toml` `auto_update` (default **true**). Plane can only restrict;
+   the box can only restrict further. Auto-off still applies when the
+   operator runs `fleet-host update` or the CP sets `update_requested_at`.
+2. After heartbeat: if effective auto and `desired` differs, spawn apply
+   (do not block the heartbeat). One attempt per desired git sha.
+3. No `desired` / no prebuilt / 404 → stay quiet; do not error-loop.
+4. Hash local bins; all match → no download.
+5. Download **changed** bins to `{bin}.new` from the paired
+   `control_plane_url` (`/install/worker/bin/{platform}/{bin}` +
+   `.sha256`) **while still claiming**. SHA-256 required. Windows PE
+   machine-type check (`0x8664` vs `0xAA64`). All downloads verify
+   before any rename; failure deletes `.new` and keeps the running set.
+6. **Children only** (`fleet-host` hash unchanged): `rename` worker/driver.
+   Keep leasing. In-flight jobs finish on the old inode.
+   `software.updating` stays false.
+7. **Host binary changed:** heartbeat `software.updating=true`, **stop
+   claiming** new leases (do not PATCH drain/paused). Wait for in-flight
+   to exit. Claims already in `work_claims` for this `host_id` wait.
+   - Unix: `mv` `.new` into place; `exec` (or `systemctl --user restart`).
+   - Windows: cannot overwrite a running PE. Write `update.cmd` next to
+     the exe, spawn it detached, **exit**. Script waits for
+     `fleet-host.exe` to leave, `move /Y` `.new` → `.exe` for changed
+     bins, starts `fleet-host.exe run`.
+8. Do **not** unpair. `machine.token` + `config.toml` stay.
+
+---
+
 ## UI
 
 New route `/{workspace_id}/workers` (sidebar: Workspace → Workers).
 
-- List workers: name, status chip, last seen, hostname/platform.
+- List workers: name, status chip, last seen, hostname/platform,
+  software line (`up to date` / `outdated` / `unknown`) — no hex on the
+  card (git bake vs file hash are not the same id).
+  `updating` replaces outdated while a swap is in progress. Outdated is
+  amber. Desired bits come from the staged dist, not the API compile sha.
 - **Add worker**: POST, show pair token **once** + install commands
   (copy). Token is not shown again.
-- Everyday: Pause / Resume, max jobs at once. Rename by clicking the name.
+- Everyday: Stop taking new jobs / Take jobs again, Auto-update (on by default), Update now if auto is off and the box is outdated. Rename by clicking the name. Each box has a durable `machine_id` (`~/.config/fleet-host/machine.id`, or the first pair’s row id if the binary is too old to send one). Re-pair of the same `machine_id` or the same hostname+platform reclaims that row. Removed clones of a live box are hidden.
 - Remove worker (revoke). Do not expose allow_host / allow_container on the card
   (v1 is host-only; container is not shipped).
 
