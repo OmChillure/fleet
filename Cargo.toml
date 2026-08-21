@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
     "crates/fleet-chat-md",
+    "crates/fleet-runners-view",
     "crates/fleet-db",
     "crates/fleet-auth",
     "crates/fleet-integrations",
@@ -12,6 +13,7 @@ members = [
     "crates/fleet-operator",
     "crates/fleet-driver",
     "crates/fleet-sandbox-driver",
+    "crates/fleet-host",
 ]
 # `cargo run` from the workspace root starts the unified API.
 default-members = [
@@ -57,6 +59,8 @@ aes-gcm = "0.10"
 fleet-db = { path = "crates/fleet-db" }
 fleet-auth = { path = "crates/fleet-auth" }
 fleet-chat-md = { path = "crates/fleet-chat-md" }
+fleet-runners-view = { path = "crates/fleet-runners-view" }
 fleet-integrations = { path = "crates/fleet-integrations" }
 fleet-server = { path = "crates/fleet-server" }
 fleet-orchestrator = { path = "crates/fleet-orchestrator" }
+fleet-host = { path = "crates/fleet-host" }

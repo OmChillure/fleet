@@ -5,12 +5,13 @@ use std::sync::Mutex;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use super::api::{
-    complete_chat, create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks,
-    get_conversation, ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
+    ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, complete_chat,
+    create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
 };
-use super::markdown::{highlight, markdown_to_parts, MdPart};
-use crate::components::toast::show_toast;
+use super::markdown::{MdPart, highlight, markdown_to_parts};
 use crate::Route;
+use crate::clipboard::copy_text;
+use crate::components::toast::show_toast;
 
 /// Hand off the first message across the `/chat` → `/chat/{id}` route switch.
 struct PendingFirstSend {
@@ -1327,8 +1328,11 @@ fn CodeBlock(lang: String, code: String) -> Element {
                     title: "Copy",
                     "aria-label": "Copy code",
                     onclick: move |_| {
-                        copy_text(&code_for_copy);
-                        copied.set(true);
+                        if copy_text(&code_for_copy) {
+                            copied.set(true);
+                        } else {
+                            show_toast().error("Copy failed. Select the code and copy it yourself.");
+                        }
                     },
                     if copied() { "Copied" } else { "Copy" }
                 }
@@ -1338,20 +1342,6 @@ fn CodeBlock(lang: String, code: String) -> Element {
                 dangerous_inner_html: "{highlighted}",
             }
         }
-    }
-}
-
-fn copy_text(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(window) = web_sys::window() {
-            let clipboard = window.navigator().clipboard();
-            let _ = clipboard.write_text(text);
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
     }
 }
 

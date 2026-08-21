@@ -15,6 +15,12 @@ const CASE_COLS: &str = r#"
     created_at, updated_at
 "#;
 
+const CASE_COLS_C: &str = r#"
+    c.id, c.workspace_id, c.kind, c.title, c.policy_md, c.status, c.stage, c.context,
+    c.next_wake_at, c.last_error, c.run_id, c.decision_count, c.created_by, c.version,
+    c.created_at, c.updated_at
+"#;
+
 const EVENT_COLS: &str = r#"
     id, case_id, workspace_id, kind, payload, created_at
 "#;
@@ -140,11 +146,10 @@ pub async fn claim_due(pool: &PgPool, limit: i64) -> DbResult<Vec<Case>> {
                 last_error = NULL
             FROM due
             WHERE c.id = due.id
-            RETURNING c.id
+            RETURNING {CASE_COLS_C}
         )
         SELECT {CASE_COLS}
-        FROM cases
-        WHERE id IN (SELECT id FROM upd)
+        FROM upd
         ORDER BY next_wake_at ASC NULLS LAST
         "#
     );

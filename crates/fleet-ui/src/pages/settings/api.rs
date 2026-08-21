@@ -109,10 +109,7 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Res
 }
 
 pub async fn fetch_settings(workspace_id: &str) -> Result<FleetSettings, String> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/fleet/settings"
-    ))
-    .await?;
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/settings")).await?;
     parse_json(res).await
 }
 

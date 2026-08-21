@@ -9,10 +9,13 @@ pub mod chat_tools;
 pub mod config;
 pub mod fleet_routes;
 pub mod grok;
+pub mod install_routes;
+pub mod partners;
 pub mod retry;
 pub mod state;
 pub mod tickets;
 pub mod work_io;
+pub mod worker_hosts;
 
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
@@ -22,12 +25,12 @@ pub use state::AppState;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_orchestrator::api::router as orch_router;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, TraceLayer};
@@ -47,6 +50,9 @@ pub fn build_router() -> Router<AppState> {
         .merge(chat::router())
         .merge(cases::router())
         .merge(fleet_routes::router())
+        .merge(worker_hosts::router())
+        .merge(partners::router())
+        .merge(install_routes::router())
 }
 
 /// Full HTTP app: fleet-server routes + orchestrator fallback + TraceLayer + CORS.
@@ -173,7 +179,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
         "git_sha": git_sha,
-        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator", "worker_hosts"],
     }))
 }
 
@@ -227,6 +233,19 @@ pub async fn api_index() -> Json<Value> {
                 "conversation": "GET|DELETE /api/workspaces/{workspace_id}/chat/conversations/{id}",
                 "complete": "POST /api/workspaces/{workspace_id}/chat",
                 "note": "Grok CLI + Ollama; persisted history; fleet + integration tools",
+            },
+            "worker_hosts": {
+                "list": "GET /api/workspaces/{workspace_id}/worker-hosts",
+                "create": "POST /api/workspaces/{workspace_id}/worker-hosts",
+                "get": "GET /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "patch": "PATCH /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "delete": "DELETE /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "pair_tokens": "POST /api/workspaces/{workspace_id}/worker-hosts/{host_id}/pair-tokens",
+                "pair": "POST /api/worker-hosts/pair",
+                "heartbeat": "POST /api/worker-hosts/me/heartbeat",
+                "lease": "POST /api/worker-hosts/me/lease",
+                "complete": "POST /api/worker-hosts/me/lease/{claim_id}/complete",
+                "install": "GET /install-worker.sh",
             },
             "orchestrator_admin": {
                 "note": "Bearer ADMIN_TOKEN for automation / workers",

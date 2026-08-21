@@ -156,7 +156,9 @@ cmd_guide() {
     "Chat: New chat, Chat history." \
     "Monitoring: Dashboard, Fleet, Sandboxes, Cases." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
-    "Workspace (expand it): Integrations, Settings." || return 0
+    "Runners (expand it): Self-hosted, Cloud, Partners." \
+    "Workspace (expand it): Integrations, Settings." \
+    "Workers is gone from the sidebar; /{ws}/workers still redirects." || return 0
 
   pause_step "Workspace switcher" \
     "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
@@ -164,6 +166,31 @@ cmd_guide() {
   pause_step "Settings" \
     "Number of agents + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
+
+  pause_step "Runners / Self-hosted" \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; Native greyed off; cannot remove). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
+    "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
+    "Token panel is enough. Do not require a second machine; pairing is outbound." \
+    "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
+    "Each card has Native and Sandboxed checkboxes. Sandboxed is not implemented yet. Both off is the same as stop taking new jobs. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Isolation, Auto-update, and Max jobs stay disabled until the runner acks." \
+    "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
+    "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
+    "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
+    "Click a card name (not Control plane) to rename; Enter saves, Escape cancels." \
+    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago). Control plane says this process, not last seen." || return 0
+
+  pause_step "Workers" \
+    "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \
+    "/{ws}/runners also lands on Self-hosted. Record scene is runners (workers alias)." || return 0
+
+  pause_step "Runners / Cloud" \
+    "Runners → Cloud (/{ws}/runners/cloud). Placeholder cards for public cloud (AWS / GCP / Azure) and Fleet Cloud." \
+    "Do not enter provider keys. Coming-soon / placeholder is success." || return 0
+
+  pause_step "Runners / Partners" \
+    "Runners → Partners (/{ws}/runners/partners). Trust copy first: unused capacity, Sandboxed only, verified vs open." \
+    "Disclaimer + acknowledge checkbox — ack does not enable lending. Lend / Buy credits stay disabled." \
+    "Do not pair a partner machine. Reading the page is success." || return 0
 
   pause_step "Agents" \
     "Seed starters → eight persona cards. No LLM is called here." || return 0
@@ -206,7 +233,7 @@ cmd_guide() {
 
   echo
   ok "Walkthrough done."
-  echo "    Reviewer: ask a peer on the GitLab MR (not a small-tweak exception)."
+  echo "    Review: ask on Slack after the MR exists."
   echo "    Agent demo: $0 record     → attach .tmp/demos/*.webm to the MR."
   echo "    Stop stack: $0 stop"
 }

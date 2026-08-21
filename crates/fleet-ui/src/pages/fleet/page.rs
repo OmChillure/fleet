@@ -90,15 +90,9 @@ fn parse_sessions(v: &Value) -> Vec<SessionCard> {
                     Some(SessionCard {
                         id: s["id"].as_str()?.to_string(),
                         status: s["status"].as_str().unwrap_or("?").to_string(),
-                        runtime_backend: s["runtime_backend"]
-                            .as_str()
-                            .unwrap_or("?")
-                            .to_string(),
+                        runtime_backend: s["runtime_backend"].as_str().unwrap_or("?").to_string(),
                         progress_pct: s["progress_pct"].as_i64().unwrap_or(0),
-                        worker_profile: s["worker_profile"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
+                        worker_profile: s["worker_profile"].as_str().unwrap_or("").to_string(),
                         work_dir: s["work_dir"].as_str().unwrap_or("").to_string(),
                         exit_reason: s["exit_reason"].as_str().unwrap_or("").to_string(),
                     })
@@ -128,15 +122,11 @@ fn status_pill_class(status: &str) -> &'static str {
         "done_success" | "completed" | "exited" => {
             "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
         }
-        "done_failed" | "cancelled" | "failed" => {
-            "bg-red-500/15 text-red-400 border-red-500/30"
-        }
+        "done_failed" | "cancelled" | "failed" => "bg-red-500/15 text-red-400 border-red-500/30",
         "in_progress" | "assigned" | "running" | "active" => {
             "bg-sky-500/15 text-sky-400 border-sky-500/30"
         }
-        "blocked" | "retry_wait" | "stuck" => {
-            "bg-amber-500/15 text-amber-400 border-amber-500/30"
-        }
+        "blocked" | "retry_wait" | "stuck" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
         "ready" | "queued" => {
             "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]"
         }
@@ -183,12 +173,7 @@ pub fn Fleet(workspace_id: String) -> Element {
         spawn(async move {
             match ensure_fleet(&ws).await {
                 Ok(v) => {
-                    project_name.set(
-                        v["name"]
-                            .as_str()
-                            .unwrap_or("Workspace fleet")
-                            .to_string(),
-                    );
+                    project_name.set(v["name"].as_str().unwrap_or("Workspace fleet").to_string());
                     if let Some(b) = v["sandbox_backend"].as_str() {
                         sandbox_backend.set(b.to_string());
                     }

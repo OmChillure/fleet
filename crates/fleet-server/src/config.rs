@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use fleet_auth::AuthConfig;
@@ -18,6 +19,11 @@ pub struct ServerConfig {
     pub integrations: IntegrationsConfig,
     pub ollama: OllamaConfig,
     pub grok: GrokConfig,
+    /// Optional prebuilt `fleet-host` / `fleet-worker` / `fleet-driver` tree.
+    /// First lookup for `/install/worker/bin/{platform}/{bin}`. When unset or
+    /// the file is missing, the handler tries current_exe siblings and (native
+    /// only) workspace `target/{release,debug}/{bin}`.
+    pub worker_dist_dir: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -52,6 +58,11 @@ impl ServerConfig {
         let integrations = IntegrationsConfig::from_env()?;
         let ollama = OllamaConfig::from_env();
         let grok = GrokConfig::from_env();
+        let worker_dist_dir = env::var("FLEET_WORKER_DIST_DIR")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
 
         Ok(Self {
             database_url,
@@ -61,6 +72,7 @@ impl ServerConfig {
             integrations,
             ollama,
             grok,
+            worker_dist_dir,
         })
     }
 }

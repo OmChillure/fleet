@@ -44,9 +44,71 @@ pub struct WorkspacePublic {
     pub role: String,
 }
 
+/// Workspace-level partners disclaimer ack.
+///
+/// Default is not accepted (`accepted_at` is `None`). Recording an ack
+/// does not enable lending, borrowing, enqueue, or assignable runners.
+#[derive(Debug, Clone, Serialize)]
+pub struct PartnersDisclaimerAck {
+    pub accepted: bool,
+    pub accepted_at: Option<DateTime<Utc>>,
+}
+
+impl PartnersDisclaimerAck {
+    pub fn from_accepted_at(accepted_at: Option<DateTime<Utc>>) -> Self {
+        Self {
+            accepted: accepted_at.is_some(),
+            accepted_at,
+        }
+    }
+}
+
 impl From<WorkspaceWithRole> for WorkspacePublic {
     fn from(w: WorkspaceWithRole) -> Self {
         w.as_public()
+    }
+}
+
+#[cfg(test)]
+mod partners_disclaimer_tests {
+    use super::*;
+
+    #[test]
+    fn missing_timestamp_is_not_accepted() {
+        let ack = PartnersDisclaimerAck::from_accepted_at(None);
+        assert!(!ack.accepted, "default (NULL) is not accepted");
+        assert_eq!(ack.accepted_at, None);
+    }
+
+    #[test]
+    fn recorded_timestamp_is_accepted() {
+        let at = DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&Utc);
+        let ack = PartnersDisclaimerAck::from_accepted_at(Some(at));
+        assert!(ack.accepted);
+        assert_eq!(ack.accepted_at, Some(at));
+    }
+
+    #[test]
+    fn ack_serializes_timestamp_only() {
+        let at = DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&Utc);
+        let json = serde_json::to_value(PartnersDisclaimerAck::from_accepted_at(Some(at)))
+            .expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert_eq!(obj.get("accepted"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            obj.get("accepted_at"),
+            Some(&serde_json::json!("2026-08-20T12:00:00Z"))
+        );
+        // Ack is a recorded timestamp only — no lend/borrow/enqueue flags.
+        assert_eq!(obj.len(), 2);
+        assert!(!obj.contains_key("lending"));
+        assert!(!obj.contains_key("borrowing"));
+        assert!(!obj.contains_key("enqueue"));
+        assert!(!obj.contains_key("assignable"));
     }
 }
 

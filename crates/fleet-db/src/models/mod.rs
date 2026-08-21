@@ -1,21 +1,27 @@
 mod audit;
 mod case;
 mod chat;
+mod gpu;
 mod integration;
 mod persona;
+mod plane_runner;
 mod session;
 mod ticket;
 mod user;
 mod work_claim;
+mod worker_host;
 mod workspace;
 
 pub use audit::*;
 pub use case::*;
 pub use chat::*;
+pub use gpu::{infer_igpu_from_cpu, normalize_gpu_name};
 pub use integration::*;
 pub use persona::*;
+pub use plane_runner::*;
 pub use session::*;
 pub use ticket::*;
 pub use user::*;
 pub use work_claim::*;
+pub use worker_host::*;
 pub use workspace::*;

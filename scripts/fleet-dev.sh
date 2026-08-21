@@ -126,6 +126,28 @@ wait_http() {
   return 1
 }
 
+# dx answers :3030 before wasm/public sha rebuild. Port-up is not this tree.
+wait_this_tree() {
+  local mode="${1:-}"
+  local attempts="${2:-180}"
+  local -a args=()
+  if [[ "$mode" == "api-only" ]]; then
+    args+=(--api-only)
+  fi
+  export_git_sha
+  local i
+  log "Waiting for stack identity (${FLEET_GIT_SHA})…"
+  for i in $(seq 1 "$attempts"); do
+    if python3 "${ROOT}/tests/browser/stack_identity.py" "${args[@]}" >/dev/null 2>&1; then
+      ok "  stack is this tree"
+      return 0
+    fi
+    sleep 1
+  done
+  python3 "${ROOT}/tests/browser/stack_identity.py" "${args[@]}" || true
+  return 1
+}
+
 wait_postgres() {
   local attempts="${1:-40}"
   local i
@@ -338,7 +360,7 @@ start_ui() {
   nohup env \
     CARGO_TERM_COLOR=never \
     FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
-    dx serve --package fleet-ui --port "$UI_PORT" \
+    dx serve --package fleet-ui --port "$UI_PORT" --addr "${UI_ADDR:-$HOST}" \
     >>"$LOG_UI" 2>&1 &
   echo $! >"$PID_UI"
   ok "  fleet-ui pid $(read_pid "$PID_UI")  log → $LOG_UI"
@@ -384,12 +406,12 @@ cmd_start() {
     }
   fi
   if [[ "${FLEET_SKIP_UI:-0}" == "1" ]]; then
-    python3 "${ROOT}/tests/browser/stack_identity.py" --api-only || {
+    wait_this_tree api-only 90 || {
       err "Started API is not this tree. See tests/browser/stack_identity.py"
       exit 1
     }
   else
-    python3 "${ROOT}/tests/browser/stack_identity.py" || {
+    wait_this_tree 180 || {
       err "Started ports are not this tree. See tests/browser/stack_identity.py"
       exit 1
     }

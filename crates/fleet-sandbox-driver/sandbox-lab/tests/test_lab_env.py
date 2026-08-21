@@ -14,6 +14,7 @@ class LabEnvTests(unittest.TestCase):
         self.assertTrue(flags["ENABLE_OLLAMA"])
         self.assertTrue(flags["ENABLE_LMSTUDIO_PROXY"])
         self.assertTrue(flags["ENABLE_GITSSH"])
+        self.assertTrue(flags["ENABLE_RUNNER_GUEST_E2E"])
         self.assertTrue(env_flag("ENABLE_KIND", environ={}, dotenv_text="PROFILE=full\n"))
 
     def test_explicit_zero_beats_profile_full(self):
@@ -40,12 +41,14 @@ class LabEnvTests(unittest.TestCase):
         self.assertTrue(flags["ENABLE_OLLAMA"])
         self.assertTrue(flags["ENABLE_GITSSH"])
         self.assertFalse(flags["ENABLE_BROWSER_E2E"])
+        self.assertTrue(flags["ENABLE_RUNNER_GUEST_E2E"])
 
     def test_minimal_proxy_and_gitssh_off(self):
         flags = resolve_flags(environ={}, dotenv_text="PROFILE=minimal\n")
         self.assertFalse(flags["ENABLE_LMSTUDIO_PROXY"])
         self.assertFalse(flags["ENABLE_GITSSH"])
         self.assertTrue(flags["ENABLE_OLLAMA"])
+        self.assertTrue(flags["ENABLE_RUNNER_GUEST_E2E"])
 
 
 if __name__ == "__main__":

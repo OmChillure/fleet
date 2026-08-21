@@ -68,10 +68,7 @@ async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
 }
 
 pub async fn fetch_personas(workspace_id: &str) -> Result<PersonasPayload, String> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/fleet/personas"
-    ))
-    .await?;
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/personas")).await?;
     let status = res.status();
     let text = res.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {

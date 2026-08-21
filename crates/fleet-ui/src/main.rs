@@ -2,6 +2,7 @@
 
 #![allow(non_snake_case)]
 
+mod clipboard;
 mod components;
 mod pages;
 mod theme;
@@ -11,6 +12,10 @@ use dioxus::prelude::*;
 use components::app_shell::AppShell;
 use components::navbar::Navbar;
 use components::toast::ToastProvider;
+use fleet_runners_view::routes::{
+    SEGMENT_CLOUD, SEGMENT_PARTNERS, runner_child_path, runners_index_target, self_hosted_path,
+    workers_redirect,
+};
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
 use pages::cases::{CaseDetail, Cases};
@@ -19,9 +24,12 @@ use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
 use pages::integrations::{Integrations, OAuthDone};
+use pages::runners::cloud::CloudPage;
+use pages::runners::partners::PartnersPage;
 use pages::sandboxes::Sandboxes;
 use pages::sessions::{SessionDetail, Sessions};
 use pages::settings::Settings;
+use pages::workers::Workers as SelfHosted;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -62,6 +70,16 @@ pub enum Route {
         Cases { workspace_id: String },
         #[route("/:workspace_id/integrations")]
         Integrations { workspace_id: String },
+        #[route("/:workspace_id/runners/self-hosted")]
+        SelfHosted { workspace_id: String },
+        #[route("/:workspace_id/runners/cloud")]
+        CloudPage { workspace_id: String },
+        #[route("/:workspace_id/runners/partners")]
+        PartnersPage { workspace_id: String },
+        #[route("/:workspace_id/runners")]
+        RunnersIndex { workspace_id: String },
+        #[route("/:workspace_id/workers")]
+        WorkersRedirect { workspace_id: String },
         #[route("/:workspace_id/settings")]
         Settings { workspace_id: String },
 }
@@ -81,6 +99,11 @@ impl Route {
             | Route::Cases { workspace_id }
             | Route::CaseDetail { workspace_id, .. }
             | Route::Integrations { workspace_id }
+            | Route::SelfHosted { workspace_id }
+            | Route::CloudPage { workspace_id }
+            | Route::PartnersPage { workspace_id }
+            | Route::RunnersIndex { workspace_id }
+            | Route::WorkersRedirect { workspace_id }
             | Route::Settings { workspace_id } => Some(workspace_id.as_str()),
             _ => None,
         }
@@ -99,6 +122,41 @@ fn App() -> Element {
             Router::<Route> {}
         }
     }
+}
+
+/// Map a host-tested runners path onto the typed Dioxus route.
+fn route_for_runners_path(workspace_id: String, path: &str) -> Route {
+    if path == self_hosted_path(&workspace_id) {
+        Route::SelfHosted { workspace_id }
+    } else if path == runner_child_path(&workspace_id, SEGMENT_CLOUD) {
+        Route::CloudPage { workspace_id }
+    } else if path == runner_child_path(&workspace_id, SEGMENT_PARTNERS) {
+        Route::PartnersPage { workspace_id }
+    } else {
+        Route::SelfHosted { workspace_id }
+    }
+}
+
+/// `/{ws}/runners` → current self-hosted workers UI.
+#[component]
+fn RunnersIndex(workspace_id: String) -> Element {
+    let navigator = use_navigator();
+    use_effect(move || {
+        let dest = runners_index_target(&workspace_id);
+        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
+    });
+    rsx! {}
+}
+
+/// `/{ws}/workers` → `/{ws}/runners/self-hosted`.
+#[component]
+fn WorkersRedirect(workspace_id: String) -> Element {
+    let navigator = use_navigator();
+    use_effect(move || {
+        let dest = workers_redirect(&workspace_id);
+        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
+    });
+    rsx! {}
 }
 
 /// Landing + auth chrome — pure black, no color accents.

@@ -5,6 +5,6 @@ mod markdown;
 mod page;
 
 pub use api::{
-    delete_conversation, fetch_chat_status, list_conversations, ChatModelInfo, ConversationSummary,
+    ChatModelInfo, ConversationSummary, delete_conversation, fetch_chat_status, list_conversations,
 };
 pub use page::{Chat, ChatThread};

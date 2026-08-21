@@ -132,10 +132,8 @@ mod oauth_bridge {
             }) as Box<dyn FnMut(_)>);
 
             if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback(
-                    "message",
-                    handler.as_ref().unchecked_ref(),
-                );
+                let _ = window
+                    .add_event_listener_with_callback("message", handler.as_ref().unchecked_ref());
                 let _ = window.add_event_listener_with_callback(
                     "storage",
                     storage_handler.as_ref().unchecked_ref(),
@@ -562,21 +560,15 @@ async fn poll_until_connected(
         // Auth tab postMessage / localStorage → thread_local (safe).
         if let Some(msg) = oauth_bridge::take() {
             if msg.ok {
-                let matches = msg.provider.is_empty()
-                    || msg.provider.eq_ignore_ascii_case(provider);
+                let matches =
+                    msg.provider.is_empty() || msg.provider.eq_ignore_ascii_case(provider);
                 if matches {
                     // Instant UI feedback — don't wait for the next list fetch.
                     mark_connected_locally(items, provider);
 
                     // Confirm with server (DB may lag a beat behind the popup).
-                    let confirmed = refresh_until_connected(
-                        workspace_id,
-                        provider,
-                        items,
-                        20,
-                        300,
-                    )
-                    .await;
+                    let confirmed =
+                        refresh_until_connected(workspace_id, provider, items, 20, 300).await;
 
                     connecting_provider.set(None);
                     if confirmed {

@@ -50,9 +50,8 @@ async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
         if text.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text).map_err(|e| {
-            FleetError::Network(format!("invalid JSON: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| FleetError::Network(format!("invalid JSON: {e} ({text})")))
     } else {
         #[derive(Deserialize)]
         struct ErrBody {
@@ -72,12 +71,11 @@ async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
 }
 
 pub async fn ensure_fleet(workspace_id: &str) -> Result<Value, FleetError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/fleet"
-    ))))
-    .send()
-    .await
-    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    let res =
+        with_credentials(client().get(api_url(&format!("/api/workspaces/{workspace_id}/fleet"))))
+            .send()
+            .await
+            .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
     parse(res).await
 }
 

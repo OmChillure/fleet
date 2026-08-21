@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{list_sandboxes, SandboxRow};
+use super::api::{SandboxRow, list_sandboxes};
 
 fn short_id(id: &str) -> String {
     id.get(..8).unwrap_or(id).to_string()

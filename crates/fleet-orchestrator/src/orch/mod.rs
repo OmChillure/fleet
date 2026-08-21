@@ -20,4 +20,5 @@ pub use validate_done::{default_acceptance, validate_task_done};
 pub use deps_step::*;
 pub use materialize_step::*;
 pub use rollup::*;
+pub use spawn::apply_retry_after_failure;
 pub use tick::*;

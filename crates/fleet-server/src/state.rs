@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::extract::FromRef;
 use fleet_auth::{AuthConfig, AuthState};
 use fleet_db::PgPool;
@@ -19,6 +21,8 @@ pub struct AppState {
     pub ollama: OllamaConfig,
     /// Grok via local CLI auth (`~/.grok/auth.json`) — model `grok-4.5`.
     pub grok: GrokConfig,
+    /// Optional prebuilt worker binaries (`FLEET_WORKER_DIST_DIR`).
+    pub worker_dist_dir: Option<PathBuf>,
 }
 
 impl FromRef<AppState> for AuthState {

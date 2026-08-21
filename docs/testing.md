@@ -22,11 +22,12 @@ jobs or a runner. Tests run on a developer or agent host:
 | Rust integration | `fleet-orchestrator` / `fleet-auth` / `fleet-server` / `fleet-db` `tests/` | `just test-integration` (needs Postgres via `just db-up`) | **Fail** if `DATABASE_URL` is unset |
 | Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | Skip only when the matching `ENABLE_*` is off; **fail** if the flag is on and the service is down |
 | Browser | `tests/browser/test_app_e2e.py` | suite stage when `ENABLE_BROWSER_E2E=1` (needs `:3030` + `:8080`; after kind when `ENABLE_KIND=1`) | Off unless enabled; then **fail** if the stack is down |
+| Runner guests | `sandbox-lab/tests/test_runner_guest_e2e.py` | `ENABLE_RUNNER_GUEST_E2E=1` + this tree + a guest per OS | Default **on** for every `PROFILE`. Missing guest/stack is a **fail**. Explicit `0` still wins. Live **skipped for now:** linux ARM, `freebsd-amd64`, Darwin, `windows-arm64` (`LIVE_SKIPPED`). Procedure: [`components/runners/testing-procedures.md`](./components/runners/testing-procedures.md) |
 | Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI |
 | MR demo video | `scripts/human-test.sh record` (agent, Playwright `.webm`) | attach to the GitLab MR | Agent records; never commit the file |
 | Live LLM / Grok ACP | `#[ignore]` | `cargo test -p fleet-driver -- --ignored` | Ignored by default |
 
-`fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover chrome with Playwright. Chat markdown units live in `fleet-chat-md` and run on `just test`.
+`fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover chrome with Playwright. Chat markdown units live in `fleet-chat-md` and runner card helpers live in `fleet-runners-view`; both run on `just test`.
 
 `ENABLE_BROWSER_E2E` defaults **on** only for `PROFILE=full` (kind publishes UI/API). `lab` and `minimal` default it off.
 
@@ -42,6 +43,15 @@ green path via `FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx` is a fail
 (Kind UI is not a substitute). Kind videos filmed without matching API+UI
 ids are not proof. Contract: `tests/browser/test_fail_closed_contract.py`.
 
+## Harvest, not a writer loop
+
+Catalog status comes from running the commands above (or
+`scripts/harvest-runner-catalog.sh`). Do not schedule a recurring agent
+that implements missing rows or relaunches children. Do not spawn one
+agent per catalog row on a timer. A missing child id is not a relaunch.
+One stack rebuild, then one e2e pass. `LIVE_SKIPPED` guests stay skipped
+until there is a bootable guest.
+
 ## Rules
 
 - Rust behavior is tested in Rust. Python tests the Python workspace agent and compose/kind YAML.
@@ -51,6 +61,7 @@ ids are not proof. Contract: `tests/browser/test_fail_closed_contract.py`.
 - Do not add GitLab jobs or runners. Keep `.gitlab-ci.yml` as `when: never`.
 - Human testing and agent-recorded MR demos: [`human-testing.md`](./human-testing.md).
 - Behavior catalog: [`behavior-interactions.md`](./behavior-interactions.md). HTTP/auth/fleet coverage lives in crate integration tests, not a second Python framework.
+- Runner behaviors require unit + browser e2e + real-life VM/OS e2e: [`components/runners/testing-requirements.md`](./components/runners/testing-requirements.md). That file is the requirement, not the tests.
 
 ## Commands
 

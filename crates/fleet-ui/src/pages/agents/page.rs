@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use super::api::{fetch_personas, PersonaDto};
+use super::api::{PersonaDto, fetch_personas};
 
 #[component]
 pub fn Agents(workspace_id: String) -> Element {

@@ -20,6 +20,8 @@ Related component folders (stubs for deeper specs):
 | Sandbox Hosting Tool | [`docs/components/sandbox-hosting-tool/`](../components/sandbox-hosting-tool/) | Concrete runtime backends (k8s, VM, podman, …) |
 | Web UI | [`docs/components/ui/`](../components/ui/) | Browser app (Dioxus): landing, auth, workspace-scoped shell |
 | Auth & workspaces | [`docs/components/auth/`](../components/auth/) | Signup/login cookies, default workspace, list/create APIs |
+| Worker hosts | [`docs/components/worker-host/`](../components/worker-host/) | Paired self-hosted machines; outbound HTTPS pair + lease |
+| Runners | [`docs/components/runners/`](../components/runners/) | Product surface for where work runs (kinds + isolation) |
 
 **Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
 (auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
@@ -34,6 +36,11 @@ executor for coding plans; cases are the long-lived state machine.
 runs OpenCode/Pi over ACP in a per-task compose sandbox (see
 [`sandbox-workspace.md`](./sandbox-workspace.md)). Not `PROCESS_WORKER_BIN`
 (that is [`crates/fleet-driver`](../../crates/fleet-driver/)).
+**Worker hosts:** workspace owners create a host and copy a one-time pair
+token. The machine installs `fleet-host` and pairs outbound (HTTPS); no
+inbound port on the worker. Tick prefers an online matching host, else
+today's local `SANDBOX_BACKEND`. See
+[`docs/components/worker-host/`](../components/worker-host/).
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

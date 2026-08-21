@@ -277,11 +277,11 @@ pub async fn fetch_chat_status(workspace_id: &str) -> Result<ChatStatus, ChatErr
 }
 
 /// List saved chats for Sessions page.
-pub async fn list_conversations(
-    workspace_id: &str,
-) -> Result<Vec<ConversationSummary>, ChatError> {
-    let res =
-        authorized_get(&format!("/api/workspaces/{workspace_id}/chat/conversations")).await?;
+pub async fn list_conversations(workspace_id: &str) -> Result<Vec<ConversationSummary>, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/chat/conversations"
+    ))
+    .await?;
     let body: ConversationsListResponse = parse_json(res).await?;
     Ok(body.conversations)
 }

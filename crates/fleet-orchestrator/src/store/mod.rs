@@ -1,16 +1,21 @@
 //! Postgres store layer (PR3).
 
+mod host_pool;
 mod models;
 mod pool;
 mod tick_ops;
 
+pub use host_pool::{
+    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
+    effective_runtime, enqueue_remote_spawn, hold_ready_for_host_update, host_at_capacity,
+    pick_assignable_host, pick_assignable_runner, select_assignable_host, select_assignable_runner,
+    workspace_has_updating_host,
+};
 pub use models::*;
 pub use pool::*;
 pub use tick_ops::SpawnAssignment;
 
-use crate::domain::{
-    stable_board_task_id, WorkPlanBody, WorkPlanStatus, WorkRunStatus,
-};
+use crate::domain::{WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id};
 use crate::validate::validate_plan;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -445,11 +450,7 @@ impl Store {
         Ok(res.rows_affected() == 1)
     }
 
-    pub async fn set_run_terminal(
-        &self,
-        run_id: Uuid,
-        status: &str,
-    ) -> Result<()> {
+    pub async fn set_run_terminal(&self, run_id: Uuid, status: &str) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE work_runs

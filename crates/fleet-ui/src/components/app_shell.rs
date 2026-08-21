@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 
+use crate::Route;
 use crate::components::sidebar::Sidebar;
 use crate::pages::auth::api::{AuthError, me};
 use crate::theme::Theme;
-use crate::Route;
 
 /// App chrome for dashboard and related pages: sidebar + content (no top bar).
 ///

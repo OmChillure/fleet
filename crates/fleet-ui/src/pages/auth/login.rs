@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 
 use super::api::{LoginBody, list_workspaces, login as api_login, take_just_registered};
 use super::layout::AuthSplit;
-use crate::components::toast::show_toast;
 use crate::Route;
+use crate::components::toast::show_toast;
 
 /// Login — left form, right product panel. Sets JWT cookies via fleet-auth.
 #[component]
@@ -60,9 +60,7 @@ pub fn Login() -> Element {
                     loading.set(false);
                     if let Some(id) = ws_id {
                         show_toast().success("Signed in.");
-                        navigator.push(Route::Dashboard {
-                            workspace_id: id,
-                        });
+                        navigator.push(Route::Dashboard { workspace_id: id });
                     } else {
                         show_toast().error("Logged in, but no workspace was found. Try again.");
                     }

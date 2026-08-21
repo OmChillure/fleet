@@ -153,9 +153,7 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
 }
 
 /// `GET /api/workspaces/{id}/integrations`
-pub async fn list_integrations(
-    workspace_id: &str,
-) -> Result<Vec<Integration>, IntegrationsError> {
+pub async fn list_integrations(workspace_id: &str) -> Result<Vec<Integration>, IntegrationsError> {
     let path = format!("/api/workspaces/{workspace_id}/integrations");
     let res = authorized_get(&path).await?;
     let body: IntegrationListResponse = parse_json_or_error(res).await?;
