@@ -30,18 +30,16 @@ can be assignable. Do not invent a second spawn path.
 
 ---
 
-## Isolation is not a nav item
+## Isolation is SANDBOX_BACKEND (once)
 
-Each self-hosted runner has two checkboxes: **Native** and **Sandboxed**.
-Both, either, or neither. Neither is the same as stop taking new jobs.
+Do not add Native / Sandboxed checkboxes on runner cards. How a job is
+isolated is `SANDBOX_BACKEND` (`stub` / `process` / `local` / `docker`)
+on the control plane. Paired `fleet-host` boxes run a process on that
+machine. Pause / “Stop taking new jobs” is not isolation.
 
-- **Native** — jobs run as processes on that OS. This is what v1 assigns.
-- **Sandboxed** — placeholder. Shown on the card so the option is not
-  missing; checking it does not run container/k8s jobs yet.
-
-Sidebar after MR 3: **Runners** accordion (same rank as Monitoring and
-Agents). Children: **Self-hosted** (live), **Cloud** and **Partners**
-(placeholders this MR). Workspace keeps Integrations + Settings.
+Sidebar: **Runners** accordion (same rank as Monitoring and Agents).
+Children: **Self-hosted** (live), **Cloud** and **Partners**
+(placeholders). Workspace keeps Integrations + Settings.
 
 ---
 

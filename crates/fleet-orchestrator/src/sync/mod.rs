@@ -1,4 +1,6 @@
-//! External board sync stub (PR4 / PR10). No Jira client in MVP.
+//! External board sync (PR4 / PR10). Log/Noop stubs + control-plane I/O adapter.
+
+pub mod io;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -7,6 +9,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct TaskStatusSync {
     pub board_task_id: Uuid,
+    pub project_id: Uuid,
     pub external_provider: Option<String>,
     pub external_key: Option<String>,
     pub status: String,
@@ -59,6 +62,7 @@ mod tests {
         NoopBoardSync
             .sync_task_status(TaskStatusSync {
                 board_task_id: Uuid::new_v4(),
+                project_id: Uuid::new_v4(),
                 external_provider: Some("jira".into()),
                 external_key: Some("WEB-1".into()),
                 status: "in_progress".into(),

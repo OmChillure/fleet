@@ -132,15 +132,7 @@ def _card(page, name: str):
 def _widgets(card):
     auto = card.locator("label").filter(has_text="Auto-update").locator("input")
     max_jobs = card.locator("label").filter(has_text="Max jobs at once").locator("input")
-    native = card.get_by_role("checkbox", name=re.compile(r"^Native$"))
-    if native.count() == 0:
-        native = card.locator("label").filter(has_text=re.compile(r"^Native$")).locator(
-            "input"
-        )
-    sandboxed = card.get_by_role("checkbox", name=re.compile(r"Sandboxed"))
-    if sandboxed.count() == 0:
-        sandboxed = card.locator("label").filter(has_text="Sandboxed").locator("input")
-    return auto, max_jobs, native, sandboxed
+    return auto, max_jobs
 
 
 class CatalogWidgetsLockPendingTests(unittest.TestCase):
@@ -192,15 +184,16 @@ class CatalogWidgetsLockPendingTests(unittest.TestCase):
         wait_dx_ready(page)
         card = _card(page, name)
         self.assertIn("online", card.inner_text().lower())
-        auto, max_jobs, native, sandboxed = _widgets(card)
+        auto, max_jobs = _widgets(card)
         self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
         self.assertGreater(max_jobs.count(), 0, "paired card needs Max jobs at once")
-        self.assertGreater(native.count(), 0, "paired card needs Native")
-        self.assertGreater(sandboxed.count(), 0, "paired card needs Sandboxed")
+        self.assertEqual(
+            card.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
+            0,
+            "isolation Native checkbox must not exist",
+        )
         self.assertTrue(auto.first.is_enabled(), "Auto-update must be editable before Apply")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must be editable before Apply")
-        self.assertTrue(native.first.is_enabled(), "Native must be editable before Apply")
-        self.assertTrue(sandboxed.first.is_enabled(), "Sandboxed must be editable before Apply")
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
             0,
@@ -244,16 +237,11 @@ class CatalogWidgetsLockPendingTests(unittest.TestCase):
                 "pending apply pill missing after reload: "
                 f"{card.inner_text()[:800]!r} api={row!r}"
             ) from None
-        auto, max_jobs, native, sandboxed = _widgets(card)
+        auto, max_jobs = _widgets(card)
         self.assertFalse(auto.first.is_enabled(), "Auto-update must lock while pending apply")
         self.assertFalse(
             max_jobs.first.is_enabled(),
             "Max jobs at once must lock while pending apply",
-        )
-        self.assertFalse(native.first.is_enabled(), "Isolation Native must lock while pending apply")
-        self.assertFalse(
-            sandboxed.first.is_enabled(),
-            "Isolation Sandboxed must lock while pending apply",
         )
 
         acked = heartbeat(page, machine_token, {"settings_ack_gen": settings_gen})
@@ -269,11 +257,9 @@ class CatalogWidgetsLockPendingTests(unittest.TestCase):
             0,
             "ack must clear pending apply so widgets unlock",
         )
-        auto, max_jobs, native, sandboxed = _widgets(card)
+        auto, max_jobs = _widgets(card)
         self.assertTrue(auto.first.is_enabled(), "Auto-update must unlock after ack")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must unlock after ack")
-        self.assertTrue(native.first.is_enabled(), "Native must unlock after ack")
-        self.assertTrue(sandboxed.first.is_enabled(), "Sandboxed must unlock after ack")
 
 
 if __name__ == "__main__":

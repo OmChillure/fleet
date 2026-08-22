@@ -230,11 +230,34 @@ class Demo:
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/cases", wait_until="networkidle")
-        pause(p, 1500)
+        pause(p, 800)
+        title = p.locator("input[placeholder*='Title']")
+        policy = p.locator("textarea[placeholder*='Policy']")
+        if title.count() and policy.count():
+            title.first.fill("Demo case")
+            policy.first.fill("Wait until observed, then complete.")
+            create = p.get_by_role("button", name="Create case")
+            if create.count():
+                create.first.click()
+                pause(p, 1500)
         first = p.locator("a[href*='/cases/']")
         if first.count():
             first.first.click()
-            pause(p, 1500)
+            pause(p, 800)
+            decide = p.get_by_role("button", name="Decide now")
+            if decide.count():
+                decide.first.click()
+                pause(p, 1500)
+
+    def scene_inbox(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/inbox", wait_until="networkidle")
+        pause(p, 800)
+        start = p.get_by_role("button", name="Start monitor")
+        if start.count():
+            start.first.click()
+            pause(p, 1200)
 
     def scene_agents(self) -> None:
         base = self.ensure_session()
@@ -264,7 +287,11 @@ class Demo:
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/settings", wait_until="networkidle")
-        pause(p, 1500)
+        pause(p, 800)
+        members = p.get_by_text("Members", exact=True)
+        if members.count():
+            members.first.scroll_into_view_if_needed()
+            pause(p, 800)
 
     def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
@@ -380,7 +407,7 @@ class Demo:
                 "Trust",
                 "Disclaimer",
                 "unused capacity",
-                "Sandboxed",
+                "Coming soon",
                 "Verified",
                 "verified",
                 "acknowledge",
@@ -471,6 +498,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "fleet": Demo.scene_fleet,
     "sandboxes": Demo.scene_sandboxes,
     "cases": Demo.scene_cases,
+    "inbox": Demo.scene_inbox,
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
@@ -494,6 +522,7 @@ CORE = [
     "fleet",
     "sandboxes",
     "cases",
+    "inbox",
     "agents",
     "integrations",
     "settings",

@@ -1,5 +1,6 @@
-//! Inbox ingest: `@fleet monitor` watches connected sources; `@fleet finish`
-//! launches a specialist plan for one item.
+//! Inbox ingest: the Inbox page (Start monitor) or chat tool `monitor_tickets`
+//! watches connected sources. Chat `finish_ticket` loads the spec for the model
+//! to plan. Inbox Finish launches one generalist — the worker chooses tools.
 //!
 //! Sources: GitHub / GitLab issues, Jira, Linear, Slack, Notion.
 //! Tokens stay on the control plane.
@@ -20,11 +21,20 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// Every integration that can feed the inbox. Poll uses whatever is connected.
 pub const TASK_PROVIDERS: &[&str] = &[
-    "github", "gitlab", "jira", "linear", "slack", "notion", "trello", "asana",
+    "github",
+    "gitlab",
+    "bitbucket",
+    "jira",
+    "linear",
+    "trello",
+    "asana",
+    "slack",
+    "teams",
+    "notion",
+    "confluence",
 ];
-/// Auto-launch only these — chat/page queries, not every old Jira issue.
-pub const AUTO_LAUNCH_PROVIDERS: &[&str] = &["slack", "notion", "teams"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitorArgs {
@@ -154,7 +164,7 @@ pub async fn monitor_tickets(
     }
     if enabled && providers.is_empty() {
         return Err(AppError::bad_request(
-            "no listen source connected — open Integrations and Connect Slack, Notion, GitHub, Jira, Linear, … then say @fleet monitor",
+            "no listen source connected — open Integrations, Connect an app, then Start monitor on Inbox",
         ));
     }
     providers.sort();
@@ -204,6 +214,14 @@ pub async fn monitor_tickets(
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
 
+    if enabled {
+        let _ = state
+            .orch
+            .store
+            .set_auto_sync_external(workspace_id, true)
+            .await;
+    }
+
     let poll = if enabled {
         Some(poll_workspace(state, workspace_id, true).await?)
     } else {
@@ -243,6 +261,11 @@ pub async fn list_tickets(
         "monitor": monitor.as_ref().map(|m| json!({
             "enabled": m.enabled,
             "providers": m.providers,
+            "github_repos": m.github_repos,
+            "jira_jql": m.jira_jql,
+            "slack_channels": m.slack_channels,
+            "notion_databases": m.notion_databases,
+            "auto_launch": m.auto_launch,
             "last_poll_at": m.last_poll_at,
             "last_error": m.last_error,
         })),
@@ -269,10 +292,9 @@ pub async fn prepare_finish(
     let spec = format!(
         "{}\n\n# I/O\n\
          Source: `{provider}` `{key}`.\n\
-         Use `use_integration` to read/write any connected app (Slack, Notion, GitHub, git, …). \
-         Tokens stay on the control plane.\n\
-         When you finish, write `result.md`. The control plane will also reply on this source \
-         (Slack thread, Notion page, or ticket comment).",
+         Use `use_integration` for whatever this item actually needs on any connected app. \
+         Tokens stay on the control plane. Do not assume you must write code or open a PR.\n\
+         When you finish, write `result.md`. The control plane will also reply on this source.",
         ticket_spec_md(&item, live.as_ref()),
         provider = item.provider,
         key = item.external_key,
@@ -282,40 +304,48 @@ pub async fn prepare_finish(
         provider: item.provider.clone(),
         key: item.external_key.clone(),
     };
-    let tasks = vec![
-        PlanTask {
-            plan_task_id: "impl".into(),
-            title: title.clone(),
-            summary: spec.chars().take(280).collect(),
-            spec_md: spec.clone(),
-            depends_on: vec![],
-            worker_profile: "coding".into(),
-            acceptance: vec![],
-            priority: 100,
-            external_ref: Some(ext.clone()),
-            timeout_s: Some(3600),
-            max_retries: Some(1),
-        },
-        PlanTask {
-            plan_task_id: "rev".into(),
-            title: format!("Review {}", item.external_key),
-            summary: format!("Review the implementation of {}", item.external_key),
-            spec_md: format!(
-                "Review `{key}` ({title}). Check the work in `work/` against the ticket. \
-                 If it is not acceptable, call `request_changes`.\n\n{spec}",
-                key = item.external_key,
-                title = item.title,
-            ),
-            depends_on: vec!["impl".into()],
-            worker_profile: "reviewer".into(),
-            acceptance: vec![],
-            priority: 90,
-            external_ref: Some(ext),
-            timeout_s: Some(3600),
-            max_retries: Some(1),
-        },
-    ];
+    let tasks = vec![PlanTask {
+        plan_task_id: "work".into(),
+        title: title.clone(),
+        summary: spec.chars().take(280).collect(),
+        spec_md: spec,
+        depends_on: vec![],
+        worker_profile: "generalist".into(),
+        acceptance: vec!["result.md exists and is non-empty".into()],
+        priority: 100,
+        external_ref: Some(ext),
+        timeout_s: Some(3600),
+        max_retries: Some(1),
+    }];
     Ok(PreparedFinish { item, tasks, title })
+}
+
+/// Chat tool: return the ticket spec so the model plans. Does not launch a run.
+pub async fn ticket_context_for_model(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    args: FinishTicketArgs,
+) -> AppResult<Value> {
+    let prep = prepare_finish(state, workspace_id, user_id, args).await?;
+    let spec = prep
+        .tasks
+        .first()
+        .map(|t| t.spec_md.clone())
+        .unwrap_or_default();
+    Ok(json!({
+        "ok": true,
+        "launched": false,
+        "title": prep.title,
+        "ticket": {
+            "provider": prep.item.provider,
+            "key": prep.item.external_key,
+            "title": prep.item.title,
+            "state": prep.item.state,
+        },
+        "spec": spec,
+        "hint": "You plan the next step. Use integration_query for one-shot I/O, or launch_agent_plan with the tasks and outputs this item needs. Do not assume coding, review, or a PR.",
+    }))
 }
 
 pub async fn mark_ticket_launched(
@@ -389,7 +419,27 @@ pub async fn poll_workspace(
                     Err(e) => errors.push(format!("notion: {e}")),
                 }
             }
-            _ => {}
+            "trello" => match poll_trello(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("trello: {e}")),
+            },
+            "asana" => match poll_asana(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("asana: {e}")),
+            },
+            "teams" => match poll_teams(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("teams: {e}")),
+            },
+            "bitbucket" => match poll_bitbucket(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("bitbucket: {e}")),
+            },
+            "confluence" => match poll_confluence(state, workspace_id, &caller).await {
+                Ok(n) => seen += n,
+                Err(e) => errors.push(format!("confluence: {e}")),
+            },
+            other => errors.push(format!("{other}: no inbox adapter")),
         }
     }
     let err_join = if errors.is_empty() {
@@ -426,12 +476,8 @@ pub async fn list_auto_launch_items(
     let cutoff = Utc::now() - chrono::Duration::minutes(5);
     Ok(open
         .into_iter()
-        .filter(|i| {
-            AUTO_LAUNCH_PROVIDERS.contains(&i.provider.as_str())
-                && i.run_id.is_none()
-                && i.created_at >= cutoff
-        })
-        .take(3)
+        .filter(|i| i.run_id.is_none() && i.created_at >= cutoff)
+        .take(8)
         .collect())
 }
 
@@ -969,6 +1015,344 @@ async fn upsert_notion_items(
     Ok(n)
 }
 
+async fn upsert_inbox_item(
+    state: &AppState,
+    workspace_id: Uuid,
+    provider: &str,
+    key: String,
+    title: String,
+    url: Option<String>,
+    summary: String,
+    closed: bool,
+) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Ok(());
+    }
+    ticket_repo::upsert_inbox(
+        &state.db,
+        &UpsertInbox {
+            workspace_id,
+            provider: provider.into(),
+            external_key: key,
+            title,
+            url,
+            summary,
+            provider_closed: closed,
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+fn json_items(data: &Value) -> Vec<Value> {
+    data.get("items")
+        .or_else(|| data.get("results"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn json_text(v: &Value, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(s) = v.get(*k).and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            return s.to_string();
+        }
+        if let Some(n) = v.get(*k).and_then(|x| x.as_u64()) {
+            return n.to_string();
+        }
+        if let Some(n) = v.get(*k).and_then(|x| x.as_i64()) {
+            return n.to_string();
+        }
+    }
+    String::new()
+}
+
+async fn poll_trello(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let boards = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "trello",
+        "list_boards",
+        json!({}),
+    )
+    .await;
+    if !boards.ok {
+        return Err(boards.summary);
+    }
+    let mut n = 0usize;
+    for b in json_items(&boards.data).into_iter().take(6) {
+        let board_id = json_text(&b, &["id", "idBoard"]);
+        if board_id.is_empty() {
+            continue;
+        }
+        let cards = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "trello",
+            "list_cards",
+            json!({ "board_id": board_id }),
+        )
+        .await;
+        if !cards.ok {
+            return Err(cards.summary);
+        }
+        for c in json_items(&cards.data) {
+            let key = json_text(&c, &["id"]);
+            let title = json_text(&c, &["name", "title"]);
+            let closed = c.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
+            upsert_inbox_item(
+                state,
+                workspace_id,
+                "trello",
+                key,
+                title,
+                c.get("url").and_then(|v| v.as_str()).map(|s| s.into()),
+                json_text(&c, &["desc"]),
+                closed,
+            )
+            .await?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+async fn poll_asana(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let spaces = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "asana",
+        "list_workspaces",
+        json!({}),
+    )
+    .await;
+    if !spaces.ok {
+        return Err(spaces.summary);
+    }
+    let ws_gid = json_items(&spaces.data)
+        .into_iter()
+        .find_map(|w| {
+            let id = json_text(&w, &["gid", "id"]);
+            (!id.is_empty()).then_some(id)
+        });
+    let Some(ws_gid) = ws_gid else {
+        return Ok(0);
+    };
+    let listed = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "asana",
+        "list_tasks",
+        json!({ "workspace": ws_gid }),
+    )
+    .await;
+    if !listed.ok {
+        return Err(listed.summary);
+    }
+    let mut n = 0usize;
+    for t in json_items(&listed.data) {
+        let key = json_text(&t, &["gid", "id"]);
+        let title = json_text(&t, &["name", "title"]);
+        let closed = t.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
+        upsert_inbox_item(
+            state,
+            workspace_id,
+            "asana",
+            key,
+            title,
+            t.get("permalink_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.into()),
+            json_text(&t, &["notes"]),
+            closed,
+        )
+        .await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+async fn poll_teams(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let chats = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "teams",
+        "list_chats",
+        json!({ "limit": 8 }),
+    )
+    .await;
+    if !chats.ok {
+        return Err(chats.summary);
+    }
+    let mut n = 0usize;
+    for chat in json_items(&chats.data).into_iter().take(6) {
+        let chat_id = json_text(&chat, &["id"]);
+        if chat_id.is_empty() {
+            continue;
+        }
+        let msgs = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "teams",
+            "list_chat_messages",
+            json!({ "chat_id": chat_id, "limit": 15 }),
+        )
+        .await;
+        if !msgs.ok {
+            return Err(msgs.summary);
+        }
+        for m in json_items(&msgs.data) {
+            let mid = json_text(&m, &["id"]);
+            let text = {
+                let top = json_text(&m, &["text", "content"]);
+                if !top.is_empty() {
+                    top
+                } else {
+                    m.get("body")
+                        .and_then(|b| b.get("content").or(b.as_str().map(|_| b)))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                }
+            };
+            if mid.is_empty() || text.is_empty() || text.starts_with("Fleet run ") {
+                continue;
+            }
+            let title: String = text.chars().take(80).collect();
+            upsert_inbox_item(
+                state,
+                workspace_id,
+                "teams",
+                format!("{chat_id}:{mid}"),
+                title,
+                None,
+                text.chars().take(4000).collect(),
+                false,
+            )
+            .await?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+async fn poll_bitbucket(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let repos = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "bitbucket",
+        "list_repos",
+        json!({ "per_page": 5 }),
+    )
+    .await;
+    if !repos.ok {
+        return Err(repos.summary);
+    }
+    let mut n = 0usize;
+    for r in json_items(&repos.data).into_iter().take(5) {
+        let full = json_text(&r, &["full_name"]);
+        let Some((ws, repo)) = full.split_once('/') else {
+            continue;
+        };
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "bitbucket",
+            "list_issues",
+            json!({ "workspace": ws, "repo": repo }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        for i in json_items(&listed.data) {
+            let id = json_text(&i, &["id"]);
+            if id.is_empty() {
+                continue;
+            }
+            let key = format!("{full}#{id}");
+            let title = json_text(&i, &["title", "name"]);
+            let issue_state = json_text(&i, &["state"]);
+            upsert_inbox_item(
+                state,
+                workspace_id,
+                "bitbucket",
+                key,
+                title,
+                i.get("links").and_then(|v| v.as_str()).map(|s| s.into()),
+                json_text(&i, &["content"]),
+                status_done(&issue_state),
+            )
+            .await?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+async fn poll_confluence(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+) -> Result<usize, String> {
+    let listed = proxy_op(
+        state,
+        workspace_id,
+        caller,
+        "confluence",
+        "search",
+        json!({ "query": "type=page", "limit": 20 }),
+    )
+    .await;
+    if !listed.ok {
+        return Err(listed.summary);
+    }
+    let mut n = 0usize;
+    for p in json_items(&listed.data) {
+        let key = json_text(&p, &["id"]);
+        let title = json_text(&p, &["title"]);
+        upsert_inbox_item(
+            state,
+            workspace_id,
+            "confluence",
+            key,
+            title,
+            p.get("links").and_then(|v| v.as_str()).map(|s| s.into()),
+            json_text(&p, &["body"]),
+            json_text(&p, &["status"]) == "trashed",
+        )
+        .await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 fn status_done(status: &str) -> bool {
     let s = status.to_ascii_lowercase();
     s.contains("done") || s.contains("closed") || s.contains("resolved") || s.contains("complete")
@@ -1045,7 +1429,7 @@ async fn resolve_ticket(
     }
     if open.is_empty() {
         return Err(AppError::bad_request(
-            "no open tickets — say @fleet monitor first (and Connect GitHub / Jira / Linear), or pass a key like ENG-123",
+            "no open tickets — Start monitor on Inbox first (after connecting apps), or pass a key like ENG-123",
         ));
     }
     let list: Vec<String> = open
@@ -1067,18 +1451,30 @@ async fn fetch_ticket_details(
     item: &TicketInboxItem,
 ) -> Option<Value> {
     let caller = ProxyCaller::Chat { user_id };
-    let args = match item.provider.as_str() {
+    let (op, args) = match item.provider.as_str() {
         "github" => {
             let (owner, repo, number) = parse_github_owner_repo_num(&item.external_key)?;
-            json!({ "owner": owner, "repo": repo, "number": number })
+            ("get_issue", json!({ "owner": owner, "repo": repo, "number": number }))
         }
-        "jira" => json!({ "key": item.external_key }),
-        "linear" => json!({ "identifier": item.external_key }),
+        "gitlab" => {
+            let (project, iid) = item.external_key.split_once('#')?;
+            ("get_issue", json!({ "project": project, "iid": iid }))
+        }
+        "bitbucket" => {
+            let (full, id) = item.external_key.split_once('#')?;
+            let (ws, repo) = full.split_once('/')?;
+            (
+                "get_issue",
+                json!({ "workspace": ws, "repo": repo, "id": id }),
+            )
+        }
+        "jira" => ("get_issue", json!({ "key": item.external_key })),
+        "linear" => ("get_issue", json!({ "identifier": item.external_key })),
+        "trello" => ("get_card", json!({ "card_id": item.external_key })),
+        "asana" => ("get_task", json!({ "gid": item.external_key })),
+        "notion" => ("get_page", json!({ "page_id": item.external_key })),
+        "confluence" => ("get_page", json!({ "id": item.external_key })),
         _ => return None,
-    };
-    let op = match item.provider.as_str() {
-        "jira" => "get_issue",
-        _ => "get_issue",
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
     if result.ok {
@@ -1138,6 +1534,7 @@ pub fn tickets_json(items: &[TicketInboxItem]) -> Value {
             .iter()
             .map(|t| {
                 json!({
+                    "id": t.id,
                     "provider": t.provider,
                     "key": t.external_key,
                     "title": t.title,
@@ -1149,6 +1546,165 @@ pub fn tickets_json(items: &[TicketInboxItem]) -> Value {
             })
             .collect(),
     )
+}
+
+// ── HTTP ────────────────────────────────────────────────────────────────────
+
+use axum::extract::{Path, Query, State};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use axum_extra::extract::CookieJar;
+use fleet_auth::{require_user, AuthState};
+use fleet_db::repos::workspaces as workspace_repo;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/workspaces/{workspace_id}/inbox",
+            get(http_list).post(http_monitor),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/inbox/poll",
+            post(http_poll),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/inbox/finish",
+            post(http_finish),
+        )
+}
+
+async fn require_member(
+    state: &AppState,
+    jar: &CookieJar,
+    workspace_id: Uuid,
+) -> AppResult<(fleet_db::User, String)> {
+    let auth = AuthState {
+        db: state.db.clone(),
+        config: state.auth.clone(),
+    };
+    let user = require_user(&auth, jar).await?;
+    let role = workspace_repo::user_role(&state.db, workspace_id, user.id)
+        .await?
+        .ok_or_else(|| AppError::forbidden("not a member of this workspace"))?;
+    Ok((user, role))
+}
+
+#[derive(Debug, Deserialize)]
+struct InboxQuery {
+    state: Option<String>,
+}
+
+async fn http_list(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Query(q): Query<InboxQuery>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let filter = q.state.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    Ok(Json(list_tickets(&state, workspace_id, filter).await?))
+}
+
+async fn http_monitor(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(args): Json<MonitorArgs>,
+) -> AppResult<Json<Value>> {
+    let (user, _) = require_member(&state, &jar, workspace_id).await?;
+    let _ = state
+        .orch
+        .store
+        .set_auto_sync_external(workspace_id, true)
+        .await;
+    Ok(Json(
+        monitor_tickets(&state, workspace_id, user.id, args).await?,
+    ))
+}
+
+async fn http_poll(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    Ok(Json(poll_workspace(&state, workspace_id, true).await?))
+}
+
+async fn http_finish(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(args): Json<FinishTicketArgs>,
+) -> AppResult<Json<Value>> {
+    let (user, _) = require_member(&state, &jar, workspace_id).await?;
+    Ok(Json(
+        finish_and_launch(&state, workspace_id, user.id, args).await?,
+    ))
+}
+
+pub async fn finish_and_launch(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    args: FinishTicketArgs,
+) -> AppResult<Value> {
+    use crate::chat_tools::build_multi_task_plan;
+    let prep = prepare_finish(state, workspace_id, user_id, args).await?;
+    state
+        .orch
+        .store
+        .ensure_project(workspace_id, "workspace fleet", 3)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let _ = state
+        .orch
+        .store
+        .set_auto_sync_external(workspace_id, true)
+        .await;
+    let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
+    plan.source = "inbox".into();
+    plan.policy.auto_sync_external = true;
+    stamp_inbox_llm(&mut plan, state, workspace_id).await;
+    let (run, _) = state
+        .orch
+        .store
+        .insert_accepted_plan(workspace_id, plan)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    mark_ticket_launched(
+        state,
+        workspace_id,
+        &prep.item.provider,
+        &prep.item.external_key,
+        run.id,
+    )
+    .await?;
+    let _ = state.orch.tick.tick_project(workspace_id).await;
+    Ok(json!({
+        "ok": true,
+        "run_id": run.id,
+        "ticket": {
+            "provider": prep.item.provider,
+            "key": prep.item.external_key,
+            "title": prep.item.title,
+        },
+        "title": prep.title,
+    }))
+}
+
+async fn stamp_inbox_llm(
+    plan: &mut fleet_orchestrator::domain::WorkPlanBody,
+    state: &AppState,
+    workspace_id: Uuid,
+) {
+    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
+    if !llm.provider.is_empty() {
+        plan.policy.llm_provider = Some(llm.provider);
+    }
+    if !llm.model.is_empty() {
+        plan.policy.llm_model = Some(llm.model);
+    }
 }
 
 #[cfg(test)]
@@ -1174,6 +1730,30 @@ mod tests {
         assert_eq!(p.key, "acme/app#7");
         let (o, r, n) = parse_github_owner_repo_num("acme/app#7").unwrap();
         assert_eq!((o, r, n), ("acme".into(), "app".into(), 7));
+    }
+
+    #[test]
+    fn inbox_finish_plan_is_one_generalist() {
+        let ext = ExternalRef {
+            provider: "slack".into(),
+            key: "C1:1".into(),
+        };
+        let tasks = vec![PlanTask {
+            plan_task_id: "work".into(),
+            title: "t".into(),
+            summary: String::new(),
+            spec_md: "do what the item needs".into(),
+            depends_on: vec![],
+            worker_profile: "generalist".into(),
+            acceptance: vec!["result.md exists and is non-empty".into()],
+            priority: 100,
+            external_ref: Some(ext),
+            timeout_s: Some(3600),
+            max_retries: Some(1),
+        }];
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].worker_profile, "generalist");
+        assert!(!tasks.iter().any(|t| t.worker_profile.contains("review")));
     }
 
     #[test]

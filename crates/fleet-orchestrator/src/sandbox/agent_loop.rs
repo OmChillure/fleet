@@ -152,28 +152,17 @@ impl AgentJob {
             }
         });
         let hb_abort = hb.abort_handle();
-        let ship = is_ship_role(&req.plan_task_id, &req.worker_profile);
-        let spec_blob = format!(
-            "{} {}\n{}",
-            req.task_title.clone().unwrap_or_default(),
-            req.plan_task_id,
-            req.task_spec.clone().unwrap_or_default()
-        );
         let handle = tokio::spawn(async move {
-            let code = if ship {
-                run_ship(&work_dir, io, workspace_id, &spec_blob).await
-            } else {
-                run_loop(
-                    &work_dir,
-                    timeout,
-                    &backend,
-                    model.as_deref(),
-                    talk.as_ref(),
-                    io,
-                    workspace_id,
-                )
-                .await
-            }
+            let code = run_loop(
+                &work_dir,
+                timeout,
+                &backend,
+                model.as_deref(),
+                talk.as_ref(),
+                io,
+                workspace_id,
+            )
+            .await
             .unwrap_or(1);
             hb.abort();
             if let Ok(mut g) = exit2.lock() {
@@ -260,14 +249,13 @@ async fn run_loop(
          If you are reviewing and the work is not acceptable, call `request_changes` with a concrete reason (they will be sent back to fix it).\n\
          Use handoff/ files from finished teammates. Do not redo their work.\n\
          Work only inside this workspace. Use tools to read/write files and run shell commands.\n\
-         To talk to Slack, Notion, GitHub, Jira, Linear, Teams, Trello, Asana, … call `use_integration` (control plane decrypts; you never see tokens).\n\
-         Typical loop: read the source (slack get_channel_history / notion get_page / github get_issue), do the work, write back (post_message / append_blocks / commit_files / create_pr / add_comment).\n\
+         To talk to connected apps call `use_integration` (provider, operation, args). The control plane decrypts; you never see tokens. If an op is unknown the error lists valid ops.\n\
+         Do only what the spec asks. Do not assume you must write code or open a PR.\n\
          Do not request secrets. Do not leave the work directory.\n\
-         Read RUN.md — the whole board, your acceptance, and shared files. The run must not stop mid-way.\n\
+         Read RUN.md — the whole board, your acceptance, and shared files.\n\
          When finished, write `result.md` summarizing what you did (the next agent will read it), then stop.\n\
-         If you are the **ship** agent (or your spec says you must push): call `use_integration` `github` `commit_files` then `create_pr` on the files in `work/`. result.md MUST include the PR URL. Local files alone are not done.\n\
-         Implementers write the full app into `work/`. Reviewers only review. Do not ask a human to continue.\n\
-         The control plane **validates** your work: missing result.md, failed acceptance, or a ship task without a github.com URL sends you back.\n\
+         If you are reviewing and the work is not acceptable, call `request_changes`.\n\
+         The control plane validates result.md and any acceptance lines on the task — nothing else.\n\
          If you cannot complete the task, write result.md with blockers.\n",
         if persona.trim().is_empty() {
             "You are a competent specialist on a multi-agent team.".into()
@@ -431,6 +419,7 @@ async fn run_loop(
     Ok(0)
 }
 
+#[allow(dead_code)]
 fn is_ship_role(plan_task_id: &str, worker_profile: &str) -> bool {
     let id = plan_task_id.to_ascii_lowercase();
     let p = worker_profile.to_ascii_lowercase();

@@ -1,4 +1,5 @@
 pub mod auth;
+mod members;
 mod personas;
 mod workspaces;
 
@@ -27,5 +28,6 @@ where
             "/api/workspaces",
             get(workspaces::list_workspaces).post(workspaces::create_workspace),
         )
+        .merge(members::router::<S>())
         .merge(personas::router::<S>())
 }

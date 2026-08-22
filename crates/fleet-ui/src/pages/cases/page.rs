@@ -4,8 +4,10 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    cancel_case, get_case, list_cases, observe_case, CaseEventRow, CaseRow,
+    cancel_case, create_case, decide_case, get_case, list_cases, observe_case, wake_case,
+    CaseEventRow, CaseRow,
 };
+use crate::components::toast::show_toast;
 use crate::Route;
 
 fn short(id: &str) -> String {
@@ -45,7 +47,12 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
     let mut status_line = use_signal(|| "Loading cases…".to_string());
     let note = use_signal(String::new);
     let busy = use_signal(|| false);
+    let mut new_title = use_signal(String::new);
+    let mut new_policy = use_signal(String::new);
+    let mut new_kind = use_signal(|| "generic".to_string());
+    let mut creating = use_signal(|| false);
     let selected_id = selected.clone();
+    let navigator = use_navigator();
 
     let ws_list = workspace_id.clone();
     use_future(move || {
@@ -98,12 +105,77 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
                 }
             }
 
+            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "New case" }
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "Title + a policy in plain language. The wake loop owns status; you can observe facts later."
+                }
+                input {
+                    class: "mt-3 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                    r#type: "text",
+                    placeholder: "Title — e.g. Watch Slack #support for refunds",
+                    value: "{new_title}",
+                    oninput: move |e| new_title.set(e.value()),
+                }
+                select {
+                    class: "mt-2 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                    value: "{new_kind}",
+                    onchange: move |e| new_kind.set(e.value()),
+                    option { value: "generic", "generic" }
+                    option { value: "ticket", "ticket" }
+                    option { value: "outreach", "outreach" }
+                    option { value: "watch", "watch" }
+                }
+                textarea {
+                    class: "mt-2 min-h-24 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                    placeholder: "Policy — when to wait, what counts as done, which tools to use…",
+                    value: "{new_policy}",
+                    oninput: move |e| new_policy.set(e.value()),
+                }
+                button {
+                    class: "mt-3 rounded-lg bg-[var(--app-fg)] px-3 py-2 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
+                    r#type: "button",
+                    disabled: creating() || new_title().trim().is_empty() || new_policy().trim().is_empty(),
+                    onclick: {
+                        let workspace_id = workspace_id.clone();
+                        move |_| {
+                            if creating() { return; }
+                            let title = new_title().trim().to_string();
+                            let policy = new_policy().trim().to_string();
+                            if title.is_empty() || policy.is_empty() { return; }
+                            creating.set(true);
+                            let ws = workspace_id.clone();
+                            let kind = new_kind();
+                            spawn(async move {
+                                match create_case(&ws, &title, &policy, Some(kind.as_str())).await {
+                                    Ok(c) => {
+                                        new_title.set(String::new());
+                                        new_policy.set(String::new());
+                                        show_toast().success("Case created.");
+                                        navigator.push(Route::CaseDetail {
+                                            workspace_id: ws,
+                                            case_id: c.id,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        show_toast().error(e.message());
+                                        status_line.set(e.message());
+                                    }
+                                }
+                                creating.set(false);
+                            });
+                        }
+                    },
+                    if creating() { "Creating…" } else { "Create case" }
+                }
+            }
+
             div { class: "grid gap-4 lg:grid-cols-[minmax(0,18rem)_1fr]",
                 section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-3",
                     h2 { class: "m-0 px-1 text-sm font-semibold text-[var(--app-fg)]", "Open & recent" }
                     if rows().is_empty() {
                         p { class: "mt-3 px-1 text-sm text-[var(--app-muted)]",
-                            "No cases yet. In Chat: start_case with a policy, or ask the assistant to watch Slack / book a follow-up."
+                            "No cases yet. Use the form above, or ask Chat to start one."
                         }
                     } else {
                         ul { class: "mt-2 m-0 list-none space-y-1 p-0",
@@ -224,6 +296,75 @@ fn CasePanel(
                             }
                         },
                         "Observe"
+                    }
+                    button {
+                        class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: {
+                            let ws = workspace_id.clone();
+                            let id = cid.clone();
+                            move |_| {
+                                if busy() { return; }
+                                busy.set(true);
+                                let ws = ws.clone();
+                                let id = id.clone();
+                                spawn(async move {
+                                    match wake_case(&ws, &id).await {
+                                        Ok(_) => show_toast().success("Decision applied."),
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Decide now"
+                    }
+                    button {
+                        class: "rounded-lg border border-emerald-500/30 px-3 py-2 text-sm text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: {
+                            let ws = workspace_id.clone();
+                            let id = cid.clone();
+                            move |_| {
+                                if busy() { return; }
+                                busy.set(true);
+                                let ws = ws.clone();
+                                let id = id.clone();
+                                spawn(async move {
+                                    match decide_case(&ws, &id, "complete", Some("completed from UI"), None).await {
+                                        Ok(_) => show_toast().success("Case completed."),
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Complete"
+                    }
+                    button {
+                        class: "rounded-lg border border-red-500/30 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-50",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: {
+                            let ws = workspace_id.clone();
+                            let id = cid.clone();
+                            move |_| {
+                                if busy() { return; }
+                                busy.set(true);
+                                let ws = ws.clone();
+                                let id = id.clone();
+                                spawn(async move {
+                                    match decide_case(&ws, &id, "fail", Some("failed from UI"), None).await {
+                                        Ok(_) => show_toast().success("Case failed."),
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Fail"
                     }
                     button {
                         class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-muted)] hover:text-[var(--app-fg)] disabled:opacity-50",

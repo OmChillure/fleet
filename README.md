@@ -109,6 +109,8 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/auth/me` | User + workspaces (ensures default) |
 | `GET` | `/api/workspaces` | List memberships (ensures default) |
 | `POST` | `/api/workspaces` | Create workspace `{ "name": "…" }` |
+| `GET` | `/api/workspaces/{id}/members` | List members + your role |
+| `POST` | `/api/workspaces/{id}/invites` | Invite by email (`admin`/`member`); existing users join immediately |
 | `GET` | `/api/workspaces/{id}/personas` | List workspace personas |
 | `POST` | `/api/workspaces/{id}/personas` | Create custom persona |
 | `POST` | `/api/workspaces/{id}/personas/seed-starters` | Idempotent 8 starter personas |
@@ -116,13 +118,16 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
-| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok + Ollama) + model lists |
+| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok, Ollama, OpenAI, Claude) + model lists |
 | `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
+| `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Inbox → Start monitor) |
+| `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
@@ -142,6 +147,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/sandboxes` | Live worker sessions |
 | `/{workspace_id}/cases` | Durable cases (stage + events) |
 | `/{workspace_id}/cases/{case_id}` | Case detail, observe, cancel |
+| `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 | `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |

@@ -113,11 +113,8 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Isolation label + Native + Sandboxed per card | Component + PATCH `allow_host` / `allow_container` | Both checkboxes on a paired card | Native on → guest takes a host job |
-| Both off = not taking new jobs | `holding_new_jobs` | Stop taking jobs unchecks both | Guest gets no new lease |
-| Sandboxed is a placeholder (not assignable, no k8s job) | `list_assignable` excludes sandboxed; no `runtime=container` | Hint “not implemented yet”; no container enqueue | Must **not** start a container/k3d job |
-| Plane: Native always off, disabled, greyed out | UI lock; plane `taking_native_jobs` is still `allow_host` (Behavior) | Plane Native unchecked + not clickable | n/a |
-| Plane Sandboxed still toggles (still placeholder) | PATCH plane `allow_container` | Toggle Sandboxed on the plane card | n/a |
+| One runtime: `SANDBOX_BACKEND` on the plane; process on a paired host | `runtime_line` | No Native/Sandboxed checkboxes; plane shows `Runtime: … (SANDBOX_BACKEND)` | Plane jobs use env backend |
+| Stop taking new jobs | `holding_new_jobs` / `accepting_jobs` | Behavior button only | Guest gets no new lease |
 
 ### Behavior (jobs, update, cap)
 

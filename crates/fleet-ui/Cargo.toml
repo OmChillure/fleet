@@ -14,7 +14,31 @@ fleet-runners-view = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-web-sys = { version = "0.3", features = ["Window", "Storage", "StorageEvent", "Location", "MessageEvent", "Event", "EventTarget", "Navigator", "Clipboard", "Document", "HtmlDocument", "HtmlTextAreaElement", "HtmlElement", "Element", "Node"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Storage",
+    "StorageEvent",
+    "Location",
+    "MessageEvent",
+    "Event",
+    "EventTarget",
+    "Navigator",
+    "Clipboard",
+    "Document",
+    "HtmlDocument",
+    "HtmlTextAreaElement",
+    "HtmlElement",
+    "Element",
+    "Node",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "RequestCredentials",
+    "Headers",
+    "Response",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

@@ -25,7 +25,7 @@ use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest};
 use fleet_orchestrator::domain::{PlanTask, WorkRunStatus};
 use fleet_orchestrator::validate;
 
-use crate::chat_tools::{build_multi_task_plan, ChatLlmContext};
+use crate::chat_tools::build_multi_task_plan;
 use crate::state::AppState;
 
 pub const MAX_DECISIONS_PER_CASE: i32 = 200;
@@ -177,6 +177,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/workspaces/{workspace_id}/cases/{case_id}/decide",
             post(http_decide_manual),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/cases/{case_id}/wake",
+            post(http_wake_now),
         )
 }
 
@@ -348,6 +352,34 @@ async fn http_decide_manual(
         .map_err(|e| AppError::internal(e.to_string()))?;
     }
     let case = apply_decision(&state, &case, body.decision).await?;
+    Ok(Json(case_json(&case, None)))
+}
+
+/// Run the case engine now (LLM or heuristic) — same path as the wake loop.
+async fn http_wake_now(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, case_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let case = case_repo::get(&state.db, workspace_id, case_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::not_found("case not found"))?;
+    let from = CaseStatus::parse(&case.status).unwrap_or(CaseStatus::Open);
+    if from.is_terminal() {
+        return Err(AppError::bad_request("case is terminal"));
+    }
+    let _ = case_repo::append_event(
+        &state.db,
+        case.id,
+        case.workspace_id,
+        "wake_requested",
+        json!({ "source": "ui" }),
+    )
+    .await;
+    let decision = decide_for_case(&state, &case).await;
+    let case = apply_decision(&state, &case, decision).await?;
     Ok(Json(case_json(&case, None)))
 }
 
@@ -1430,7 +1462,7 @@ async fn launch_case_plan(
 
     let mut plan = build_multi_task_plan(case.workspace_id, None, tasks);
     plan.source = "case".into();
-    let llm = case_llm_context(state);
+    let llm = crate::chat_tools::composer_or_fallback(state, case.workspace_id).await;
     if !llm.provider.is_empty() {
         plan.policy.llm_provider = Some(llm.provider);
     }
@@ -1454,21 +1486,7 @@ async fn launch_case_plan(
     Ok(run.id)
 }
 
-fn case_llm_context(state: &AppState) -> ChatLlmContext {
-    if state.grok.enabled {
-        ChatLlmContext {
-            provider: "grok".into(),
-            model: crate::grok::GROK_MODEL.into(),
-        }
-    } else if state.ollama.enabled {
-        ChatLlmContext {
-            provider: "ollama".into(),
-            model: state.ollama.default_model.clone().unwrap_or_default(),
-        }
-    } else {
-        ChatLlmContext::default()
-    }
-}
+
 
 pub fn wake_interval() -> Duration {
     let secs = std::env::var("CASE_WAKE_INTERVAL_S")

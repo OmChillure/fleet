@@ -23,6 +23,7 @@ use pages::chat::{Chat, ChatThread};
 use pages::dashboard::Dashboard;
 use pages::fleet::Fleet;
 use pages::home::Home;
+use pages::inbox::Inbox;
 use pages::integrations::{Integrations, OAuthDone};
 use pages::runners::cloud::CloudPage;
 use pages::runners::partners::PartnersPage;
@@ -68,6 +69,8 @@ pub enum Route {
         CaseDetail { workspace_id: String, case_id: String },
         #[route("/:workspace_id/cases")]
         Cases { workspace_id: String },
+        #[route("/:workspace_id/inbox")]
+        Inbox { workspace_id: String },
         #[route("/:workspace_id/integrations")]
         Integrations { workspace_id: String },
         #[route("/:workspace_id/runners/self-hosted")]
@@ -98,6 +101,7 @@ impl Route {
             | Route::Sandboxes { workspace_id }
             | Route::Cases { workspace_id }
             | Route::CaseDetail { workspace_id, .. }
+            | Route::Inbox { workspace_id }
             | Route::Integrations { workspace_id }
             | Route::SelfHosted { workspace_id }
             | Route::CloudPage { workspace_id }

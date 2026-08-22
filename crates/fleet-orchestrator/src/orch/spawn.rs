@@ -153,7 +153,14 @@ pub async fn schedule_and_spawn(
         crate::sandbox::team::prepare_agent_workspace(data_dir, &session_work, task, snap).await;
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
-        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        let mut persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        if let Ok(Some((name, body))) = store
+            .find_workspace_persona(project_id, &task.worker_profile)
+            .await
+        {
+            persona.name = name;
+            persona.body = body;
+        }
         let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
             cached.clone()
         } else {

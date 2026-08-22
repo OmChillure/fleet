@@ -70,6 +70,14 @@ pub fn router() -> Router<AppState> {
             "/api/workspaces/{workspace_id}/fleet/runs/{run_id}/cancel",
             post(post_cancel),
         )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/tasks/{task_id}/resume",
+            post(post_resume),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill",
+            post(post_kill_session),
+        )
 }
 
 async fn require_member(
@@ -641,6 +649,7 @@ async fn get_tasks(
             "claimed_session_id": t.claimed_session_id,
             "worker_profile": t.worker_profile,
             "block_reason": t.block_reason,
+            "hitl_notes": t.hitl_notes,
             "failure_reason": t.failure_reason,
         })).collect::<Vec<_>>()
     })))
@@ -902,6 +911,84 @@ async fn post_cancel(
     Ok(Json(json!({
         "run_id": run_id,
         "cancel_requested": true,
+        "reason": reason,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeBody {
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+async fn post_resume(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, task_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<ResumeBody>>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let message = body
+        .and_then(|Json(b)| b.message)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "resumed from UI".into());
+    let ok = state
+        .orch
+        .store
+        .request_hitl_resume(workspace_id, task_id, &message)
+        .await
+        .map_err(|e| map_orch_err("request_hitl_resume", e))?;
+    if !ok {
+        return Err(AppError::conflict("task is not blocked"));
+    }
+    // Tick so the resume is applied immediately (blocked → ready).
+    if let Err(e) = state.orch.tick.tick_project(workspace_id).await {
+        let msg = e.to_string();
+        if !msg.contains("lock") {
+            tracing::warn!(%workspace_id, %task_id, error = %msg, "resume tick failed");
+        }
+    }
+    Ok(Json(json!({
+        "task_id": task_id,
+        "resume_requested": true,
+        "message": message,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KillSessionBody {
+    pub reason: Option<String>,
+}
+
+async fn post_kill_session(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, session_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<KillSessionBody>>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    ensure_project(&state, workspace_id, "workspace fleet").await?;
+    let report = state
+        .orch
+        .tick
+        .kill_session(workspace_id, session_id)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                AppError::not_found(msg)
+            } else {
+                map_orch_err("kill_session", e)
+            }
+        })?;
+    let reason = body.and_then(|Json(b)| b.reason);
+    Ok(Json(json!({
+        "session_id": report.session_id,
+        "killed": !report.already_dead,
+        "already_dead": report.already_dead,
+        "signaled": report.signaled,
         "reason": reason,
     })))
 }

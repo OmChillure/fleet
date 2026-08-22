@@ -11,6 +11,7 @@ pub mod fleet_routes;
 pub mod grok;
 pub mod install_routes;
 pub mod partners;
+pub mod providers;
 pub mod retry;
 pub mod state;
 pub mod tickets;
@@ -20,6 +21,7 @@ pub mod worker_hosts;
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
 pub use grok::GrokConfig;
+pub use providers::{ClaudeConfig, OpenaiConfig};
 pub use state::AppState;
 
 use std::time::Duration;
@@ -49,6 +51,7 @@ pub fn build_router() -> Router<AppState> {
         .merge(fleet_integrations::router::<AppState>())
         .merge(chat::router())
         .merge(cases::router())
+        .merge(tickets::router())
         .merge(fleet_routes::router())
         .merge(worker_hosts::router())
         .merge(partners::router())
@@ -195,6 +198,8 @@ pub async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+                "members": "GET /api/workspaces/{workspace_id}/members",
+                "invite": "POST /api/workspaces/{workspace_id}/invites",
             },
             "personas": {
                 "list": "GET /api/workspaces/{workspace_id}/personas",
@@ -218,6 +223,14 @@ pub async fn api_index() -> Json<Value> {
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
                 "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
                 "workers": "GET /api/workspaces/{workspace_id}/fleet/workers",
+                "resume": "POST /api/workspaces/{workspace_id}/fleet/tasks/{task_id}/resume",
+                "kill": "POST /api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill",
+            },
+            "inbox": {
+                "list": "GET /api/workspaces/{workspace_id}/inbox",
+                "monitor": "POST /api/workspaces/{workspace_id}/inbox",
+                "poll": "POST /api/workspaces/{workspace_id}/inbox/poll",
+                "finish": "POST /api/workspaces/{workspace_id}/inbox/finish",
             },
             "cases": {
                 "list": "GET /api/workspaces/{workspace_id}/cases",
@@ -226,13 +239,15 @@ pub async fn api_index() -> Json<Value> {
                 "observe": "POST /api/workspaces/{workspace_id}/cases/{case_id}/observe",
                 "cancel": "POST /api/workspaces/{workspace_id}/cases/{case_id}/cancel",
                 "decide": "POST /api/workspaces/{workspace_id}/cases/{case_id}/decide",
+                "wake": "POST /api/workspaces/{workspace_id}/cases/{case_id}/wake",
             },
             "chat": {
                 "status": "GET /api/workspaces/{workspace_id}/chat/status",
                 "conversations": "GET|POST /api/workspaces/{workspace_id}/chat/conversations",
                 "conversation": "GET|DELETE /api/workspaces/{workspace_id}/chat/conversations/{id}",
                 "complete": "POST /api/workspaces/{workspace_id}/chat",
-                "note": "Grok CLI + Ollama; persisted history; fleet + integration tools",
+                "stream": "POST /api/workspaces/{workspace_id}/chat/stream",
+                "note": "Grok / Ollama / OpenAI / Claude; NDJSON stream; fleet + integration tools",
             },
             "worker_hosts": {
                 "list": "GET /api/workspaces/{workspace_id}/worker-hosts",

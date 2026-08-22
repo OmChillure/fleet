@@ -81,8 +81,8 @@ Catalog → test (layer 2):
 | Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
 | Loopback URL warning | `test_14i_loopback_warning`; `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
 | Cancel discards pending | `test_15_cancel_discards_pending_worker` |
-| Control plane first, no software, Native locked | `test_16_control_plane_card` |
-| Plane Sandboxed still toggles (still placeholder) | `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
+| Control plane first, no software, runtime is SANDBOX_BACKEND | `test_16_control_plane_card` |
+| Plane has no isolation checkboxes | `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
 | Apply changes appears when dirty | `test_17_apply_changes_when_dirty` |
 | Apply PATCH toast + pending apply | `test_14m_apply_toast`; `test_catalog_apply_toast.test_apply_toast_and_pending_apply_until_ack` |
 | Widgets lock while pending | `test_14n_widgets_lock`; `test_catalog_widgets_lock.test_widgets_lock_while_pending_until_ack` |

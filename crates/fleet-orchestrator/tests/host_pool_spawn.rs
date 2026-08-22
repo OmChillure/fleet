@@ -55,6 +55,7 @@ fn sample_req(token: &str) -> SpawnRequest {
         persona_md: None,
         agent_backend: None,
         agent_model: None,
+        io: fleet_orchestrator::sandbox::io::IntegrationHandle::none(),
     }
 }
 

@@ -11,6 +11,7 @@ use crate::orch::reap::orphan_reap;
 use crate::orch::rollup::{rollup_run, RollupAction, RunRollupInput};
 use crate::orch::spawn::schedule_and_spawn;
 use crate::orch::stuck::process_sessions;
+use crate::notify::{LogNotify, NotificationSink};
 use crate::sandbox::SandboxRuntime;
 use crate::store::Store;
 use crate::sync::{ExternalBoardSync, NoopBoardSync};
@@ -19,6 +20,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct KillSessionReport {
+    pub session_id: Uuid,
+    pub already_dead: bool,
+    pub signaled: bool,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct TickReport {
@@ -54,6 +62,7 @@ pub struct TickRunner {
     store: Store,
     runtime: Arc<dyn SandboxRuntime>,
     board_sync: Arc<dyn ExternalBoardSync>,
+    notify: Arc<dyn NotificationSink>,
     data_dir: PathBuf,
     orchestrator_url: String,
     integrations: crate::sandbox::io::IntegrationHandle,
@@ -86,10 +95,16 @@ impl TickRunner {
             store,
             runtime,
             board_sync,
+            notify: Arc::new(LogNotify),
             data_dir,
             orchestrator_url: orchestrator_url.into(),
             integrations: crate::sandbox::io::IntegrationHandle::none(),
         }
+    }
+
+    pub fn with_notify(mut self, notify: Arc<dyn NotificationSink>) -> Self {
+        self.notify = notify;
+        self
     }
 
     pub fn data_dir(&self) -> &std::path::Path {
@@ -98,6 +113,62 @@ impl TickRunner {
 
     pub fn runtime_backend(&self) -> &'static str {
         self.runtime.backend_name()
+    }
+
+    /// Stop one live sandbox (UI / cookie kill). Signals TERM+KILL, destroys
+    /// the runtime handle, frees the claim, and cancels the board task.
+    pub async fn kill_session(
+        &self,
+        project_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<KillSessionReport, TickError> {
+        let session = self
+            .store
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| TickError::Other("session not found".into()))?;
+        if session.project_id != project_id {
+            return Err(TickError::Other("session not found".into()));
+        }
+        if matches!(session.status.as_str(), "exited" | "failed_spawn") {
+            return Ok(KillSessionReport {
+                session_id,
+                already_dead: true,
+                signaled: false,
+            });
+        }
+
+        let grace = chrono::Utc::now() + chrono::Duration::seconds(0);
+        self.store
+            .mark_session_killing(session.id, "ui_kill", grace)
+            .await?;
+
+        let mut signaled = false;
+        if let Some(ref hid) = session.runtime_handle {
+            let handle = crate::sandbox::RuntimeHandle {
+                backend: session.runtime_backend.clone(),
+                id: hid.clone(),
+            };
+            let _ = self.runtime.signal(&handle, crate::sandbox::Signal::Term).await;
+            let _ = self.runtime.signal(&handle, crate::sandbox::Signal::Kill).await;
+            let _ = self.runtime.destroy(&handle).await;
+            signaled = true;
+        } else {
+            let _ = self.store.complete_spawn_failure(session.id).await;
+        }
+
+        self.store
+            .free_session_claim(session.board_task_id, session.id, "ui_kill")
+            .await?;
+        self.store
+            .set_task_cancelled(session.board_task_id, "sandbox_killed")
+            .await?;
+
+        Ok(KillSessionReport {
+            session_id,
+            already_dead: false,
+            signaled,
+        })
     }
 
     /// Attach the control-plane integration proxy (fleet-server).
@@ -146,6 +217,7 @@ impl TickRunner {
         // Step 1 — inbox
         report.inbox_applied =
             apply_inbox(&self.store, &self.runtime, project_id, &self.data_dir).await?;
+        notify_new_blocks(&self.store, &self.notify, project_id).await;
 
         // Step 1b — repair assigned+healthy
         let _ = self.store.repair_assigned_to_in_progress(project_id).await?;
@@ -304,6 +376,22 @@ impl TickRunner {
             }) {
                 self.store.set_run_terminal(run.id, term.as_db()).await?;
                 report.runs_terminated += 1;
+                let ev = match term.as_db() {
+                    "completed" => "run_completed",
+                    "cancelled" => "run_cancelled",
+                    _ => "run_failed",
+                };
+                let _ = self
+                    .notify
+                    .on_event(
+                        ev,
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "run_id": run.id,
+                            "status": term.as_db(),
+                        }),
+                    )
+                    .await;
                 report.writebacks += write_back_run(
                     &self.store,
                     &self.integrations,
@@ -498,6 +586,34 @@ async fn cleanup_terminal_session_dirs(
         crate::sandbox::git_isolate::detach_worktree(&project_dir, &path).await;
         if path.exists() {
             let _ = tokio::fs::remove_dir_all(&path).await;
+        }
+    }
+}
+
+async fn notify_new_blocks(
+    store: &Store,
+    notify: &Arc<dyn NotificationSink>,
+    project_id: Uuid,
+) {
+    let Ok(tasks) = store.list_tasks_slim(project_id, None).await else {
+        return;
+    };
+    for t in tasks {
+        if t.status != "blocked" || t.hitl_notified_at.is_some() {
+            continue;
+        }
+        let ev = crate::notify::HitlBlockedEvent {
+            project_id,
+            run_id: t.run_id,
+            board_task_id: t.id,
+            reason: t
+                .block_reason
+                .clone()
+                .or(t.hitl_notes.clone())
+                .unwrap_or_else(|| "blocked".into()),
+        };
+        if notify.on_blocked(ev).await.is_ok() {
+            let _ = store.mark_hitl_notified(t.id).await;
         }
     }
 }

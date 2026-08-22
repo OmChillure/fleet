@@ -61,7 +61,7 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                         }
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Run work on other people's unused capacity. Isolation: Sandboxed."
+                        "Run work on other people's unused capacity. Coming soon."
                     }
                 }
             }

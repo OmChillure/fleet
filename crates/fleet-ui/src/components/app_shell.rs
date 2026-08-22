@@ -11,7 +11,7 @@ use crate::theme::Theme;
 /// access JWT expired but `fleet_refresh` is still valid.
 #[component]
 pub fn AppShell() -> Element {
-    let theme = use_signal(|| Theme::Black);
+    let theme = use_signal(Theme::load_saved);
     use_context_provider(|| theme);
 
     let mut auth_state = use_signal(|| AuthGate::Checking);

@@ -3,12 +3,12 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, clamp_max_jobs, display_name,
-    draft_holding_new_jobs, extra_status_pills, format_ts, hint_is_loopback, identity_line,
-    in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label, not_taking_reason,
-    package_report, plane_native_locked, settings_draft_dirty, shows_software_line, software_flag,
-    software_line, software_title, sort_hosts_for_list, specs_line, status_label, update_now_label,
-    update_requested, widgets_locked, worker_id_label,
+    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, clamp_max_jobs,
+    display_name, draft_holding_new_jobs, extra_status_pills, format_ts, hint_is_loopback,
+    identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
+    not_taking_reason, package_report, runtime_line, settings_draft_dirty, shows_software_line,
+    software_flag, software_line, software_title, sort_hosts_for_list, specs_line, status_label,
+    update_now_label, update_requested, widgets_locked, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 
@@ -17,7 +17,6 @@ use super::api::{
     install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
 };
 use crate::clipboard::copy_text;
-use crate::components::runner_isolation::RunnerModeChecks;
 use crate::components::toast::show_toast;
 
 const POLL_MS: u32 = 10_000;
@@ -55,6 +54,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
     let mut show_removed = use_signal(|| false);
     let mut packages = use_signal(PackageInventory::default);
+    let mut sandbox_backend = use_signal(|| "stub".to_string());
 
     // Do not read `hosts` / `loading` here — a write-triggered effect loops
     // and Firefox OOMs when the first card mounts.
@@ -65,9 +65,12 @@ pub fn SelfHosted(workspace_id: String) -> Element {
             let mut first = true;
             loop {
                 match list_workers_page(&ws).await {
-                    Ok((list, inv)) => {
+                    Ok((list, inv, backend)) => {
                         hosts.set(list);
                         packages.set(inv);
+                        if !backend.trim().is_empty() {
+                            sandbox_backend.set(backend);
+                        }
                         error.set(None);
                     }
                     Err(e) => {
@@ -199,6 +202,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                                 HostCard {
                                     key: "{host.id}",
                                     workspace_id: workspace_id.clone(),
+                                    sandbox_backend: sandbox_backend(),
                                     host,
                                     on_updated: move |updated: HostPublic| {
                                         let mut list = hosts();
@@ -233,6 +237,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                                     HostCard {
                                         key: "rm-{host.id}",
                                         workspace_id: workspace_id.clone(),
+                                        sandbox_backend: sandbox_backend(),
                                         host,
                                         on_updated: move |updated: HostPublic| {
                                             let mut list = hosts();
@@ -417,6 +422,7 @@ fn btn_class() -> &'static str {
 #[component]
 fn HostCard(
     workspace_id: String,
+    sandbox_backend: String,
     host: HostPublic,
     on_updated: EventHandler<HostPublic>,
     on_revoked: EventHandler<String>,
@@ -425,15 +431,15 @@ fn HostCard(
     let mut confirm_remove = use_signal(|| false);
     let mut renaming = use_signal(|| false);
     let mut name_draft = use_signal(|| host.name.clone());
-    let mut d_native = use_signal(|| host.allow_host);
-    let mut d_sandboxed = use_signal(|| host.allow_container);
+    let mut d_accepting = use_signal(|| accepting_jobs(&host));
     let mut d_auto = use_signal(|| host.auto_update);
     let mut d_max = use_signal(|| host.max_concurrent);
     let plane = is_control_plane(&host);
-    let dirty = settings_draft_dirty(&host, d_native(), d_sandboxed(), d_auto(), d_max());
+    let dirty = settings_draft_dirty(&host, d_accepting(), d_auto(), d_max());
     let pending = widgets_locked(&host, false);
     let extra_pills = extra_status_pills(&host);
-    let draft_holding = draft_holding_new_jobs(d_native(), d_sandboxed());
+    let draft_holding = draft_holding_new_jobs(d_accepting());
+    let runtime = runtime_line(&host, &sandbox_backend);
     let revoked = host.status == "disabled";
     let pill = status_pill_class(&host.status);
     let last_seen = last_seen_label(&host, js_sys::Date::now());
@@ -556,6 +562,9 @@ fn HostCard(
                 p { class: "m-0",
                     "{jobs_line(&host)}"
                 }
+                p { class: "m-0",
+                    "{runtime}"
+                }
             }
 
             if let Some(reason) = why {
@@ -569,14 +578,6 @@ fn HostCard(
 
             if !revoked {
                 div { class: "mt-3 space-y-3 border-t border-[var(--app-border)] pt-3",
-                    RunnerModeChecks {
-                        native: d_native(),
-                        sandboxed: d_sandboxed(),
-                        disabled: widgets_locked(&host, busy()),
-                        lock_native: plane_native_locked(&host),
-                        on_native: move |on: bool| d_native.set(on),
-                        on_sandboxed: move |on: bool| d_sandboxed.set(on),
-                    }
                     div { class: "flex flex-col gap-1",
                     span {
                         class: "text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
@@ -589,12 +590,7 @@ fn HostCard(
                         disabled: busy(),
                         title: "{accept_jobs_title(draft_holding)}",
                         onclick: move |_| {
-                            if draft_holding {
-                                d_native.set(true);
-                            } else {
-                                d_native.set(false);
-                                d_sandboxed.set(false);
-                            }
+                            d_accepting.set(draft_holding);
                         },
                         "{accept_jobs_label(draft_holding)}"
                     }
@@ -686,8 +682,8 @@ fn HostCard(
                                         let ws = workspace_id.clone();
                                         let current = host.clone();
                                         let patch = HostPatch {
-                                            allow_host: Some(d_native()),
-                                            allow_container: Some(d_sandboxed()),
+                                            allow_host: Some(d_accepting()),
+                                            allow_container: Some(d_accepting()),
                                             max_concurrent: Some(d_max()),
                                             paused: Some(false),
                                             drain: Some(false),
@@ -777,8 +773,8 @@ fn HostCard(
                                             let ws = workspace_id.clone();
                                             let current = host.clone();
                                             let patch = HostPatch {
-                                                allow_host: Some(d_native()),
-                                                allow_container: Some(d_sandboxed()),
+                                                allow_host: Some(d_accepting()),
+                                                allow_container: Some(d_accepting()),
                                                 auto_update: Some(d_auto()),
                                                 max_concurrent: Some(d_max()),
                                                 paused: Some(false),

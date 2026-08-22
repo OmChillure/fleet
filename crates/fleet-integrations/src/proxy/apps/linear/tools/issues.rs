@@ -26,7 +26,7 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
             updatedAt
             state { name type }
             assignee { name email }
-            team { key name }
+            team { id key name }
           }
         }
       }
@@ -100,7 +100,7 @@ pub(crate) async fn get_issue(
               id identifier title description url priority createdAt updatedAt
               state { name type }
               assignee { name email }
-              team { key name }
+              team { id key name }
             }
           }
         "#;
@@ -113,7 +113,7 @@ pub(crate) async fn get_issue(
                 id identifier title description url priority createdAt updatedAt
                 state { name type }
                 assignee { name email }
-                team { key name }
+                team { id key name }
               }
             }
           }
@@ -135,7 +135,7 @@ pub(crate) async fn get_issue(
                     id identifier title description url priority createdAt updatedAt
                     state { name type }
                     assignee { name email }
-                    team { key name }
+                    team { id key name }
                   }
                 }
               }

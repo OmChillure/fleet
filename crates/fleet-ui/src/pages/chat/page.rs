@@ -5,8 +5,9 @@ use std::sync::Mutex;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use super::api::{
-    ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, complete_chat,
     create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
+    stream_chat, ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
+    ChatStreamEvent,
 };
 use super::markdown::{MdPart, highlight, markdown_to_parts};
 use crate::Route;
@@ -162,43 +163,85 @@ fn send_on_existing_session(
         rid
     };
 
+    {
+        let mut list = messages();
+        list.push(ChatMessage {
+            id: reply_id,
+            role: MessageRole::Assistant,
+            content: String::new(),
+            model: Some(model_for_api.clone()),
+            actions: vec![],
+        });
+        messages.set(list);
+    }
+
     spawn(async move {
-        match complete_chat(
+        let mut streamed = String::new();
+        let result = stream_chat(
             &workspace_id,
             history,
             provider,
             Some(model_for_api.clone()),
             Some(conversation_id),
+            |ev| match ev {
+                ChatStreamEvent::Status { text } => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        if last.content.is_empty() {
+                            last.content = format!("_{text}_");
+                        }
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Delta { text } => {
+                    streamed.push_str(&text);
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = streamed.clone();
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Action(action) => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.actions.push(action);
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Done(res) => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = res.message.content.clone();
+                        last.model = Some(if res.model.is_empty() {
+                            model_for_api.clone()
+                        } else {
+                            res.model.clone()
+                        });
+                        if !res.actions.is_empty() {
+                            last.actions = res.actions.clone();
+                        }
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Error { error } => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = format!("⚠️ {error}");
+                    }
+                    messages.set(list);
+                }
+            },
         )
-        .await
-        {
-            Ok(res) => {
-                let mut list = messages();
-                list.push(ChatMessage {
-                    id: reply_id,
-                    role: MessageRole::Assistant,
-                    content: res.message.content,
-                    model: Some(if res.model.is_empty() {
-                        model_for_api
-                    } else {
-                        res.model
-                    }),
-                    actions: res.actions,
-                });
-                messages.set(list);
+        .await;
+        if let Err(e) = result {
+            show_toast().error(e.message());
+            let mut list = messages();
+            if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                if last.content.is_empty() || last.content.starts_with('_') {
+                    last.content = format!("⚠️ {}", e.message());
+                }
             }
-            Err(e) => {
-                show_toast().error(e.message());
-                let mut list = messages();
-                list.push(ChatMessage {
-                    id: reply_id,
-                    role: MessageRole::Assistant,
-                    content: format!("⚠️ {}", e.message()),
-                    model: Some(model_for_api),
-                    actions: vec![],
-                });
-                messages.set(list);
-            }
+            messages.set(list);
         }
         sending.set(false);
     });

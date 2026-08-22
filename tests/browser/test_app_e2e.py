@@ -505,9 +505,14 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("Serving this build:", card)
         self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
-        self.assertIn("Native", card)
-        self.assertIn("Sandboxed", card)
-        self.assertIn("not implemented yet", card.lower())
+        self.assertNotIn("Isolation", card)
+        self.assertEqual(
+            page.locator("article").first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
+            0,
+            "Native isolation checkbox is gone — runtime is SANDBOX_BACKEND",
+        )
+        self.assertNotIn("not implemented yet", card.lower())
+        self.assertIn("Runtime:", card)
         self.assertIn("behavior", card.lower())
         self.assertIn("Auto-update", card)
         self.assertRegex(card, r"id [0-9a-f]{8}")
@@ -554,13 +559,18 @@ class BrowserE2ETests(unittest.TestCase):
             and first.get_by_role("button", name="Remove worker").first.is_visible(),
             "control plane must not have Remove worker",
         )
-        native = first.get_by_role("checkbox", name=re.compile(r"^Native$"))
-        if native.count() == 0:
-            native = first.locator("label").filter(has_text="Native").locator("input")
-        self.assertGreater(native.count(), 0, "plane must still show Native")
-        box = native.first
-        self.assertFalse(box.is_checked(), "plane Native must stay off")
-        self.assertFalse(box.is_enabled(), "plane Native must be greyed out")
+        self.assertEqual(
+            first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
+            0,
+            "plane must not show a Native isolation checkbox",
+        )
+        self.assertEqual(
+            first.locator("label").filter(has_text="Sandboxed").count(),
+            0,
+            "plane must not show a Sandboxed isolation checkbox",
+        )
+        self.assertIn("Runtime:", text)
+        self.assertIn("SANDBOX_BACKEND", text)
 
     def test_17_apply_changes_when_dirty(self) -> None:
         base = getattr(type(self), "workspace_url", None)
@@ -1650,23 +1660,22 @@ class BrowserE2ETests(unittest.TestCase):
 
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
         max_jobs = card.locator("label").filter(has_text="Max jobs at once").locator("input")
-        native = card.get_by_role("checkbox", name=re.compile(r"^Native$"))
-        if native.count() == 0:
-            native = card.locator("label").filter(
-                has_text=re.compile(r"^Native$")
-            ).locator("input")
-        sandboxed = card.get_by_role("checkbox", name=re.compile(r"Sandboxed"))
-        if sandboxed.count() == 0:
-            sandboxed = card.locator("label").filter(has_text="Sandboxed").locator("input")
 
         self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
         self.assertGreater(max_jobs.count(), 0, "paired card needs Max jobs at once")
-        self.assertGreater(native.count(), 0, "paired card needs Native")
-        self.assertGreater(sandboxed.count(), 0, "paired card needs Sandboxed")
+        self.assertEqual(
+            card.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
+            0,
+            "isolation Native checkbox must not exist",
+        )
+        self.assertEqual(
+            card.locator("label").filter(has_text="Sandboxed").count(),
+            0,
+            "isolation Sandboxed checkbox must not exist",
+        )
+        self.assertIn("Runtime: process on this machine", card.inner_text())
         self.assertTrue(auto.first.is_enabled(), "Auto-update must be editable before Apply")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must be editable before Apply")
-        self.assertTrue(native.first.is_enabled(), "Native must be editable before Apply")
-        self.assertTrue(sandboxed.first.is_enabled(), "Sandboxed must be editable before Apply")
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
             0,
@@ -1691,14 +1700,6 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertFalse(
             max_jobs.first.is_enabled(),
             "Max jobs at once must lock while pending apply",
-        )
-        self.assertFalse(
-            native.first.is_enabled(),
-            "Isolation Native must lock while pending apply",
-        )
-        self.assertFalse(
-            sandboxed.first.is_enabled(),
-            "Isolation Sandboxed must lock while pending apply",
         )
 
         listed = list_hosts(page, ws)
@@ -1729,23 +1730,11 @@ class BrowserE2ETests(unittest.TestCase):
         )
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
         max_jobs = card.locator("label").filter(has_text="Max jobs at once").locator("input")
-        native = card.get_by_role("checkbox", name=re.compile(r"^Native$"))
-        if native.count() == 0:
-            native = card.locator("label").filter(
-                has_text=re.compile(r"^Native$")
-            ).locator("input")
-        sandboxed = card.get_by_role("checkbox", name=re.compile(r"Sandboxed"))
-        if sandboxed.count() == 0:
-            sandboxed = card.locator("label").filter(has_text="Sandboxed").locator("input")
         self.assertTrue(auto.first.is_enabled(), "Auto-update must unlock after ack")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must unlock after ack")
-        self.assertTrue(native.first.is_enabled(), "Native must unlock after ack")
-        self.assertTrue(sandboxed.first.is_enabled(), "Sandboxed must unlock after ack")
-
 
     def test_14l_plane_sandboxed(self) -> None:
-        # catalog:e2e-plane-sandboxed-toggle — Toggle Sandboxed on the plane card.
-        # Isolated run (this method only) still needs a session.
+        # catalog:e2e-plane-runtime — plane uses SANDBOX_BACKEND, no isolation checkboxes.
         page = self.page
         base = getattr(type(self), "workspace_url", None)
         if base:
@@ -1757,69 +1746,20 @@ class BrowserE2ETests(unittest.TestCase):
         goto_self_hosted(page, workspace_url)
         first = page.locator("article").first
         first.wait_for(timeout=10_000)
-        self.assertIn("Control plane", first.inner_text())
-
-        native = first.get_by_role("checkbox", name=re.compile(r"^Native$"))
-        if native.count() == 0:
-            native = first.locator("label").filter(has_text="Native").locator("input")
-        self.assertGreater(native.count(), 0, "plane must still show Native")
-        native_box = native.first
-        self.assertFalse(native_box.is_checked(), "plane Native must stay off")
-        self.assertFalse(native_box.is_enabled(), "plane Native must be greyed out")
-
-        sandboxed = first.get_by_role("checkbox", name=re.compile(r"Sandboxed"))
-        if sandboxed.count() == 0:
-            sandboxed = (
-                first.locator("label").filter(has_text="Sandboxed").locator("input")
-            )
-        self.assertGreater(sandboxed.count(), 0, "plane must show Sandboxed")
-        box = sandboxed.first
-        self.assertTrue(box.is_enabled(), "plane Sandboxed must be clickable")
-        before = box.is_checked()
-        box.click(force=True)
-
-        apply_btn = first.get_by_role("button", name="Apply changes")
-        applied = False
-        for _ in range(25):
-            if apply_btn.count() and apply_btn.first.is_visible():
-                apply_btn.first.click(force=True)
-                apply_btn.first.wait_for(state="hidden", timeout=10_000)
-                applied = True
-                break
-            page.wait_for_timeout(200)
-        if not applied:
-            self.fail("Apply changes never appeared after toggling plane Sandboxed")
-
-        goto_self_hosted(page, workspace_url)
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        self.assertIn("Control plane", first.inner_text())
-        self.assertNotIn(
-            "pending apply",
-            first.inner_text().lower(),
-            "plane apply is immediate — no pending apply",
+        text = first.inner_text()
+        self.assertIn("Control plane", text)
+        self.assertIn("Runtime:", text)
+        self.assertIn("SANDBOX_BACKEND", text)
+        self.assertEqual(
+            first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
+            0,
+            "plane must not show Native isolation",
         )
         self.assertEqual(
-            first.get_by_text("pending apply", exact=True).count(),
+            first.locator("label").filter(has_text="Sandboxed").count(),
             0,
-            "plane apply is immediate — no pending apply pill",
+            "plane must not show Sandboxed isolation",
         )
-
-        native = first.get_by_role("checkbox", name=re.compile(r"^Native$"))
-        if native.count() == 0:
-            native = first.locator("label").filter(has_text="Native").locator("input")
-        native_box = native.first
-        self.assertFalse(native_box.is_checked(), "plane Native must stay off")
-        self.assertFalse(native_box.is_enabled(), "plane Native must stay disabled")
-
-        sandboxed = first.get_by_role("checkbox", name=re.compile(r"Sandboxed"))
-        if sandboxed.count() == 0:
-            sandboxed = (
-                first.locator("label").filter(has_text="Sandboxed").locator("input")
-            )
-        box = sandboxed.first
-        self.assertNotEqual(box.is_checked(), before, "Sandboxed must toggle")
-        self.assertTrue(box.is_enabled(), "plane Sandboxed must stay clickable")
 
     def test_14d_update_now(self) -> None:
         # catalog:e2e-update-now — Auto-update off + Update now when behind.

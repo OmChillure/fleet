@@ -21,6 +21,7 @@ pub mod chat;
 pub mod dashboard;
 pub mod fleet;
 pub mod home;
+pub mod inbox;
 pub mod integrations;
 pub mod runners;
 pub mod sandboxes;

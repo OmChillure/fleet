@@ -188,6 +188,21 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
+    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
+        &state.db,
+        user_id,
+        &email_normalized,
+        now,
+    )
+    .await
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            error = %e,
+            "signup: accept pending invites failed"
+        );
+    }
+
     let _ = headers;
     tracing::info!(
         user_id = %user_id,
@@ -239,6 +254,21 @@ pub async fn login(
     }
 
     let (access, refresh, sid) = create_session_and_tokens(&state, &user, &headers).await?;
+
+    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
+        &state.db,
+        user.id,
+        &email_normalized,
+        Utc::now(),
+    )
+    .await
+    {
+        tracing::warn!(
+            user_id = %user.id,
+            error = %e,
+            "login: accept pending invites failed"
+        );
+    }
 
     let default_ws = ensure_default_workspace(
         &state,

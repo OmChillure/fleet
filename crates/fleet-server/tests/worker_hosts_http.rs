@@ -12,7 +12,9 @@ use fleet_db::{PoolConfig, connect_and_migrate_with};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
-use fleet_server::{AppState, GrokConfig, OllamaConfig, ServerConfig, build_http_app};
+use fleet_server::{
+    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -130,6 +132,16 @@ async fn app_with_state_dist(worker_dist_dir: Option<PathBuf>) -> (axum::Router,
             api_key: None,
             api_base: "https://api.x.ai/v1".into(),
         },
+        openai: OpenaiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.openai.com/v1".into(),
+        },
+        claude: ClaudeConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.anthropic.com".into(),
+        },
         worker_dist_dir,
     };
 
@@ -157,6 +169,8 @@ async fn app_with_state_dist(worker_dist_dir: Option<PathBuf>) -> (axum::Router,
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        openai: config.openai.clone(),
+        claude: config.claude.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 

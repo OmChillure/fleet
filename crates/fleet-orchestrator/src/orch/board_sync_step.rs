@@ -1,7 +1,7 @@
 //! PR10 — push board task status to ExternalBoardSync when enabled.
 //!
-//! Gated by `project_configs.auto_sync_external`. No Jira/Linear client —
-//! adapters are Noop or Log (and tests may inject a recording sink).
+//! Gated by `project_configs.auto_sync_external`. Live adapter is
+//! [`crate::sync::io::IoBoardSync`] (Jira transition, Linear state, GitHub/GitLab close).
 
 use crate::store::BoardSnapshot;
 use crate::sync::{ExternalBoardSync, TaskStatusSync};
@@ -41,6 +41,7 @@ pub async fn sync_external_board(
         };
         let item = TaskStatusSync {
             board_task_id: task.id,
+            project_id: task.project_id,
             external_provider: Some(ext.provider),
             external_key: Some(ext.key),
             status: task.status.clone(),

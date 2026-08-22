@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Layer 2 e2e: plane Sandboxed still toggles (catalog:e2e-plane-sandboxed-toggle).
+"""Layer 2 e2e: plane runtime is SANDBOX_BACKEND (catalog:e2e-plane-runtime).
 
-Toggle Sandboxed on the Control plane card. Apply is immediate (no pending
-apply). Native stays off and disabled. Sandboxed stays a placeholder.
-Fail closed — no skip.
+No Native/Sandboxed isolation checkboxes. The plane card shows the workspace
+SANDBOX_BACKEND. Fail closed — no skip.
 """
 from __future__ import annotations
 
@@ -185,87 +184,36 @@ class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_toggle_sandboxed_on_the_plane_card(self) -> None:
-        # catalog:e2e-plane-sandboxed-toggle — Toggle Sandboxed on the plane card.
+        # catalog:e2e-plane-runtime — plane uses SANDBOX_BACKEND, no isolation UI.
         page = self.page
-        ws, workspace_url = _signup_api(page)
+        _ws, workspace_url = _signup_api(page)
 
         goto_self_hosted(page, workspace_url)
         card = _plane_card(page)
         text = card.inner_text()
         self.assertIn("this process", text.lower())
-        self.assertIn(HINT, text.lower(), "plane Sandboxed must stay a placeholder")
+        self.assertIn("Runtime:", text)
+        self.assertIn("SANDBOX_BACKEND", text)
+        self.assertNotIn("not implemented yet", text.lower())
         self.assertNotIn(
             "pending apply",
             text.lower(),
             "fresh plane must not show pending apply",
         )
-
-        native = _checkbox(card, "Native")
-        self.assertGreater(native.count(), 0, "plane must still show Native")
-        native_box = native.first
-        self.assertFalse(native_box.is_checked(), "plane Native must stay off")
-        self.assertFalse(native_box.is_enabled(), "plane Native must be greyed out")
-
-        sandboxed = _checkbox(card, "Sandboxed")
-        self.assertGreater(sandboxed.count(), 0, "plane must show Sandboxed")
-        box = sandboxed.first
-        self.assertTrue(box.is_enabled(), "plane Sandboxed must be clickable")
-
-        before_ui = box.is_checked()
-        before_api = bool(_plane_row(page, ws).get("allow_container"))
         self.assertEqual(
-            before_ui,
-            before_api,
-            f"UI Sandboxed must match plane allow_container ({before_api})",
-        )
-
-        box.click(force=True)
-        _apply_if_visible(card, page)
-        self.assertNotEqual(box.is_checked(), before_ui, "Sandboxed must flip in the draft")
-        self.assertFalse(native_box.is_checked(), "toggling Sandboxed must not enable Native")
-        self.assertFalse(native_box.is_enabled(), "plane Native must stay disabled")
-        wait_dx_ready(page)
-        card = _plane_card(page)
-        self.assertNotIn(
-            "pending apply",
-            card.inner_text().lower(),
-            "plane apply is immediate — no pending apply",
-        )
-        self.assertEqual(
-            card.get_by_text("pending apply", exact=True).count(),
+            card.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
             0,
-            "plane apply is immediate — no pending apply pill",
+            "plane must not show Native isolation",
+        )
+        self.assertEqual(
+            card.locator("label").filter(has_text="Sandboxed").count(),
+            0,
+            "plane must not show Sandboxed isolation",
         )
 
-        row = _plane_row(page, ws)
+        row = _plane_row(page, _ws)
         self.assertEqual(row.get("kind"), "control_plane", row)
         self.assertEqual(row.get("name"), "Control plane", row)
-        self.assertFalse(row.get("settings_pending"), row)
-        self.assertEqual(
-            bool(row.get("allow_container")),
-            not before_api,
-            f"PATCH must persist plane allow_container: {row}",
-        )
-
-        goto_self_hosted(page, workspace_url)
-        card = _plane_card(page)
-        self.assertIn(HINT, card.inner_text().lower())
-        self.assertNotIn("pending apply", card.inner_text().lower())
-
-        native = _checkbox(card, "Native")
-        native_box = native.first
-        self.assertFalse(native_box.is_checked(), "plane Native must stay off after reload")
-        self.assertFalse(native_box.is_enabled(), "plane Native must stay disabled after reload")
-
-        sandboxed = _checkbox(card, "Sandboxed")
-        box = sandboxed.first
-        self.assertNotEqual(box.is_checked(), before_ui, "Sandboxed must persist after reload")
-        self.assertTrue(box.is_enabled(), "plane Sandboxed must stay clickable")
-        self.assertEqual(
-            box.is_checked(),
-            bool(_plane_row(page, ws).get("allow_container")),
-            "reloaded UI must match persisted allow_container",
-        )
 
 
 if __name__ == "__main__":

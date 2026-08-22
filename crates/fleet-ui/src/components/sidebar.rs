@@ -54,7 +54,8 @@ pub fn Sidebar() -> Element {
             | Route::Dashboard { .. }
             | Route::Sandboxes { .. }
             | Route::Cases { .. }
-            | Route::CaseDetail { .. } => Some(NavSection::Monitoring),
+            | Route::CaseDetail { .. }
+            | Route::Inbox { .. } => Some(NavSection::Monitoring),
             Route::Agents { .. } => Some(NavSection::Agents),
             Route::SelfHosted { .. }
             | Route::CloudPage { .. }
@@ -331,6 +332,10 @@ pub fn Sidebar() -> Element {
                         to: Route::Cases { workspace_id: workspace_id.clone() },
                         label: "Cases",
                     }
+                    NavSubLink {
+                        to: Route::Inbox { workspace_id: workspace_id.clone() },
+                        label: "Inbox",
+                    }
                 }
 
                 NavAccordion {
@@ -349,7 +354,7 @@ pub fn Sidebar() -> Element {
                         label: "All agents",
                     }
                     NavSubLink {
-                        to: Route::Sessions { workspace_id: workspace_id.clone() },
+                        to: Route::Sandboxes { workspace_id: workspace_id.clone() },
                         label: "Live sessions",
                     }
                 }
@@ -478,6 +483,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                         r#type: "button",
                         onclick: move |_| {
                             let next = theme().toggle();
+                            next.persist();
                             theme.set(next);
                         },
                         span { "Appearance" }

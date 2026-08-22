@@ -119,3 +119,29 @@ pub struct WorkspaceMember {
     pub role: String,
     pub created_at: DateTime<Utc>,
 }
+
+/// Member plus user identity for the members list.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct WorkspaceMemberPublic {
+    pub workspace_id: Uuid,
+    pub user_id: Uuid,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct WorkspaceInvite {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub email_normalized: String,
+    pub role: String,
+    pub token: String,
+    pub invited_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub accepted_user_id: Option<Uuid>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}

@@ -341,10 +341,16 @@ async fn http_list(
     hosts.push(plane);
     hosts.extend(rows.iter().map(|h| host_json(&state, h)));
     let packages = crate::install_routes::list_dist_packages(&state);
+    let sandbox_backend = std::env::var("SANDBOX_BACKEND")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "stub".into());
     Ok(Json(json!({
         "hosts": hosts,
         "packages": packages,
         "plane_git_sha": plane_git_sha(),
+        "sandbox_backend": sandbox_backend,
     })))
 }
 

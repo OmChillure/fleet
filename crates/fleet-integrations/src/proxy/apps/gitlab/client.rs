@@ -186,6 +186,22 @@ pub(crate) async fn gitlab_post(
     }
 }
 
+pub(crate) async fn gitlab_put(
+    http: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> (u16, Value) {
+    match gitlab_headers(http.put(url).json(body), token).send().await {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let body = res.json::<Value>().await.unwrap_or(json!({}));
+            (status, body)
+        }
+        Err(e) => (0, json!({ "error": e.to_string() })),
+    }
+}
+
 pub(crate) fn project_url(project: &str, suffix: &str) -> String {
     format!("{API}/projects/{}{suffix}", project_enc(project))
 }

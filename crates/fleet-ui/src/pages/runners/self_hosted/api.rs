@@ -24,6 +24,8 @@ struct HostListResponse {
     packages: Vec<HostDesiredSoftware>,
     #[serde(default)]
     plane_git_sha: Option<String>,
+    #[serde(default)]
+    sandbox_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,7 +157,7 @@ pub async fn list_hosts(workspace_id: &str) -> Result<Vec<HostPublic>, String> {
 
 pub async fn list_workers_page(
     workspace_id: &str,
-) -> Result<(Vec<HostPublic>, PackageInventory), String> {
+) -> Result<(Vec<HostPublic>, PackageInventory, String), String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/worker-hosts")).await?;
     let body: HostListResponse = parse_json(res).await?;
     Ok((
@@ -164,6 +166,7 @@ pub async fn list_workers_page(
             packages: body.packages,
             plane_git_sha: body.plane_git_sha,
         },
+        body.sandbox_backend.unwrap_or_else(|| "stub".into()),
     ))
 }
 

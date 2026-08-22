@@ -45,15 +45,28 @@ pub async fn build_app_state_with_pool_io(
     })
     .map_err(|e| anyhow::anyhow!(e))?;
     let orch_url = cfg.orchestrator_public_url.clone();
-    // PR10: LogBoardSync adapter; per-project `auto_sync_external` gates tick calls.
-    let board_sync = Arc::new(LogBoardSync);
+    let io_handle = io
+        .clone()
+        .map(crate::sandbox::io::IntegrationHandle::new)
+        .unwrap_or_else(crate::sandbox::io::IntegrationHandle::none);
+    let board_sync: Arc<dyn crate::sync::ExternalBoardSync> = if io_handle.get().is_some() {
+        Arc::new(crate::sync::io::IoBoardSync::new(io_handle.clone()))
+    } else {
+        Arc::new(LogBoardSync)
+    };
+    let notify: Arc<dyn crate::notify::NotificationSink> = if io_handle.get().is_some() {
+        Arc::new(crate::notify::io::IoNotify::new(io_handle.clone()))
+    } else {
+        Arc::new(crate::notify::LogNotify)
+    };
     let mut runner = TickRunner::with_board_sync(
         store.clone(),
         runtime,
         board_sync,
         cfg.data_dir.clone(),
         orch_url,
-    );
+    )
+    .with_notify(notify);
     if let Some(inv) = io {
         runner = runner.with_integrations(inv);
     }

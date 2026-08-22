@@ -38,6 +38,15 @@ pub fn supported_providers() -> &'static [&'static str] {
     ]
 }
 
+/// Full allowlist as lines the model can read without calling `get_integration`.
+pub fn operations_catalog_text() -> String {
+    supported_providers()
+        .iter()
+        .map(|p| format!("{p}: {}", operations_for(p).join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn operations_for(provider: &str) -> &'static [&'static str] {
     match provider {
         "github" => github::OPERATIONS,
@@ -150,5 +159,15 @@ mod tests {
     #[test]
     fn unknown_provider_has_no_operations() {
         assert!(operations_for("unknown").is_empty());
+    }
+
+    #[test]
+    fn operations_catalog_lists_every_provider() {
+        let text = operations_catalog_text();
+        for p in supported_providers() {
+            assert!(text.contains(&format!("{p}:")), "missing {p} in {text}");
+        }
+        assert!(text.contains("post_message"));
+        assert!(text.contains("commit_files"));
     }
 }

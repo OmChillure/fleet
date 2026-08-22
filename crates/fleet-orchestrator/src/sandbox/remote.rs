@@ -131,6 +131,7 @@ mod tests {
             persona_md: None,
             agent_backend: None,
             agent_model: None,
+            io: crate::sandbox::io::IntegrationHandle::none(),
         }
     }
 

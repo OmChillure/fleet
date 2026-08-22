@@ -154,6 +154,8 @@ async fn run() -> anyhow::Result<()> {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        openai: config.openai.clone(),
+        claude: config.claude.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
@@ -170,6 +172,17 @@ async fn run() -> anyhow::Result<()> {
             interval_s = interval.as_secs(),
             "background case wake loop started (CASE_AUTO_DECIDE, CASE_WAKE_INTERVAL_S)"
         );
+    }
+
+    {
+        let ticket_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(fleet_server::tickets::POLL_MIN_INTERVAL).await;
+                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
+            }
+        });
+        tracing::info!("background ticket inbox poller started");
     }
 
     let app = build_http_app(state, orch, &config)?;

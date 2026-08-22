@@ -52,10 +52,13 @@ pub fn default_acceptance(worker_profile: &str) -> Vec<String> {
             "result.md states pass or fail".into(),
         ];
     }
-    vec![
-        "result.md exists and is non-empty".into(),
-        "exists:work".into(),
-    ]
+    if p.contains("cod") || p.contains("implement") {
+        return vec![
+            "result.md exists and is non-empty".into(),
+            "exists:work".into(),
+        ];
+    }
+    vec!["result.md exists and is non-empty".into()]
 }
 
 pub fn validate_task_done(
@@ -75,24 +78,14 @@ pub fn validate_task_done(
     let result = work_dir.join("result.md");
     let result_body = std::fs::read_to_string(&result).unwrap_or_default();
     let result_trim = result_body.trim();
-    let github_elsewhere = workspace_cites_github(work_dir);
     if result_trim.is_empty() {
-        if !github_elsewhere {
-            reasons.push("result.md is missing or empty — next agents have no context".into());
-        }
-    } else if result_trim.chars().count() < 20 && !github_elsewhere {
+        reasons.push("result.md is missing or empty — next agents have no context".into());
+    } else if result_trim.chars().count() < 20 {
         reasons.push("result.md is too short to hand off".into());
     }
 
-    if looks_blocked(result_trim) && !looks_complete(result_trim) && !github_elsewhere {
+    if looks_blocked(result_trim) && !looks_complete(result_trim) {
         reasons.push("result.md reports a blocker without completing the task".into());
-    }
-
-    if task_must_cite_github(task) && !cites_github(result_trim) && !github_elsewhere {
-        reasons.push(
-            "this task must push to GitHub — result.md needs a github.com PR or commit URL"
-                .into(),
-        );
     }
 
     if let Ok(raw) = std::fs::read_to_string(work_dir.join(".fleet").join("done.json")) {
@@ -124,43 +117,7 @@ pub fn validate_task_done(
     }
 }
 
-pub fn task_must_cite_github(task: &BoardTaskRow) -> bool {
-    let id = task.plan_task_id.to_ascii_lowercase();
-    let profile = task.worker_profile.to_ascii_lowercase();
-    if id == "ship" || profile.contains("ship") || profile.contains("release") {
-        return true;
-    }
-    let spec = task.spec_md.to_ascii_lowercase();
-    spec.contains("must")
-        && (spec.contains("create_pr")
-            || spec.contains("commit_files")
-            || spec.contains("pr url")
-            || spec.contains("github.com"))
-}
 
-fn cites_github(text: &str) -> bool {
-    let t = text.to_ascii_lowercase();
-    t.contains("github.com")
-        || t.contains("gitlab.com")
-        || t.contains("/pull/")
-        || t.contains("/merge_requests/")
-}
-
-/// Ship often writes the PR URL into work/SHIP.md before result.md.
-fn workspace_cites_github(work_dir: &Path) -> bool {
-    for rel in [
-        "SHIP.md",
-        "work/SHIP.md",
-        "work/review_notes.md",
-        "handoff/result.md",
-    ] {
-        let body = std::fs::read_to_string(work_dir.join(rel)).unwrap_or_default();
-        if cites_github(&body) {
-            return true;
-        }
-    }
-    false
-}
 
 fn looks_blocked(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
@@ -361,35 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn ship_task_requires_github_url() {
+    fn ship_id_does_not_require_a_github_url() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("result.md"), "Pushed the calculator locally.\n").unwrap();
-        std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        let mut t = task(json!([]));
-        t.plan_task_id = "ship".into();
-        let c = validate_task_done(&t, dir.path(), "process");
-        assert!(!c.ok, "{c:?}");
         std::fs::write(
             dir.path().join("result.md"),
-            "Opened https://github.com/acme/app/pull/9\n",
+            "Posted the summary to Slack and stopped.\n",
         )
         .unwrap();
+        let mut t = task(json!([]));
+        t.plan_task_id = "ship".into();
+        t.worker_profile = "generalist".into();
         let c = validate_task_done(&t, dir.path(), "process");
         assert!(c.ok, "{c:?}");
     }
 
     #[test]
-    fn ship_accepts_pr_url_in_work_ship_md() {
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("work")).unwrap();
-        std::fs::write(
-            dir.path().join("work").join("SHIP.md"),
-            "PR: https://github.com/OmChillure/test/pull/2\n",
-        )
-        .unwrap();
-        let mut t = task(json!([]));
-        t.plan_task_id = "ship".into();
-        let c = validate_task_done(&t, dir.path(), "process");
-        assert!(c.ok, "{c:?}");
+    fn generalist_default_acceptance_is_result_only() {
+        let acc = default_acceptance("generalist");
+        assert_eq!(acc, vec!["result.md exists and is non-empty"]);
+        let coding = default_acceptance("coding");
+        assert!(coding.iter().any(|l| l.contains("exists:work")));
     }
 }

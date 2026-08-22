@@ -49,6 +49,87 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     )
 }
 
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let project = match require_project(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("gitlab", "update_issue", "bad_args", e, None),
+    };
+    let iid = match args
+        .get("iid")
+        .or_else(|| args.get("number"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        Some(n) => n,
+        None => {
+            return ProxyResult::err("gitlab", "update_issue", "bad_args", "iid is required", None);
+        }
+    };
+    let mut payload = json!({});
+    if let Some(se) = args
+        .get("state_event")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        payload["state_event"] = json!(se);
+    } else if let Some(state) = args
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match state.to_ascii_lowercase().as_str() {
+            "closed" | "close" => payload["state_event"] = json!("close"),
+            "open" | "reopen" | "opened" => payload["state_event"] = json!("reopen"),
+            other => {
+                return ProxyResult::err(
+                    "gitlab",
+                    "update_issue",
+                    "bad_args",
+                    format!("unknown state `{other}` (use close/reopen)"),
+                    None,
+                );
+            }
+        }
+    }
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+        payload["title"] = json!(title);
+    }
+    if let Some(d) = args
+        .get("description")
+        .or_else(|| args.get("body"))
+        .and_then(|v| v.as_str())
+    {
+        payload["description"] = json!(d);
+    }
+    if payload.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        return ProxyResult::err(
+            "gitlab",
+            "update_issue",
+            "bad_args",
+            "provide state/state_event, title, and/or description",
+            None,
+        );
+    }
+    let (status, body) = gitlab_put(
+        http,
+        token,
+        &project_url(&project, &format!("/issues/{iid}")),
+        &payload,
+    )
+    .await;
+    if !(200..300).contains(&status) {
+        return upstream_err("update_issue", status, &body);
+    }
+    ProxyResult::ok_result(
+        "gitlab",
+        "update_issue",
+        format!("Updated issue !{iid} on {project}"),
+        map_issue(&body),
+        Some(status),
+    )
+}
+
 pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let project = match require_project(args) {
         Ok(v) => v,

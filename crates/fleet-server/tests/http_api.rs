@@ -12,7 +12,9 @@ use fleet_db::{connect_and_migrate_with, PoolConfig};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
-use fleet_server::{build_http_app, AppState, GrokConfig, OllamaConfig, ServerConfig};
+use fleet_server::{
+    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -126,6 +128,16 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.x.ai/v1".into(),
         },
+        openai: OpenaiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.openai.com/v1".into(),
+        },
+        claude: ClaudeConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.anthropic.com".into(),
+        },
         worker_dist_dir: None,
     };
 
@@ -153,6 +165,8 @@ async fn app_with_state() -> (axum::Router, AppState) {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        openai: config.openai.clone(),
+        claude: config.claude.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
@@ -569,6 +583,46 @@ async fn fixture_bff_start_and_tick_with_cookie() {
         "expected plan_task_id t1: {}",
         tasks.body
     );
+}
+
+#[tokio::test]
+async fn resume_non_blocked_task_is_conflict_and_unknown_kill_is_404() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    let _ = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    let task_id = tasks.body["tasks"][0]["id"].as_str().expect("task id");
+    let resume = call(
+        &app,
+        "POST",
+        &fleet(&ws, &format!("/tasks/{task_id}/resume")),
+        Some(&jar),
+        Some(json!({ "message": "go" })),
+    )
+    .await;
+    assert_eq!(resume.status, StatusCode::CONFLICT, "{}", resume.body);
+
+    let missing = uuid::Uuid::new_v4();
+    let kill = call(
+        &app,
+        "POST",
+        &fleet(&ws, &format!("/sessions/{missing}/kill")),
+        Some(&jar),
+        Some(json!({ "reason": "test" })),
+    )
+    .await;
+    assert_eq!(kill.status, StatusCode::NOT_FOUND, "{}", kill.body);
 }
 
 // ── 4. cancel run ───────────────────────────────────────────────────────────
@@ -1185,8 +1239,17 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
         .iter()
         .find(|p| p["id"] == "openai");
     if let Some(p) = openai {
-        assert_eq!(p["coming_soon"], true, "{p}");
         assert_eq!(p["available"], false, "{p}");
+        assert_eq!(p["coming_soon"], false, "{p}");
+    }
+    let claude = status.body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "claude");
+    if let Some(p) = claude {
+        assert_eq!(p["available"], false, "{p}");
+        assert_eq!(p["coming_soon"], false, "{p}");
     }
 
     let empty = call(
@@ -1689,7 +1752,7 @@ async fn chat_tools_human_can_talk_on_team_channel() {
 }
 
 #[tokio::test]
-async fn chat_tools_reject_removed_monitor_and_overview_has_no_ticket_inbox() {
+async fn chat_tools_ticket_inbox_is_available() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
@@ -1700,38 +1763,20 @@ async fn chat_tools_reject_removed_monitor_and_overview_has_no_ticket_inbox() {
         model: "grok-4.5".into(),
     };
 
-    for name in ["monitor_tickets", "list_tickets", "finish_ticket"] {
-        let (denied, deny_action) = fleet_server::chat_tools::execute_tool(
-            &state,
-            workspace_id,
-            user_id,
-            name,
-            &json!({}),
-            &llm,
-        )
-        .await;
-        assert!(!deny_action.ok, "{name} {deny_action:?} {denied}");
-        let err = denied["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("unknown tool"),
-            "{name} should be gone: {denied}"
-        );
-    }
-
-    let overview = call(
-        &app,
-        "GET",
-        &fleet(&ws, "/overview"),
-        Some(&jar),
-        None,
+    let (listed, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "list_tickets",
+        &json!({}),
+        &llm,
     )
     .await;
-    assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
-    assert!(
-        overview.body.get("tickets").is_none(),
-        "overview must not expose a ticket inbox: {}",
-        overview.body
-    );
+    assert!(action.ok, "list_tickets {action:?} {listed}");
+
+    let inbox = call(&app, "GET", &format!("/api/workspaces/{ws}/inbox"), Some(&jar), None)
+        .await;
+    assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
 }
 
 #[tokio::test]

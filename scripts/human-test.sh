@@ -154,7 +154,7 @@ cmd_guide() {
 
   pause_step "Sidebar" \
     "Chat: New chat, Chat history." \
-    "Monitoring: Dashboard, Fleet, Sandboxes, Cases." \
+    "Monitoring: Dashboard, Fleet, Sandboxes, Cases, Inbox." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
     "Runners (expand it): Self-hosted, Cloud, Partners." \
     "Workspace (expand it): Integrations, Settings." \
@@ -168,11 +168,11 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; Native greyed off; cannot remove). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; Runtime: SANDBOX_BACKEND; cannot remove). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
     "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
-    "Each card has Native and Sandboxed checkboxes. Sandboxed is not implemented yet. Both off is the same as stop taking new jobs. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Isolation, Auto-update, and Max jobs stay disabled until the runner acks." \
+    "No Native/Sandboxed checkboxes. Isolation is SANDBOX_BACKEND (shown on the plane card). Stop taking jobs is the Behavior button. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Auto-update and Max jobs stay disabled until the runner acks." \
     "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
@@ -215,9 +215,19 @@ cmd_guide() {
     "Same worker sessions as Fleet (status, backend, work dir)." || return 0
 
   pause_step "Cases" \
-    "/{ws}/cases — durable workflows (empty is OK)." \
-    "If chat started a case: open it, events show, Observe / Cancel work." \
-    "The LLM invents Slack/GitHub/Notion steps; this page is the log." || return 0
+    "/{ws}/cases — New case form (title + policy) creates a durable workflow." \
+    "Open a case: events, Observe, Decide now, Cancel." \
+    "Fleet blocked tasks have Resume; Sandboxes live rows have Kill." || return 0
+
+  pause_step "Inbox" \
+    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
+    "Start monitor + Refresh now. Finish launches implement + review." \
+    "Empty is OK until Integrations are connected." || return 0
+
+  pause_step "Settings members" \
+    "/{ws}/settings — Members: invite by email (member/admin)." \
+    "Existing users join immediately; others join on signup or next login." \
+    "Owner can change roles / remove; member cannot invite." || return 0
 
   pause_step "Chat history" \
     "/{ws}/sessions lists saved chats, not workers." \

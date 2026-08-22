@@ -275,8 +275,12 @@ pub fn display_name(host: &HostPublic) -> String {
     }
 }
 
+pub fn accepting_jobs(host: &HostPublic) -> bool {
+    host.allow_host || host.allow_container
+}
+
 pub fn holding_new_jobs(host: &HostPublic) -> bool {
-    host.paused || host.drain || (!host.allow_host && !host.allow_container)
+    host.paused || host.drain || !accepting_jobs(host)
 }
 
 pub fn hold_jobs_reason(host: &HostPublic) -> Option<String> {
@@ -659,16 +663,14 @@ pub fn identity_line(host: &HostPublic) -> Option<String> {
     }
 }
 
-/// Draft Isolation / Behavior widgets differ from the last applied host.
+/// Draft Behavior widgets differ from the last applied host.
 pub fn settings_draft_dirty(
     host: &HostPublic,
-    native: bool,
-    sandboxed: bool,
+    accepting: bool,
     auto_update: bool,
     max_concurrent: i32,
 ) -> bool {
-    native != host.allow_host
-        || sandboxed != host.allow_container
+    accepting != accepting_jobs(host)
         || (!is_control_plane(host) && auto_update != host.auto_update)
         || max_concurrent != host.max_concurrent
 }
@@ -678,14 +680,20 @@ pub fn widgets_locked(host: &HostPublic, busy: bool) -> bool {
     busy || (!is_control_plane(host) && settings_awaiting_ack(host))
 }
 
-/// Control plane Native stays off and not clickable.
-pub fn plane_native_locked(host: &HostPublic) -> bool {
-    is_control_plane(host)
+/// Draft hold is the same as `holding_new_jobs` (not taking work).
+pub fn draft_holding_new_jobs(accepting: bool) -> bool {
+    !accepting
 }
 
-/// Draft "both isolation modes off" is the same hold as `holding_new_jobs`.
-pub fn draft_holding_new_jobs(native: bool, sandboxed: bool) -> bool {
-    !native && !sandboxed
+/// How this runner executes. Isolation is SANDBOX_BACKEND, not a second pair of checkboxes.
+pub fn runtime_line(host: &HostPublic, sandbox_backend: &str) -> String {
+    if is_control_plane(host) {
+        let backend = sandbox_backend.trim();
+        let name = if backend.is_empty() { "stub" } else { backend };
+        format!("Runtime: {name} (SANDBOX_BACKEND)")
+    } else {
+        "Runtime: process on this machine".into()
+    }
 }
 
 /// Max jobs at once (1–256). Same clamp as `job_cap` on the plane side.
@@ -693,12 +701,8 @@ pub fn clamp_max_jobs(n: i32) -> i32 {
     n.clamp(1, 256)
 }
 
-/// Card section above Native / Sandboxed.
-pub const ISOLATION_LABEL: &str = "Isolation";
 /// Card section above hold / auto-update / cap.
 pub const BEHAVIOR_LABEL: &str = "Behavior";
-/// Sandboxed is a placeholder — not assignable, no k8s job.
-pub const SANDBOXED_HINT: &str = "Sandboxed is not implemented yet.";
 
 pub fn hint_is_loopback(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
@@ -1770,18 +1774,17 @@ mod tests {
         host.allow_container = true;
         host.auto_update = true;
         host.max_concurrent = 4;
-        assert!(!settings_draft_dirty(&host, true, true, true, 4));
-        assert!(settings_draft_dirty(&host, false, true, true, 4));
-        assert!(settings_draft_dirty(&host, true, false, true, 4));
-        assert!(settings_draft_dirty(&host, true, true, false, 4));
-        assert!(settings_draft_dirty(&host, true, true, true, 8));
+        assert!(!settings_draft_dirty(&host, true, true, 4));
+        assert!(settings_draft_dirty(&host, false, true, 4));
+        assert!(settings_draft_dirty(&host, true, false, 4));
+        assert!(settings_draft_dirty(&host, true, true, 8));
 
         host.kind = "control_plane".into();
         assert!(
-            !settings_draft_dirty(&host, true, true, false, 4),
+            !settings_draft_dirty(&host, true, false, 4),
             "plane has no auto-update widget"
         );
-        assert!(settings_draft_dirty(&host, true, false, false, 4));
+        assert!(settings_draft_dirty(&host, false, false, 4));
     }
 
     #[test]
@@ -1807,23 +1810,22 @@ mod tests {
     }
 
     #[test]
-    fn plane_native_is_locked_only_on_control_plane() {
+    fn runtime_line_is_sandbox_backend_not_isolation_modes() {
         let mut host = sample_host();
-        assert!(!plane_native_locked(&host));
+        assert_eq!(
+            runtime_line(&host, "docker"),
+            "Runtime: process on this machine"
+        );
         host.kind = "control_plane".into();
-        assert!(plane_native_locked(&host));
-        assert_eq!(ISOLATION_LABEL, "Isolation");
+        assert_eq!(runtime_line(&host, "process"), "Runtime: process (SANDBOX_BACKEND)");
+        assert_eq!(runtime_line(&host, ""), "Runtime: stub (SANDBOX_BACKEND)");
         assert_eq!(BEHAVIOR_LABEL, "Behavior");
-        assert_eq!(SANDBOXED_HINT, "Sandboxed is not implemented yet.");
-        assert!(SANDBOXED_HINT.contains("not implemented yet"));
     }
 
     #[test]
     fn draft_holding_and_clamp_max_jobs() {
-        assert!(draft_holding_new_jobs(false, false));
-        assert!(!draft_holding_new_jobs(true, false));
-        assert!(!draft_holding_new_jobs(false, true));
-        assert!(!draft_holding_new_jobs(true, true));
+        assert!(draft_holding_new_jobs(false));
+        assert!(!draft_holding_new_jobs(true));
         assert_eq!(clamp_max_jobs(0), 1);
         assert_eq!(clamp_max_jobs(1), 1);
         assert_eq!(clamp_max_jobs(4), 4);

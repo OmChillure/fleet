@@ -123,6 +123,37 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateCaseBody {
+    pub title: String,
+    pub policy_md: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+}
+
+pub async fn create_case(
+    workspace_id: &str,
+    title: &str,
+    policy_md: &str,
+    kind: Option<&str>,
+) -> Result<CaseRow, CaseError> {
+    let res = with_credentials(client().post(api_url(&format!(
+        "/api/workspaces/{workspace_id}/cases"
+    ))))
+    .json(&CreateCaseBody {
+        title: title.to_string(),
+        policy_md: policy_md.to_string(),
+        kind: kind.map(|s| s.to_string()),
+        stage: None,
+    })
+    .send()
+    .await
+    .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
+    parse_json(res).await
+}
+
 pub async fn list_cases(workspace_id: &str) -> Result<CaseListResponse, CaseError> {
     let res = with_credentials(client().get(api_url(&format!(
         "/api/workspaces/{workspace_id}/cases"
@@ -155,6 +186,40 @@ pub async fn observe_case(
         note: note.to_string(),
         wake: true,
     })
+    .send()
+    .await
+    .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
+    parse_json(res).await
+}
+
+pub async fn wake_case(workspace_id: &str, case_id: &str) -> Result<CaseRow, CaseError> {
+    let res = with_credentials(client().post(api_url(&format!(
+        "/api/workspaces/{workspace_id}/cases/{case_id}/wake"
+    ))))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
+    parse_json(res).await
+}
+
+pub async fn decide_case(
+    workspace_id: &str,
+    case_id: &str,
+    action: &str,
+    note: Option<&str>,
+    stage: Option<&str>,
+) -> Result<Value, CaseError> {
+    let res = with_credentials(client().post(api_url(&format!(
+        "/api/workspaces/{workspace_id}/cases/{case_id}/decide"
+    ))))
+    .json(&serde_json::json!({
+        "decision": {
+            "action": action,
+            "note": note,
+            "stage": stage,
+        }
+    }))
     .send()
     .await
     .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;

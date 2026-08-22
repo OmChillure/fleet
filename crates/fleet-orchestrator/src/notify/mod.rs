@@ -1,5 +1,7 @@
 //! HITL / operator notification sink (PR4).
 
+pub mod io;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
