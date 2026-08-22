@@ -127,9 +127,8 @@ async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(
         .map_err(|e| AuthError::Network(e.to_string()))?;
 
     if status.is_success() {
-        serde_json::from_str(&text).map_err(|e| {
-            AuthError::Network(format!("invalid success response: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| AuthError::Network(format!("invalid success response: {e} ({text})")))
     } else if status.as_u16() == 401 {
         let msg = serde_json::from_str::<ErrorBody>(&text)
             .map(|b| b.error)
@@ -276,9 +275,7 @@ pub async fn logout() -> Result<(), AuthError> {
 /// Flag for login page banner after successful signup.
 pub fn mark_just_registered() {
     #[cfg(target_arch = "wasm32")]
-    if let Some(storage) = web_sys::window()
-        .and_then(|w| w.session_storage().ok().flatten())
-    {
+    if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
         let _ = storage.set_item("fleet_just_registered", "1");
     }
 }
@@ -286,9 +283,7 @@ pub fn mark_just_registered() {
 pub fn take_just_registered() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(storage) = web_sys::window()
-            .and_then(|w| w.session_storage().ok().flatten())
-        {
+        if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
             let hit = storage
                 .get_item("fleet_just_registered")
                 .ok()

@@ -1,6 +1,6 @@
 //! Store operations used by the reconcile tick (PR5b/c).
 
-use super::{hash_worker_token, Result, Store, WorkerSessionRow};
+use super::{Result, Store, WorkerSessionRow, hash_worker_token};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -136,6 +136,31 @@ impl Store {
         Ok(())
     }
 
+    /// Remote enqueue: keep `spawning` until the job worker heartbeats.
+    /// Does not stamp `last_heartbeat_at` (that would start the stale clock).
+    pub async fn record_remote_enqueued(
+        &self,
+        session_id: Uuid,
+        runtime_handle: &str,
+        work_dir: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE worker_sessions
+            SET runtime_backend = 'remote',
+                runtime_handle = $2,
+                work_dir = COALESCE($3, work_dir)
+            WHERE id = $1 AND status = 'spawning'
+            "#,
+        )
+        .bind(session_id)
+        .bind(runtime_handle)
+        .bind(work_dir)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<()> {
         sqlx::query(
             r#"
@@ -195,7 +220,9 @@ impl Store {
             r#"
             UPDATE worker_sessions
             SET last_heartbeat_at = now(),
-                progress_pct = COALESCE($2, progress_pct)
+                progress_pct = COALESCE($2, progress_pct),
+                status = CASE WHEN status = 'spawning' THEN 'healthy' ELSE status END,
+                started_at = COALESCE(started_at, now())
             WHERE id = $1
             "#,
         )
@@ -209,6 +236,8 @@ impl Store {
             UPDATE board_tasks
             SET last_report_seq = GREATEST(last_report_seq, $2),
                 progress_pct = COALESCE($3, progress_pct),
+                status = CASE WHEN status = 'assigned' THEN 'in_progress' ELSE status END,
+                started_at = COALESCE(started_at, now()),
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -547,10 +576,7 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub async fn cancel_nonterminal_tasks_without_session(
-        &self,
-        run_id: Uuid,
-    ) -> Result<u64> {
+    pub async fn cancel_nonterminal_tasks_without_session(&self, run_id: Uuid) -> Result<u64> {
         let res = sqlx::query(
             r#"
             UPDATE board_tasks
@@ -602,7 +628,6 @@ pub struct SpawnAssignment {
     pub worker_token: String,
 }
 
-
 impl Store {
     pub async fn get_project(&self, project_id: Uuid) -> Result<Option<super::ProjectRow>> {
         sqlx::query_as::<_, super::ProjectRow>(
@@ -614,7 +639,11 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub async fn get_run(&self, project_id: Uuid, run_id: Uuid) -> Result<Option<super::WorkRunRow>> {
+    pub async fn get_run(
+        &self,
+        project_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<Option<super::WorkRunRow>> {
         sqlx::query_as::<_, super::WorkRunRow>(
             r#"
             SELECT id, project_id, status, source, cancel_requested_at,
@@ -698,7 +727,6 @@ impl Store {
         run_id: Option<Uuid>,
         status: Option<&str>,
     ) -> Result<Vec<super::BoardTaskRow>> {
-        // Simple filter in SQL with optional binds via dynamic approach
         let tasks = sqlx::query_as::<_, super::BoardTaskRow>(
             r#"
             SELECT id, project_id, run_id, plan_id, plan_task_id, title, summary, spec_md,
@@ -748,6 +776,63 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub async fn mark_hitl_notified(&self, task_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE board_tasks
+            SET hitl_notified_at = now(), updated_at = now()
+            WHERE id = $1 AND hitl_notified_at IS NULL
+            "#,
+        )
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Workspace custom persona (Agents page) by slug. Same DB, project_id == workspace_id.
+    pub async fn find_workspace_persona(
+        &self,
+        workspace_id: Uuid,
+        slug: &str,
+    ) -> Result<Option<(String, String)>> {
+        let key = slug.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT name, role_prompt, COALESCE(description, '')
+            FROM personas
+            WHERE workspace_id = $1 AND status = 'active'
+              AND (slug = $2 OR lower(name) = lower($2))
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await;
+        match row {
+            Ok(Some((name, role, desc))) => {
+                let mut body = format!("# {name}\n\n");
+                if !desc.trim().is_empty() {
+                    body.push_str(desc.trim());
+                    body.push_str("\n\n");
+                }
+                body.push_str("## Role\n\n");
+                body.push_str(role.trim());
+                body.push('\n');
+                Ok(Some((name, body)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                tracing::debug!(error = %e, "workspace persona lookup skipped");
+                Ok(None)
+            }
+        }
+    }
+
     /// HITL resume intent only (Model A). Returns false if task not blocked.
     pub async fn request_hitl_resume(
         &self,
@@ -770,6 +855,19 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() == 1)
+    }
+
+    /// Local SANDBOX_BACKEND sessions that still hold a plane slot.
+    pub async fn count_local_capacity(&self, project_id: Uuid) -> Result<i32> {
+        let rows = self.list_sessions_for_project(project_id).await?;
+        Ok(rows
+            .iter()
+            .filter(|s| {
+                s.runtime_backend != crate::sandbox::remote::BACKEND
+                    && crate::domain::WorkerSessionStatus::from_db(&s.status)
+                        .is_some_and(|st| st.holds_capacity())
+            })
+            .count() as i32)
     }
 
     pub async fn list_sessions_for_project(
@@ -808,7 +906,6 @@ impl Store {
         }
     }
 }
-
 
 impl Store {
     /// Create project with a fixed id if missing (workspace_id == project_id mapping).

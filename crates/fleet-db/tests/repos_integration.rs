@@ -5,12 +5,12 @@
 
 mod common;
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, SubsecRound, Utc};
 use fleet_db::error::DbError;
-use fleet_db::models::NewAuthSession;
-use fleet_db::repos::{cases, chats, sessions, tickets, users, workspaces};
-use serde_json::json;
+use fleet_db::models::{NewAuthSession, NewWorkerHost, PartnersDisclaimerAck};
 use fleet_db::repos::users::NewUser;
+use fleet_db::repos::{cases, chats, sessions, tickets, users, worker_hosts, workspaces};
+use serde_json::json;
 use uuid::Uuid;
 
 use common::{connect_and_migrate, unique_email, unique_slug};
@@ -51,9 +51,7 @@ async fn seed_user_with_workspace(pool: &fleet_db::PgPool) -> (Uuid, Uuid) {
     (user_id, workspace_id)
 }
 
-// ---------------------------------------------------------------------------
 // 1. users::insert_tx — duplicate email_normalized
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn insert_tx_duplicate_email_normalized_is_conflict_with_exact_message() {
@@ -112,9 +110,7 @@ async fn insert_tx_duplicate_email_normalized_is_conflict_with_exact_message() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 2. workspace slug unique → Conflict
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn workspace_slug_unique_is_conflict() {
@@ -150,9 +146,7 @@ async fn workspace_slug_unique_is_conflict() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 3. session insert + find by refresh hash
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn session_insert_and_find_by_refresh_hash() {
@@ -202,9 +196,7 @@ async fn session_insert_and_find_by_refresh_hash() {
     assert!(missing.is_none(), "unknown refresh hash must yield None");
 }
 
-// ---------------------------------------------------------------------------
 // 4. chat conversation belongs to user+workspace
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn chat_conversation_scoped_to_user_and_workspace() {
@@ -230,7 +222,6 @@ async fn chat_conversation_scoped_to_user_and_workspace() {
     assert_eq!(created.user_id, owner_id);
     assert_eq!(created.workspace_id, workspace_id);
 
-    // Owner can fetch.
     let ok = chats::get_conversation(&pool, conv_id, workspace_id, owner_id)
         .await
         .expect("get as owner")
@@ -256,9 +247,7 @@ async fn chat_conversation_scoped_to_user_and_workspace() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 5. from_sqlx / is_unique_violation mapping honesty
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn from_sqlx_maps_23505_to_conflict_and_is_unique_violation() {
@@ -330,6 +319,9 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
             providers: vec!["linear".into(), "jira".into()],
             github_repos: vec![],
             jira_jql: None,
+            slack_channels: vec![],
+            notion_databases: vec![],
+            auto_launch: false,
             started_by: Some(user_id),
         },
     )
@@ -403,9 +395,7 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
     assert_eq!(after_close.summary, "second");
 }
 
-// ---------------------------------------------------------------------------
 // cases: create → claim wake → patch complete
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn case_create_claim_and_complete() {
@@ -479,4 +469,161 @@ async fn case_create_claim_and_complete() {
 
     let events = cases::list_events(&pool, id, 10).await.expect("events");
     assert!(!events.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// partners disclaimer: default NULL, first write wins, hosts unchanged
+// ---------------------------------------------------------------------------
+
+/// Identity of a worker host that must not change when the disclaimer is ack'd.
+fn host_fingerprint(h: &fleet_db::models::WorkerHost) -> (Uuid, &str, bool, bool, bool, &str, i32) {
+    (
+        h.id,
+        h.status.as_str(),
+        h.enabled,
+        h.paused,
+        h.drain,
+        h.isolation.as_str(),
+        h.current_jobs,
+    )
+}
+
+#[tokio::test]
+async fn partners_disclaimer_defaults_null_and_first_write_wins() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let raw: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("SELECT partners_disclaimer_accepted_at FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .fetch_one(&pool)
+            .await
+            .expect("raw accepted_at");
+    assert!(
+        raw.is_none(),
+        "new workspace column default must be NULL, got {raw:?}"
+    );
+
+    let unread = workspaces::partners_disclaimer_accepted_at(&pool, workspace_id)
+        .await
+        .expect("read default");
+    assert_eq!(unread, None, "repo must treat NULL as not accepted");
+    assert!(
+        !PartnersDisclaimerAck::from_accepted_at(unread).accepted,
+        "PartnersDisclaimerAck must report not accepted when timestamp is None"
+    );
+
+    let first_at = Utc::now().trunc_subsecs(6);
+    let stored = workspaces::accept_partners_disclaimer(&pool, workspace_id, first_at)
+        .await
+        .expect("first accept");
+    assert_eq!(stored, first_at, "accept must write the provided timestamp");
+
+    let after_first = workspaces::partners_disclaimer_accepted_at(&pool, workspace_id)
+        .await
+        .expect("read after first accept");
+    assert_eq!(after_first, Some(first_at));
+    assert!(PartnersDisclaimerAck::from_accepted_at(after_first).accepted);
+
+    let later = first_at + Duration::hours(1);
+    let again = workspaces::accept_partners_disclaimer(&pool, workspace_id, later)
+        .await
+        .expect("second accept");
+    assert_eq!(
+        again, first_at,
+        "COALESCE must keep the original timestamp (first write wins)"
+    );
+
+    let after_second = workspaces::partners_disclaimer_accepted_at(&pool, workspace_id)
+        .await
+        .expect("read after second accept");
+    assert_eq!(after_second, Some(first_at));
+}
+
+#[tokio::test]
+async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let pending_token = worker_hosts::generate_pair_token();
+    let pending = worker_hosts::create_pending(
+        &pool,
+        &NewWorkerHost::new(Uuid::now_v7(), workspace_id, "pending-box", Some(user_id)),
+        &worker_hosts::hash_token(&pending_token),
+        expires,
+    )
+    .await
+    .expect("create pending host");
+
+    let online_token = worker_hosts::generate_pair_token();
+    let online = worker_hosts::create_pending(
+        &pool,
+        &NewWorkerHost::new(Uuid::now_v7(), workspace_id, "online-box", Some(user_id)),
+        &worker_hosts::hash_token(&online_token),
+        expires,
+    )
+    .await
+    .expect("create online host");
+    worker_hosts::consume_pair_token(
+        &pool,
+        &online_token,
+        "online-box",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair online host");
+
+    let hosts_before = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list hosts before");
+    let assignable_before =
+        worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+            .await
+            .expect("list assignable before");
+    let host_ids_before: Vec<Uuid> = hosts_before.iter().map(|h| h.id).collect();
+    let assignable_ids_before: Vec<Uuid> = assignable_before.iter().map(|h| h.id).collect();
+    assert!(host_ids_before.contains(&pending.id));
+    assert!(host_ids_before.contains(&online.id));
+    assert_eq!(
+        assignable_ids_before,
+        vec![online.id],
+        "only the paired online host is assignable before accept"
+    );
+
+    workspaces::accept_partners_disclaimer(&pool, workspace_id, Utc::now())
+        .await
+        .expect("accept disclaimer");
+
+    let hosts_after = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list hosts after");
+    let assignable_after =
+        worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+            .await
+            .expect("list assignable after");
+
+    assert_eq!(
+        hosts_after.iter().map(host_fingerprint).collect::<Vec<_>>(),
+        hosts_before
+            .iter()
+            .map(host_fingerprint)
+            .collect::<Vec<_>>(),
+        "accept must not create, drop, or mutate worker_hosts"
+    );
+    assert_eq!(
+        assignable_after.iter().map(|h| h.id).collect::<Vec<_>>(),
+        assignable_ids_before,
+        "accept must not change assignable hosts"
+    );
+    assert!(
+        workspaces::partners_disclaimer_accepted_at(&pool, workspace_id)
+            .await
+            .expect("read accepted_at")
+            .is_some(),
+        "disclaimer must still have been recorded"
+    );
 }

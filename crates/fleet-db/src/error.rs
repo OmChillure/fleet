@@ -5,9 +5,11 @@ use thiserror::Error;
 pub enum DbError {
     #[error(
         "could not connect to Postgres at `{target}`: {source}\n\
-         Hint: set DATABASE_URL in `.env` to a reachable DB.\n\
-         - Neon/Supabase: paste the pooled connection string and include `?sslmode=require`\n\
-         - Local: start Postgres and create the database, or point DATABASE_URL at cloud"
+         Hint: set DATABASE_URL in `.env` to a reachable Postgres.\n\
+         - Local: start Postgres or `just db-up`\n\
+         - Supabase/Neon: session pooler or direct URI + `?sslmode=require`\n\
+         - Prefer Supabase :5432 (session). :6543 is rewritten automatically.\n\
+         - Slow connect: DATABASE_ACQUIRE_TIMEOUT_SECS=90"
     )]
     Connect {
         target: String,

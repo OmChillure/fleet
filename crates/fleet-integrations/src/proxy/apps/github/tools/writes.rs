@@ -163,7 +163,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    // Resolve default branch + base commit.
     let (st, repo_body) =
         github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
     if !(200..300).contains(&st) {
@@ -248,7 +247,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
                 .to_string();
         }
     } else {
-        // Create branch ref from base.
         let (st, created) = github_post(
             http,
             token,
@@ -264,7 +262,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         }
     }
 
-    // Create blobs + tree entries.
     let mut tree_items = Vec::new();
     let mut paths = Vec::new();
     for f in files {
@@ -369,7 +366,6 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         .unwrap_or("")
         .to_string();
 
-    // Move branch pointer.
     let (st, updated) = github_patch(
         http,
         token,
@@ -622,6 +618,88 @@ pub(crate) async fn create_issue(
             "Created issue #{} on {owner}/{repo}",
             body.get("number").and_then(|v| v.as_u64()).unwrap_or(0)
         ),
+        map_issue(&body),
+        Some(status),
+    )
+}
+
+pub(crate) async fn update_issue(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
+    let (owner, repo) = match require_owner_repo(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("github", "update_issue", "bad_args", e, None),
+    };
+    let number = match args.get("number").and_then(|v| v.as_u64()).or_else(|| {
+        args.get("number")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    }) {
+        Some(n) => n,
+        None => {
+            return ProxyResult::err(
+                "github",
+                "update_issue",
+                "bad_args",
+                "number is required",
+                None,
+            );
+        }
+    };
+    let mut payload = json!({});
+    if let Some(state) = args
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let state = state.to_ascii_lowercase();
+        if state != "open" && state != "closed" {
+            return ProxyResult::err(
+                "github",
+                "update_issue",
+                "bad_args",
+                "state must be open or closed",
+                None,
+            );
+        }
+        payload["state"] = json!(state);
+    }
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+        payload["title"] = json!(title);
+    }
+    if let Some(body) = args
+        .get("body")
+        .or_else(|| args.get("description"))
+        .and_then(|v| v.as_str())
+    {
+        payload["body"] = json!(body);
+    }
+    if payload.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        return ProxyResult::err(
+            "github",
+            "update_issue",
+            "bad_args",
+            "provide state, title, and/or body",
+            None,
+        );
+    }
+    let (status, body) = github_patch(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}"),
+        &payload,
+    )
+    .await;
+    if !(200..300).contains(&status) {
+        return upstream_err("update_issue", status, &body);
+    }
+    ProxyResult::ok_result(
+        "github",
+        "update_issue",
+        format!("Updated {owner}/{repo}#{number}"),
         map_issue(&body),
         Some(status),
     )

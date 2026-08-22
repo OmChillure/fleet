@@ -68,6 +68,10 @@
 #   ENABLE_OLLAMA              install/bind Ollama + pull OLLAMA_MODEL
 #   ENABLE_LMSTUDIO_PROXY      TCP :1234 → :11434 so LM Studio job URLs work
 #   ENABLE_GITSSH              local git+ssh container :2222 (tiny)
+#   ENABLE_RUNNER_GUEST_E2E    real-life runner guests (VM per OS). Default on
+#                              for every PROFILE. Missing guest/stack is a fail.
+#                              Explicit 0 still wins. See
+#                              docs/components/runners/testing-procedures.md
 #   ENABLE_BROWSER_E2E         pip playwright + Chromium under <repo>/.tmp/ms-playwright
 #                              + OS libs via this script's matrix (dnf/apt/pacman/
 #                              zypper/apk; brew/darwin uses Playwright's own
@@ -251,6 +255,7 @@ case "${PROFILE}" in
     set_default ENABLE_LMSTUDIO_PROXY 1
     set_default ENABLE_GITSSH 1
     set_default ENABLE_BROWSER_E2E 1
+    set_default ENABLE_RUNNER_GUEST_E2E 1
     ;;
   lab)
     set_default ENABLE_SANDBOX_LAB 1
@@ -264,6 +269,7 @@ case "${PROFILE}" in
     set_default ENABLE_LMSTUDIO_PROXY 1
     set_default ENABLE_GITSSH 1
     set_default ENABLE_BROWSER_E2E 0
+    set_default ENABLE_RUNNER_GUEST_E2E 1
     ;;
   minimal)
     set_default ENABLE_SANDBOX_LAB 1
@@ -277,6 +283,7 @@ case "${PROFILE}" in
     set_default ENABLE_LMSTUDIO_PROXY 0
     set_default ENABLE_GITSSH 0
     set_default ENABLE_BROWSER_E2E 0
+    set_default ENABLE_RUNNER_GUEST_E2E 1
     ;;
   *)
     echo "ERROR: PROFILE=${PROFILE} (want full|lab|minimal)" >&2

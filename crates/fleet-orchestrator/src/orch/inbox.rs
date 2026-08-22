@@ -3,6 +3,7 @@
 use crate::sandbox::{RuntimeHandle, SandboxRuntime};
 use crate::store::Store;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -12,6 +13,7 @@ pub async fn apply_inbox(
     store: &Store,
     runtime: &Arc<dyn SandboxRuntime>,
     project_id: Uuid,
+    data_dir: &Path,
 ) -> Result<usize, TickError> {
     let reports = store.list_unapplied_reports(project_id).await?;
     let mut applied = 0usize;
@@ -38,6 +40,61 @@ pub async fn apply_inbox(
                     }
                     "success" => {
                         destroy_session_runtime(store, runtime, r.session_id).await?;
+                        if let Some(session) = store.get_session(r.session_id).await? {
+                            if let Some(task) = store
+                                .load_board_snapshot(project_id)
+                                .await?
+                                .tasks
+                                .iter()
+                                .find(|t| t.id == r.board_task_id)
+                                .cloned()
+                            {
+                                let work = session
+                                    .work_dir
+                                    .as_deref()
+                                    .filter(|s| !s.is_empty())
+                                    .map(std::path::PathBuf::from)
+                                    .unwrap_or_else(|| {
+                                        data_dir
+                                            .join("projects")
+                                            .join(project_id.to_string())
+                                            .join("sessions")
+                                            .join(session.id.to_string())
+                                    });
+                                let check = super::validate_done::validate_task_done(
+                                    &task,
+                                    &work,
+                                    &session.runtime_backend,
+                                );
+                                if !check.ok {
+                                    let bounces = task
+                                        .hitl_notes
+                                        .as_deref()
+                                        .unwrap_or("")
+                                        .matches("Task validation failed")
+                                        .count();
+                                    if bounces >= 2 {
+                                        store
+                                            .set_task_done_failed(
+                                                r.board_task_id,
+                                                "validation_failed_exhausted",
+                                            )
+                                            .await?;
+                                    } else {
+                                        store
+                                            .reopen_task_for_changes(
+                                                r.board_task_id,
+                                                "validation_failed",
+                                                &check.notes(),
+                                            )
+                                            .await?;
+                                    }
+                                    store.mark_report_applied(r.id).await?;
+                                    applied += 1;
+                                    continue;
+                                }
+                            }
+                        }
                         store
                             .apply_task_terminal(
                                 r.board_task_id,

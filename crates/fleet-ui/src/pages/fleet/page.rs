@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use super::api::{
-    cancel_run, ensure_fleet, list_runs, list_sessions, list_tasks, run_tick, start_fixture,
+    cancel_run, ensure_fleet, kill_session, list_runs, list_sessions, list_tasks, resume_task,
+    run_tick, start_fixture,
 };
 use crate::Route;
 use gloo_timers::future::TimeoutFuture;
@@ -19,6 +20,8 @@ struct TaskCard {
     attempt: i64,
     progress_pct: i64,
     worker_profile: String,
+    block_reason: String,
+    hitl_notes: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -57,6 +60,8 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                             .as_str()
                             .unwrap_or("generalist")
                             .to_string(),
+                        block_reason: t["block_reason"].as_str().unwrap_or("").to_string(),
+                        hitl_notes: t["hitl_notes"].as_str().unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -90,15 +95,9 @@ fn parse_sessions(v: &Value) -> Vec<SessionCard> {
                     Some(SessionCard {
                         id: s["id"].as_str()?.to_string(),
                         status: s["status"].as_str().unwrap_or("?").to_string(),
-                        runtime_backend: s["runtime_backend"]
-                            .as_str()
-                            .unwrap_or("?")
-                            .to_string(),
+                        runtime_backend: s["runtime_backend"].as_str().unwrap_or("?").to_string(),
                         progress_pct: s["progress_pct"].as_i64().unwrap_or(0),
-                        worker_profile: s["worker_profile"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
+                        worker_profile: s["worker_profile"].as_str().unwrap_or("").to_string(),
                         work_dir: s["work_dir"].as_str().unwrap_or("").to_string(),
                         exit_reason: s["exit_reason"].as_str().unwrap_or("").to_string(),
                     })
@@ -128,15 +127,11 @@ fn status_pill_class(status: &str) -> &'static str {
         "done_success" | "completed" | "exited" => {
             "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
         }
-        "done_failed" | "cancelled" | "failed" => {
-            "bg-red-500/15 text-red-400 border-red-500/30"
-        }
+        "done_failed" | "cancelled" | "failed" => "bg-red-500/15 text-red-400 border-red-500/30",
         "in_progress" | "assigned" | "running" | "active" => {
             "bg-sky-500/15 text-sky-400 border-sky-500/30"
         }
-        "blocked" | "retry_wait" | "stuck" => {
-            "bg-amber-500/15 text-amber-400 border-amber-500/30"
-        }
+        "blocked" | "retry_wait" | "stuck" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
         "ready" | "queued" => {
             "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]"
         }
@@ -155,6 +150,7 @@ pub fn Fleet(workspace_id: String) -> Element {
     let mut last_tick = use_signal(|| String::new());
     let mut busy = use_signal(|| false);
     let mut ready = use_signal(|| false);
+    let mut resume_note = use_signal(String::new);
 
     let refresh = {
         let workspace_id = workspace_id.clone();
@@ -183,12 +179,7 @@ pub fn Fleet(workspace_id: String) -> Element {
         spawn(async move {
             match ensure_fleet(&ws).await {
                 Ok(v) => {
-                    project_name.set(
-                        v["name"]
-                            .as_str()
-                            .unwrap_or("Workspace fleet")
-                            .to_string(),
-                    );
+                    project_name.set(v["name"].as_str().unwrap_or("Workspace fleet").to_string());
                     if let Some(b) = v["sandbox_backend"].as_str() {
                         sandbox_backend.set(b.to_string());
                     }
@@ -217,9 +208,9 @@ pub fn Fleet(workspace_id: String) -> Element {
     });
 
     let ws_poll = workspace_id.clone();
-    use_effect(move || {
+    use_future(move || {
         let ws = ws_poll.clone();
-        spawn(async move {
+        async move {
             loop {
                 TimeoutFuture::new(2500).await;
                 if let Ok(t) = list_tasks(&ws).await {
@@ -232,7 +223,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                     sessions.set(parse_sessions(&s));
                 }
             }
-        });
+        }
     });
 
     let columns = ["Ready", "In progress", "Blocked", "Done", "Failed"];
@@ -445,7 +436,6 @@ pub fn Fleet(workspace_id: String) -> Element {
 
             p { class: "text-sm text-[var(--app-fg)]", "{status_line}" }
 
-            // Runs strip
             section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs" }
                 if runs().is_empty() {
@@ -481,13 +471,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                 } else {
                     div { class: "flex flex-col gap-2",
                         for s in sessions() {
-                            Link {
+                            div {
                                 key: "{s.id}",
-                                to: Route::SessionDetail {
-                                    workspace_id: workspace_id.clone(),
-                                    session_id: s.id.clone(),
-                                },
-                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 transition hover:border-[var(--app-accent)]",
+                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
                                 div { class: "min-w-0",
                                     p { class: "m-0 font-mono text-xs text-[var(--app-muted)]", "{s.id}" }
                                     p { class: "m-0 text-sm text-[var(--app-fg)]",
@@ -501,10 +487,49 @@ pub fn Fleet(workspace_id: String) -> Element {
                                     }
                                 }
                                 div { class: "flex items-center gap-2",
+                                    Link {
+                                        to: Route::SessionDetail {
+                                            workspace_id: workspace_id.clone(),
+                                            session_id: s.id.clone(),
+                                        },
+                                        class: "text-[11px] text-[var(--app-accent)] hover:underline",
+                                        "Open"
+                                    }
                                     span { class: "text-[10px] text-[var(--app-muted)]", "{s.progress_pct}%" }
                                     span {
                                         class: "rounded-full border px-2 py-0.5 text-xs font-medium {status_pill_class(&s.status)}",
                                         "{s.status}"
+                                    }
+                                    if matches!(s.status.as_str(), "spawning" | "healthy" | "stuck" | "killing") {
+                                        button {
+                                            class: "rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50",
+                                            r#type: "button",
+                                            disabled: busy(),
+                                            onclick: {
+                                                let workspace_id = workspace_id.clone();
+                                                let sid = s.id.clone();
+                                                move |_| {
+                                                    if busy() { return; }
+                                                    busy.set(true);
+                                                    let ws = workspace_id.clone();
+                                                    let sid = sid.clone();
+                                                    spawn(async move {
+                                                        match kill_session(&ws, &sid).await {
+                                                            Ok(_) => status_line.set(format!("Killed sandbox {sid}")),
+                                                            Err(e) => status_line.set(e.message()),
+                                                        }
+                                                        if let Ok(s) = list_sessions(&ws).await {
+                                                            sessions.set(parse_sessions(&s));
+                                                        }
+                                                        if let Ok(t) = list_tasks(&ws).await {
+                                                            tasks.set(parse_tasks(&t));
+                                                        }
+                                                        busy.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Kill"
+                                        }
                                     }
                                 }
                             }
@@ -513,7 +538,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                 }
             }
 
-            // Kanban-ish board
             section {
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Board" }
                 div { class: "grid gap-3 md:grid-cols-5",
@@ -549,6 +573,51 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "try {t.attempt}" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.progress_pct}%" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.worker_profile}" }
+                                                }
+                                                if t.status == "blocked" {
+                                                    if !t.block_reason.is_empty() {
+                                                        p { class: "m-0 mt-1 text-[11px] text-amber-300/90", "{t.block_reason}" }
+                                                    }
+                                                    if !t.hitl_notes.is_empty() {
+                                                        p { class: "m-0 mt-0.5 text-[11px] text-[var(--app-muted)]", "{t.hitl_notes}" }
+                                                    }
+                                                    input {
+                                                        class: "mt-2 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-[11px] text-[var(--app-fg)]",
+                                                        r#type: "text",
+                                                        placeholder: "Resume note (optional)",
+                                                        value: "{resume_note}",
+                                                        oninput: move |e| resume_note.set(e.value()),
+                                                    }
+                                                    button {
+                                                        class: "mt-1 rounded-md bg-amber-600 px-2 py-1 text-[11px] font-medium text-white disabled:opacity-50",
+                                                        r#type: "button",
+                                                        disabled: busy(),
+                                                        onclick: {
+                                                            let workspace_id = workspace_id.clone();
+                                                            let tid = t.id.clone();
+                                                            move |_| {
+                                                                if busy() { return; }
+                                                                busy.set(true);
+                                                                let ws = workspace_id.clone();
+                                                                let tid = tid.clone();
+                                                                let note = resume_note();
+                                                                spawn(async move {
+                                                                    match resume_task(&ws, &tid, &note).await {
+                                                                        Ok(_) => {
+                                                                            resume_note.set(String::new());
+                                                                            status_line.set("HITL resume requested".into());
+                                                                        }
+                                                                        Err(e) => status_line.set(e.message()),
+                                                                    }
+                                                                    if let Ok(t) = list_tasks(&ws).await {
+                                                                        tasks.set(parse_tasks(&t));
+                                                                    }
+                                                                    busy.set(false);
+                                                                });
+                                                            }
+                                                        },
+                                                        "Resume"
+                                                    }
                                                 }
                                             }
                                         }

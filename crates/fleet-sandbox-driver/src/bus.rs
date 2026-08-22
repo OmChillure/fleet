@@ -19,7 +19,6 @@ impl Bus {
             .get_multiplexed_async_connection()
             .await
             .context("redis connect")?;
-        // ping
         let mut c = conn.clone();
         let pong: String = redis::cmd("PING").query_async(&mut c).await?;
         info!(%pong, "Redis OK");

@@ -493,3 +493,103 @@ async fn create_workspace_then_list_includes_both() {
     assert!(ids.contains(&first_id.as_str()), "{ids:?}");
     assert!(ids.contains(&second_id), "{ids:?}");
 }
+
+#[tokio::test]
+async fn invite_adds_existing_user_and_member_cannot_invite() {
+    let app = app().await;
+    let (owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = owner_me.body["default_workspace"]["id"]
+        .as_str()
+        .or_else(|| {
+            owner_me.body["workspaces"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|w| w["id"].as_str())
+        })
+        .expect("workspace")
+        .to_string();
+    let _ = owner_email;
+
+    let (member_email, member_jar, _) = signup_and_login(&app).await;
+
+    let invited = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
+    assert_eq!(invited.body["added_existing_user"], true);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let roles: Vec<&str> = members.body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["role"].as_str())
+        .collect();
+    assert!(roles.contains(&"owner"), "{roles:?}");
+    assert!(roles.contains(&"member"), "{roles:?}");
+
+    let forbidden = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&member_jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN, "{}", forbidden.body);
+}
+
+#[tokio::test]
+async fn pending_invite_joins_on_signup() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = owner_me.body["default_workspace"]["id"]
+        .as_str()
+        .or_else(|| {
+            owner_me.body["workspaces"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|w| w["id"].as_str())
+        })
+        .expect("workspace")
+        .to_string();
+
+    let guest = unique_email();
+    let inv = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
+    assert_eq!(inv.body["added_existing_user"], false);
+
+    let _ = signup(&app, &guest, TEST_PASSWORD).await;
+    let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+
+    let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids: Vec<&str> = listed.body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w["id"].as_str())
+        .collect();
+    assert!(ids.contains(&ws.as_str()), "guest should join invited workspace: {ids:?}");
+}

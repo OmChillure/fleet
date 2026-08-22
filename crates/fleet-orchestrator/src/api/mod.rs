@@ -4,7 +4,7 @@ mod auth;
 mod handlers;
 mod state;
 
-pub use state::{build_app_state, build_app_state_from_parts, AppState};
+pub use state::{build_app_state, build_app_state_with_pool, build_app_state_with_pool_io, AppState};
 
 use axum::http::{header, HeaderValue, Method};
 use axum::routing::{get, post};

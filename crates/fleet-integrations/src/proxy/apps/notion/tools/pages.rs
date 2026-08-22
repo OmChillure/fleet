@@ -230,9 +230,16 @@ pub(crate) async fn create_page(http: &reqwest::Client, token: &str, args: &Valu
             }
         });
     }
-    if let Some(text) = write_text_from_args(args) {
-        payload["children"] = children_payload(&text);
-    }
+    let Some(text) = write_text_from_args(args) else {
+        return ProxyResult::err(
+            "notion",
+            "create_page",
+            "bad_args",
+            "text is required — pass args.text with the page body (Slack request, PR link, what shipped). A title-only page is empty and not a result.",
+            None,
+        );
+    };
+    payload["children"] = children_payload(&text);
     let (status, body) =
         notion_post(http, token, "https://api.notion.com/v1/pages", &payload).await;
     if !(200..300).contains(&status) {

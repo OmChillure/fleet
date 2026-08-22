@@ -251,6 +251,33 @@ pub async fn insert_message(
         .map_err(map_query_err)
 }
 
+/// Last composer pick for this workspace (provider + model from the newest chat).
+pub async fn latest_composer_llm(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Option<(String, String)>> {
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT provider, model
+        FROM chat_conversations
+        WHERE workspace_id = $1
+          AND provider IS NOT NULL
+          AND btrim(provider) <> ''
+        ORDER BY updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(row.and_then(|(p, m)| {
+        let provider = p.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty())?;
+        let model = m.unwrap_or_default().trim().to_string();
+        Some((provider, model))
+    }))
+}
+
 pub async fn count_messages(pool: &PgPool, conversation_id: Uuid) -> DbResult<i64> {
     let n: (i64,) = sqlx::query_as(
         r#"SELECT COUNT(*)::bigint FROM chat_messages WHERE conversation_id = $1"#,

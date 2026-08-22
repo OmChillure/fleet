@@ -46,6 +46,82 @@ pub(crate) async fn list_teams(http: &reqwest::Client, token: &str, _args: &Valu
     )
 }
 
+pub(crate) async fn list_workflow_states(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
+    let team_id = match args
+        .get("team_id")
+        .or_else(|| args.get("teamId"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => id.to_string(),
+        None => {
+            return ProxyResult::err(
+                "linear",
+                "list_workflow_states",
+                "bad_args",
+                "team_id is required",
+                None,
+            );
+        }
+    };
+    let query = r#"
+      query($teamId: String!) {
+        team(id: $teamId) {
+          states {
+            nodes { id name type }
+          }
+        }
+      }
+    "#;
+    let (status, body) = graphql(http, token, query, json!({ "teamId": team_id })).await;
+    if !(200..300).contains(&status) {
+        return upstream_err("list_workflow_states", status, &body);
+    }
+    if let Some(errs) = body.get("errors").and_then(|v| v.as_array())
+        && !errs.is_empty()
+    {
+        let msg = errs[0]
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GraphQL error");
+        return ProxyResult::err(
+            "linear",
+            "list_workflow_states",
+            "upstream",
+            format!("Linear GraphQL: {msg}"),
+            Some(status),
+        );
+    }
+    let items: Vec<Value> = body
+        .pointer("/data/team/states/nodes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|s| {
+                    json!({
+                        "id": s.get("id"),
+                        "name": s.get("name"),
+                        "type": s.get("type"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let n = items.len();
+    ProxyResult::ok_result(
+        "linear",
+        "list_workflow_states",
+        format!("Listed {n} workflow states"),
+        json!({ "team_id": team_id, "count": n, "items": items }),
+        Some(status),
+    )
+}
+
 pub(crate) async fn create_issue(
     http: &reqwest::Client,
     token: &str,
@@ -94,7 +170,7 @@ pub(crate) async fn create_issue(
           issue {
             id identifier title url priority
             state { name type }
-            team { key name }
+            team { id key name }
           }
         }
       }
@@ -178,7 +254,7 @@ pub(crate) async fn update_issue(
             id identifier title url priority description
             state { name type }
             assignee { name email }
-            team { key name }
+            team { id key name }
             createdAt updatedAt
           }
         }

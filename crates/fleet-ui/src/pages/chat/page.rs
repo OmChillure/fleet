@@ -3,14 +3,16 @@
 use std::sync::Mutex;
 
 use dioxus::prelude::*;
-
+use gloo_timers::future::TimeoutFuture;
 use super::api::{
-    complete_chat, create_conversation, fetch_chat_status, get_conversation, ChatActionDto,
-    ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
+    create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
+    stream_chat, ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
+    ChatStreamEvent,
 };
-use super::markdown::{highlight, markdown_to_parts, MdPart};
-use crate::components::toast::show_toast;
+use super::markdown::{MdPart, highlight, markdown_to_parts};
 use crate::Route;
+use crate::clipboard::copy_text;
+use crate::components::toast::show_toast;
 
 /// Hand off the first message across the `/chat` → `/chat/{id}` route switch.
 struct PendingFirstSend {
@@ -128,7 +130,6 @@ fn send_on_existing_session(
         return;
     }
 
-    // First message on a brand-new empty thread → set title from text.
     if messages().is_empty() {
         thread_title.set(title_from_text(&text));
     }
@@ -162,43 +163,85 @@ fn send_on_existing_session(
         rid
     };
 
+    {
+        let mut list = messages();
+        list.push(ChatMessage {
+            id: reply_id,
+            role: MessageRole::Assistant,
+            content: String::new(),
+            model: Some(model_for_api.clone()),
+            actions: vec![],
+        });
+        messages.set(list);
+    }
+
     spawn(async move {
-        match complete_chat(
+        let mut streamed = String::new();
+        let result = stream_chat(
             &workspace_id,
             history,
             provider,
             Some(model_for_api.clone()),
             Some(conversation_id),
+            |ev| match ev {
+                ChatStreamEvent::Status { text } => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        if last.content.is_empty() {
+                            last.content = format!("_{text}_");
+                        }
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Delta { text } => {
+                    streamed.push_str(&text);
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = streamed.clone();
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Action(action) => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.actions.push(action);
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Done(res) => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = res.message.content.clone();
+                        last.model = Some(if res.model.is_empty() {
+                            model_for_api.clone()
+                        } else {
+                            res.model.clone()
+                        });
+                        if !res.actions.is_empty() {
+                            last.actions = res.actions.clone();
+                        }
+                    }
+                    messages.set(list);
+                }
+                ChatStreamEvent::Error { error } => {
+                    let mut list = messages();
+                    if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                        last.content = format!("⚠️ {error}");
+                    }
+                    messages.set(list);
+                }
+            },
         )
-        .await
-        {
-            Ok(res) => {
-                let mut list = messages();
-                list.push(ChatMessage {
-                    id: reply_id,
-                    role: MessageRole::Assistant,
-                    content: res.message.content,
-                    model: Some(if res.model.is_empty() {
-                        model_for_api
-                    } else {
-                        res.model
-                    }),
-                    actions: res.actions,
-                });
-                messages.set(list);
+        .await;
+        if let Err(e) = result {
+            show_toast().error(e.message());
+            let mut list = messages();
+            if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
+                if last.content.is_empty() || last.content.starts_with('_') {
+                    last.content = format!("⚠️ {}", e.message());
+                }
             }
-            Err(e) => {
-                show_toast().error(e.message());
-                let mut list = messages();
-                list.push(ChatMessage {
-                    id: reply_id,
-                    role: MessageRole::Assistant,
-                    content: format!("⚠️ {}", e.message()),
-                    model: Some(model_for_api),
-                    actions: vec![],
-                });
-                messages.set(list);
-            }
+            messages.set(list);
         }
         sending.set(false);
     });
@@ -227,7 +270,6 @@ fn send_message(
         return;
     }
 
-    // Already on a session → send in place.
     if let Some(cid) = conversation_id() {
         send_on_existing_session(
             text,
@@ -441,7 +483,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             return;
         }
 
-        // Resume from history.
         loading_thread.set(true);
         let ws = ws_load.clone();
         spawn(async move {
@@ -514,7 +555,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
 
     rsx! {
         div { class: "relative flex h-full min-h-0 w-full flex-col",
-            // Top bar: title + new chat
             div {
                 class: "flex shrink-0 items-center justify-between gap-2 border-b border-[var(--app-border)] px-4 py-2 md:px-6",
                 div { class: "min-w-0",
@@ -547,7 +587,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                 }
             }
 
-            // Messages
             div {
                 class: "min-h-0 flex-1 overflow-y-auto px-4 pb-36 pt-6 md:px-6",
                 if loading_thread() {
@@ -565,11 +604,25 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                         }
                         p { class: "m-0 max-w-md text-sm text-[var(--app-muted)]",
                             if can_chat {
-                                "Pick a provider and model, then chat. Ask about integrations, or launch work in a sandbox. Chats are saved under History."
+                                "Say it in plain language. For implement + push, a fleet of agents runs the work — not just chat tools."
                             } else if let Some(s) = status() {
                                 "{s.hint}"
                             } else {
                                 "Run `grok login` and/or start local Ollama."
+                            }
+                        }
+                        if can_chat {
+                            div { class: "mt-2 flex max-w-lg flex-col gap-2",
+                                ExampleChip {
+                                    text: "Read the latest Slack request in #eng, implement it, push to GitHub, and write the result in a new Notion page".to_string(),
+                                    draft,
+                                    disabled: sending(),
+                                }
+                                ExampleChip {
+                                    text: "What’s on that Notion page? Summarize it in Slack.".to_string(),
+                                    draft,
+                                    disabled: sending(),
+                                }
                             }
                         }
                         if let Some(err) = status().and_then(|s| s.error.clone()) {
@@ -581,7 +634,11 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                 } else {
                     div { class: "mx-auto flex w-full max-w-3xl flex-col gap-6",
                         for msg in messages() {
-                            MessageBubble { key: "{msg.id}", message: msg }
+                            MessageBubble {
+                                key: "{msg.id}",
+                                message: msg,
+                                workspace_id: workspace_id.clone(),
+                            }
                         }
                         if sending() {
                             div { class: "flex items-center gap-2.5 text-sm text-[var(--app-muted)]",
@@ -593,7 +650,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                 }
             }
 
-            // Composer with provider + model dropdowns inside the card
             div {
                 class: "pointer-events-none absolute inset-x-0 bottom-0 px-4 pb-4 pt-2 md:px-6 md:pb-6",
                 div { class: "pointer-events-auto mx-auto w-full max-w-3xl",
@@ -643,10 +699,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             },
                         }
 
-                        // Toolbar: Provider | Model | refresh ………… send
                         div {
                             class: "flex flex-wrap items-center gap-2 border-t border-[var(--app-border)]/60 px-2.5 py-2",
-                            // Provider
                             div { class: "flex min-w-0 items-center gap-1.5",
                                 span {
                                     class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
@@ -718,7 +772,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 }
                             }
 
-                            // Model (Grok: grok-4.5 · Ollama: live tags)
                             div { class: "flex min-w-0 flex-1 items-center gap-1.5",
                                 span { class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
                                     "Model"
@@ -753,7 +806,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 }
                             }
 
-                            // Refresh providers / models
                             button {
                                 class: "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-0 text-[var(--app-muted)] transition hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)] focus:outline-none focus:ring-0 disabled:opacity-40",
                                 r#type: "button",
@@ -775,7 +827,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 RefreshIcon {}
                             }
 
-                            // Send
                             button {
                                 class: "ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--app-fg)] text-[var(--app-bg)] transition hover:opacity-90 focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-30",
                                 r#type: "button",
@@ -810,13 +861,32 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
 }
 
 #[component]
-fn MessageBubble(message: ChatMessage) -> Element {
+fn ExampleChip(text: String, mut draft: Signal<String>, disabled: bool) -> Element {
+    let label = text.clone();
+    rsx! {
+        button {
+            class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-left text-xs leading-5 text-[var(--app-muted)] transition hover:border-[var(--app-fg)] hover:text-[var(--app-fg)] disabled:opacity-40",
+            r#type: "button",
+            disabled,
+            onclick: move |_| draft.set(label.clone()),
+            "{text}"
+        }
+    }
+}
+
+#[component]
+fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
     let is_user = message.role == MessageRole::User;
     let actions = message.actions.clone();
+    let shown = if !is_user && looks_like_later_copy(&message.content) && message.actions.iter().any(|a| a.ok && is_fleet_launch(&a.tool)) {
+        "Agents are working in this thread. Tool calls stay highlighted until implement → review → ship is done.".to_string()
+    } else {
+        message.content.clone()
+    };
     let parts = if is_user {
         Vec::new()
     } else {
-        markdown_to_parts(&message.content)
+        markdown_to_parts(&shown)
     };
     rsx! {
         div {
@@ -829,7 +899,22 @@ fn MessageBubble(message: ChatMessage) -> Element {
                 UserBubble { text: message.content.clone() }
             } else {
                 if !actions.is_empty() {
-                    ToolCallGroup { actions: actions.clone() }
+                    ToolCallGroup {
+                        actions: actions.clone(),
+                        workspace_id: workspace_id.clone(),
+                    }
+                }
+                if let Some(run_id) = actions.iter().find_map(|a| {
+                    if a.ok && is_fleet_launch(&a.tool) {
+                        a.run_id.clone()
+                    } else {
+                        None
+                    }
+                }) {
+                    AgentChatStream {
+                        workspace_id: workspace_id.clone(),
+                        run_id,
+                    }
                 }
                 div { class: "flex flex-col gap-0",
                     for (i, part) in parts.iter().enumerate() {
@@ -890,12 +975,282 @@ fn short_id(id: &str) -> String {
     id.get(..8).unwrap_or(id).to_string()
 }
 
+fn looks_like_later_copy(s: &str) -> bool {
+    let t = s.to_ascii_lowercase();
+    t.contains("when it finishes")
+        || t.contains("when done")
+        || t.contains("outputs will")
+        || t.contains("they'll implement")
+        || t.contains("they will implement")
+        || t.contains("say continue")
+}
+
+fn tool_used_label(raw: &str) -> String {
+    let t = raw
+        .trim()
+        .trim_start_matches("Using ")
+        .trim_start_matches("using ")
+        .trim_end_matches('…')
+        .trim_end_matches("...");
+    format!("Used {t}")
+}
+
+fn clip_live_text(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.contains("min-height")
+        || lower.contains("box-sizing")
+        || (t.matches('{').count() >= 2 && t.contains(';'))
+    {
+        return None;
+    }
+    if t.starts_with('{') && t.contains("\"ok\"") && t.len() > 180 {
+        return Some("got a tool result".into());
+    }
+    let one = t.replace('\n', " ");
+    let chars: Vec<char> = one.chars().collect();
+    if chars.len() > 140 {
+        Some(format!("{}…", chars.into_iter().take(137).collect::<String>()))
+    } else {
+        Some(one)
+    }
+}
+
+fn status_tone(status: &str) -> &'static str {
+    match status {
+        "done_success" | "completed" | "healthy" => "text-emerald-400",
+        "in_progress" | "assigned" | "spawning" | "active" => "text-sky-400",
+        "queued" | "ready" | "retry_wait" => "text-amber-400",
+        "done_failed" | "failed" | "failed_spawn" => "text-red-400",
+        _ => "text-[var(--app-muted)]",
+    }
+}
+
+fn is_terminal_run(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+fn agent_phase(status: &str) -> String {
+    match status {
+        "in_progress" | "assigned" | "spawning" | "healthy" => "working".into(),
+        "queued" | "ready" | "retry_wait" => "queued".into(),
+        "done_success" | "completed" => "done".into(),
+        "done_failed" | "failed" | "failed_spawn" => "failed".into(),
+        other if other.is_empty() => "queued".into(),
+        other => other.to_string(),
+    }
+}
+
+#[component]
+fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
+    let mut tasks = use_signal(Vec::<(String, String, String, String)>::new);
+    let mut activity = use_signal(Vec::<(String, String, String)>::new);
+    let mut chat = use_signal(Vec::<(String, String, String)>::new);
+    let mut run_status = use_signal(|| "active".to_string());
+    let mut live = use_signal(|| 0u64);
+    let mut err = use_signal(|| None::<String>);
+
+    let ws = workspace_id.clone();
+    let rid = run_id.clone();
+    use_future(move || {
+        let ws = ws.clone();
+        let rid = rid.clone();
+        async move {
+            loop {
+                match fetch_fleet_live(&ws).await {
+                    Ok(o) => {
+                        let mut st = run_status();
+                        if let Some(r) = o
+                            .runs
+                            .iter()
+                            .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(rid.as_str()))
+                        {
+                            st = r
+                                .get("status")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("active")
+                                .to_string();
+                            run_status.set(st.clone());
+                        }
+                        live.set(o.live_agents);
+                        let mut board = o.tasks.clone();
+                        if let Ok(all) = fetch_fleet_tasks(&ws).await {
+                            if !all.tasks.is_empty() {
+                                board = all.tasks;
+                            }
+                        }
+                        let ts: Vec<(String, String, String, String)> = board
+                            .iter()
+                            .filter(|t| {
+                                t.get("run_id")
+                                    .and_then(|x| x.as_str())
+                                    .map(|id| id == rid || id.starts_with(&rid) || rid.starts_with(id))
+                                    .unwrap_or(false)
+                            })
+                            .filter_map(|t| {
+                                Some((
+                                    t.get("plan_task_id")?.as_str()?.to_string(),
+                                    t.get("title")?.as_str()?.to_string(),
+                                    t.get("worker_profile")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    t.get("status")?.as_str()?.to_string(),
+                                ))
+                            })
+                            .collect();
+                        tasks.set(ts);
+                        activity.set(
+                            o.activity
+                                .iter()
+                                .filter_map(|a| {
+                                    let kind = a.get("kind")?.as_str()?.to_string();
+                                    if kind == "tool_result" {
+                                        return None;
+                                    }
+                                    let text = clip_live_text(a.get("text")?.as_str()?)?;
+                                    Some((
+                                        a.get("profile")?.as_str()?.to_string(),
+                                        kind,
+                                        text,
+                                    ))
+                                })
+                                .take(24)
+                                .collect(),
+                        );
+                        chat.set(
+                            o.chat
+                                .iter()
+                                .rev()
+                                .filter_map(|m| {
+                                    Some((
+                                        m.get("from")?.as_str()?.to_string(),
+                                        m.get("to").and_then(|x| x.as_str()).unwrap_or("*").to_string(),
+                                        m.get("body")?.as_str()?.to_string(),
+                                    ))
+                                })
+                                .take(6)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect(),
+                        );
+                        err.set(None);
+                        if is_terminal_run(&st) {
+                            break;
+                        }
+                    }
+                    Err(e) => err.set(Some(e.message())),
+                }
+                TimeoutFuture::new(2000).await;
+            }
+        }
+    });
+
+    let done = is_terminal_run(&run_status());
+    let _ = live;
+    let _ = workspace_id;
+    rsx! {
+        div { class: "mt-5 flex flex-col gap-3",
+            // Who is working / queued — a line in the thread, not a board.
+            div { class: "flex flex-wrap gap-x-3 gap-y-1 text-[13px]",
+                for (id, title, profile, status) in tasks() {
+                    {
+                        let who = if profile.is_empty() { title.clone() } else { profile.clone() };
+                        let phase = agent_phase(&status);
+                        rsx! {
+                            span { class: "text-[var(--app-muted)]",
+                                span { class: "font-medium text-[var(--app-fg)]", "{id}" }
+                                " "
+                                span { class: "{status_tone(&status)}", "{phase}" }
+                                span { class: "opacity-50", " · {who}" }
+                            }
+                        }
+                    }
+                }
+                if tasks().is_empty() && !done {
+                    span { class: "text-[var(--app-muted)]", "starting agents…" }
+                }
+                if done {
+                    span { class: "text-emerald-400", "all shipped" }
+                }
+            }
+            if let Some(e) = err() {
+                p { class: "m-0 text-xs text-red-400", "{e}" }
+            }
+            // Grok-style tool / think lines in the same chat column.
+            div { class: "flex flex-col gap-2.5",
+                for (i, (profile, kind, text)) in activity().into_iter().enumerate() {
+                    {
+                        let is_tool = kind == "tool" || kind.starts_with("use_");
+                        let is_think = kind == "think" || kind == "start";
+                        rsx! {
+                            div { key: "{i}", class: "min-w-0",
+                                p { class: "m-0 mb-0.5 text-[11px] text-[var(--app-muted)]",
+                                    "{profile}"
+                                }
+                                if is_tool {
+                                    div { class: "chat-tool-rail pl-3 text-[13px] text-[var(--app-muted)]",
+                                        span { class: "font-medium text-[var(--app-fg)]", "{tool_used_label(&text)}" }
+                                    }
+                                } else if is_think {
+                                    p { class: "m-0 text-[15px] leading-6 text-[var(--app-fg)]",
+                                        "{text}"
+                                    }
+                                } else {
+                                    p { class: "m-0 text-[13px] leading-5 text-[var(--app-muted)]",
+                                        "{text}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (from, _to, body) in chat() {
+                p { class: "m-0 text-[13px] leading-5 text-[var(--app-muted)]",
+                    span { class: "font-medium text-[var(--app-fg)]", "{from}" }
+                    " {body}"
+                }
+            }
+        }
+    }
+}
+
+fn action_url(action: &ChatActionDto) -> Option<String> {
+    let d = action.detail.as_ref()?;
+    d.get("url")
+        .or_else(|| d.pointer("/data/url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| s.starts_with("http"))
+        .map(|s| s.to_string())
+}
+
+fn is_fleet_launch(tool: &str) -> bool {
+    tool == "launch_agent_plan" || tool == "launch_agent_task"
+}
+
 /// Claude-style collapsible tool rail (clock + check, muted body).
 #[component]
-fn ToolCallGroup(actions: Vec<ChatActionDto>) -> Element {
+fn ToolCallGroup(actions: Vec<ChatActionDto>, workspace_id: String) -> Element {
+    let _ = workspace_id;
     let mut open = use_signal(|| true);
     let all_ok = actions.iter().all(|a| a.ok);
-    let title = if actions.len() == 1 {
+    let fleet = actions.iter().find(|a| a.ok && is_fleet_launch(&a.tool));
+    let n_agents = fleet
+        .and_then(|a| a.sandbox_ids.as_ref())
+        .map(|ids| ids.len())
+        .unwrap_or(0);
+    let title = if let Some(f) = fleet {
+        if n_agents > 0 {
+            format!("Fleet · {n_agents} agents")
+        } else {
+            f.summary.clone()
+        }
+    } else if actions.len() == 1 {
         let a = &actions[0];
         if a.summary.is_empty() {
             a.tool.clone()
@@ -926,23 +1281,40 @@ fn ToolCallGroup(actions: Vec<ChatActionDto>) -> Element {
                                     None
                                 } else {
                                     Some(format!(
-                                        "sandbox {}",
-                                        ids.iter().map(|id| short_id(id)).collect::<Vec<_>>().join(", ")
+                                        "{} agent{}",
+                                        ids.len(),
+                                        if ids.len() == 1 { "" } else { "s" }
                                     ))
                                 }
                             });
+                            let href = action_url(action);
                             rsx! {
                                 div {
                                     key: "{i}",
                                     class: "mb-2.5 last:mb-1",
                                     div { class: "flex items-start gap-2 text-[13px] leading-5 text-[var(--app-muted)]",
-                                        span { class: "chat-tool-clock mt-0.5 shrink-0", "◷" }
+                                        span { class: "chat-tool-clock mt-0.5 shrink-0",
+                                            if action.ok { "✓" } else { "!" }
+                                        }
                                         div { class: "min-w-0",
                                             p { class: "m-0 font-medium text-[var(--app-fg)]",
-                                                "{action.tool}"
+                                                if is_fleet_launch(&action.tool) {
+                                                    "Fleet launch"
+                                                } else {
+                                                    "{action.tool}"
+                                                }
                                             }
                                             if !action.summary.is_empty() {
                                                 p { class: "m-0 mt-0.5", "{action.summary}" }
+                                            }
+                                            if let Some(url) = href {
+                                                a {
+                                                    class: "mt-0.5 block truncate text-[12px] underline-offset-2 hover:underline",
+                                                    href: "{url}",
+                                                    target: "_blank",
+                                                    rel: "noreferrer",
+                                                    "{url}"
+                                                }
                                             }
                                             if let Some(line) = &extra {
                                                 p { class: "m-0 mt-0.5 font-mono text-[11px] opacity-80",
@@ -999,8 +1371,11 @@ fn CodeBlock(lang: String, code: String) -> Element {
                     title: "Copy",
                     "aria-label": "Copy code",
                     onclick: move |_| {
-                        copy_text(&code_for_copy);
-                        copied.set(true);
+                        if copy_text(&code_for_copy) {
+                            copied.set(true);
+                        } else {
+                            show_toast().error("Copy failed. Select the code and copy it yourself.");
+                        }
                     },
                     if copied() { "Copied" } else { "Copy" }
                 }
@@ -1010,20 +1385,6 @@ fn CodeBlock(lang: String, code: String) -> Element {
                 dangerous_inner_html: "{highlighted}",
             }
         }
-    }
-}
-
-fn copy_text(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(window) = web_sys::window() {
-            let clipboard = window.navigator().clipboard();
-            let _ = clipboard.write_text(text);
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
     }
 }
 

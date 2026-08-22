@@ -47,8 +47,18 @@ class InstallContractTests(unittest.TestCase):
             "ENABLE_KIND",
             "ENABLE_SANDBOX_LAB",
             "ENABLE_BROWSER_E2E",
+            "ENABLE_RUNNER_GUEST_E2E",
         ):
             self.assertIn(token, text, token)
+
+    def test_guest_e2e_defaults_on_for_every_profile(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertGreaterEqual(
+            text.count("set_default ENABLE_RUNNER_GUEST_E2E 1"),
+            3,
+            "full, lab, and minimal must default ENABLE_RUNNER_GUEST_E2E on",
+        )
+        self.assertNotIn("set_default ENABLE_RUNNER_GUEST_E2E 0", text)
 
     def test_header_lists_compatible_systems_and_tested(self):
         text = SCRIPT.read_text(encoding="utf-8")

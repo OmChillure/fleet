@@ -19,7 +19,7 @@ mod apps;
 mod sanitize;
 mod types;
 
-pub use apps::{operations_for, supported_providers};
+pub use apps::{operations_catalog_text, operations_for, supported_providers};
 pub use sanitize::{contains_secret_keys, sanitize_value};
 pub use types::{ProxyCaller, ProxyRequest, ProxyResult, MAX_PROXY_DATA_BYTES};
 
@@ -262,13 +262,16 @@ mod tests {
         assert!(operations_for("github").contains(&"list_prs"));
         assert!(operations_for("github").contains(&"commit_files"));
         assert!(operations_for("github").contains(&"get_file"));
+        assert!(operations_for("github").contains(&"update_issue"));
         assert!(operations_for("gitlab").contains(&"list_mrs"));
         assert!(operations_for("gitlab").contains(&"commit_files"));
         assert!(operations_for("gitlab").contains(&"create_mr"));
+        assert!(operations_for("gitlab").contains(&"update_issue"));
         assert!(operations_for("jira").contains(&"get_issue"));
         assert!(operations_for("jira").contains(&"create_issue"));
         assert!(operations_for("linear").contains(&"list_issues"));
         assert!(operations_for("linear").contains(&"create_issue"));
+        assert!(operations_for("linear").contains(&"list_workflow_states"));
         assert!(operations_for("slack").contains(&"post_message"));
         assert!(operations_for("figma").contains(&"get_file"));
         assert!(operations_for("notion").contains(&"search"));
@@ -279,7 +282,9 @@ mod tests {
         assert!(operations_for("trello").contains(&"create_card"));
         assert!(operations_for("asana").contains(&"list_tasks"));
         assert!(operations_for("asana").contains(&"create_task"));
-        assert_eq!(supported_providers().len(), 12);
+        assert!(operations_for("bitbucket").contains(&"create_pr"));
+        assert!(operations_for("confluence").contains(&"create_page"));
+        assert_eq!(supported_providers().len(), 14);
     }
 
     #[test]

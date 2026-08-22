@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::Value;
 
-use super::api::{fetch_overview, Overview};
+use super::api::{Overview, fetch_overview};
 use crate::Route;
 
 fn short(id: &str) -> String {
@@ -104,9 +104,9 @@ pub fn Dashboard(workspace_id: String) -> Element {
     let mut loaded = use_signal(|| false);
     let ws = workspace_id.clone();
 
-    use_effect(move || {
+    use_future(move || {
         let ws = ws.clone();
-        spawn(async move {
+        async move {
             loop {
                 match fetch_overview(&ws).await {
                     Ok(o) => {
@@ -118,25 +118,14 @@ pub fn Dashboard(workspace_id: String) -> Element {
                 loaded.set(true);
                 TimeoutFuture::new(2000).await;
             }
-        });
+        }
     });
 
     let o = data();
     let tasks = parse_tasks(&o.tasks);
     let waiting = parse_chat(&o.waiting);
     let chat = parse_chat(&o.chat);
-    let tickets: Vec<(String, String, String, String)> = o
-        .tickets
-        .iter()
-        .filter_map(|t| {
-            Some((
-                t.get("provider")?.as_str()?.to_string(),
-                t.get("key")?.as_str()?.to_string(),
-                t.get("title")?.as_str()?.to_string(),
-                t.get("state")?.as_str()?.to_string(),
-            ))
-        })
-        .collect();
+
     let activity: Vec<(String, String, String, String)> = o
         .activity
         .iter()
@@ -145,7 +134,10 @@ pub fn Dashboard(workspace_id: String) -> Element {
                 a.get("profile")?.as_str()?.to_string(),
                 a.get("kind")?.as_str()?.to_string(),
                 a.get("text")?.as_str()?.to_string(),
-                a.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                a.get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             ))
         })
         .collect();
@@ -157,7 +149,7 @@ pub fn Dashboard(workspace_id: String) -> Element {
                     "Dashboard"
                 }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Live team: who is working, what they're thinking, who asked whom."
+                    "Say what you want in Chat — e.g. read Slack, implement it, push to GitHub, write it in Notion."
                 }
             }
 
@@ -172,39 +164,6 @@ pub fn Dashboard(workspace_id: String) -> Element {
                 Stat { label: "Live agents", value: "{o.live_agents}" }
                 Stat { label: "In progress", value: "{o.tasks_in_progress}" }
                 Stat { label: "Sent back", value: "{o.changes_requested}" }
-            }
-
-            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Tickets" }
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "Chat: @fleet monitor to watch GitHub / Jira / Linear. @fleet finish KEY to run a fleet."
-                }
-                if tickets.is_empty() {
-                    p { class: "mt-3 text-sm text-[var(--app-muted)]",
-                        "No inbox yet. Connect a board and say @fleet monitor."
-                    }
-                } else {
-                    ul { class: "mt-3 m-0 list-none space-y-2 p-0",
-                        for (provider, key, title, st) in tickets {
-                            li {
-                                key: "{provider}-{key}",
-                                class: "flex items-start justify-between gap-2",
-                                div {
-                                    p { class: "m-0 text-sm text-[var(--app-fg)]",
-                                        "{title}"
-                                    }
-                                    p { class: "m-0 font-mono text-[11px] text-[var(--app-muted)]",
-                                        "{provider} · {key}"
-                                    }
-                                }
-                                span {
-                                    class: "shrink-0 text-xs {status_class(&st)}",
-                                    "{st}"
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             div { class: "grid gap-4 lg:grid-cols-2",

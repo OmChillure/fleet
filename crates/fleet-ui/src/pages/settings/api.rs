@@ -109,11 +109,129 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Res
 }
 
 pub async fn fetch_settings(workspace_id: &str) -> Result<FleetSettings, String> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/fleet/settings"
-    ))
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/settings")).await?;
+    parse_json(res).await
+}
+
+async fn authorized_post_json(
+    path: &str,
+    body: &impl Serialize,
+) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().post(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().post(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn authorized_delete(path: &str) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MemberRow {
+    pub user_id: String,
+    pub email: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MembersResponse {
+    #[serde(default)]
+    pub members: Vec<MemberRow>,
+    pub you: MemberYou,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MemberYou {
+    pub user_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct InviteRow {
+    pub id: String,
+    pub email: String,
+    pub role: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvitesResponse {
+    #[serde(default)]
+    pub invites: Vec<InviteRow>,
+}
+
+pub async fn list_members(workspace_id: &str) -> Result<MembersResponse, String> {
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/members")).await?;
+    parse_json(res).await
+}
+
+pub async fn invite_member(
+    workspace_id: &str,
+    email: &str,
+    role: &str,
+) -> Result<serde_json::Value, String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/invites"),
+        &serde_json::json!({ "email": email, "role": role }),
+    )
     .await?;
     parse_json(res).await
+}
+
+pub async fn list_invites(workspace_id: &str) -> Result<Vec<InviteRow>, String> {
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/invites")).await?;
+    let body: InvitesResponse = parse_json(res).await?;
+    Ok(body.invites)
+}
+
+pub async fn revoke_invite(workspace_id: &str, invite_id: &str) -> Result<(), String> {
+    let res =
+        authorized_delete(&format!("/api/workspaces/{workspace_id}/invites/{invite_id}")).await?;
+    let _: serde_json::Value = parse_json(res).await?;
+    Ok(())
+}
+
+pub async fn set_member_role(
+    workspace_id: &str,
+    user_id: &str,
+    role: &str,
+) -> Result<MemberRow, String> {
+    let res = authorized_patch_json(
+        &format!("/api/workspaces/{workspace_id}/members/{user_id}"),
+        &serde_json::json!({ "role": role }),
+    )
+    .await?;
+    parse_json(res).await
+}
+
+pub async fn remove_member(workspace_id: &str, user_id: &str) -> Result<(), String> {
+    let res =
+        authorized_delete(&format!("/api/workspaces/{workspace_id}/members/{user_id}")).await?;
+    let _: serde_json::Value = parse_json(res).await?;
+    Ok(())
 }
 
 pub async fn save_settings(

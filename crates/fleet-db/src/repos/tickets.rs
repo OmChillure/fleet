@@ -1,4 +1,4 @@
-//! Ticket monitor + inbox (chat `@fleet monitor` / finish).
+//! Ticket monitor + inbox (Inbox UI / chat tools `monitor_tickets` + `finish_ticket`).
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -9,7 +9,8 @@ use crate::models::{TicketInboxItem, TicketMonitor};
 use crate::pool::map_query_err;
 
 const MONITOR_COLS: &str = r#"
-    workspace_id, enabled, providers, github_repos, jira_jql, started_by,
+    workspace_id, enabled, providers, github_repos, jira_jql,
+    slack_channels, notion_databases, auto_launch, started_by,
     last_poll_at, last_error, created_at, updated_at
 "#;
 
@@ -25,6 +26,9 @@ pub struct UpsertMonitor {
     pub providers: Vec<String>,
     pub github_repos: Vec<String>,
     pub jira_jql: Option<String>,
+    pub slack_channels: Vec<String>,
+    pub notion_databases: Vec<String>,
+    pub auto_launch: bool,
     pub started_by: Option<Uuid>,
 }
 
@@ -65,15 +69,19 @@ pub async fn upsert_monitor(pool: &PgPool, spec: &UpsertMonitor) -> DbResult<Tic
     let q = format!(
         r#"
         INSERT INTO ticket_monitors (
-            workspace_id, enabled, providers, github_repos, jira_jql, started_by,
+            workspace_id, enabled, providers, github_repos, jira_jql,
+            slack_channels, notion_databases, auto_launch, started_by,
             updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
         ON CONFLICT (workspace_id) DO UPDATE SET
             enabled = EXCLUDED.enabled,
             providers = EXCLUDED.providers,
             github_repos = EXCLUDED.github_repos,
             jira_jql = EXCLUDED.jira_jql,
+            slack_channels = EXCLUDED.slack_channels,
+            notion_databases = EXCLUDED.notion_databases,
+            auto_launch = EXCLUDED.auto_launch,
             started_by = COALESCE(EXCLUDED.started_by, ticket_monitors.started_by),
             updated_at = now()
         RETURNING {MONITOR_COLS}
@@ -85,6 +93,9 @@ pub async fn upsert_monitor(pool: &PgPool, spec: &UpsertMonitor) -> DbResult<Tic
         .bind(&spec.providers)
         .bind(&spec.github_repos)
         .bind(&spec.jira_jql)
+        .bind(&spec.slack_channels)
+        .bind(&spec.notion_databases)
+        .bind(spec.auto_launch)
         .bind(spec.started_by)
         .fetch_one(pool)
         .await

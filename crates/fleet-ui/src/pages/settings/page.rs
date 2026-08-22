@@ -2,9 +2,12 @@
 
 use dioxus::prelude::*;
 
-use super::api::{fetch_settings, save_settings, FleetSettingsPatch};
+use super::api::{
+    fetch_settings, invite_member, list_invites, list_members, remove_member, revoke_invite,
+    save_settings, set_member_role, FleetSettingsPatch, InviteRow, MemberRow,
+};
 use crate::components::toast::show_toast;
-use crate::pages::chat::{fetch_chat_status, ChatModelInfo};
+use crate::pages::chat::{ChatModelInfo, fetch_chat_status};
 
 fn field_class() -> &'static str {
     "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)] outline-none focus:border-[var(--app-muted)]"
@@ -20,9 +23,16 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut fleet_llm = use_signal(|| "off".to_string());
     let mut fleet_model = use_signal(String::new);
     let mut grok_env = use_signal(|| false);
+    let mut sandbox_backend = use_signal(|| "stub".to_string());
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
     let mut ollama_error = use_signal(|| None::<String>);
+    let mut members = use_signal(Vec::<MemberRow>::new);
+    let mut invites = use_signal(Vec::<InviteRow>::new);
+    let mut my_role = use_signal(|| "member".to_string());
+    let mut my_user_id = use_signal(String::new);
+    let mut invite_email = use_signal(String::new);
+    let mut invite_role = use_signal(|| "member".to_string());
 
     let ws_load = workspace_id.clone();
     use_effect(move || {
@@ -35,6 +45,9 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm.set(s.fleet_llm);
                     fleet_model.set(s.fleet_llm_model);
                     grok_env.set(s.grok_env);
+                    if !s.sandbox_backend.trim().is_empty() {
+                        sandbox_backend.set(s.sandbox_backend);
+                    }
                     effective.set(s.effective_backend);
                     error.set(None);
                 }
@@ -56,6 +69,14 @@ pub fn Settings(workspace_id: String) -> Element {
                     }
                 }
                 Err(e) => ollama_error.set(Some(e.message())),
+            }
+            if let Ok(m) = list_members(&ws).await {
+                my_role.set(m.you.role);
+                my_user_id.set(m.you.user_id);
+                members.set(m.members);
+            }
+            if let Ok(inv) = list_invites(&ws).await {
+                invites.set(inv);
             }
             loading.set(false);
         });
@@ -110,7 +131,7 @@ pub fn Settings(workspace_id: String) -> Element {
                 "Settings"
             }
             p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                "How many agents run at once. They share a workspace and talk to each other — no git URL to set. Connect apps under Integrations only if you want the fleet to act there (GitHub, Slack, …)."
+                "How many agents run at once. Workers launched from Chat use the model in the composer dropdown, not this page. Settings LLM is only a fallback if you never chatted. Connect apps under Integrations if the fleet should act there."
             }
 
             if loading() {
@@ -136,6 +157,18 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-6 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Runtime"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "How jobs isolate on the control plane. Set SANDBOX_BACKEND on the server (stub, process, local, docker). Not a second Native/Sandboxed switch."
+                    }
+                    p { class: "mt-2 font-mono text-sm text-[var(--app-fg)]",
+                        "SANDBOX_BACKEND={sandbox_backend}"
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
                         "Number of agents"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
@@ -160,7 +193,7 @@ pub fn Settings(workspace_id: String) -> Element {
                         "Fleet LLM"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Local Ollama model for each specialist worker. Grok is not listed here — set FLEET_AGENT_BACKEND=grok on the server."
+                        "Fallback only. Chat-launched specialists use whatever you pick next to the input (Grok, Ollama, OpenAI, Claude)."
                     }
                     label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
                         "Backend"
@@ -222,6 +255,180 @@ pub fn Settings(workspace_id: String) -> Element {
                     disabled: saving(),
                     onclick: on_save,
                     if saving() { "Saving…" } else { "Save" }
+                }
+
+                section { class: "mt-8 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Members" }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Invite by email. Existing users join immediately; others join on signup or next login. Roles: owner, admin, member."
+                    }
+                    ul { class: "mt-3 m-0 list-none space-y-2 p-0",
+                        for m in members() {
+                            li {
+                                key: "{m.user_id}",
+                                class: "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
+                                div {
+                                    p { class: "m-0 text-sm text-[var(--app-fg)]", "{m.email}" }
+                                    p { class: "m-0 text-[11px] text-[var(--app-muted)]",
+                                        if let Some(n) = &m.display_name {
+                                            "{n} · {m.role}"
+                                        } else {
+                                            "{m.role}"
+                                        }
+                                    }
+                                }
+                                div { class: "flex items-center gap-2",
+                                    if my_role() == "owner" && m.user_id != my_user_id() {
+                                        select {
+                                            class: "rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-xs text-[var(--app-fg)]",
+                                            value: "{m.role}",
+                                            onchange: {
+                                                let ws = workspace_id.clone();
+                                                let uid = m.user_id.clone();
+                                                move |e| {
+                                                    let role = e.value();
+                                                    let ws = ws.clone();
+                                                    let uid = uid.clone();
+                                                    spawn(async move {
+                                                        match set_member_role(&ws, &uid, &role).await {
+                                                            Ok(_) => {
+                                                                if let Ok(list) = list_members(&ws).await {
+                                                                    members.set(list.members);
+                                                                }
+                                                                show_toast().success("Role updated.");
+                                                            }
+                                                            Err(err) => show_toast().error(err),
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            option { value: "owner", "owner" }
+                                            option { value: "admin", "admin" }
+                                            option { value: "member", "member" }
+                                        }
+                                    }
+                                    if (my_role() == "owner" || my_role() == "admin" || m.user_id == my_user_id())
+                                        && !(m.role == "owner" && members().iter().filter(|x| x.role == "owner").count() <= 1)
+                                    {
+                                        button {
+                                            class: "rounded-md border border-red-500/40 px-2 py-1 text-[11px] text-red-400 hover:bg-red-500/10",
+                                            r#type: "button",
+                                            onclick: {
+                                                let ws = workspace_id.clone();
+                                                let uid = m.user_id.clone();
+                                                move |_| {
+                                                    let ws = ws.clone();
+                                                    let uid = uid.clone();
+                                                    spawn(async move {
+                                                        match remove_member(&ws, &uid).await {
+                                                            Ok(()) => {
+                                                                if let Ok(list) = list_members(&ws).await {
+                                                                    members.set(list.members);
+                                                                    my_role.set(list.you.role);
+                                                                }
+                                                                show_toast().success("Member removed.");
+                                                            }
+                                                            Err(err) => show_toast().error(err),
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            if m.user_id == my_user_id() { "Leave" } else { "Remove" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if my_role() == "owner" || my_role() == "admin" {
+                        div { class: "mt-4 flex flex-col gap-2 sm:flex-row",
+                            input {
+                                class: field_class(),
+                                r#type: "email",
+                                placeholder: "teammate@example.test",
+                                value: "{invite_email}",
+                                oninput: move |e| invite_email.set(e.value()),
+                            }
+                            select {
+                                class: field_class(),
+                                value: "{invite_role}",
+                                onchange: move |e| invite_role.set(e.value()),
+                                option { value: "member", "member" }
+                                if my_role() == "owner" {
+                                    option { value: "admin", "admin" }
+                                }
+                            }
+                            button {
+                                class: "rounded-lg bg-[var(--app-fg)] px-3 py-2 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
+                                r#type: "button",
+                                disabled: invite_email().trim().is_empty(),
+                                onclick: {
+                                    let workspace_id = workspace_id.clone();
+                                    move |_| {
+                                        let email = invite_email().trim().to_string();
+                                        if email.is_empty() { return; }
+                                        let ws = workspace_id.clone();
+                                        let role = invite_role();
+                                        spawn(async move {
+                                            match invite_member(&ws, &email, &role).await {
+                                                Ok(v) => {
+                                                    invite_email.set(String::new());
+                                                    if v.get("added_existing_user").and_then(|x| x.as_bool()) == Some(true) {
+                                                        show_toast().success("Added existing user.");
+                                                    } else {
+                                                        show_toast().success("Invite sent — they join on signup or login.");
+                                                    }
+                                                    if let Ok(list) = list_members(&ws).await {
+                                                        members.set(list.members);
+                                                    }
+                                                    if let Ok(inv) = list_invites(&ws).await {
+                                                        invites.set(inv);
+                                                    }
+                                                }
+                                                Err(err) => show_toast().error(err),
+                                            }
+                                        });
+                                    }
+                                },
+                                "Invite"
+                            }
+                        }
+                        if !invites().is_empty() {
+                            ul { class: "mt-3 m-0 list-none space-y-1 p-0",
+                                for inv in invites() {
+                                    li {
+                                        key: "{inv.id}",
+                                        class: "flex items-center justify-between gap-2 text-xs text-[var(--app-muted)]",
+                                        span { "{inv.email} · {inv.role} (pending)" }
+                                        button {
+                                            class: "text-red-400 hover:underline",
+                                            r#type: "button",
+                                            onclick: {
+                                                let ws = workspace_id.clone();
+                                                let id = inv.id.clone();
+                                                move |_| {
+                                                    let ws = ws.clone();
+                                                    let id = id.clone();
+                                                    spawn(async move {
+                                                        match revoke_invite(&ws, &id).await {
+                                                            Ok(()) => {
+                                                                if let Ok(inv) = list_invites(&ws).await {
+                                                                    invites.set(inv);
+                                                                }
+                                                            }
+                                                            Err(err) => show_toast().error(err),
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            "Revoke"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

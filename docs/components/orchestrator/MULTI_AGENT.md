@@ -43,6 +43,7 @@ Each spawned task:
 3. Copies finished teammates’ `result.md` into `handoff/<id>.md` and their **files** into `handoff/<id>/` plus `work/` (shared run workspace)
 4. Runs an LLM tool loop **on the control plane** (keys never enter the box): `list_dir`, `read_file`, `write_file`, `run_bash`, `read_team`, **`send_message`**, **`read_messages`**, **`ask_teammate`**, **`request_changes`**
 5. Writes `result.md` + `stdout.log` so the next specialist can pick up
+6. **Done gate:** process/local/docker tasks are not `done_success` until `result.md` exists and acceptance (`exists:`, `contains:`) passes. Fail → task goes back to `ready` with notes. Stub fixtures skip the file checks.
 
 **They share a repo and they talk.** Isolated session dirs still exist, but:
 
@@ -63,6 +64,6 @@ Handoffs + the board still matter for finished work. Chat is for “I need your 
 
 Chat: `list_agent_personas` then `launch_agent_plan` with different `worker_profile` per task. Omit the profile for **generalist**. Optional shortcuts: `coding`, `frontend`, `reviewer`, `testing`.
 
-Tickets: `@fleet monitor` then `@fleet finish KEY` (`monitor_tickets` / `finish_ticket`). Same plan shape (implementer + reviewer) with `external_ref` back to the issue.
+Cross-app work is a normal chat sentence. The assistant calls `integration_query` (Slack/Notion/GitHub/…) then `launch_agent_plan`; workers use `use_integration`; plan `outputs` write back when the run ends.
 
 Roster is cloned on first use into `DATA_DIR/agency-agents`. UI: `/{workspace}/agents`.

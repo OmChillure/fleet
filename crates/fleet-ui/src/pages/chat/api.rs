@@ -1,6 +1,7 @@
 //! Browser client for workspace chat (Grok + Ollama + saved conversations).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::pages::auth::api::{auth_base_url, refresh_session};
 
@@ -188,6 +189,8 @@ pub struct ChatActionDto {
     pub run_id: Option<String>,
     #[serde(default)]
     pub sandbox_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub detail: Option<Value>,
 }
 
 /// Wire format from POST /chat (extra fields kept for API stability).
@@ -274,11 +277,11 @@ pub async fn fetch_chat_status(workspace_id: &str) -> Result<ChatStatus, ChatErr
 }
 
 /// List saved chats for Sessions page.
-pub async fn list_conversations(
-    workspace_id: &str,
-) -> Result<Vec<ConversationSummary>, ChatError> {
-    let res =
-        authorized_get(&format!("/api/workspaces/{workspace_id}/chat/conversations")).await?;
+pub async fn list_conversations(workspace_id: &str) -> Result<Vec<ConversationSummary>, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/chat/conversations"
+    ))
+    .await?;
     let body: ConversationsListResponse = parse_json(res).await?;
     Ok(body.conversations)
 }
@@ -318,7 +321,6 @@ pub async fn create_conversation(
     Ok(body.conversation)
 }
 
-/// Load one conversation + messages.
 pub async fn get_conversation(
     workspace_id: &str,
     conversation_id: &str,
@@ -331,7 +333,6 @@ pub async fn get_conversation(
     Ok((body.conversation, body.messages))
 }
 
-/// Delete a conversation.
 pub async fn delete_conversation(
     workspace_id: &str,
     conversation_id: &str,
@@ -342,6 +343,233 @@ pub async fn delete_conversation(
     .await?;
     let _: serde_json::Value = parse_json(res).await?;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum ChatStreamEvent {
+    Status { text: String },
+    Delta { text: String },
+    Action(ChatActionDto),
+    Done(ChatCompleteResponse),
+    Error { error: String },
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_stream_line(line: &str) -> Option<ChatStreamEvent> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let kind = v.get("type")?.as_str()?;
+    match kind {
+        "status" => Some(ChatStreamEvent::Status {
+            text: v.get("text")?.as_str()?.to_string(),
+        }),
+        "delta" => Some(ChatStreamEvent::Delta {
+            text: v.get("text")?.as_str()?.to_string(),
+        }),
+        "action" => {
+            let action = ChatActionDto {
+                tool: v.get("tool")?.as_str()?.to_string(),
+                ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+                summary: v
+                    .get("summary")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                run_id: v
+                    .get("run_id")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                sandbox_ids: v.get("sandbox_ids").and_then(|x| {
+                    x.as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                }),
+                detail: v.get("detail").cloned(),
+            };
+            Some(ChatStreamEvent::Action(action))
+        }
+        "done" => Some(ChatStreamEvent::Done(ChatCompleteResponse {
+            message: ChatMessageDtoOut {
+                role: "assistant".into(),
+                content: v
+                    .get("message")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            model: v
+                .get("model")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            provider: v
+                .get("provider")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            actions: v
+                .get("actions")
+                .and_then(|a| serde_json::from_value(a.clone()).ok())
+                .unwrap_or_default(),
+            conversation_id: v
+                .get("conversation_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+        })),
+        "error" => Some(ChatStreamEvent::Error {
+            error: v
+                .get("error")
+                .and_then(|x| x.as_str())
+                .unwrap_or("stream error")
+                .to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Stream a chat turn (NDJSON). Falls back to a single complete on non-wasm.
+pub async fn stream_chat(
+    workspace_id: &str,
+    messages: Vec<ChatMessageDto>,
+    provider: String,
+    model: Option<String>,
+    conversation_id: Option<String>,
+    mut on_event: impl FnMut(ChatStreamEvent),
+) -> Result<ChatCompleteResponse, ChatError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return stream_chat_wasm(
+            workspace_id,
+            messages,
+            provider,
+            model,
+            conversation_id,
+            &mut on_event,
+        )
+        .await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let res = complete_chat(workspace_id, messages, provider, model, conversation_id).await?;
+        on_event(ChatStreamEvent::Delta {
+            text: res.message.content.clone(),
+        });
+        on_event(ChatStreamEvent::Done(res.clone()));
+        Ok(res)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn stream_chat_wasm(
+    workspace_id: &str,
+    messages: Vec<ChatMessageDto>,
+    provider: String,
+    model: Option<String>,
+    conversation_id: Option<String>,
+    on_event: &mut impl FnMut(ChatStreamEvent),
+) -> Result<ChatCompleteResponse, ChatError> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{Request, RequestCredentials, RequestInit, RequestMode};
+
+    let body = ChatCompleteBody {
+        messages,
+        provider,
+        model,
+        conversation_id,
+    };
+    let payload = serde_json::to_string(&body)
+        .map_err(|e| ChatError::Network(format!("encode: {e}")))?;
+    let url = api_url(&format!("/api/workspaces/{workspace_id}/chat/stream"));
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::Cors);
+    opts.set_credentials(RequestCredentials::Include);
+    opts.set_body(&wasm_bindgen::JsValue::from_str(&payload));
+
+    let request = Request::new_with_str_and_init(&url, &opts)
+        .map_err(|_| ChatError::Network("could not build stream request".into()))?;
+    request
+        .headers()
+        .set("Content-Type", "application/json")
+        .map_err(|_| ChatError::Network("could not set headers".into()))?;
+
+    let window = web_sys::window().ok_or_else(|| ChatError::Network("no window".into()))?;
+    let resp_js = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|_| ChatError::Network("stream fetch failed".into()))?;
+    let resp: web_sys::Response = resp_js
+        .dyn_into()
+        .map_err(|_| ChatError::Network("invalid stream response".into()))?;
+    if !resp.ok() {
+        let text = JsFuture::from(
+            resp.text()
+                .map_err(|_| ChatError::Network("read error body".into()))?,
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
+        return Err(ChatError::Message(if text.is_empty() {
+            format!("stream failed ({})", resp.status())
+        } else {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                .unwrap_or(text)
+        }));
+    }
+    let body = resp
+        .body()
+        .ok_or_else(|| ChatError::Network("empty stream body".into()))?;
+    let reader = body
+        .get_reader()
+        .dyn_into::<web_sys::ReadableStreamDefaultReader>()
+        .map_err(|_| ChatError::Network("no stream reader".into()))?;
+
+    let mut buf = String::new();
+    let mut last_done: Option<ChatCompleteResponse> = None;
+    loop {
+        let read = JsFuture::from(reader.read())
+            .await
+            .map_err(|_| ChatError::Network("stream read failed".into()))?;
+        let done = js_sys::Reflect::get(&read, &"done".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if let Ok(value) = js_sys::Reflect::get(&read, &"value".into()) {
+            if !value.is_undefined() && !value.is_null() {
+                if let Some(arr) = value.dyn_ref::<js_sys::Uint8Array>() {
+                    let mut bytes = vec![0u8; arr.length() as usize];
+                    arr.copy_to(&mut bytes);
+                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                }
+            }
+        }
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].trim().to_string();
+            buf = buf[idx + 1..].to_string();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(ev) = parse_stream_line(&line) {
+                if let ChatStreamEvent::Done(ref d) = ev {
+                    last_done = Some(d.clone());
+                }
+                if let ChatStreamEvent::Error { error } = &ev {
+                    return Err(ChatError::Message(error.clone()));
+                }
+                on_event(ev);
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    last_done.ok_or_else(|| ChatError::Network("stream ended without a done event".into()))
 }
 
 /// Send conversation turn; persists server-side when successful.
@@ -361,6 +589,42 @@ pub async fn complete_chat(
             conversation_id,
         },
     )
+    .await?;
+    parse_json(res).await
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FleetLiveSnapshot {
+    #[serde(default)]
+    pub live_agents: u64,
+    #[serde(default)]
+    pub runs: Vec<Value>,
+    #[serde(default)]
+    pub tasks: Vec<Value>,
+    #[serde(default)]
+    pub activity: Vec<Value>,
+    #[serde(default)]
+    pub chat: Vec<Value>,
+}
+
+pub async fn fetch_fleet_live(workspace_id: &str) -> Result<FleetLiveSnapshot, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/fleet/overview"
+    ))
+    .await?;
+    parse_json(res).await
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FleetTasksSnapshot {
+    #[serde(default)]
+    pub tasks: Vec<Value>,
+}
+
+pub async fn fetch_fleet_tasks(workspace_id: &str) -> Result<FleetTasksSnapshot, ChatError> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/fleet/tasks"
+    ))
     .await?;
     parse_json(res).await
 }

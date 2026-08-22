@@ -151,7 +151,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "launch_agent_plan",
-                "description": "Launch local multi-agent work NOW. Workers use THIS chat's selected provider+model. No integration is required. DAG of tasks (depends_on + parallel).",
+                "description": "Launch a DAG of specialists for work that needs sandboxes. You choose the tasks, worker_profile, depends_on, and outputs from the user's request — do not assume coding or a PR. Workers use THIS chat's provider+model and use_integration for any connected app. Put fetched context in each spec. outputs = write-backs when the run ends (any provider+operation).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -166,6 +166,19 @@ pub fn tool_definitions() -> Value {
                         "context_from": {
                             "type": "array",
                             "description": "Shared integration context prefetched into every task spec",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "provider": { "type": "string" },
+                                    "operation": { "type": "string" },
+                                    "args": { "type": "object" }
+                                },
+                                "required": ["provider", "operation"]
+                            }
+                        },
+                        "outputs": {
+                            "type": "array",
+                            "description": "Write-backs when the run finishes. Any connected provider + allowlisted operation. Example: {provider:\"notion\", operation:\"append_blocks\", args:{page_id:\"…\", text:\"{{summary}}\"}}.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -325,87 +338,14 @@ pub fn tool_definitions() -> Value {
         {
             "type": "function",
             "function": {
-                "name": "monitor_tickets",
-                "description": "Start or stop watching connected ticket boards (GitHub issues, Jira, Linear). User says @fleet monitor. Pulls open tickets into the inbox. Does NOT launch agents. Use finish_ticket to actually do the work.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "true to watch (default), false to stop (@fleet monitor off)"
-                        },
-                        "providers": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Subset of github, jira, linear. Default: whatever is connected."
-                        },
-                        "github_repos": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Optional owner/repo list. Omit to use recently updated repos."
-                        },
-                        "jira_jql": {
-                            "type": "string",
-                            "description": "Optional JQL. Default: statusCategory != Done"
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_tickets",
-                "description": "Show the ticket inbox from @fleet monitor: open / launched / done issues from GitHub, Jira, Linear.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "state": {
-                            "type": "string",
-                            "description": "Optional filter: open, launched, done, ignored"
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "finish_ticket",
-                "description": "User says @fleet finish this ticket / @fleet finish ENG-123. Launch implementer + reviewer on that issue. Prefer a key from list_tickets. Tokens stay on the control plane.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "ticket": {
-                            "type": "string",
-                            "description": "ENG-123, PROJ-1, owner/repo#12, or a GitHub issue URL"
-                        },
-                        "provider": {
-                            "type": "string",
-                            "description": "github | jira | linear if the key is ambiguous"
-                        },
-                        "key": {
-                            "type": "string",
-                            "description": "Same as ticket if you split provider/key"
-                        }
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "integration_query",
-                "description": "Call a connected integration on the CONTROL PLANE (decrypt there; tokens never enter sandboxes). Providers: github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana. Use get_integration for the allowlisted ops. GitHub: list_repos/issues/prs, get_file, list_commits, commit_files, create_pr/issue, add_comment. GitLab: list_repos/issues/mrs, get_file, list_commits, commit_files, create_mr/issue, add_comment. Jira: search/create/transition issues, comments. Linear: list/create/update issues. Slack: list_channels/users, post_message, history. Figma: get_file/nodes/comments. Notion: search/pages/databases. Drive: list/get/export files (readonly). Teams: chats/teams/channels + send messages. Discord: get_me, list_guilds. Trello: list_boards/lists/cards, create/update cards, comments. Asana: list workspaces/projects/tasks, create/update tasks, comments. Do NOT put tokens in sandbox specs.",
+                "description": "Read or write a connected app on the CONTROL PLANE (tokens never enter sandboxes). The system prompt lists every provider and allowlisted operation. Use those. If not_connected, say so and still do the rest of the work.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "description": "github | gitlab | jira | linear | slack | figma | notion | google_drive | teams | discord | trello | asana"
+                            "description": "github | gitlab | bitbucket | jira | linear | slack | figma | notion | confluence | google_drive | teams | discord | trello | asana"
                         },
                         "operation": {
                             "type": "string",
@@ -522,48 +462,151 @@ pub fn tool_definitions() -> Value {
                     "additionalProperties": false
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "monitor_tickets",
+                "description": "Start or update the workspace ticket inbox. Polls every connected integration (GitHub, GitLab, Bitbucket, Jira, Linear, Trello, Asana, Slack, Teams, Notion, Confluence). Tokens stay on the control plane.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": { "type": "boolean" },
+                        "providers": { "type": "array", "items": { "type": "string" } },
+                        "github_repos": { "type": "array", "items": { "type": "string" } },
+                        "jira_jql": { "type": "string" },
+                        "slack_channels": { "type": "array", "items": { "type": "string" } },
+                        "auto_launch": { "type": "boolean" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_tickets",
+                "description": "List inbox tickets (open GitHub/Jira/Linear/Slack items the monitor has seen).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "description": "open | launched | closed" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "finish_ticket",
+                "description": "Load one inbox item (ENG-123, owner/repo#12, or github:owner/repo#12) and return its spec. Does not launch agents. You then integration_query and/or launch_agent_plan for whatever this item actually needs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ticket": { "type": "string" },
+                        "provider": { "type": "string" },
+                        "key": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }
+            }
         }
     ])
 }
 
 pub fn system_prompt_with_tools() -> &'static str {
-    "You are the Agent Fleet assistant — you run fleets of sandboxed specialist agents that collaborate on whatever the user asked (software, research, ops, writing, support, …).\n\n\
-Bias to action. A request like “get a couple of agents on this” means: pick personas, launch the plan now, and say who is doing what. Do not wait for confirmation. Do not require a connected app.\n\n\
-The model selected in this chat composer is used for YOU and for every sandbox worker (same provider + same model). If the user picked Grok, agents are Grok. Later Claude in the dropdown means Claude everywhere. Do not call configure_fleet to switch to Ollama.\n\n\
-Invent the workflow. Do not look up a saved playbook and do not ask anyone to define one. Read the ask, pick personas, call apps, launch a plan.\n\
-If a tool fails (network, bad args, Slack not_in_channel, Notion 400, …), retry the same user task — call the tool again with fixed params or another approach. Do not stop after one error.\n\n\
-You have tools for:\n\
-**Cases (durable backend state)** — for long-running watch→decide→act policies\n\
-- start_case(title, policy_md) — backend wakes on a schedule; LLM/heuristic decides; status lives in DB\n\
-- list_cases / get_case / observe_case (inject facts) / cancel_case\n\
-- Integrations are optional tools later; human observations work today via observe_case\n\
-**Fleet / sandboxes** (ephemeral: spawn → work → destroy; NEVER put OAuth tokens or credentials in sandbox specs)\n\
-- list_agent_personas then launch_agent_plan / launch_agent_task immediately\n\
-- get_fleet_status / list_sandboxes / list_tasks / list_runs for progress\n\
-- read_team_chat / send_team_message — agents talk to each other mid-run; you can listen in and reply\n\
-- Local sandboxes do not need any integration.\n\
-**Integrations — CONTROL PLANE only** (same tool for every app)\n\
-- integration_query(provider, operation, args): github, gitlab, jira, linear, slack, figma, notion, google_drive, teams, discord, trello, asana\n\
-- list_integrations / get_integration (returns operations)\n\
-- GitHub: list_repos/issues/prs, get_file, commit_files, create_pr/issue, add_comment\n\
-- GitLab: list_repos/issues/mrs, get_file, commit_files, create_mr/issue, add_comment\n\
-- Slack: list_channels/users, post_message, get_channel_history, get_thread\n\
-- Notion: search, get_page, get_block_children (includes text), query_database, create_page, append_blocks\n\
-- Trello: list_boards/lists/cards, create/update card, add_comment\n\
-- Asana: list_workspaces/projects/tasks, create/update task, add_comment\n\
-- @fleet monitor → monitor_tickets. @fleet finish KEY → finish_ticket. Shortcuts, not the only workflows.\n\
-Do NOT claim an external write succeeded unless integration_query returned ok.\n\
-Do NOT block local work because an app is disconnected. Only mention Connect if they explicitly wanted that app.\n\
-Multi-agent: split into complementary specialists (different worker_profile). Default persona is generalist if they did not name one. Use depends_on so reviewers wait on implementers. Specs say what THIS agent owns vs others. After launch, one plain sentence: who is doing what + run id. Live agents share `work/`, message each other, and reviewers bounce bad work with request_changes. Use read_team_chat if the user asks what they said.\n\
+    "You are the Agent Fleet assistant. The user talks in normal language. You do the work.\n\n\
+A sentence is enough. Compose tools from the request — there is no fixed playbook.\n\
+- One-shot read/write on a connected app: integration_query(provider, operation, args).\n\
+- Multi-step or sandbox work: launch_agent_plan with the tasks YOU choose (any worker_profile, depends_on, outputs).\n\
+- Inbox item: finish_ticket to load the spec, then you plan (do not assume implement + review + PR).\n\
+- Long-running wait/watch policy: start_case.\n\n\
+Bias to action. Do not wait for confirmation. Do not invent slash-commands. Do not tell the user to open Settings first unless no model can run.\n\
+The model in this composer is used for YOU and every sandbox worker. Do not call configure_fleet to switch providers.\n\
+If a tool fails, retry with fixed args or another op. Do not stop after one error.\n\n\
+Tools:\n\
+- integration_query / list_integrations / get_integration — backend connector ops (full catalog is appended below)\n\
+- launch_agent_plan / launch_agent_task / list_agent_personas\n\
+- Plan outputs fire when a run ends ({{summary}} {{run_id}} {{status}}); workers also use_integration mid-run\n\
+- get_fleet_status / list_sandboxes / list_tasks / list_runs / read_team_chat / send_team_message\n\
+- monitor_tickets / list_tickets / finish_ticket (load spec only)\n\
+- start_case / list_cases / get_case / observe_case / cancel_case\n\n\
+Do NOT claim an external write succeeded unless integration_query (or a finished plan output) returned ok.\n\
+If an app is disconnected, say Connect under Integrations and still do everything else.\n\
+After launch: one sentence, who + run id. Never ask the user to say continue.\n\
+Never create a Notion page without args.text (the actual result).\n\
 Be concise."
+}
+
+pub fn last_user_text(history: &[Value]) -> String {
+    history
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Model tried to stop and ask the human to continue after launching a fleet.
+pub fn rewrite_if_asked_to_continue(content: &str, actions: &[ChatAction]) -> Option<String> {
+    let launched = actions.iter().find(|a| {
+        a.ok && matches!(a.tool.as_str(), "launch_agent_plan" | "launch_agent_task")
+    })?;
+    let lower = content.to_ascii_lowercase();
+    let asks = lower.contains("continue")
+        || lower.contains("say \"continue\"")
+        || lower.contains("blocked mid")
+        || lower.contains("i'm blocked")
+        || lower.contains("when it finishes")
+        || lower.contains("when done")
+        || lower.contains("when the run")
+        || lower.contains("outputs will")
+        || lower.contains("they'll implement")
+        || lower.contains("they will implement");
+    if !asks {
+        return None;
+    }
+    let run = launched
+        .run_id
+        .as_deref()
+        .unwrap_or("the open run");
+    Some(format!(
+        "Fleet `{run}` is live on this screen. Stay here — task status and agent activity show in the live panel. \
+I will not ask you to continue."
+    ))
+}
+
+/// Full connector allowlist, plus which of those are connected in this workspace.
+pub fn connector_catalog_markdown(connected: &[String]) -> String {
+    let connected_set: std::collections::HashSet<&str> =
+        connected.iter().map(|s| s.as_str()).collect();
+    let mut out = String::from(
+        "\n\n# Connector catalog (backend tools — call integration_query / use_integration)\n",
+    );
+    for provider in supported_providers() {
+        let state = if connected_set.contains(*provider) {
+            "connected"
+        } else {
+            "not connected"
+        };
+        let ops = operations_for(provider);
+        out.push_str(&format!("- {provider} [{state}]: {}\n", ops.join(", ")));
+    }
+    if connected.is_empty() {
+        out.push_str("None connected yet. User can connect them under Integrations.\n");
+    }
+    out
 }
 
 pub async fn system_prompt_for_workspace(state: &AppState, workspace_id: Uuid) -> String {
     let mut base = system_prompt_with_tools().to_string();
+    let mut connected: Vec<String> = Vec::new();
     match build_integrations_snapshot(state, workspace_id, false).await {
         Ok((content, _)) => {
             if let Some(arr) = content.get("integrations").and_then(|v| v.as_array()) {
-                let connected: Vec<String> = arr
+                connected = arr
                     .iter()
                     .filter(|i| i.get("connected").and_then(|c| c.as_bool()) == Some(true))
                     .filter_map(|i| {
@@ -578,21 +621,22 @@ pub async fn system_prompt_for_workspace(state: &AppState, workspace_id: Uuid) -
                         })
                     })
                     .collect();
-                if connected.is_empty() {
-                    base.push_str(
-                        "\n\nWorkspace integrations: none connected yet. User can connect them under Integrations.",
-                    );
-                } else {
-                    base.push_str(&format!(
-                        "\n\nWorkspace integrations currently connected: {}.",
-                        connected.join(", ")
-                    ));
-                }
             }
         }
         Err(e) => {
             tracing::debug!(error = %e, "integrations snapshot for system prompt failed");
         }
+    }
+    let ids: Vec<String> = connected
+        .iter()
+        .map(|s| s.split_whitespace().next().unwrap_or(s).to_string())
+        .collect();
+    base.push_str(&connector_catalog_markdown(&ids));
+    if !connected.is_empty() {
+        base.push_str(&format!(
+            "Connected accounts: {}.\n",
+            connected.join(", ")
+        ));
     }
     base
 }
@@ -633,6 +677,14 @@ struct PlanTaskArg {
 }
 
 #[derive(Debug, Deserialize)]
+struct OutputArg {
+    provider: String,
+    operation: String,
+    #[serde(default)]
+    args: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 struct LaunchPlanArgs {
     #[serde(default)]
     title: Option<String>,
@@ -640,6 +692,8 @@ struct LaunchPlanArgs {
     max_agents: Option<i32>,
     #[serde(default)]
     context_from: Option<Vec<ContextFromArg>>,
+    #[serde(default)]
+    outputs: Option<Vec<OutputArg>>,
     tasks: Vec<PlanTaskArg>,
 }
 
@@ -654,6 +708,28 @@ struct ListTasksArgs {
 pub struct ChatLlmContext {
     pub provider: String,
     pub model: String,
+}
+
+/// Composer dropdown first (last chat in this workspace), then Grok/Ollama host defaults.
+pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatLlmContext {
+    if let Ok(Some((provider, model))) =
+        fleet_db::repos::chats::latest_composer_llm(&state.db, workspace_id).await
+    {
+        return ChatLlmContext { provider, model };
+    }
+    if state.grok.enabled {
+        return ChatLlmContext {
+            provider: "grok".into(),
+            model: crate::grok::GROK_MODEL.into(),
+        };
+    }
+    if state.ollama.enabled {
+        return ChatLlmContext {
+            provider: "ollama".into(),
+            model: state.ollama.default_model.clone().unwrap_or_default(),
+        };
+    }
+    ChatLlmContext::default()
 }
 
 pub async fn execute_tool(
@@ -698,7 +774,7 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_ascii_lowercase())
                 .filter(|s| !s.is_empty());
-            list_agent_personas_tool(div.as_deref()).await
+            list_agent_personas_tool(state, workspace_id, div.as_deref()).await
         }
         "read_team_chat" => read_team_chat_tool(state, workspace_id, arguments).await,
         "send_team_message" => send_team_message_tool(state, workspace_id, arguments).await,
@@ -722,16 +798,6 @@ pub async fn execute_tool(
             }
         }
         "integration_query" => integration_query(state, workspace_id, user_id, arguments).await,
-        "monitor_tickets" => monitor_tickets_tool(state, workspace_id, user_id, arguments).await,
-        "list_tickets" => {
-            let filter = arguments
-                .get("state")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            list_tickets_tool(state, workspace_id, filter).await
-        }
-        "finish_ticket" => finish_ticket_tool(state, workspace_id, user_id, arguments, llm).await,
         "start_case" => start_case_tool(state, workspace_id, user_id, arguments).await,
         "list_cases" => {
             let filter = arguments
@@ -744,6 +810,92 @@ pub async fn execute_tool(
         "get_case" => get_case_tool(state, workspace_id, arguments).await,
         "observe_case" => observe_case_tool(state, workspace_id, arguments).await,
         "cancel_case" => cancel_case_tool(state, workspace_id, arguments).await,
+        "monitor_tickets" => {
+            let args = serde_json::from_value::<crate::tickets::MonitorArgs>(arguments.clone())
+                .unwrap_or(crate::tickets::MonitorArgs {
+                    enabled: None,
+                    providers: None,
+                    github_repos: None,
+                    jira_jql: None,
+                    slack_channels: None,
+                    notion_databases: None,
+                    auto_launch: None,
+                });
+            match crate::tickets::monitor_tickets(state, workspace_id, user_id, args).await {
+                Ok(v) => Ok((
+                    v.clone(),
+                    ChatAction {
+                        tool: "monitor_tickets".into(),
+                        ok: true,
+                        summary: "Inbox monitor updated".into(),
+                        run_id: None,
+                        sandbox_ids: None,
+                        detail: Some(v),
+                    },
+                )),
+                Err(e) => Err(e),
+            }
+        }
+        "list_tickets" => {
+            let filter = arguments
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match crate::tickets::list_tickets(state, workspace_id, filter).await {
+                Ok(v) => {
+                    let n = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+                    Ok((
+                        v.clone(),
+                        ChatAction {
+                            tool: "list_tickets".into(),
+                            ok: true,
+                            summary: format!("{n} ticket(s)"),
+                            run_id: None,
+                            sandbox_ids: None,
+                            detail: Some(v),
+                        },
+                    ))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "finish_ticket" => {
+            let args = serde_json::from_value::<crate::tickets::FinishTicketArgs>(arguments.clone())
+                .unwrap_or(crate::tickets::FinishTicketArgs {
+                    ticket: arguments
+                        .get("ticket")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    provider: arguments
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    key: arguments
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                });
+            match crate::tickets::ticket_context_for_model(state, workspace_id, user_id, args).await
+            {
+                Ok(v) => Ok((
+                    v.clone(),
+                    ChatAction {
+                        tool: "finish_ticket".into(),
+                        ok: true,
+                        summary: v
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("ticket loaded")
+                            .to_string(),
+                        run_id: None,
+                        sandbox_ids: None,
+                        detail: Some(v),
+                    },
+                )),
+                Err(e) => Err(e),
+            }
+        }
         other => Err(AppError::bad_request(format!("unknown tool `{other}`"))),
     };
 
@@ -962,11 +1114,17 @@ pub fn coerce_integration_args(
         ("slack", "post_message")
             | ("slack", "get_channel_history")
             | ("slack", "get_thread")
-    ) && next.get("channel").and_then(|v| v.as_str()).is_none()
-    {
-        if let Some(ch) = harvest_slack_channel(prior) {
-            next.as_object_mut()?.insert("channel".into(), json!(ch));
-            changed = true;
+    ) {
+        let ch = next.get("channel").and_then(|v| v.as_str()).unwrap_or("");
+        let needs_id = ch.is_empty()
+            || !(ch.starts_with('C') && ch.len() >= 8);
+        if needs_id {
+            if let Some(id) = harvest_slack_channel(prior).or_else(|| {
+                harvest_slack_channel_named(prior, ch)
+            }) {
+                next.as_object_mut()?.insert("channel".into(), json!(id));
+                changed = true;
+            }
         }
     }
     if changed {
@@ -1021,6 +1179,35 @@ fn harvest_slack_text(prior: &[Value]) -> Option<String> {
     } else {
         Some(lines.join("\n"))
     }
+}
+
+fn harvest_slack_channel_named(prior: &[Value], raw: &str) -> Option<String> {
+    let want = raw.trim().trim_start_matches('#').to_ascii_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    for p in prior {
+        if p.get("provider").and_then(|v| v.as_str()) != Some("slack") {
+            continue;
+        }
+        let items = p
+            .pointer("/data/items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for c in items {
+            let name = c
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !id.is_empty() && (name == want || id.eq_ignore_ascii_case(raw.trim())) {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn harvest_slack_channel(prior: &[Value]) -> Option<String> {
@@ -1131,7 +1318,7 @@ pub fn build_chat_plan(
             spec_md: spec.to_string(),
             depends_on: vec![],
             worker_profile: worker_profile.to_string(),
-            acceptance: vec![],
+            acceptance: fleet_orchestrator::orch::default_acceptance(worker_profile),
             priority: 100,
             external_ref: None,
             timeout_s: Some(3600),
@@ -1398,7 +1585,11 @@ async fn tick_until_run_settled(
     Ok((ticks, terminal))
 }
 
-async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, ChatAction)> {
+async fn list_agent_personas_tool(
+    state: &AppState,
+    workspace_id: Uuid,
+    division: Option<&str>,
+) -> AppResult<(Value, ChatAction)> {
     let data_dir = std::env::var("DATA_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
@@ -1406,11 +1597,27 @@ async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, C
     if let Some(d) = division {
         personas.retain(|p| p.division.eq_ignore_ascii_case(d));
     }
-    let n = personas.len();
+    let custom = fleet_db::repos::personas::list_for_workspace(&state.db, workspace_id, Some("active"))
+        .await
+        .unwrap_or_default();
+    let custom_json: Vec<Value> = custom
+        .iter()
+        .map(|p| {
+            json!({
+                "slug": p.slug,
+                "name": p.name,
+                "description": p.description,
+                "division": "workspace",
+                "source": "workspace",
+            })
+        })
+        .collect();
+    let n = personas.len() + custom_json.len();
     let content = json!({
         "source": "https://github.com/msitarzewski/agency-agents",
         "count": n,
         "default": "generalist",
+        "workspace_personas": custom_json,
         "aliases": {
             "generalist": "generalist",
             "coding": "engineering-backend-architect (optional shortcut)",
@@ -1419,7 +1626,7 @@ async fn list_agent_personas_tool(division: Option<&str>) -> AppResult<(Value, C
             "testing": "testing/* first match (optional shortcut)",
         },
         "personas": personas.iter().take(80).collect::<Vec<_>>(),
-        "hint": "Set worker_profile to any slug. Omit it for generalist. Fleet LLM is Settings Ollama or host FLEET_AGENT_BACKEND=grok.",
+        "hint": "Set worker_profile to a workspace persona slug (Agents page) or any roster slug.",
     });
     Ok((
         content.clone(),
@@ -1463,139 +1670,6 @@ async fn resolve_chat_run(
     open.or(runs.first())
         .map(|r| r.id)
         .ok_or_else(|| AppError::bad_request("no fleet runs yet"))
-}
-
-async fn monitor_tickets_tool(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    arguments: &Value,
-) -> AppResult<(Value, ChatAction)> {
-    let obj = parse_json_args(arguments).map_err(AppError::bad_request)?;
-    let args: crate::tickets::MonitorArgs = serde_json::from_value(obj)
-        .map_err(|e| AppError::bad_request(format!("invalid monitor_tickets args: {e}")))?;
-    let content = crate::tickets::monitor_tickets(state, workspace_id, user_id, args).await?;
-    let enabled = content.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    let n = content
-        .get("tickets")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter(|t| t.get("state").and_then(|s| s.as_str()) == Some("open")).count())
-        .unwrap_or(0);
-    let summary = if enabled {
-        format!("Watching tickets — {n} open. Say @fleet finish <key> to run one.")
-    } else {
-        "Stopped watching tickets.".into()
-    };
-    Ok((
-        content.clone(),
-        ChatAction {
-            tool: "monitor_tickets".into(),
-            ok: true,
-            summary,
-            run_id: None,
-            sandbox_ids: None,
-            detail: Some(content),
-        },
-    ))
-}
-
-async fn list_tickets_tool(
-    state: &AppState,
-    workspace_id: Uuid,
-    state_filter: Option<&str>,
-) -> AppResult<(Value, ChatAction)> {
-    let content = crate::tickets::list_tickets(state, workspace_id, state_filter).await?;
-    let n = content.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-    Ok((
-        content.clone(),
-        ChatAction {
-            tool: "list_tickets".into(),
-            ok: true,
-            summary: format!("{n} ticket(s) in the inbox"),
-            run_id: None,
-            sandbox_ids: None,
-            detail: Some(content),
-        },
-    ))
-}
-
-async fn finish_ticket_tool(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    arguments: &Value,
-    llm: &ChatLlmContext,
-) -> AppResult<(Value, ChatAction)> {
-    let obj = parse_json_args(arguments).map_err(AppError::bad_request)?;
-    let args: crate::tickets::FinishTicketArgs = serde_json::from_value(obj)
-        .map_err(|e| AppError::bad_request(format!("invalid finish_ticket args: {e}")))?;
-    let prepared = crate::tickets::prepare_finish(state, workspace_id, user_id, args).await?;
-    if prepared.item.state == "launched" {
-        if let Some(run_id) = prepared.item.run_id {
-            return Ok((
-                json!({
-                    "already_launched": true,
-                    "provider": prepared.item.provider,
-                    "key": prepared.item.external_key,
-                    "run_id": run_id,
-                }),
-                ChatAction {
-                    tool: "finish_ticket".into(),
-                    ok: true,
-                    summary: format!(
-                        "{} {} already has run {run_id}",
-                        prepared.item.provider, prepared.item.external_key
-                    ),
-                    run_id: Some(run_id.to_string()),
-                    sandbox_ids: None,
-                    detail: None,
-                },
-            ));
-        }
-    }
-    ensure_project_capacity(state, workspace_id, chat_max_agents()).await?;
-    let mut plan = build_multi_task_plan(workspace_id, None, prepared.tasks);
-    plan.source = "ticket".into();
-    stamp_plan_llm(&mut plan, llm);
-    let (mut content, mut action) = accept_and_drive_plan(
-        state,
-        workspace_id,
-        plan,
-        "finish_ticket",
-        &prepared.title,
-        Vec::new(),
-    )
-    .await?;
-    if let Some(run) = action
-        .run_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok())
-    {
-        let _ = crate::tickets::mark_ticket_launched(
-            state,
-            workspace_id,
-            &prepared.item.provider,
-            &prepared.item.external_key,
-            run,
-        )
-        .await;
-    }
-    action.summary = format!(
-        "Finishing {} {} — implementer + reviewer. {}",
-        prepared.item.provider, prepared.item.external_key, action.summary
-    );
-    if let Some(obj) = content.as_object_mut() {
-        obj.insert(
-            "ticket".into(),
-            json!({
-                "provider": prepared.item.provider,
-                "key": prepared.item.external_key,
-                "title": prepared.item.title,
-                "url": prepared.item.url,
-            }),
-        );
-    }
-    Ok((content, action))
 }
 
 async fn start_case_tool(
@@ -2272,7 +2346,9 @@ async fn launch_agent_plan(
                     .filter(|s| !s.is_empty())
                     .unwrap_or("generalist")
                     .to_string(),
-                acceptance: vec![],
+                acceptance: fleet_orchestrator::orch::default_acceptance(
+                    t.worker_profile.as_deref().unwrap_or("generalist"),
+                ),
                 priority: t.priority.unwrap_or(100),
                 external_ref: None,
                 timeout_s: Some(3600),
@@ -2282,6 +2358,17 @@ async fn launch_agent_plan(
         .collect();
 
     let mut plan = build_multi_task_plan(workspace_id, args.max_agents, tasks);
+    if let Some(outs) = args.outputs {
+        plan.policy.outputs = outs
+            .into_iter()
+            .filter(|o| !o.provider.trim().is_empty() && !o.operation.trim().is_empty())
+            .map(|o| fleet_orchestrator::domain::PlanIo {
+                provider: o.provider.trim().to_ascii_lowercase(),
+                operation: o.operation.trim().to_ascii_lowercase(),
+                args: o.args.unwrap_or(json!({})),
+            })
+            .collect();
+    }
     stamp_plan_llm(&mut plan, llm);
     if let Err(e) = validate::validate_plan(&plan) {
         return Err(AppError::bad_request(e.to_string()));
@@ -2314,7 +2401,6 @@ async fn accept_and_drive_plan(
 ) -> AppResult<(Value, ChatAction)> {
     let run_id = plan.run_id;
     let task_count = plan.tasks.len();
-
     let (run, plan_row) = state
         .orch
         .store
@@ -2394,7 +2480,7 @@ async fn accept_and_drive_plan(
     let hint = if terminal {
         "Sandboxes are ephemeral. Integration tokens stay on the control plane."
     } else {
-        "Run is draining in the background (local queue, no k8s). Check Fleet / Sandboxes / get_fleet_status."
+        "Fleet is running. Do NOT ask the user to continue. Plan outputs fire when the run completes. Watch Fleet."
     };
     let content = json!({
         "run_id": run_id,
@@ -2418,11 +2504,17 @@ async fn accept_and_drive_plan(
         "hint": hint,
     });
 
-    let summary = format!(
-        "Launched «{label}» · {task_count} task(s) · run {} · {} sandbox(es) · terminal={terminal} · destroyed≈{destroyed_n}",
-        short_id(&run_id.to_string()),
-        sandbox_ids.len(),
-    );
+    let summary = if terminal {
+        format!(
+            "Fleet finished «{label}» · {task_count} task(s) · run {} · terminal",
+            short_id(&run_id.to_string()),
+        )
+    } else {
+        format!(
+            "Fleet running «{label}» · {task_count} agents/tasks · run {} · implement→review→ship in background — do not ask the user to continue",
+            short_id(&run_id.to_string()),
+        )
+    };
 
     Ok((
         content.clone(),
@@ -2473,6 +2565,12 @@ fn provider_capabilities(provider: &str) -> &'static str {
         "discord" => "get_me, list_guilds (user OAuth; no channel posts)",
         "trello" => "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment",
         "asana" => "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment",
+        "bitbucket" => {
+            "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, commit_files, create_branch, create_pr, create_issue, add_comment"
+        }
+        "confluence" => {
+            "search, list_spaces, list_pages, get_page, create_page, update_page, add_comment"
+        }
         _ => "OAuth connect only — no proxy tools yet.",
     }
 }
@@ -2515,6 +2613,7 @@ async fn build_integrations_snapshot(
             "account_label": conn.and_then(|c| c.account_label.clone()),
             "last_error": conn.and_then(|c| c.last_error.clone()),
             "capabilities": provider_capabilities(&view.id),
+            "operations": operations_for(&view.id),
         }));
     }
 
@@ -2624,6 +2723,11 @@ mod tests {
         }))
         .is_err());
         let ok = parse_launch_plan_args(&json!({
+            "outputs": [{
+                "provider": "notion",
+                "operation": "append_blocks",
+                "args": { "page_id": "p1", "text": "{{summary}}" }
+            }],
             "tasks": [
                 { "id": "a", "title": "API", "worker_profile": "frontend" },
                 { "id": "b", "title": "Review", "depends_on": ["a"] }
@@ -2632,6 +2736,9 @@ mod tests {
         .unwrap();
         assert_eq!(ok.tasks.len(), 2);
         assert_eq!(ok.tasks[0].worker_profile.as_deref(), Some("frontend"));
+        let outs = ok.outputs.unwrap();
+        assert_eq!(outs[0].provider, "notion");
+        assert_eq!(outs[0].operation, "append_blocks");
     }
 
     #[test]
@@ -2723,10 +2830,83 @@ mod tests {
     }
 
     #[test]
+    fn coerce_resolves_hash_eng_from_listed_channels() {
+        let prior = vec![json!({
+            "ok": true,
+            "provider": "slack",
+            "operation": "list_channels",
+            "data": {
+                "items": [
+                    { "id": "CENG", "name": "eng" },
+                    { "id": "CGEN", "name": "general" }
+                ]
+            }
+        })];
+        let fixed = coerce_integration_args(
+            "slack",
+            "get_channel_history",
+            &json!({ "channel": "#eng", "limit": 10 }),
+            &prior,
+        )
+        .expect("coerced");
+        assert_eq!(fixed["channel"], "CENG");
+    }
+
+    #[test]
     fn retry_hint_names_required_text() {
         let h = retry_hint("notion", "append_blocks");
         assert_eq!(h["should_retry"], true);
         assert!(h["required"].as_array().unwrap().iter().any(|x| x == "text"));
+    }
+
+    #[test]
+    fn continue_rewrite_does_not_inject_ship_playbook() {
+        let launched = vec![ChatAction {
+            tool: "launch_agent_plan".into(),
+            ok: true,
+            summary: "ok".into(),
+            run_id: Some("r".into()),
+            sandbox_ids: None,
+            detail: None,
+        }];
+        let rewritten = rewrite_if_asked_to_continue(
+            "Say continue and I'll commit_files.",
+            &launched,
+        )
+        .expect("rewrite");
+        assert!(
+            rewritten.contains("Fleet `r` is live") || rewritten.contains("is live on this screen"),
+            "{rewritten}"
+        );
+        let lower = rewritten.to_ascii_lowercase();
+        assert!(!lower.contains("say continue"));
+        assert!(!lower.contains("implement → review → ship"));
+    }
+
+    #[test]
+    fn chat_plan_is_not_rewritten_into_a_pr_pipeline() {
+        let plan = build_chat_plan(
+            Uuid::nil(),
+            "Calculator",
+            "Implement the calculator and push to GitHub then write Notion.",
+            "coding",
+        );
+        let ids: Vec<_> = plan.tasks.iter().map(|t| t.plan_task_id.as_str()).collect();
+        assert_eq!(ids, vec!["t1"]);
+        assert_eq!(plan.tasks[0].worker_profile, "coding");
+    }
+
+    #[test]
+    fn connector_catalog_lists_every_provider_and_ops() {
+        let md = connector_catalog_markdown(&["slack".into()]);
+        for p in supported_providers() {
+            assert!(md.contains(&format!("- {p} [")), "missing {p} in {md}");
+        }
+        assert!(md.contains("slack [connected]"));
+        assert!(md.contains("github [not connected]"));
+        assert!(md.contains("post_message"));
+        assert!(md.contains("commit_files"));
+        assert!(md.contains("create_page"));
     }
 
     #[test]

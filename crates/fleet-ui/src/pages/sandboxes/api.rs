@@ -84,9 +84,8 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(
         .await
         .map_err(|e| SandboxError::Network(e.to_string()))?;
     if status.is_success() {
-        serde_json::from_str(&text).map_err(|e| {
-            SandboxError::Network(format!("invalid JSON: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| SandboxError::Network(format!("invalid JSON: {e} ({text})")))
     } else {
         #[derive(Deserialize)]
         struct ErrBody {
@@ -105,6 +104,21 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(
     }
 }
 
+pub async fn kill_sandbox(workspace_id: &str, session_id: &str) -> Result<(), SandboxError> {
+    let res = with_credentials(
+        client()
+            .post(api_url(&format!(
+                "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill"
+            )))
+            .json(&serde_json::json!({ "reason": "ui_kill" })),
+    )
+    .send()
+    .await
+    .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
+    let _: serde_json::Value = parse_json(res).await?;
+    Ok(())
+}
+
 /// List worker sessions as sandboxes for the workspace.
 pub async fn list_sandboxes(workspace_id: &str) -> Result<SandboxesResponse, SandboxError> {
     let res = with_credentials(client().get(api_url(&format!(
@@ -115,4 +129,3 @@ pub async fn list_sandboxes(workspace_id: &str) -> Result<SandboxesResponse, San
     .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
-

@@ -15,6 +15,12 @@ const CASE_COLS: &str = r#"
     created_at, updated_at
 "#;
 
+const CASE_COLS_C: &str = r#"
+    c.id, c.workspace_id, c.kind, c.title, c.policy_md, c.status, c.stage, c.context,
+    c.next_wake_at, c.last_error, c.run_id, c.decision_count, c.created_by, c.version,
+    c.created_at, c.updated_at
+"#;
+
 const EVENT_COLS: &str = r#"
     id, case_id, workspace_id, kind, payload, created_at
 "#;
@@ -140,11 +146,10 @@ pub async fn claim_due(pool: &PgPool, limit: i64) -> DbResult<Vec<Case>> {
                 last_error = NULL
             FROM due
             WHERE c.id = due.id
-            RETURNING c.id
+            RETURNING {CASE_COLS_C}
         )
         SELECT {CASE_COLS}
-        FROM cases
-        WHERE id IN (SELECT id FROM upd)
+        FROM upd
         ORDER BY next_wake_at ASC NULLS LAST
         "#
     );
@@ -153,6 +158,31 @@ pub async fn claim_due(pool: &PgPool, limit: i64) -> DbResult<Vec<Case>> {
         .fetch_all(pool)
         .await
         .map_err(map_query_err)
+}
+
+/// Release cases left in `deciding` after a crash or a hung LLM call.
+///
+/// `updated_at` is bumped on claim, so in-flight decides younger than
+/// `stale_after_secs` are left alone.
+pub async fn reclaim_stale_deciding(pool: &PgPool, stale_after_secs: i64) -> DbResult<u64> {
+    let stale_after_secs = stale_after_secs.clamp(60, 3600);
+    let res = sqlx::query(
+        r#"
+        UPDATE cases
+        SET status = 'waiting',
+            next_wake_at = now(),
+            last_error = COALESCE(last_error, 'stale deciding reclaim'),
+            version = version + 1,
+            updated_at = now()
+        WHERE status = 'deciding'
+          AND updated_at < now() - make_interval(secs => $1)
+        "#,
+    )
+    .bind(stale_after_secs)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
 }
 
 pub async fn list_acting_with_run(pool: &PgPool, limit: i64) -> DbResult<Vec<Case>> {

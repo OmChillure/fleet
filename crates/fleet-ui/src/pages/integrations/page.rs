@@ -132,10 +132,8 @@ mod oauth_bridge {
             }) as Box<dyn FnMut(_)>);
 
             if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback(
-                    "message",
-                    handler.as_ref().unchecked_ref(),
-                );
+                let _ = window
+                    .add_event_listener_with_callback("message", handler.as_ref().unchecked_ref());
                 let _ = window.add_event_listener_with_callback(
                     "storage",
                     storage_handler.as_ref().unchecked_ref(),
@@ -242,7 +240,6 @@ pub fn Integrations(workspace_id: String) -> Element {
             }
 
             if loading() {
-                // Skeleton cards matching the real integration card layout.
                 div {
                     class: "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3",
                     for i in 0..6 {
@@ -449,7 +446,6 @@ fn IntegrationSkeletonCard() -> Element {
         article {
             class: "flex min-h-[7.5rem] flex-col rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
             div { class: "flex items-start gap-3",
-                // Logo placeholder
                 div {
                     class: "h-10 w-10 shrink-0 animate-pulse rounded-xl bg-[var(--app-bg-hover)]"
                 }
@@ -457,10 +453,8 @@ fn IntegrationSkeletonCard() -> Element {
                     div { class: "h-3.5 w-24 animate-pulse rounded bg-[var(--app-bg-hover)]" }
                     div { class: "h-2.5 w-16 animate-pulse rounded bg-[var(--app-bg-hover)]" }
                 }
-                // Action button placeholder
                 div { class: "h-7 w-[5.5rem] shrink-0 animate-pulse rounded-lg bg-[var(--app-bg-hover)]" }
             }
-            // Description lines
             div { class: "mt-3 space-y-1.5",
                 div { class: "h-2.5 w-full animate-pulse rounded bg-[var(--app-bg-hover)]" }
                 div { class: "h-2.5 w-4/5 max-w-[85%] animate-pulse rounded bg-[var(--app-bg-hover)]" }
@@ -566,21 +560,15 @@ async fn poll_until_connected(
         // Auth tab postMessage / localStorage → thread_local (safe).
         if let Some(msg) = oauth_bridge::take() {
             if msg.ok {
-                let matches = msg.provider.is_empty()
-                    || msg.provider.eq_ignore_ascii_case(provider);
+                let matches =
+                    msg.provider.is_empty() || msg.provider.eq_ignore_ascii_case(provider);
                 if matches {
                     // Instant UI feedback — don't wait for the next list fetch.
                     mark_connected_locally(items, provider);
 
                     // Confirm with server (DB may lag a beat behind the popup).
-                    let confirmed = refresh_until_connected(
-                        workspace_id,
-                        provider,
-                        items,
-                        20,
-                        300,
-                    )
-                    .await;
+                    let confirmed =
+                        refresh_until_connected(workspace_id, provider, items, 20, 300).await;
 
                     connecting_provider.set(None);
                     if confirmed {

@@ -50,9 +50,8 @@ async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
         if text.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text).map_err(|e| {
-            FleetError::Network(format!("invalid JSON: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| FleetError::Network(format!("invalid JSON: {e} ({text})")))
     } else {
         #[derive(Deserialize)]
         struct ErrBody {
@@ -72,12 +71,11 @@ async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
 }
 
 pub async fn ensure_fleet(workspace_id: &str) -> Result<Value, FleetError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/fleet"
-    ))))
-    .send()
-    .await
-    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    let res =
+        with_credentials(client().get(api_url(&format!("/api/workspaces/{workspace_id}/fleet"))))
+            .send()
+            .await
+            .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
     parse(res).await
 }
 
@@ -155,6 +153,38 @@ pub async fn update_fleet_config(
                 "/api/workspaces/{workspace_id}/fleet/config"
             )))
             .json(&body),
+    )
+    .send()
+    .await
+    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    parse(res).await
+}
+
+pub async fn resume_task(
+    workspace_id: &str,
+    task_id: &str,
+    message: &str,
+) -> Result<Value, FleetError> {
+    let res = with_credentials(
+        client()
+            .post(api_url(&format!(
+                "/api/workspaces/{workspace_id}/fleet/tasks/{task_id}/resume"
+            )))
+            .json(&serde_json::json!({ "message": message })),
+    )
+    .send()
+    .await
+    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    parse(res).await
+}
+
+pub async fn kill_session(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
+    let res = with_credentials(
+        client()
+            .post(api_url(&format!(
+                "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill"
+            )))
+            .json(&serde_json::json!({ "reason": "ui_kill" })),
     )
     .send()
     .await

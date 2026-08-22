@@ -190,7 +190,13 @@ pub fn copy_dir_filtered(src: &Path, dest: &Path) {
         }
         let from = ent.path();
         let to = dest.join(&name);
-        if from.is_dir() {
+        let Ok(meta) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
             copy_dir_filtered(&from, &to);
         } else if let Ok(bytes) = std::fs::read(&from) {
             if let Some(parent) = to.parent() {

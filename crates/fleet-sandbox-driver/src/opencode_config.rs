@@ -33,7 +33,6 @@ pub fn setup_opencode(
     fs::write(&out, format!("{text}\n"))?;
     info!(path = %out.display(), "wrote OpenCode config");
 
-    // Optional probe of openai-compatible baseURL
     if let Some(url) = extract_base_url(&config) {
         match probe_models(&url) {
             Ok(ids) => {
@@ -208,7 +207,6 @@ pub(crate) fn config_from_provider_spec(spec: &ProviderSpec, model: Option<&str>
         }
         models_obj.insert(id.clone(), Value::Object(m));
     }
-    // Ensure model from job is listed
     if let Some(m) = model {
         let mid = m
             .strip_prefix(&format!("{}/", spec.id))
@@ -371,9 +369,6 @@ fn probe_models(base_url: &str) -> Result<Vec<String>> {
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
     // blocking in async context is bad — use sync only from setup which is sync today.
-    // We'll call from tokio::task::spawn_blocking in main path... for now use ureq-less:
-    // Actually we have tokio - make this async later. For setup in async runtime use
-    // std::thread or reqwest blocking on spawn_blocking.
     let resp = client
         .get(&models_url)
         .header("Authorization", "Bearer probe")

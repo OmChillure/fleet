@@ -19,6 +19,7 @@ pub const OPERATIONS: &[&str] = &[
     "create_branch",
     "create_mr",
     "create_issue",
+    "update_issue",
     "add_comment",
 ];
 
@@ -40,6 +41,7 @@ pub async fn invoke(
         "create_branch" => writes::create_branch(http, token, args).await,
         "create_mr" => writes::create_mr(http, token, args).await,
         "create_issue" => writes::create_issue(http, token, args).await,
+        "update_issue" => writes::update_issue(http, token, args).await,
         "add_comment" => writes::add_comment(http, token, args).await,
         other => ProxyResult::err(
             "gitlab",

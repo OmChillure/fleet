@@ -9,24 +9,30 @@ pub mod chat_tools;
 pub mod config;
 pub mod fleet_routes;
 pub mod grok;
+pub mod install_routes;
+pub mod partners;
+pub mod providers;
 pub mod retry;
 pub mod state;
 pub mod tickets;
+pub mod work_io;
+pub mod worker_hosts;
 
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
 pub use grok::GrokConfig;
+pub use providers::{ClaudeConfig, OpenaiConfig};
 pub use state::AppState;
 
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_orchestrator::api::router as orch_router;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, TraceLayer};
@@ -42,14 +48,14 @@ pub fn build_router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/api", get(api_index))
         .merge(fleet_auth::router::<AppState>())
-        // Integrations catalog (GitHub, Jira, Slack, …)
         .merge(fleet_integrations::router::<AppState>())
-        // Workspace chat → Grok (xAI) + Ollama
         .merge(chat::router())
-        // Durable general-purpose cases (state machine + wake loop)
         .merge(cases::router())
-        // Workspace-scoped fleet / orchestrator UI routes
+        .merge(tickets::router())
         .merge(fleet_routes::router())
+        .merge(worker_hosts::router())
+        .merge(partners::router())
+        .merge(install_routes::router())
 }
 
 /// Full HTTP app: fleet-server routes + orchestrator fallback + TraceLayer + CORS.
@@ -61,7 +67,6 @@ pub fn build_http_app(
     orch: fleet_orchestrator::api::AppState,
     config: &ServerConfig,
 ) -> anyhow::Result<Router> {
-    // Admin / worker bearer routes remain on orch_router (/v1, /healthz).
     let orch_service = orch_router(orch);
 
     Ok(build_router()
@@ -177,7 +182,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
         "git_sha": git_sha,
-        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator", "worker_hosts"],
     }))
 }
 
@@ -193,6 +198,8 @@ pub async fn api_index() -> Json<Value> {
             "workspaces": {
                 "list": "GET /api/workspaces",
                 "create": "POST /api/workspaces",
+                "members": "GET /api/workspaces/{workspace_id}/members",
+                "invite": "POST /api/workspaces/{workspace_id}/invites",
             },
             "personas": {
                 "list": "GET /api/workspaces/{workspace_id}/personas",
@@ -216,6 +223,14 @@ pub async fn api_index() -> Json<Value> {
                 "runs": "GET /api/workspaces/{workspace_id}/fleet/runs",
                 "sessions": "GET /api/workspaces/{workspace_id}/fleet/sessions",
                 "workers": "GET /api/workspaces/{workspace_id}/fleet/workers",
+                "resume": "POST /api/workspaces/{workspace_id}/fleet/tasks/{task_id}/resume",
+                "kill": "POST /api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill",
+            },
+            "inbox": {
+                "list": "GET /api/workspaces/{workspace_id}/inbox",
+                "monitor": "POST /api/workspaces/{workspace_id}/inbox",
+                "poll": "POST /api/workspaces/{workspace_id}/inbox/poll",
+                "finish": "POST /api/workspaces/{workspace_id}/inbox/finish",
             },
             "cases": {
                 "list": "GET /api/workspaces/{workspace_id}/cases",
@@ -224,13 +239,28 @@ pub async fn api_index() -> Json<Value> {
                 "observe": "POST /api/workspaces/{workspace_id}/cases/{case_id}/observe",
                 "cancel": "POST /api/workspaces/{workspace_id}/cases/{case_id}/cancel",
                 "decide": "POST /api/workspaces/{workspace_id}/cases/{case_id}/decide",
+                "wake": "POST /api/workspaces/{workspace_id}/cases/{case_id}/wake",
             },
             "chat": {
                 "status": "GET /api/workspaces/{workspace_id}/chat/status",
                 "conversations": "GET|POST /api/workspaces/{workspace_id}/chat/conversations",
                 "conversation": "GET|DELETE /api/workspaces/{workspace_id}/chat/conversations/{id}",
                 "complete": "POST /api/workspaces/{workspace_id}/chat",
-                "note": "Grok CLI + Ollama; persisted history; fleet + integration tools",
+                "stream": "POST /api/workspaces/{workspace_id}/chat/stream",
+                "note": "Grok / Ollama / OpenAI / Claude; NDJSON stream; fleet + integration tools",
+            },
+            "worker_hosts": {
+                "list": "GET /api/workspaces/{workspace_id}/worker-hosts",
+                "create": "POST /api/workspaces/{workspace_id}/worker-hosts",
+                "get": "GET /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "patch": "PATCH /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "delete": "DELETE /api/workspaces/{workspace_id}/worker-hosts/{host_id}",
+                "pair_tokens": "POST /api/workspaces/{workspace_id}/worker-hosts/{host_id}/pair-tokens",
+                "pair": "POST /api/worker-hosts/pair",
+                "heartbeat": "POST /api/worker-hosts/me/heartbeat",
+                "lease": "POST /api/worker-hosts/me/lease",
+                "complete": "POST /api/worker-hosts/me/lease/{claim_id}/complete",
+                "install": "GET /install-worker.sh",
             },
             "orchestrator_admin": {
                 "note": "Bearer ADMIN_TOKEN for automation / workers",

@@ -73,9 +73,7 @@ async fn async_main(args: Args) -> Result<()> {
                     break;
                 }
             }
-            Ok(None) => {
-                // timeout idle
-            }
+            Ok(None) => {}
             Err(e) => {
                 error!(error = %e, "BLPOP error");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;

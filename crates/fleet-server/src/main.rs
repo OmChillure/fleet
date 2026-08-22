@@ -6,9 +6,8 @@ use std::net::SocketAddr;
 
 use fleet_auth::validate_cookie_policy;
 use fleet_db::connect_and_migrate;
-use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::Config as OrchConfig;
-use fleet_server::{build_http_app, AppState, ServerConfig};
+use fleet_server::{AppState, ServerConfig, build_http_app};
 use tracing_subscriber::EnvFilter;
 
 /// Default when `RUST_LOG` is unset.
@@ -90,10 +89,12 @@ async fn run() -> anyhow::Result<()> {
         "configuration loaded"
     );
 
-    let db = connect_and_migrate(&config.database_url).await.map_err(|e| {
-        tracing::error!(error = %e, "database startup failed");
-        anyhow::anyhow!(e)
-    })?;
+    let db = connect_and_migrate(&config.database_url)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "database startup failed");
+            anyhow::anyhow!(e)
+        })?;
     tracing::info!("database ready");
 
     let orch_cfg = OrchConfig::from_env_for_server(&config.database_url, &config.bind.to_string())
@@ -101,10 +102,21 @@ async fn run() -> anyhow::Result<()> {
             tracing::error!(error = %e, "orchestrator config failed");
             e
         })?;
-    let orch = build_app_state(&orch_cfg).await.map_err(|e| {
-        tracing::error!(error = %e, "orchestrator state init failed");
-        e
-    })?;
+    let io: std::sync::Arc<dyn fleet_orchestrator::sandbox::io::IntegrationInvoker> =
+        std::sync::Arc::new(fleet_server::work_io::ControlPlaneIo {
+            db: db.clone(),
+            key: config.integrations.credentials_key.clone(),
+        });
+    let orch = fleet_orchestrator::api::build_app_state_with_pool_io(
+        &orch_cfg,
+        db.clone(),
+        Some(io),
+    )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "orchestrator state init failed");
+            e
+        })?;
     tracing::info!("orchestrator state ready");
 
     // Local drain loop: queue thousands of tasks, run FLEET_MAX_AGENTS at a time (no k8s).
@@ -142,18 +154,10 @@ async fn run() -> anyhow::Result<()> {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        openai: config.openai.clone(),
+        claude: config.claude.clone(),
+        worker_dist_dir: config.worker_dist_dir.clone(),
     };
-
-    {
-        let ticket_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
-            }
-        });
-        tracing::info!("background ticket monitor started");
-    }
 
     {
         let case_state = state.clone();
@@ -170,6 +174,17 @@ async fn run() -> anyhow::Result<()> {
         );
     }
 
+    {
+        let ticket_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(fleet_server::tickets::POLL_MIN_INTERVAL).await;
+                fleet_server::tickets::poll_due_workspaces(&ticket_state).await;
+            }
+        });
+        tracing::info!("background ticket inbox poller started");
+    }
+
     let app = build_http_app(state, orch, &config)?;
 
     let addr: SocketAddr = config.bind;
@@ -177,9 +192,7 @@ async fn run() -> anyhow::Result<()> {
         %addr,
         "fleet-server listening (auth + workspaces + integrations + fleet + orchestrator)"
     );
-    tracing::info!(
-        "logging: RUST_LOG=info (default) | debug (verbose) | warn (quiet errors only)"
-    );
+    tracing::info!("logging: RUST_LOG=info (default) | debug (verbose) | warn (quiet errors only)");
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         tracing::error!(%addr, error = %e, "failed to bind listen address");

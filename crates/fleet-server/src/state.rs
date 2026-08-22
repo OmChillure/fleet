@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::extract::FromRef;
 use fleet_auth::{AuthConfig, AuthState};
 use fleet_db::PgPool;
@@ -6,6 +8,7 @@ use fleet_orchestrator::api::AppState as OrchState;
 
 use crate::chat::OllamaConfig;
 use crate::grok::GrokConfig;
+use crate::providers::{ClaudeConfig, OpenaiConfig};
 
 /// Unified app state for every API module mounted on fleet-server.
 #[derive(Clone)]
@@ -19,6 +22,10 @@ pub struct AppState {
     pub ollama: OllamaConfig,
     /// Grok via local CLI auth (`~/.grok/auth.json`) — model `grok-4.5`.
     pub grok: GrokConfig,
+    pub openai: OpenaiConfig,
+    pub claude: ClaudeConfig,
+    /// Optional prebuilt worker binaries (`FLEET_WORKER_DIST_DIR`).
+    pub worker_dist_dir: Option<PathBuf>,
 }
 
 impl FromRef<AppState> for AuthState {

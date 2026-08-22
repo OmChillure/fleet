@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
@@ -28,9 +29,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool_with_retry, system_prompt_for_workspace, system_prompt_with_tools, tool_definitions,
-    ChatLlmContext,
-    ChatAction, MAX_TOOL_ROUNDS,
+    execute_tool_with_retry, rewrite_if_asked_to_continue,
+    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, ChatAction,
+    ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -99,6 +100,10 @@ pub fn router() -> Router<AppState> {
             get(get_conversation).delete(delete_conversation),
         )
         .route("/api/workspaces/{workspace_id}/chat", post(chat_complete))
+        .route(
+            "/api/workspaces/{workspace_id}/chat/stream",
+            post(chat_stream),
+        )
 }
 
 // ── request / response types ────────────────────────────────────────────────
@@ -522,18 +527,44 @@ async fn fetch_models(cfg: &OllamaConfig) -> Result<Vec<ChatModelInfo>, String> 
     Ok(models)
 }
 
-/// Placeholder providers the UI can show as “coming soon”.
-/// Grok is a real provider (`crate::grok`) — not listed here.
-fn future_providers() -> Vec<ChatProviderInfo> {
-    vec![ChatProviderInfo {
-        id: "openai".into(),
-        name: "OpenAI".into(),
-        available: false,
-        coming_soon: true,
-        error: None,
-        models: vec![],
-        default_model: None,
-    }]
+/// Incremental events for `POST …/chat/stream` (NDJSON).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatProgress {
+    Status { text: String },
+    Delta { text: String },
+    Action {
+        tool: String,
+        ok: bool,
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sandbox_ids: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<Value>,
+    },
+    Done {
+        message: String,
+        model: String,
+        provider: String,
+        conversation_id: Uuid,
+        actions: Vec<ChatAction>,
+    },
+    Error { error: String },
+}
+
+impl ChatProgress {
+    pub fn from_action(a: &ChatAction) -> Self {
+        Self::Action {
+            tool: a.tool.clone(),
+            ok: a.ok,
+            summary: a.summary.clone(),
+            run_id: a.run_id.clone(),
+            sandbox_ids: a.sandbox_ids.clone(),
+            detail: a.detail.clone(),
+        }
+    }
 }
 
 /// Ollama provider entry (available or offline with error).
@@ -553,17 +584,164 @@ fn ollama_provider(
     }
 }
 
+/// One-shot text completion (no tools). Used by the case wake loop.
+pub async fn complete_text(
+    cfg: &OllamaConfig,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> AppResult<String> {
+    if !cfg.enabled {
+        return Err(AppError::bad_request("Ollama is disabled"));
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AppError::bad_request("Ollama model is required"));
+    }
+    let messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    let parsed = ollama_chat(cfg, model, &messages, false, None).await?;
+    let content = parsed.message.content.trim().to_string();
+    if content.is_empty() {
+        return Err(AppError::bad_request("ollama returned empty decision"));
+    }
+    Ok(content)
+}
+
 /// One Ollama chat turn. When `with_tools` is true, sends tool definitions.
+async fn emit_progress(
+    progress: &Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+    ev: ChatProgress,
+) {
+    if let Some(tx) = progress {
+        let _ = tx.send(ev).await;
+    }
+}
+
 async fn ollama_chat(
     cfg: &OllamaConfig,
     model: &str,
     messages: &[Value],
     with_tools: bool,
+    progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<OllamaChatResponse> {
+    if progress.is_some() {
+        return ollama_chat_stream(cfg, model, messages, with_tools, progress).await;
+    }
     crate::retry::retry_provider("ollama", || {
         ollama_chat_once(cfg, model, messages, with_tools)
     })
     .await
+}
+
+async fn ollama_chat_stream(
+    cfg: &OllamaConfig,
+    model: &str,
+    messages: &[Value],
+    with_tools: bool,
+    progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<OllamaChatResponse> {
+    let client = http_client(cfg.timeout)?;
+    let url = format!("{}/api/chat", cfg.base_url);
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    if with_tools {
+        body["tools"] = tool_definitions();
+    }
+    let mut res = client.post(&url).json(&body).send().await.map_err(|e| {
+        AppError::bad_request(format!(
+            "cannot reach Ollama at {}: {e}. Start it with `ollama serve`.",
+            cfg.base_url
+        ))
+    })?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "Ollama error ({status}): {text}"
+        )));
+    }
+
+    let mut buf = String::new();
+    let mut content = String::new();
+    let mut used_model = model.to_string();
+    let mut tool_calls: Vec<OllamaToolCall> = Vec::new();
+    let mut saw_tools = false;
+
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|e| AppError::internal(format!("ollama stream chunk: {e}")))?
+    {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].trim().to_string();
+            buf = buf[idx + 1..].to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_str::<OllamaChatResponse>(&line) else {
+                continue;
+            };
+            if !parsed.model.is_empty() {
+                used_model = parsed.model;
+            }
+            if !parsed.message.tool_calls.is_empty() {
+                saw_tools = true;
+                tool_calls = parsed.message.tool_calls;
+            }
+            let piece = parsed.message.content;
+            if !piece.is_empty() {
+                content.push_str(&piece);
+                if !saw_tools {
+                    if let Some(tx) = progress {
+                        let _ = tx
+                            .send(ChatProgress::Delta {
+                                text: piece.clone(),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+    if !buf.trim().is_empty() {
+        if let Ok(parsed) = serde_json::from_str::<OllamaChatResponse>(buf.trim()) {
+            if !parsed.model.is_empty() {
+                used_model = parsed.model;
+            }
+            if !parsed.message.tool_calls.is_empty() {
+                saw_tools = true;
+                tool_calls = parsed.message.tool_calls;
+            }
+            let piece = parsed.message.content;
+            if !piece.is_empty() {
+                content.push_str(&piece);
+                if !saw_tools {
+                    if let Some(tx) = progress {
+                        let _ = tx
+                            .send(ChatProgress::Delta {
+                                text: piece.clone(),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(OllamaChatResponse {
+        model: used_model,
+        message: OllamaMessage {
+            content,
+            tool_calls,
+        },
+    })
 }
 
 async fn ollama_chat_once(
@@ -658,6 +836,7 @@ async fn chat_with_tools(
     cfg: &OllamaConfig,
     model: &str,
     mut history: Vec<Value>,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
     // Inject live system prompt (integrations snapshot) as first message.
     let sys = system_prompt_for_workspace(state, workspace_id).await;
@@ -672,19 +851,30 @@ async fn chat_with_tools(
         history.insert(0, json!({ "role": "system", "content": sys }));
     }
 
+    emit_progress(
+        &progress,
+        ChatProgress::Status {
+            text: format!("Thinking with {model}…"),
+        },
+    )
+    .await;
+
     let mut actions: Vec<ChatAction> = Vec::new();
     let mut used_model = model.to_string();
 
     let mut max_rounds = MAX_TOOL_ROUNDS;
     let mut round = 0usize;
     while round < max_rounds {
-        let parsed = ollama_chat(cfg, &used_model, &history, true).await?;
+        let parsed = ollama_chat(cfg, &used_model, &history, true, progress.as_ref()).await?;
         if !parsed.model.is_empty() {
             used_model = parsed.model;
         }
 
         if parsed.message.tool_calls.is_empty() {
-            let content = parsed.message.content.trim().to_string();
+            let mut content = parsed.message.content.trim().to_string();
+            if let Some(rewritten) = rewrite_if_asked_to_continue(&content, &actions) {
+                content = rewritten;
+            }
             if content.is_empty() && !actions.is_empty() {
                 // Model returned only tool calls earlier; synthesize a short summary.
                 let summary = actions
@@ -726,6 +916,13 @@ async fn chat_with_tools(
                 .iter()
                 .filter_map(|a| a.detail.clone())
                 .collect();
+            emit_progress(
+                &progress,
+                ChatProgress::Status {
+                    text: format!("Using {name}…"),
+                },
+            )
+            .await;
             let (result_json, action) = execute_tool_with_retry(
                 state,
                 workspace_id,
@@ -736,6 +933,7 @@ async fn chat_with_tools(
                 &prior,
             )
             .await;
+            emit_progress(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
 
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
@@ -768,7 +966,7 @@ async fn chat_with_tools(
     }
 
     // Max rounds hit — one last call without tools for a user-facing summary.
-    let parsed = ollama_chat(cfg, model, &history, false).await?;
+    let parsed = ollama_chat(cfg, model, &history, false, progress.as_ref()).await?;
     used_model = parsed.model;
     let mut content = parsed.message.content.trim().to_string();
     if content.is_empty() {
@@ -795,7 +993,6 @@ async fn chat_status(
     let cfg = &state.ollama;
     let grok = crate::grok::provider_status(&state.grok).await;
 
-    // Ollama entry
     let (ollama, ollama_models, ollama_err) = if !cfg.enabled {
         (
             ollama_provider(
@@ -844,7 +1041,8 @@ async fn chat_status(
         providers.push(ollama);
         providers.push(grok.clone());
     }
-    providers.extend(future_providers());
+    providers.push(crate::providers::openai_status(&state.openai));
+    providers.push(crate::providers::claude_status(&state.claude));
 
     let any_available = providers.iter().any(|p| p.available);
     let hint = if grok.available {
@@ -910,7 +1108,6 @@ async fn chat_complete(
         return Err(AppError::bad_request("messages must not be empty"));
     }
 
-    // Validate roles / trim empty content (shared).
     let mut pairs: Vec<(String, String)> = Vec::new();
     for m in &body.messages {
         let role = m.role.trim().to_lowercase();
@@ -949,7 +1146,9 @@ async fn chat_complete(
         .ok_or_else(|| AppError::bad_request("last turn must include a user message"))?;
 
     // Prefer DB history when resuming a conversation.
-    let pairs_for_llm = if let Some(cid) = body.conversation_id {
+    // Cap turns sent to the model so a long thread cannot grow without bound.
+    const MAX_LLM_HISTORY_TURNS: usize = 40;
+    let mut pairs_for_llm = if let Some(cid) = body.conversation_id {
         let stored = chat_repo::list_messages(&state.db, cid)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
@@ -961,7 +1160,6 @@ async fn chat_complete(
                 .filter(|m| m.role == "user" || m.role == "assistant")
                 .map(|m| (m.role, m.content))
                 .collect();
-            // Append new user message if not already last.
             match hist.last() {
                 Some((r, c)) if r == "user" && c == &last_user => {}
                 _ => hist.push(("user".into(), last_user.clone())),
@@ -971,6 +1169,10 @@ async fn chat_complete(
     } else {
         pairs.clone()
     };
+    if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
+        pairs_for_llm = pairs_for_llm
+            .split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+    }
 
     match provider.as_str() {
         "grok" | "xai" => {
@@ -981,6 +1183,7 @@ async fn chat_complete(
                 &body,
                 pairs_for_llm,
                 &last_user,
+                None,
             )
             .await
         }
@@ -992,11 +1195,270 @@ async fn chat_complete(
                 &body,
                 pairs_for_llm,
                 &last_user,
+                None,
+            )
+            .await
+        }
+        "openai" => {
+            chat_complete_openai(
+                &state,
+                workspace_id,
+                user.id,
+                &body,
+                pairs_for_llm,
+                &last_user,
+                None,
+            )
+            .await
+        }
+        "claude" | "anthropic" => {
+            chat_complete_claude(
+                &state,
+                workspace_id,
+                user.id,
+                &body,
+                pairs_for_llm,
+                &last_user,
+                None,
             )
             .await
         }
         other => Err(AppError::bad_request(format!(
-            "provider `{other}` is not available — use `grok` or `ollama`"
+            "provider `{other}` is not available — use grok, ollama, openai, or claude"
+        ))),
+    }
+}
+
+async fn chat_stream(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<ChatRequest>,
+) -> Result<axum::response::Response, AppError> {
+    let user = require_member(&state, &jar, workspace_id).await?;
+    if body.messages.is_empty() {
+        return Err(AppError::bad_request("messages must not be empty"));
+    }
+    let provider = body
+        .provider
+        .as_deref()
+        .unwrap_or("ollama")
+        .trim()
+        .to_lowercase();
+    let prepared = prepare_chat_pairs(&body)?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<ChatProgress>(64);
+    let state = state.clone();
+    tokio::spawn(async move {
+        let result = run_chat_turn(
+            &state,
+            workspace_id,
+            user.id,
+            &body,
+            &provider,
+            prepared.pairs,
+            &prepared.last_user,
+            Some(tx.clone()),
+        )
+        .await;
+        match result {
+            Ok(done) => {
+                let _ = tx.send(done).await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(ChatProgress::Error {
+                        error: e.to_string(),
+                    })
+                    .await;
+            }
+        }
+    });
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(ev) = rx.recv().await {
+            let line = serde_json::to_string(&ev).unwrap_or_else(|_| {
+                r#"{"type":"error","error":"encode"}"#.into()
+            });
+            yield Ok::<_, std::convert::Infallible>(format!("{line}\n"));
+        }
+    };
+
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/x-ndjson"),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            ),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+struct PreparedChat {
+    pairs: Vec<(String, String)>,
+    last_user: String,
+}
+
+fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for m in &body.messages {
+        let role = m.role.trim().to_lowercase();
+        if role != "user" && role != "assistant" && role != "system" {
+            return Err(AppError::bad_request(format!(
+                "invalid message role `{role}` (use user|assistant|system)"
+            )));
+        }
+        let content = m.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if content.len() > 32_000 {
+            return Err(AppError::bad_request(
+                "message too long (max 32k characters)",
+            ));
+        }
+        if role == "system" {
+            pairs.push(("user".into(), format!("[context]\n{content}")));
+        } else {
+            pairs.push((role, content.to_string()));
+        }
+    }
+    if pairs.is_empty() {
+        return Err(AppError::bad_request("no non-empty user/assistant messages"));
+    }
+    let last_user = pairs
+        .iter()
+        .rev()
+        .find(|(r, _)| r == "user")
+        .map(|(_, c)| c.clone())
+        .ok_or_else(|| AppError::bad_request("last turn must include a user message"))?;
+    Ok(PreparedChat {
+        pairs,
+        last_user,
+    })
+}
+
+async fn run_chat_turn(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    body: &ChatRequest,
+    provider: &str,
+    pairs_in: Vec<(String, String)>,
+    last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<ChatProgress> {
+    const MAX_LLM_HISTORY_TURNS: usize = 40;
+    let mut pairs_for_llm = if let Some(cid) = body.conversation_id {
+        let stored = chat_repo::list_messages(&state.db, cid)
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        if stored.is_empty() {
+            pairs_in.clone()
+        } else {
+            let mut hist: Vec<(String, String)> = stored
+                .into_iter()
+                .filter(|m| m.role == "user" || m.role == "assistant")
+                .map(|m| (m.role, m.content))
+                .collect();
+            match hist.last() {
+                Some((r, c)) if r == "user" && c == last_user => {}
+                _ => hist.push(("user".into(), last_user.to_string())),
+            }
+            hist
+        }
+    } else {
+        pairs_in
+    };
+    if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
+        pairs_for_llm = pairs_for_llm.split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+    }
+
+    match provider {
+        "grok" | "xai" => {
+            let Json(res) = chat_complete_grok(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
+        "ollama" => {
+            let Json(res) = chat_complete_ollama(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
+        "openai" => {
+            let Json(res) = chat_complete_openai(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
+        "claude" | "anthropic" => {
+            let Json(res) = chat_complete_claude(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
+        other => Err(AppError::bad_request(format!(
+            "provider `{other}` is not available — use grok, ollama, openai, or claude"
         ))),
     }
 }
@@ -1008,6 +1470,7 @@ async fn chat_complete_grok(
     body: &ChatRequest,
     pairs: Vec<(String, String)>,
     last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
     let cfg = &state.grok;
     let model = body
@@ -1035,8 +1498,16 @@ async fn chat_complete_grok(
         "chat complete (CLI auth + tools)"
     );
 
-    let (used_model, content, actions) =
-        crate::grok::chat_with_tools(state, workspace_id, user_id, cfg, &model, &pairs).await?;
+    let (used_model, content, actions) = crate::grok::chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        cfg,
+        &model,
+        &pairs,
+        progress,
+    )
+    .await?;
 
     persist_user_and_assistant(
         state,
@@ -1068,6 +1539,7 @@ async fn chat_complete_ollama(
     body: &ChatRequest,
     pairs: Vec<(String, String)>,
     last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
     let cfg = &state.ollama;
     if !cfg.enabled {
@@ -1129,7 +1601,8 @@ async fn chat_complete_ollama(
     );
 
     let (used_model, content, actions) =
-        chat_with_tools(state, workspace_id, user_id, cfg, &model, history).await?;
+        chat_with_tools(state, workspace_id, user_id, cfg, &model, history, progress)
+            .await?;
 
     persist_user_and_assistant(
         state,
@@ -1149,6 +1622,120 @@ async fn chat_complete_ollama(
         },
         model: used_model,
         provider: "ollama".into(),
+        actions,
+        conversation_id,
+    }))
+}
+
+async fn chat_complete_openai(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    body: &ChatRequest,
+    pairs: Vec<(String, String)>,
+    last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<Json<ChatResponse>> {
+    let model = body
+        .model
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::providers::OPENAI_DEFAULT_MODEL.to_string());
+    let conversation_id = ensure_conversation(
+        state,
+        workspace_id,
+        user_id,
+        body.conversation_id,
+        "openai",
+        &model,
+        last_user,
+    )
+    .await?;
+    let (used_model, content, actions) = crate::providers::openai_chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        &state.openai,
+        &model,
+        &pairs,
+        progress,
+    )
+    .await?;
+    persist_user_and_assistant(
+        state,
+        conversation_id,
+        last_user,
+        &content,
+        "openai",
+        &used_model,
+        &actions,
+    )
+    .await?;
+    Ok(Json(ChatResponse {
+        message: ChatMessageOut {
+            role: "assistant".into(),
+            content,
+        },
+        model: used_model,
+        provider: "openai".into(),
+        actions,
+        conversation_id,
+    }))
+}
+
+async fn chat_complete_claude(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    body: &ChatRequest,
+    pairs: Vec<(String, String)>,
+    last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<Json<ChatResponse>> {
+    let model = body
+        .model
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::providers::CLAUDE_DEFAULT_MODEL.to_string());
+    let conversation_id = ensure_conversation(
+        state,
+        workspace_id,
+        user_id,
+        body.conversation_id,
+        "claude",
+        &model,
+        last_user,
+    )
+    .await?;
+    let (used_model, content, actions) = crate::providers::claude_chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        &state.claude,
+        &model,
+        &pairs,
+        progress,
+    )
+    .await?;
+    persist_user_and_assistant(
+        state,
+        conversation_id,
+        last_user,
+        &content,
+        "claude",
+        &used_model,
+        &actions,
+    )
+    .await?;
+    Ok(Json(ChatResponse {
+        message: ChatMessageOut {
+            role: "assistant".into(),
+            content,
+        },
+        model: used_model,
+        provider: "claude".into(),
         actions,
         conversation_id,
     }))

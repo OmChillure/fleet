@@ -1,16 +1,21 @@
 //! Postgres store layer (PR3).
 
+mod host_pool;
 mod models;
 mod pool;
 mod tick_ops;
 
+pub use host_pool::{
+    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
+    effective_runtime, enqueue_remote_spawn, hold_ready_for_host_update, host_at_capacity,
+    pick_assignable_host, pick_assignable_runner, select_assignable_host, select_assignable_runner,
+    workspace_has_updating_host,
+};
 pub use models::*;
 pub use pool::*;
 pub use tick_ops::SpawnAssignment;
 
-use crate::domain::{
-    stable_board_task_id, WorkPlanBody, WorkPlanStatus, WorkRunStatus,
-};
+use crate::domain::{WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id};
 use crate::validate::validate_plan;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -445,11 +450,7 @@ impl Store {
         Ok(res.rows_affected() == 1)
     }
 
-    pub async fn set_run_terminal(
-        &self,
-        run_id: Uuid,
-        status: &str,
-    ) -> Result<()> {
+    pub async fn set_run_terminal(&self, run_id: Uuid, status: &str) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE work_runs
@@ -467,15 +468,23 @@ impl Store {
     }
 
     /// Acquire session-held advisory lock for a project tick (hold `conn` until unlock).
+    ///
+    /// Uses `pg_try_advisory_lock` so a second ticker cannot block a pool slot
+    /// forever if another tick already holds the project.
     pub async fn lock_project(
         &self,
         project_id: Uuid,
     ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
         let mut conn = self.pool.acquire().await?;
-        sqlx::query("SELECT pg_advisory_lock(hashtext($1::text))")
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext($1::text))")
             .bind(project_id.to_string())
-            .execute(&mut *conn)
+            .fetch_one(&mut *conn)
             .await?;
+        if !locked {
+            return Err(StoreError::Conflict(format!(
+                "project {project_id} tick already running"
+            )));
+        }
         Ok(conn)
     }
 
@@ -483,8 +492,8 @@ impl Store {
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
         project_id: Uuid,
     ) -> Result<()> {
-        sqlx::query("SELECT pg_advisory_unlock(hashtext($1::text))")
-            .bind(project_id.to_string())
+        let _ = project_id;
+        sqlx::query("SELECT pg_advisory_unlock_all()")
             .execute(&mut **conn)
             .await?;
         Ok(())

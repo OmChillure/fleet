@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{list_sandboxes, SandboxRow};
+use super::api::{kill_sandbox, list_sandboxes, SandboxRow};
 
 fn short_id(id: &str) -> String {
     id.get(..8).unwrap_or(id).to_string()
@@ -64,9 +64,9 @@ pub fn Sandboxes(workspace_id: String) -> Element {
     });
 
     let ws_poll = workspace_id.clone();
-    use_effect(move || {
+    use_future(move || {
         let ws = ws_poll.clone();
-        spawn(async move {
+        async move {
             loop {
                 TimeoutFuture::new(2500).await;
                 if let Ok(resp) = list_sandboxes(&ws).await {
@@ -78,7 +78,7 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                     });
                 }
             }
-        });
+        }
     });
 
     rsx! {
@@ -153,7 +153,14 @@ pub fn Sandboxes(workspace_id: String) -> Element {
             } else {
                 div { class: "flex flex-col gap-2",
                     for s in rows() {
-                        SandboxCard { key: "{s.id}", row: s }
+                        SandboxCard {
+                            key: "{s.id}",
+                            workspace_id: workspace_id.clone(),
+                            row: s,
+                            busy: busy,
+                            status_line: status_line,
+                            rows: rows,
+                        }
                     }
                 }
             }
@@ -162,8 +169,18 @@ pub fn Sandboxes(workspace_id: String) -> Element {
 }
 
 #[component]
-fn SandboxCard(row: SandboxRow) -> Element {
+fn SandboxCard(
+    workspace_id: String,
+    row: SandboxRow,
+    mut busy: Signal<bool>,
+    mut status_line: Signal<String>,
+    mut rows: Signal<Vec<SandboxRow>>,
+) -> Element {
     let pill = status_pill_class(&row.status);
+    let live = matches!(
+        row.status.as_str(),
+        "spawning" | "healthy" | "stuck" | "killing"
+    );
     rsx! {
         div {
             class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
@@ -180,8 +197,40 @@ fn SandboxCard(row: SandboxRow) -> Element {
                         "{row.runtime_backend}"
                     }
                 }
-                span { class: "text-xs text-[var(--app-muted)]",
-                    "{row.progress_pct}%"
+                div { class: "flex items-center gap-2",
+                    span { class: "text-xs text-[var(--app-muted)]",
+                        "{row.progress_pct}%"
+                    }
+                    if live {
+                        button {
+                            class: "rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50",
+                            r#type: "button",
+                            disabled: busy(),
+                            onclick: {
+                                let workspace_id = workspace_id.clone();
+                                let sid = row.id.clone();
+                                move |_| {
+                                    if busy() { return; }
+                                    busy.set(true);
+                                    let ws = workspace_id.clone();
+                                    let sid = sid.clone();
+                                    spawn(async move {
+                                        match kill_sandbox(&ws, &sid).await {
+                                            Ok(()) => {
+                                                status_line.set(format!("Killed {sid}"));
+                                                if let Ok(resp) = list_sandboxes(&ws).await {
+                                                    rows.set(resp.sandboxes);
+                                                }
+                                            }
+                                            Err(e) => status_line.set(e.message()),
+                                        }
+                                        busy.set(false);
+                                    });
+                                }
+                            },
+                            "Kill"
+                        }
+                    }
                 }
             }
             div { class: "mt-3 grid gap-1 font-mono text-xs text-[var(--app-muted)] sm:grid-cols-2",

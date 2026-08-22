@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
-use crate::models::{Workspace, WorkspaceWithRole};
+use crate::models::{Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole};
 use crate::pool::map_query_err;
 
 const WORKSPACE_COLS: &str = r#"
@@ -161,4 +161,318 @@ pub async fn user_role(
     .await
     .map_err(map_query_err)?;
     Ok(row)
+}
+
+/// Timestamp of the partners disclaimer ack, or `None` if not accepted.
+///
+/// Missing workspace → [`DbError::NotFound`]. Default (NULL) is not accepted.
+pub async fn partners_disclaimer_accepted_at(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Option<DateTime<Utc>>> {
+    let row = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        r#"
+        SELECT partners_disclaimer_accepted_at
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+/// Record the partners disclaimer ack. First write wins.
+///
+/// Does not enable lending, borrowing, enqueue, or assignable runners.
+pub async fn accept_partners_disclaimer(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    at: DateTime<Utc>,
+) -> DbResult<DateTime<Utc>> {
+    let accepted_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        UPDATE workspaces
+        SET partners_disclaimer_accepted_at = COALESCE(partners_disclaimer_accepted_at, $2),
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING partners_disclaimer_accepted_at
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(at)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    accepted_at.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub fn normalize_member_role(role: &str) -> Option<&'static str> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "owner" => Some("owner"),
+        "admin" => Some("admin"),
+        "member" => Some("member"),
+        _ => None,
+    }
+}
+
+pub fn normalize_invite_role(role: &str) -> Option<&'static str> {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "admin" => Some("admin"),
+        "member" => Some("member"),
+        _ => None,
+    }
+}
+
+pub async fn list_members(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<WorkspaceMemberPublic>> {
+    sqlx::query_as::<_, WorkspaceMemberPublic>(
+        r#"
+        SELECT m.workspace_id, m.user_id, m.role, m.created_at,
+               u.email, u.display_name
+        FROM workspace_members m
+        INNER JOIN users u ON u.id = m.user_id
+        WHERE m.workspace_id = $1
+        ORDER BY m.created_at ASC, m.user_id ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn count_owners(pool: &PgPool, workspace_id: Uuid) -> DbResult<i64> {
+    let n = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint FROM workspace_members
+        WHERE workspace_id = $1 AND role = 'owner'
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(n)
+}
+
+pub async fn add_member(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+    created_at: DateTime<Utc>,
+) -> DbResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (workspace_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(role)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(())
+}
+
+pub async fn set_member_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE workspace_members SET role = $3
+        WHERE workspace_id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(role)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+pub async fn remove_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        DELETE FROM workspace_members
+        WHERE workspace_id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+const INVITE_COLS: &str = r#"
+    id, workspace_id, email_normalized, role, token, invited_by,
+    created_at, expires_at, accepted_at, accepted_user_id, revoked_at
+"#;
+
+pub async fn insert_invite(
+    pool: &PgPool,
+    invite: &WorkspaceInvite,
+) -> DbResult<WorkspaceInvite> {
+    let q = format!(
+        r#"
+        INSERT INTO workspace_invites (
+            id, workspace_id, email_normalized, role, token, invited_by,
+            created_at, expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING {INVITE_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(invite.id)
+        .bind(invite.workspace_id)
+        .bind(&invite.email_normalized)
+        .bind(&invite.role)
+        .bind(&invite.token)
+        .bind(invite.invited_by)
+        .bind(invite.created_at)
+        .bind(invite.expires_at)
+        .fetch_one(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn list_open_invites(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE workspace_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+        ORDER BY created_at DESC
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn get_invite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    invite_id: Uuid,
+) -> DbResult<Option<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE workspace_id = $1 AND id = $2
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(workspace_id)
+        .bind(invite_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn revoke_invite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    invite_id: Uuid,
+    now: DateTime<Utc>,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE workspace_invites
+        SET revoked_at = $3
+        WHERE workspace_id = $1 AND id = $2
+          AND accepted_at IS NULL AND revoked_at IS NULL
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(invite_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Pending invites for this email that have not expired.
+pub async fn list_pending_invites_for_email(
+    pool: &PgPool,
+    email_normalized: &str,
+    now: DateTime<Utc>,
+) -> DbResult<Vec<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE email_normalized = $1
+          AND accepted_at IS NULL AND revoked_at IS NULL
+          AND expires_at > $2
+        ORDER BY created_at ASC
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(email_normalized)
+        .bind(now)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn accept_invite(
+    pool: &PgPool,
+    invite_id: Uuid,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE workspace_invites
+        SET accepted_at = $3, accepted_user_id = $2
+        WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+        "#,
+    )
+    .bind(invite_id)
+    .bind(user_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Add memberships for every open invite matching this email (signup / login).
+pub async fn accept_pending_invites_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    email_normalized: &str,
+    now: DateTime<Utc>,
+) -> DbResult<usize> {
+    let invites = list_pending_invites_for_email(pool, email_normalized, now).await?;
+    let mut n = 0usize;
+    for inv in invites {
+        add_member(pool, inv.workspace_id, user_id, &inv.role, now).await?;
+        if accept_invite(pool, inv.id, user_id, now).await? {
+            n += 1;
+        }
+    }
+    Ok(n)
 }

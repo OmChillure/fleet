@@ -24,7 +24,7 @@ framework.
 
 | Intent | Command |
 | --- | --- |
-| Units (no Postgres) | `just test` → workspace `--lib --exclude fleet-ui` + `cargo test -p fleet-driver` + host markdown crate |
+| Units (no Postgres) | `just test` → workspace `--lib --exclude fleet-ui` + `cargo test -p fleet-driver` + host markdown / runners-view crates |
 | Postgres integration | `just test-integration` → orch + auth + server + fleet-db |
 | Lab + optional browser | `run-full-suite.sh` (browser only if `ENABLE_BROWSER_E2E=1`) |
 | Human walkthrough | `./scripts/human-test.sh` |
@@ -55,6 +55,20 @@ There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not ad
 - Live/e2e/every-test is valid only after the install script or
   `--prepare-kind` (+ host `dx`) baked `scripts/tree-id.sh` into the
   running stack. A green run on yesterday's images is not verification.
+- Do not create a recurring test-writer loop. Do not spawn one agent
+  per catalog row on a timer. Harvest from `just test` /
+  `scripts/harvest-runner-catalog.sh` / Playwright. A missing child id
+  is not a relaunch.
+
+## Runners (required, not implemented here)
+
+Every runner behavior (nav, pair/install, cards, isolation, apply/ack,
+control-plane runner, assignment, staging/updates, Cloud/Partners
+placeholders) needs **three layers**: unit/regular, browser e2e, and
+real-life guest e2e (VM per OS, install, heartbeat, jobs, updates).
+Catalog: [`components/runners/testing-requirements.md`](./components/runners/testing-requirements.md).
+How to run: [`components/runners/testing-procedures.md`](./components/runners/testing-procedures.md).
+Do not ship a new runner behavior without the layers that apply.
 
 ## Future tests (checklist)
 

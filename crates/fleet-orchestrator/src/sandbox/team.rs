@@ -255,6 +255,20 @@ pub async fn prepare_agent_workspace(
             result_excerpt: None,
         });
     write_team_md(work_dir, &task.plan_task_id, &members).await;
+    let run_tasks: Vec<&crate::store::BoardTaskRow> = snap
+        .tasks
+        .iter()
+        .filter(|t| t.run_id == task.run_id)
+        .collect();
+    let shared = crate::orch::session_context::list_shared_files(
+        &crate::sandbox::share::run_workspace_dir(data_dir, task.project_id, task.run_id),
+    );
+    let _ = crate::orch::session_context::write_run_context(
+        work_dir,
+        &task.plan_task_id,
+        &run_tasks,
+        &shared,
+    );
     copy_dep_handoffs(work_dir, &you, data_dir, task).await;
     let talk = crate::sandbox::team_chat::TeamTalk::from_spawn(
         data_dir,
@@ -316,6 +330,17 @@ pub async fn sync_team_boards(data_dir: &Path, project_id: uuid::Uuid, snap: &Bo
         }
         let members = members_from_snapshot(snap, task.run_id, data_dir);
         write_team_md(&dir, &task.plan_task_id, &members).await;
+        let run_tasks: Vec<&crate::store::BoardTaskRow> = snap
+            .tasks
+            .iter()
+            .filter(|t| t.run_id == task.run_id)
+            .collect();
+        let shared = crate::orch::list_shared_files(&crate::sandbox::share::run_workspace_dir(
+            data_dir,
+            project_id,
+            task.run_id,
+        ));
+        let _ = crate::orch::write_run_context(&dir, &task.plan_task_id, &run_tasks, &shared);
         if let Some(you) = members.iter().find(|m| m.plan_task_id == task.plan_task_id) {
             copy_dep_handoffs(&dir, you, data_dir, task).await;
         }

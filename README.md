@@ -18,6 +18,7 @@ Rust workspace (see root `Cargo.toml`).
 | [`fleet-operator`](crates/fleet-operator/) | `crates/fleet-operator` | Kubernetes operator for `FleetSandbox` CRs |
 | [`fleet-driver`](crates/fleet-driver/) | `crates/fleet-driver` | Process worker: ACP (mock/grok) + orch heartbeat/status |
 | [`fleet-sandbox-driver`](crates/fleet-sandbox-driver/) | `crates/fleet-sandbox-driver` | In-sandbox driver: per-task compose, volume provision, multi-harness ACP |
+| [`fleet-host`](crates/fleet-host/) | `crates/fleet-host` | Self-hosted worker host (`pair` / `run`); outbound to the control plane |
 
 ## Local development
 
@@ -66,16 +67,19 @@ dx serve --package fleet-ui --port 3030
 3. **App shell** requires a live session (`GET /api/auth/me`). Unauthenticated
    visits to app routes redirect to `/login`.
 4. **Sidebar** has a workspace switcher (list + create). Nav sections: Chat,
-   Monitoring, Agents, Workspace. Links stay under the current workspace id.
+   Monitoring, Agents, Workspace (Integrations, Settings, Workers). Links stay
+   under the current workspace id.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
    The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
-   specialist `worker_profile`s, `read_team_chat` / `send_team_message`,
-   `monitor_tickets` / `finish_ticket`). `@fleet monitor` watches connected
-   GitHub / Jira / Linear; `@fleet finish ENG-123` launches implementer + reviewer.
+   specialist `worker_profile`s, `read_team_chat` / `send_team_message`) and
+   **integration_query** (Slack, Notion, GitHub, GitLab, Jira, Linear, … — tokens stay
+   on the control plane). A normal sentence is enough: “read Slack, implement it, push
+   to GitHub, write it in Notion.” Workers can `use_integration` mid-run; plan `outputs`
+   write back when the run ends.
    Live workers
    message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
    and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
@@ -83,14 +87,18 @@ dx serve --package fleet-ui --port 3030
    bash fences from the task spec.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
-   Also **integration_query**
-   (GitHub/GitLab/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord/Trello/Asana via control-plane proxy — tokens never enter sandboxes).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
    - `SANDBOX_BACKEND=stub` — fake timer (default)
    - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
    - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
    - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
    Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
+8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
+   command and one-time pair token. The machine pairs outbound (no inbound
+   port). Tick uses an online matching host, else the local `SANDBOX_BACKEND`.
+   Install: `curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh`
+   then `fleet-host pair --url … --token …`. See
+   [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md).
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -101,6 +109,8 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/auth/me` | User + workspaces (ensures default) |
 | `GET` | `/api/workspaces` | List memberships (ensures default) |
 | `POST` | `/api/workspaces` | Create workspace `{ "name": "…" }` |
+| `GET` | `/api/workspaces/{id}/members` | List members + your role |
+| `POST` | `/api/workspaces/{id}/invites` | Invite by email (`admin`/`member`); existing users join immediately |
 | `GET` | `/api/workspaces/{id}/personas` | List workspace personas |
 | `POST` | `/api/workspaces/{id}/personas` | Create custom persona |
 | `POST` | `/api/workspaces/{id}/personas/seed-starters` | Idempotent 8 starter personas |
@@ -108,12 +118,16 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
-| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok + Ollama) + model lists |
+| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok, Ollama, OpenAI, Claude) + model lists |
 | `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
+| `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (`@fleet monitor`) |
+| `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Inbox → Start monitor) |
+| `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
@@ -131,8 +145,15 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/sessions/{session_id}` | Live worker session stream |
 | `/{workspace_id}/agents` | Agents & personas (catalog + edit) |
 | `/{workspace_id}/sandboxes` | Live worker sessions |
+| `/{workspace_id}/cases` | Durable cases (stage + events) |
+| `/{workspace_id}/cases/{case_id}` | Case detail, observe, cancel |
+| `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
+| `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |
+| `/{workspace_id}/runners/cloud` | Cloud runners placeholder |
+| `/{workspace_id}/runners/partners` | Partner runners + trust disclaimer |
+| `/{workspace_id}/workers` | Redirects to self-hosted runners |
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),
@@ -157,5 +178,6 @@ Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 | [`docs/components/personas/`](docs/components/personas/) | **Personas** schema, API, Agents UI ([plan](docs/components/personas/plan.html)) |
 | [`docs/components/auth/README.md`](docs/components/auth/README.md) | **Auth + workspaces** API and cookie model |
 | [`docs/components/integrations/README.md`](docs/components/integrations/README.md) | **OAuth integrations** + credential encryption |
+| [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md) | Self-hosted worker hosts (create-then-pair, outbound) |
 | [`docs/components/`](docs/components/) | Per-component design stubs |
 | [`docs/references/`](docs/references/) | Reference projects and prior vision artifacts |

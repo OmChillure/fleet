@@ -73,7 +73,6 @@ impl Config {
             .unwrap_or_else(|| database_url.to_string());
 
         // Temporarily set DATABASE_URL for from_env path fields that read env.
-        // Safer: build structurally.
         // Cookie/workspace fleet routes do not need ADMIN_TOKEN. Optional bearer
         // is only for /v1 automation when set.
         let admin_token = env::var("ADMIN_TOKEN").unwrap_or_default();

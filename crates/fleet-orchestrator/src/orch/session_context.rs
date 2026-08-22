@@ -57,6 +57,127 @@ pub fn compose_prompt(title: &str, summary: &str, spec_md: &str, acceptance: &[S
     out
 }
 
+/// Whole-run context so every sandbox sees the board, not just its own spec.
+pub fn write_run_context(
+    work_dir: &Path,
+    you_plan_id: &str,
+    tasks: &[&BoardTaskRow],
+    shared_files: &[String],
+) -> std::io::Result<()> {
+    let mut out = String::from("# Run context\n\n");
+    out.push_str(
+        "This is one fleet run. You are **one** specialist. \
+         The run is not finished until every task on the board is done. \
+         Do not stop in the middle. Later agents will read `work/`, `result.md`, and this file.\n\n",
+    );
+    out.push_str(&format!("You are `{you_plan_id}`.\n\n"));
+    out.push_str("## Goal\n\n");
+    if let Some(first) = tasks.first() {
+        let goal = if !first.summary.trim().is_empty() {
+            first.summary.trim()
+        } else {
+            first.title.trim()
+        };
+        out.push_str(goal);
+        out.push_str("\n\n");
+    }
+    out.push_str("## Board\n\n");
+    out.push_str("| id | title | status | depends | acceptance |\n| --- | --- | --- | --- | --- |\n");
+    let id_to_plan: std::collections::HashMap<uuid::Uuid, String> = tasks
+        .iter()
+        .map(|t| (t.id, t.plan_task_id.clone()))
+        .collect();
+    for t in tasks {
+        let deps = t
+            .depends_on
+            .iter()
+            .filter_map(|id| id_to_plan.get(id).cloned())
+            .collect::<Vec<_>>()
+            .join(",");
+        let acc = acceptance_from_json(&t.acceptance).join("; ");
+        let mark = if t.plan_task_id == you_plan_id {
+            " ← you"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {}{} | {} | {} |\n",
+            t.plan_task_id,
+            t.title.replace('|', "/"),
+            t.status,
+            mark,
+            deps,
+            acc.replace('|', "/"),
+        ));
+    }
+    out.push('\n');
+    if let Some(you) = tasks.iter().find(|t| t.plan_task_id == you_plan_id) {
+        out.push_str("## Your spec\n\n");
+        out.push_str(you.spec_md.trim());
+        out.push_str("\n\n## Your acceptance (must be true before this task is done)\n\n");
+        let acc = acceptance_from_json(&you.acceptance);
+        if acc.is_empty() {
+            out.push_str("- result.md exists and is non-empty\n");
+        } else {
+            for line in acc {
+                out.push_str("- ");
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("## Shared files in `work/`\n\n");
+    if shared_files.is_empty() {
+        out.push_str("(empty — you may be first)\n");
+    } else {
+        for f in shared_files.iter().take(40) {
+            out.push_str("- `");
+            out.push_str(f);
+            out.push_str("`\n");
+        }
+    }
+    out.push_str(
+        "\nWhen finished: write `result.md` (what you did, paths, what the next agent should do). \
+         Put artifacts in `work/`. Do not exit until acceptance is met.\n",
+    );
+    std::fs::write(work_dir.join("RUN.md"), out)
+}
+
+pub fn list_shared_files(work_root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if crate::sandbox::share::skip_name(&name) {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if e.path().is_dir() {
+                if out.len() >= 40 {
+                    return;
+                }
+                walk(&e.path(), &rel, out);
+            } else {
+                out.push(rel);
+                if out.len() >= 40 {
+                    return;
+                }
+            }
+        }
+    }
+    walk(work_root, "", &mut out);
+    out.sort();
+    out
+}
+
 /// Write `spec.md`, `task.json`, `prompt.md`, and optional `workspace.json`.
 pub fn write_session_context(
     work_dir: &Path,
@@ -238,5 +359,17 @@ mod tests {
         assert_eq!(ws["repo"]["url"], "https://github.com/acme/app.git");
         assert_eq!(ws["repo"]["ref"], "develop");
         assert_eq!(ws["repo"]["auth_via"], "proxy");
+    }
+
+    #[test]
+    fn run_context_names_every_task() {
+        let dir = tempdir().unwrap();
+        let t = sample_task(json!(["ok"]));
+        write_run_context(dir.path(), "t1", &[&t], &["hello.txt".into()]).unwrap();
+        let md = std::fs::read_to_string(dir.path().join("RUN.md")).unwrap();
+        assert!(md.contains("`t1`"));
+        assert!(md.contains("← you"));
+        assert!(md.contains("hello.txt"));
+        assert!(md.contains("Do not stop in the middle"));
     }
 }

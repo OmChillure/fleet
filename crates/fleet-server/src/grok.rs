@@ -14,11 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::chat::{ChatModelInfo, ChatProviderInfo};
+use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, system_prompt_for_workspace, tool_definitions, ChatAction,
-    ChatLlmContext,
-    MAX_TOOL_ROUNDS,
+    execute_tool_with_retry, rewrite_if_asked_to_continue,
+    system_prompt_for_workspace, tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -563,13 +562,23 @@ fn arg_keys_preview(args: &Value) -> String {
     }
 }
 
+async fn emit(progress: &Option<tokio::sync::mpsc::Sender<ChatProgress>>, ev: ChatProgress) {
+    if let Some(tx) = progress {
+        let _ = tx.send(ev).await;
+    }
+}
+
 async fn chat_completions(
     cfg: &GrokConfig,
     bearer: &str,
     model: &str,
     messages: &[Value],
     with_tools: bool,
+    progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<CompletionsResponse> {
+    if progress.is_some() {
+        return chat_completions_stream(cfg, bearer, model, messages, with_tools, progress).await;
+    }
     crate::retry::retry_provider("grok", || {
         chat_completions_once(cfg, bearer, model, messages, with_tools)
     })
@@ -621,7 +630,8 @@ async fn chat_completions_once(
     })?;
 
     if !status.is_success() {
-        tracing::error!(%status, body = %text, model = %model, "grok API error");
+        let preview: String = text.chars().take(400).collect();
+        tracing::error!(%status, body = %preview, model = %model, "grok API error");
         let lower = text.to_lowercase();
         if status.as_u16() == 401 || lower.contains("unauthorized") {
             return Err(AppError::bad_request(
@@ -642,13 +652,15 @@ async fn chat_completions_once(
             && let Some(msg) = v.pointer("/error/message").and_then(|m| m.as_str()) {
                 return Err(AppError::bad_request(format!("Grok error: {msg}")));
             }
+        let preview: String = text.chars().take(400).collect();
         return Err(AppError::bad_request(format!(
-            "Grok error ({status}): {text}"
+            "Grok error ({status}): {preview}"
         )));
     }
 
     let parsed: CompletionsResponse = serde_json::from_str(&text).map_err(|e| {
-        tracing::error!(error = %e, body = %text, "grok parse failed");
+        let preview: String = text.chars().take(400).collect();
+        tracing::error!(error = %e, body = %preview, "grok parse failed");
         AppError::internal(format!("grok response parse: {e}"))
     })?;
 
@@ -659,6 +671,227 @@ async fn chat_completions_once(
     Ok(parsed)
 }
 
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<StreamToolDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFnDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+struct AccTool {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+async fn chat_completions_stream(
+    cfg: &GrokConfig,
+    bearer: &str,
+    model: &str,
+    messages: &[Value],
+    with_tools: bool,
+    progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<CompletionsResponse> {
+    let client = http_client()?;
+    let url = format!("{}/chat/completions", cfg.api_base);
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    if with_tools {
+        body["tools"] = tool_definitions();
+    }
+    let mut res = client
+        .post(&url)
+        .bearer_auth(bearer)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::bad_request(format!("cannot reach xAI API: {e}")))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(AppError::bad_request(format!(
+            "Grok error ({status}): {}",
+            text.chars().take(400).collect::<String>()
+        )));
+    }
+
+    let mut buf = String::new();
+    let mut content = String::new();
+    let mut used_model = model.to_string();
+    let mut tools: Vec<AccTool> = Vec::new();
+    let mut saw_tools = false;
+    let mut emit_text = true;
+
+    while let Some(chunk) = res.chunk().await.map_err(|e| {
+        AppError::internal(format!("grok stream chunk: {e}"))
+    })? {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].trim().to_string();
+            buf = buf[idx + 1..].to_string();
+            let data = line.strip_prefix("data:").map(str::trim).unwrap_or(&line);
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) else {
+                continue;
+            };
+            if !parsed.model.is_empty() {
+                used_model = parsed.model;
+            }
+            for choice in parsed.choices {
+                if !choice.delta.tool_calls.is_empty() {
+                    saw_tools = true;
+                    emit_text = false;
+                    for d in choice.delta.tool_calls {
+                        while tools.len() <= d.index {
+                            tools.push(AccTool {
+                                id: String::new(),
+                                name: String::new(),
+                                arguments: String::new(),
+                            });
+                        }
+                        let acc = &mut tools[d.index];
+                        if let Some(id) = d.id {
+                            acc.id = id;
+                        }
+                        if let Some(f) = d.function {
+                            if let Some(n) = f.name {
+                                acc.name = n;
+                            }
+                            if let Some(a) = f.arguments {
+                                acc.arguments.push_str(&a);
+                            }
+                        }
+                    }
+                }
+                if let Some(piece) = choice.delta.content {
+                    if !piece.is_empty() {
+                        content.push_str(&piece);
+                        if emit_text && !saw_tools {
+                            if let Some(tx) = progress {
+                                let _ = tx
+                                    .send(ChatProgress::Delta {
+                                        text: piece.clone(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let tool_calls: Vec<ToolCall> = tools
+        .into_iter()
+        .filter(|t| !t.name.is_empty() || !t.id.is_empty())
+        .map(|t| ToolCall {
+            id: if t.id.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                t.id
+            },
+            r#type: Some("function".into()),
+            function: ToolFunction {
+                name: t.name,
+                arguments: Value::String(t.arguments),
+            },
+        })
+        .collect();
+
+    Ok(CompletionsResponse {
+        model: used_model,
+        choices: vec![Choice {
+            message: ChoiceMessage {
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                tool_calls,
+            },
+        }],
+        error: None,
+    })
+}
+
+/// One-shot JSON/text completion (no tools). Used by the case wake loop.
+pub async fn complete_text(
+    cfg: &GrokConfig,
+    model: &str,
+    system: &str,
+    user: &str,
+) -> AppResult<String> {
+    if !cfg.enabled {
+        return Err(AppError::bad_request(
+            "Grok is disabled (set GROK_ENABLED=true)".to_string(),
+        ));
+    }
+    let auth = resolve_auth(cfg)
+        .await
+        .map_err(AppError::bad_request)?;
+    let bearer = auth_bearer(&auth);
+    let model = if model.trim().is_empty() {
+        GROK_MODEL
+    } else {
+        model.trim()
+    };
+    let messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    let parsed = chat_completions(cfg, bearer, model, &messages, false, None).await?;
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return Err(AppError::bad_request("grok returned empty decision"));
+    }
+    Ok(content)
+}
+
 /// Grok tool loop for fleet sandbox tools (OpenAI-compatible tool_calls).
 pub async fn chat_with_tools(
     state: &AppState,
@@ -667,6 +900,7 @@ pub async fn chat_with_tools(
     cfg: &GrokConfig,
     model: &str,
     history: &[(String, String)],
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
     if !cfg.enabled {
         return Err(AppError::bad_request(
@@ -703,13 +937,29 @@ pub async fn chat_with_tools(
         messages.push(json!({ "role": role, "content": content }));
     }
 
+    emit(
+        &progress,
+        ChatProgress::Status {
+            text: format!("Thinking with {model}…"),
+        },
+    )
+    .await;
+
     let mut actions: Vec<ChatAction> = Vec::new();
     let mut used_model = model.to_string();
 
     let mut max_rounds = MAX_TOOL_ROUNDS;
     let mut round = 0usize;
     while round < max_rounds {
-        let parsed = chat_completions(cfg, bearer, model, &messages, true).await?;
+        let parsed = chat_completions(
+            cfg,
+            bearer,
+            model,
+            &messages,
+            true,
+            progress.as_ref(),
+        )
+        .await?;
         if !parsed.model.is_empty() {
             used_model = parsed.model.clone();
         }
@@ -720,14 +970,25 @@ pub async fn chat_with_tools(
         let msg = &choice.message;
 
         if msg.tool_calls.is_empty() {
-            let content = msg.content.as_deref().unwrap_or("").trim().to_string();
+            let mut content = msg.content.as_deref().unwrap_or("").trim().to_string();
+            if let Some(rewritten) = rewrite_if_asked_to_continue(&content, &actions) {
+                content = rewritten;
+            }
             if content.is_empty() && !actions.is_empty() {
                 let summary = actions
                     .iter()
                     .map(|a| format!("• {}: {}", a.tool, a.summary))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok((used_model, format!("Done.\n{summary}"), actions));
+                let content = format!("Done.\n{summary}");
+                emit(
+                    &progress,
+                    ChatProgress::Delta {
+                        text: content.clone(),
+                    },
+                )
+                .await;
+                return Ok((used_model, content, actions));
             }
             return Ok((used_model, content, actions));
         }
@@ -755,6 +1016,13 @@ pub async fn chat_with_tools(
                 .iter()
                 .filter_map(|a| a.detail.clone())
                 .collect();
+            emit(
+                &progress,
+                ChatProgress::Status {
+                    text: format!("Using {name}…"),
+                },
+            )
+            .await;
             let (result_json, action) = execute_tool_with_retry(
                 state,
                 workspace_id,
@@ -765,6 +1033,7 @@ pub async fn chat_with_tools(
                 &prior,
             )
             .await;
+            emit(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
             messages.push(json!({
@@ -788,7 +1057,15 @@ pub async fn chat_with_tools(
         round += 1;
     }
 
-    let parsed = chat_completions(cfg, bearer, model, &messages, false).await?;
+    let parsed = chat_completions(
+        cfg,
+        bearer,
+        model,
+        &messages,
+        false,
+        progress.as_ref(),
+    )
+    .await?;
     if !parsed.model.is_empty() {
         used_model = parsed.model;
     }
@@ -806,6 +1083,13 @@ pub async fn chat_with_tools(
             .collect::<Vec<_>>()
             .join("\n");
         content = format!("Reached tool round limit.\n{summary}");
+        emit(
+            &progress,
+            ChatProgress::Delta {
+                text: content.clone(),
+            },
+        )
+        .await;
     }
     Ok((used_model, content, actions))
 }

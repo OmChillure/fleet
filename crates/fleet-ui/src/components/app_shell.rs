@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 
+use crate::Route;
 use crate::components::sidebar::Sidebar;
 use crate::pages::auth::api::{AuthError, me};
 use crate::theme::Theme;
-use crate::Route;
 
 /// App chrome for dashboard and related pages: sidebar + content (no top bar).
 ///
@@ -11,7 +11,7 @@ use crate::Route;
 /// access JWT expired but `fleet_refresh` is still valid.
 #[component]
 pub fn AppShell() -> Element {
-    let theme = use_signal(|| Theme::Black);
+    let theme = use_signal(Theme::load_saved);
     use_context_provider(|| theme);
 
     let mut auth_state = use_signal(|| AuthGate::Checking);

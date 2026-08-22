@@ -93,6 +93,8 @@ proxy/
     discord/       client + tools/me
     trello/        client + tools/boards
     asana/         client + tools/tasks
+    bitbucket/     client + tools/{reads,writes}
+    confluence/    client + tools/pages
 ```
 
 **Add a tool:** implement in `apps/<provider>/tools/`, add to that app’s
@@ -134,6 +136,8 @@ let result = invoke(
 | `discord` | `get_me`, `list_guilds` |
 | `trello` | `list_boards`, `list_lists`, `list_cards`, `get_card`, `create_card`, `update_card`, `add_comment` |
 | `asana` | `list_workspaces`, `list_projects`, `list_tasks`, `get_task`, `create_task`, `update_task`, `add_comment` |
+| `bitbucket` | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
+| `confluence` | `search`, `list_spaces`, `list_pages`, `get_page`, `create_page`, `update_page`, `add_comment` |
 
 Decrypt path: `credentials_for` → provider HTTP → `sanitize_value` → chat/agent.  
 **Writes run only on the control plane** (`integration_query` with `provider=github`, `operation=commit_files` or `create_pr`).  

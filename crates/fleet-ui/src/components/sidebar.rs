@@ -2,13 +2,15 @@
 
 use dioxus::prelude::*;
 
+use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
-    CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout,
-    me,
+    CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
 use crate::theme::{Theme, use_theme};
-use crate::Route;
+use fleet_runners_view::routes::{
+    RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
+};
 
 /// Which top-level nav sections are expanded.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -16,6 +18,7 @@ enum NavSection {
     Chat,
     Monitoring,
     Agents,
+    Runners,
     Workspace,
 }
 
@@ -37,9 +40,8 @@ pub fn Sidebar() -> Element {
     let navigator = use_navigator();
 
     // Collapsible sections — start with Chat + Monitoring open.
-    let mut expanded = use_signal(|| {
-        std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring])
-    });
+    let mut expanded =
+        use_signal(|| std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring]));
 
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
@@ -47,13 +49,19 @@ pub fn Sidebar() -> Element {
             Route::Chat { .. }
             | Route::ChatThread { .. }
             | Route::Sessions { .. }
-            | Route::SessionDetail { .. } => {
-                Some(NavSection::Chat)
-            }
-            Route::Fleet { .. } | Route::Dashboard { .. } | Route::Sandboxes { .. } => {
-                Some(NavSection::Monitoring)
-            }
+            | Route::SessionDetail { .. } => Some(NavSection::Chat),
+            Route::Fleet { .. }
+            | Route::Dashboard { .. }
+            | Route::Sandboxes { .. }
+            | Route::Cases { .. }
+            | Route::CaseDetail { .. }
+            | Route::Inbox { .. } => Some(NavSection::Monitoring),
             Route::Agents { .. } => Some(NavSection::Agents),
+            Route::SelfHosted { .. }
+            | Route::CloudPage { .. }
+            | Route::PartnersPage { .. }
+            | Route::RunnersIndex { .. }
+            | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
             Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
             _ => None,
         };
@@ -67,7 +75,6 @@ pub fn Sidebar() -> Element {
 
     use_effect(move || {
         spawn(async move {
-            // Session user for footer email.
             if let Ok((u, _)) = me().await {
                 user.set(Some(u));
             }
@@ -90,16 +97,13 @@ pub fn Sidebar() -> Element {
         .cloned()
         .or_else(|| list_snapshot.first().cloned());
 
-    let current_label = current
-        .as_ref()
-        .map(|w| w.name.clone())
-        .unwrap_or_else(|| {
-            if workspace_id.is_empty() {
-                "Select workspace".into()
-            } else {
-                "Workspace".into()
-            }
-        });
+    let current_label = current.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| {
+        if workspace_id.is_empty() {
+            "Select workspace".into()
+        } else {
+            "Workspace".into()
+        }
+    });
 
     let is_open = sidebar_open();
 
@@ -111,7 +115,6 @@ pub fn Sidebar() -> Element {
                 "flex h-full w-14 shrink-0 flex-col border-r border-[var(--app-border)] bg-[var(--app-sidebar)] text-[var(--app-fg)] transition-[width] duration-200"
             },
 
-            // Brand + open/close toggle
             div {
                 class: if is_open {
                     "flex h-11 items-center gap-1 border-b border-[var(--app-border)] px-2"
@@ -144,7 +147,6 @@ pub fn Sidebar() -> Element {
             }
 
             if is_open {
-            // Workspace switcher (no bottom border / separator under create)
             div { class: "relative px-2 pt-2 pb-1",
                 button {
                     class: "flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-2.5 py-1.5 text-left text-sm font-medium text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
@@ -281,7 +283,6 @@ pub fn Sidebar() -> Element {
                 }
             }
 
-            // Nav sections
             nav { class: "flex min-h-0 flex-1 flex-col gap-0 overflow-y-auto px-2 py-0.5",
                 NavAccordion {
                     title: "Chat",
@@ -327,6 +328,14 @@ pub fn Sidebar() -> Element {
                         to: Route::Sandboxes { workspace_id: workspace_id.clone() },
                         label: "Sandboxes",
                     }
+                    NavSubLink {
+                        to: Route::Cases { workspace_id: workspace_id.clone() },
+                        label: "Cases",
+                    }
+                    NavSubLink {
+                        to: Route::Inbox { workspace_id: workspace_id.clone() },
+                        label: "Inbox",
+                    }
                 }
 
                 NavAccordion {
@@ -345,8 +354,40 @@ pub fn Sidebar() -> Element {
                         label: "All agents",
                     }
                     NavSubLink {
-                        to: Route::Sessions { workspace_id: workspace_id.clone() },
+                        to: Route::Sandboxes { workspace_id: workspace_id.clone() },
                         label: "Live sessions",
+                    }
+                }
+
+                NavAccordion {
+                    title: RUNNERS_NAV_TITLE,
+                    expanded: expanded().contains(&NavSection::Runners),
+                    on_toggle: move |_| {
+                        let mut set = expanded();
+                        if !set.remove(&NavSection::Runners) {
+                            set.insert(NavSection::Runners);
+                        }
+                        expanded.set(set);
+                    },
+                    icon: rsx! { IconServer {} },
+                    for child in RUNNER_NAV_CHILDREN {
+                        NavSubLink {
+                            to: match child.slug {
+                                SEGMENT_SELF_HOSTED => Route::SelfHosted {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                SEGMENT_CLOUD => Route::CloudPage {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                SEGMENT_PARTNERS => Route::PartnersPage {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                                _ => Route::SelfHosted {
+                                    workspace_id: workspace_id.clone(),
+                                },
+                            },
+                            label: child.label,
+                        }
                     }
                 }
 
@@ -372,12 +413,11 @@ pub fn Sidebar() -> Element {
                 }
             }
 
-            // Footer — click opens account dropdown upward
             UserFooter {
                 user: user(),
                 workspace_id: workspace_id.clone(),
             }
-            } // end if is_open
+            }
         }
     }
 }
@@ -422,16 +462,13 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
 
     rsx! {
         div { class: "relative mt-auto border-t border-[var(--app-border)] p-1.5",
-            // Dropdown panel — opens upward from the footer
             if menu_open() {
-                // Click-away backdrop
                 div {
                     class: "fixed inset-0 z-30",
                     onclick: move |_| menu_open.set(false),
                 }
                 div {
                     class: "absolute bottom-full left-2 right-2 z-40 mb-1 overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-1 shadow-lg",
-                    // Header: who is signed in
                     div { class: "border-b border-[var(--app-border)] px-3 py-2.5",
                         p { class: "m-0 truncate text-sm font-medium text-[var(--app-fg)]", "{label_primary}" }
                         if let Some(sec) = label_secondary.clone() {
@@ -441,12 +478,12 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                         }
                     }
 
-                    // Theme row
                     button {
                         class: "flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
                         r#type: "button",
                         onclick: move |_| {
                             let next = theme().toggle();
+                            next.persist();
                             theme.set(next);
                         },
                         span { "Appearance" }
@@ -455,7 +492,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                         }
                     }
 
-                    // Settings
                     {
                         let ws = workspace_id.clone();
                         rsx! {
@@ -510,7 +546,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                 }
             }
 
-            // Trigger row — opens menu upward
             button {
                 class: "flex w-full items-center gap-2 rounded-lg p-1.5 text-left transition hover:bg-[var(--app-bg-hover)]",
                 r#type: "button",
@@ -537,8 +572,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
         }
     }
 }
-
-/* ── Accordion section ─────────────────────────────────────────── */
 
 #[component]
 fn NavAccordion(
@@ -584,6 +617,18 @@ fn NavSubLink(to: Route, label: &'static str) -> Element {
     }
 }
 
+#[component]
+fn NavComingSoon(label: &'static str) -> Element {
+    rsx! {
+        span {
+            class: "block cursor-not-allowed rounded-md px-2 py-1 text-sm text-[var(--app-muted)] opacity-60",
+            title: "Coming soon",
+            "{label}"
+            span { class: "ml-1 text-[10px] uppercase tracking-wide", "Coming soon" }
+        }
+    }
+}
+
 /* ── Inline icons (no external icon crate) ─────────────────────── */
 
 #[component]
@@ -597,7 +642,6 @@ fn IconPanelLeft() -> Element {
             stroke_width: "2",
             stroke_linecap: "round",
             stroke_linejoin: "round",
-            // Panel-left: rectangle with a left rail
             rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
             path { d: "M9 3v18" }
         }
@@ -651,6 +695,24 @@ fn IconBot() -> Element {
             rect { x: "3", y: "11", width: "18", height: "10", rx: "2" }
             path { d: "M12 2v4M8 16h.01M16 16h.01" }
             circle { cx: "12", cy: "7", r: "1" }
+        }
+    }
+}
+
+#[component]
+fn IconServer() -> Element {
+    rsx! {
+        svg {
+            class: "h-4 w-4",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            rect { x: "2", y: "2", width: "20", height: "8", rx: "2" }
+            rect { x: "2", y: "14", width: "20", height: "8", rx: "2" }
+            path { d: "M6 6h.01M6 18h.01" }
         }
     }
 }

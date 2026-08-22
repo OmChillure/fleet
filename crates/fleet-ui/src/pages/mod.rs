@@ -16,12 +16,16 @@
 
 pub mod agents;
 pub mod auth;
+pub mod cases;
 pub mod chat;
 pub mod dashboard;
 pub mod fleet;
 pub mod home;
+pub mod inbox;
 pub mod integrations;
+pub mod runners;
 pub mod sandboxes;
 pub mod sessions;
 pub mod settings;
 pub mod shared;
+pub mod workers;

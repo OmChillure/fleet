@@ -181,21 +181,37 @@ impl SandboxRuntime for DockerRuntime {
     }
 
     async fn signal(&self, handle: &RuntimeHandle, signal: Signal) -> Result<(), SandboxError> {
-        let g = self.inner.lock().await;
-        let e = g
-            .get(&handle.id)
-            .ok_or_else(|| SandboxError::NotFound(handle.id.clone()))?;
-        if e.destroyed {
-            return Ok(());
-        }
-        let sig = match signal {
-            Signal::Term => "SIGTERM",
-            Signal::Kill => "SIGKILL",
+        let (container_id, abort_agent) = {
+            let g = self.inner.lock().await;
+            let e = g
+                .get(&handle.id)
+                .ok_or_else(|| SandboxError::NotFound(handle.id.clone()))?;
+            if e.destroyed {
+                return Ok(());
+            }
+            (e.container_id.clone(), e.agent.is_some())
         };
-        let _ = Command::new("docker")
-            .args(["kill", "--signal", sig, &e.container_id])
-            .output()
+        if abort_agent {
+            let mut g = self.inner.lock().await;
+            if let Some(e) = g.get_mut(&handle.id)
+                && let Some(agent) = e.agent.as_ref()
+            {
+                agent.abort();
+            }
+        }
+        if !container_id.is_empty() {
+            let sig = match signal {
+                Signal::Term => "SIGTERM",
+                Signal::Kill => "SIGKILL",
+            };
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                Command::new("docker")
+                    .args(["kill", "--signal", sig, &container_id])
+                    .output(),
+            )
             .await;
+        }
         Ok(())
     }
 

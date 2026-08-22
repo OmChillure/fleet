@@ -26,6 +26,7 @@ pub(crate) fn map_issue(i: &Value) -> Value {
         "state_type": i.get("state").and_then(|s| s.get("type")),
         "assignee": i.get("assignee").and_then(|a| a.get("name")),
         "team": i.get("team").and_then(|t| t.get("key")),
+        "team_id": i.get("team").and_then(|t| t.get("id")),
         "created_at": i.get("createdAt"),
         "updated_at": i.get("updatedAt"),
     })

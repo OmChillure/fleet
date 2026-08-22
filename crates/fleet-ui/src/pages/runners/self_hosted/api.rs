@@ -1,0 +1,239 @@
+//! Cookie-auth client for workspace worker hosts.
+
+use serde::{Deserialize, Serialize};
+
+use crate::pages::auth::api::{auth_base_url, refresh_session};
+
+#[allow(unused_imports)] // HostGpu/HostHardware/HostSoftware stay on the api surface
+pub use fleet_runners_view::{
+    CreateHostResponse, HostDesiredSoftware, HostGpu, HostHardware, HostPatch, HostPublic,
+    HostSoftware, PackageInventory,
+};
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CreateHostBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HostListResponse {
+    #[serde(default)]
+    hosts: Vec<HostPublic>,
+    #[serde(default)]
+    packages: Vec<HostDesiredSoftware>,
+    #[serde(default)]
+    plane_git_sha: Option<String>,
+    #[serde(default)]
+    sandbox_backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HostEnvelope {
+    host: HostPublic,
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+fn api_url(path: &str) -> String {
+    format!(
+        "{}/{}",
+        auth_base_url().trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+#[allow(unused_mut)]
+fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    #[cfg(target_arch = "wasm32")]
+    {
+        req = req.fetch_credentials_include();
+    }
+    req
+}
+
+async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().get(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().get(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn authorized_post_json(
+    path: &str,
+    body: &impl Serialize,
+) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().post(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().post(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn authorized_patch_json(
+    path: &str,
+    body: &impl Serialize,
+) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().patch(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().patch(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn authorized_delete(path: &str) -> Result<reqwest::Response, String> {
+    let first = with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session().await.map_err(|e| e.message())?;
+    with_credentials(client().delete(api_url(path)))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result<T, String> {
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if status.is_success() {
+        serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))
+    } else {
+        Err(error_message(status, &text))
+    }
+}
+
+fn error_message(status: reqwest::StatusCode, text: &str) -> String {
+    #[derive(Deserialize)]
+    struct ErrBody {
+        error: String,
+    }
+    serde_json::from_str::<ErrBody>(text)
+        .map(|b| b.error)
+        .unwrap_or_else(|_| {
+            if text.is_empty() {
+                format!("request failed ({status})")
+            } else {
+                text.to_string()
+            }
+        })
+}
+
+fn apply_patch(host: HostPublic, patch: &HostPatch) -> HostPublic {
+    fleet_runners_view::apply_patch(host, patch)
+}
+
+/// `GET /api/workspaces/{id}/worker-hosts`
+pub async fn list_hosts(workspace_id: &str) -> Result<Vec<HostPublic>, String> {
+    Ok(list_workers_page(workspace_id).await?.0)
+}
+
+pub async fn list_workers_page(
+    workspace_id: &str,
+) -> Result<(Vec<HostPublic>, PackageInventory, String), String> {
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/worker-hosts")).await?;
+    let body: HostListResponse = parse_json(res).await?;
+    Ok((
+        body.hosts,
+        PackageInventory {
+            packages: body.packages,
+            plane_git_sha: body.plane_git_sha,
+        },
+        body.sandbox_backend.unwrap_or_else(|| "stub".into()),
+    ))
+}
+
+/// `POST /api/workspaces/{id}/worker-hosts` — pair token is in the response once.
+pub async fn create_host(
+    workspace_id: &str,
+    body: &CreateHostBody,
+) -> Result<CreateHostResponse, String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/worker-hosts"),
+        body,
+    )
+    .await?;
+    parse_json(res).await
+}
+
+/// `PATCH /api/workspaces/{id}/worker-hosts/{hid}`
+pub async fn patch_host(
+    workspace_id: &str,
+    host_id: &str,
+    current: &HostPublic,
+    patch: &HostPatch,
+) -> Result<HostPublic, String> {
+    let res = authorized_patch_json(
+        &format!("/api/workspaces/{workspace_id}/worker-hosts/{host_id}"),
+        patch,
+    )
+    .await?;
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(error_message(status, &text));
+    }
+    if let Ok(host) = serde_json::from_str::<HostPublic>(&text) {
+        return Ok(host);
+    }
+    if let Ok(wrap) = serde_json::from_str::<HostEnvelope>(&text) {
+        return Ok(wrap.host);
+    }
+    Ok(apply_patch(current.clone(), patch))
+}
+
+/// `DELETE /api/workspaces/{id}/worker-hosts/{hid}`
+pub async fn revoke_host(workspace_id: &str, host_id: &str) -> Result<(), String> {
+    let res = authorized_delete(&format!(
+        "/api/workspaces/{workspace_id}/worker-hosts/{host_id}"
+    ))
+    .await?;
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    Err(error_message(status, &text))
+}
+
+/// Install + pair commands from `install_hint`, or a same-origin fallback.
+pub fn install_commands(created: &CreateHostResponse) -> String {
+    fleet_runners_view::install_commands(created, &auth_base_url())
+}
+
+/// Control-plane URL the install command will call (from hint, else page origin).
+pub fn install_api_url(created: &CreateHostResponse) -> String {
+    fleet_runners_view::install_api_url(created, &auth_base_url())
+}
+
+/// PowerShell one-liner: download, pair, start (Windows).
+pub fn windows_install_command(created: &CreateHostResponse) -> String {
+    fleet_runners_view::windows_install_command(created, &auth_base_url())
+}

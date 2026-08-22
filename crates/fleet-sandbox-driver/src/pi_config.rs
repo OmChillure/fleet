@@ -34,7 +34,6 @@ pub fn setup_pi(
         )?;
     }
 
-    // Optional /models probe when we have a base URL
     if let Some(url) = models
         .pointer("/providers")
         .and_then(|p| p.as_object())
@@ -153,7 +152,6 @@ fn models_from_provider(spec: &ProviderSpec, job_model: Option<&str>) -> Value {
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }));
     }
-    // Ensure job model id is listed
     let env_model = std::env::var("MODEL").ok();
     if let Some(m) = job_model.or(env_model.as_deref()) {
         let mid = m.split_once('/').map(|(_, x)| x).unwrap_or(m);

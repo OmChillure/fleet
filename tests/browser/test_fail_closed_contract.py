@@ -282,6 +282,20 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("kubectl set env", body)
         self.assertIn("not a substitute", body.lower())
 
+    def test_agents_md_forbids_recurring_test_writer_loop(self):
+        body = AGENTS.read_text(encoding="utf-8")
+        testing = (REPO / "docs" / "testing.md").read_text(encoding="utf-8")
+        self.assertIn("recurring test-writer loop", body)
+        self.assertIn("A missing child id is not a relaunch", body)
+        self.assertIn("harvest-runner-catalog.sh", body)
+        self.assertIn("recurring", testing.lower())
+        self.assertIn("harvest-runner-catalog.sh", testing)
+        harvest = REPO / "scripts" / "harvest-runner-catalog.sh"
+        self.assertTrue(harvest.is_file(), harvest)
+        script = harvest.read_text(encoding="utf-8")
+        self.assertIn("Does not spawn writers", script)
+        self.assertIn(".env", script)
+
     def test_tools_gate_fails_when_dx_absent(self):
         with tempfile.TemporaryDirectory() as empty:
             env = os.environ.copy()

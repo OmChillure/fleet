@@ -299,11 +299,11 @@ echo hello-from-sandbox > out.txt
             persona_md: None,
             agent_backend: None,
             agent_model: None,
+            io: crate::sandbox::io::IntegrationHandle::none(),
         };
         let h = rt.spawn(req).await.unwrap();
         assert_eq!(h.backend, "process");
 
-        // Wait for completion
         for _ in 0..100 {
             match rt.state(&h).await.unwrap() {
                 SandboxState::Exited { code } => {
@@ -345,6 +345,7 @@ echo hello-from-sandbox > out.txt
                 persona_md: None,
                 agent_backend: None,
                 agent_model: None,
+                io: crate::sandbox::io::IntegrationHandle::none(),
             })
             .await
             .unwrap();

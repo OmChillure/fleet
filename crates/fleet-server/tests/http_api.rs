@@ -12,7 +12,9 @@ use fleet_db::{connect_and_migrate_with, PoolConfig};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
-use fleet_server::{build_http_app, AppState, GrokConfig, OllamaConfig, ServerConfig};
+use fleet_server::{
+    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -126,6 +128,17 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.x.ai/v1".into(),
         },
+        openai: OpenaiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.openai.com/v1".into(),
+        },
+        claude: ClaudeConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://api.anthropic.com".into(),
+        },
+        worker_dist_dir: None,
     };
 
     let db = connect_and_migrate_with(
@@ -152,6 +165,9 @@ async fn app_with_state() -> (axum::Router, AppState) {
         orch: orch.clone(),
         ollama: config.ollama.clone(),
         grok: config.grok.clone(),
+        openai: config.openai.clone(),
+        claude: config.claude.clone(),
+        worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
     let router = build_http_app(state.clone(), orch, &config).expect("build_http_app");
@@ -419,6 +435,10 @@ fn fleet(ws: &str, suffix: &str) -> String {
     }
 }
 
+fn partners_disclaimer(ws: &str) -> String {
+    format!("/api/workspaces/{ws}/partners/disclaimer")
+}
+
 async fn tick_until_tasks_done(
     app: &axum::Router,
     jar: &CookieJar,
@@ -563,6 +583,46 @@ async fn fixture_bff_start_and_tick_with_cookie() {
         "expected plan_task_id t1: {}",
         tasks.body
     );
+}
+
+#[tokio::test]
+async fn resume_non_blocked_task_is_conflict_and_unknown_kill_is_404() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    let _ = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    let task_id = tasks.body["tasks"][0]["id"].as_str().expect("task id");
+    let resume = call(
+        &app,
+        "POST",
+        &fleet(&ws, &format!("/tasks/{task_id}/resume")),
+        Some(&jar),
+        Some(json!({ "message": "go" })),
+    )
+    .await;
+    assert_eq!(resume.status, StatusCode::CONFLICT, "{}", resume.body);
+
+    let missing = uuid::Uuid::new_v4();
+    let kill = call(
+        &app,
+        "POST",
+        &fleet(&ws, &format!("/sessions/{missing}/kill")),
+        Some(&jar),
+        Some(json!({ "reason": "test" })),
+    )
+    .await;
+    assert_eq!(kill.status, StatusCode::NOT_FOUND, "{}", kill.body);
 }
 
 // ── 4. cancel run ───────────────────────────────────────────────────────────
@@ -1179,8 +1239,17 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
         .iter()
         .find(|p| p["id"] == "openai");
     if let Some(p) = openai {
-        assert_eq!(p["coming_soon"], true, "{p}");
         assert_eq!(p["available"], false, "{p}");
+        assert_eq!(p["coming_soon"], false, "{p}");
+    }
+    let claude = status.body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "claude");
+    if let Some(p) = claude {
+        assert_eq!(p["available"], false, "{p}");
+        assert_eq!(p["coming_soon"], false, "{p}");
     }
 
     let empty = call(
@@ -1683,7 +1752,7 @@ async fn chat_tools_human_can_talk_on_team_channel() {
 }
 
 #[tokio::test]
-async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
+async fn chat_tools_ticket_inbox_is_available() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
@@ -1694,123 +1763,316 @@ async fn chat_tools_monitor_needs_a_board_then_finish_launches_from_inbox() {
         model: "grok-4.5".into(),
     };
 
-    let (denied, deny_action) = fleet_server::chat_tools::execute_tool(
+    let (listed, action) = fleet_server::chat_tools::execute_tool(
         &state,
         workspace_id,
         user_id,
-        "monitor_tickets",
+        "list_tickets",
         &json!({}),
         &llm,
     )
     .await;
-    assert!(!deny_action.ok, "{deny_action:?} {denied}");
-    let err = denied["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("Connect") || err.contains("connected"),
-        "{denied}"
-    );
+    assert!(action.ok, "list_tickets {action:?} {listed}");
 
-    fleet_db::repos::tickets::upsert_inbox(
-        &state.db,
-        &fleet_db::repos::tickets::UpsertInbox {
-            workspace_id,
-            provider: "linear".into(),
-            external_key: "ENG-42".into(),
-            title: "Ship the inbox".into(),
-            url: Some("https://linear.app/eng-42".into()),
-            summary: "Do the thing described on the ticket.".into(),
-            provider_closed: false,
-        },
+    let inbox = call(&app, "GET", &format!("/api/workspaces/{ws}/inbox"), Some(&jar), None)
+        .await;
+    assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+}
+
+#[tokio::test]
+async fn cases_create_list_observe_use_tool_and_cancel() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases"),
+        Some(&jar),
+        Some(json!({
+            "title": "Slack feature",
+            "policy_md": "Read #eng, implement, PR, Notion page.",
+            "wake_in_s": 3600
+        })),
     )
-    .await
-    .expect("seed inbox");
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let case_id = created.body["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", created.body))
+        .to_string();
+    assert_eq!(created.body["status"], "open");
+    assert_eq!(created.body["stage"], "start");
 
-    let listed = call(
+    let list = call(
         &app,
         "GET",
-        &fleet(&ws, "/tickets"),
+        &format!("/api/workspaces/{ws}/cases"),
         Some(&jar),
         None,
     )
     .await;
-    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    assert_eq!(listed.body["count"], 1, "{}", listed.body);
-    assert_eq!(listed.body["tickets"][0]["key"], "ENG-42");
-
-    let prepared = fleet_server::tickets::prepare_finish(
-        &state,
-        workspace_id,
-        user_id,
-        fleet_server::tickets::FinishTicketArgs {
-            ticket: Some("ENG-42".into()),
-            provider: None,
-            key: None,
-        },
-    )
-    .await
-    .expect("prepare");
-    assert_eq!(prepared.item.external_key, "ENG-42");
-    assert_eq!(prepared.tasks.len(), 2);
-    assert_eq!(
-        prepared.tasks[0].external_ref.as_ref().map(|e| e.key.as_str()),
-        Some("ENG-42")
+    assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+    assert!(
+        list.body["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == case_id),
+        "{}",
+        list.body
     );
-    assert_eq!(prepared.tasks[1].worker_profile, "reviewer");
 
-    let run_id = Uuid::now_v7();
-    fleet_server::tickets::mark_ticket_launched(
-        &state,
-        workspace_id,
-        "linear",
-        "ENG-42",
-        run_id,
+    let observed = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/observe"),
+        Some(&jar),
+        Some(json!({ "note": "eng wants dark mode", "wake": false })),
     )
-    .await
-    .expect("mark launched");
+    .await;
+    assert_eq!(observed.status, StatusCode::OK, "{}", observed.body);
+
+    let decided = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/decide"),
+        Some(&jar),
+        Some(json!({
+            "decision": {
+                "action": "use_tool",
+                "tool": {
+                    "provider": "slack",
+                    "operation": "get_channel_history",
+                    "args": { "channel": "Cdoesnotexist" }
+                },
+                "wait_seconds": 30,
+                "reason": "read eng"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
+    let err = decided.body["last_error"].as_str().unwrap_or("");
+    assert!(
+        !err.contains("not wired"),
+        "use_tool should invoke the proxy: {err}"
+    );
+    assert!(
+        decided.body["context"]["last_tool_result"].is_object(),
+        "{}",
+        decided.body
+    );
+
+    let got = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/cases/{case_id}"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let kinds: Vec<&str> = got.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"created"), "{kinds:?}");
+    assert!(kinds.contains(&"observed"), "{kinds:?}");
+    assert!(
+        kinds.iter().any(|k| *k == "tool_ok" || *k == "tool_error"),
+        "{kinds:?}"
+    );
+
+    let cancelled = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/cases/{case_id}/cancel"),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+    assert_eq!(cancelled.body["status"], "cancelled");
+}
+
+// ── 13. partners disclaimer ack stub ────────────────────────────────────────
+
+#[tokio::test]
+async fn partners_disclaimer_get_defaults_not_accepted() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let got = call(&app, "GET", &partners_disclaimer(&ws), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(
+        got.body["accepted"], false,
+        "default must be not accepted: {}",
+        got.body
+    );
+    assert!(
+        got.body["accepted_at"].is_null(),
+        "default accepted_at must be null: {}",
+        got.body
+    );
+}
+
+#[tokio::test]
+async fn partners_disclaimer_post_then_get_ack_is_sticky() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let posted = call(
+        &app,
+        "POST",
+        &partners_disclaimer(&ws),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(posted.status, StatusCode::OK, "post: {}", posted.body);
+    assert_eq!(posted.body["accepted"], true, "{}", posted.body);
+    let accepted_at = posted.body["accepted_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("accepted_at: {}", posted.body))
+        .to_string();
+    assert!(
+        !accepted_at.is_empty(),
+        "POST must return accepted_at: {}",
+        posted.body
+    );
+
+    let got = call(&app, "GET", &partners_disclaimer(&ws), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "get after post: {}", got.body);
+    assert_eq!(got.body["accepted"], true, "{}", got.body);
+    assert_eq!(
+        got.body["accepted_at"].as_str(),
+        Some(accepted_at.as_str()),
+        "GET must return the recorded timestamp: {}",
+        got.body
+    );
 
     let again = call(
         &app,
-        "GET",
-        &fleet(&ws, "/tickets"),
+        "POST",
+        &partners_disclaimer(&ws),
         Some(&jar),
-        None,
+        Some(json!({})),
     )
     .await;
-    assert_eq!(again.body["tickets"][0]["state"], "launched", "{}", again.body);
+    assert_eq!(again.status, StatusCode::OK, "second post: {}", again.body);
+    assert_eq!(again.body["accepted"], true, "{}", again.body);
     assert_eq!(
-        again.body["tickets"][0]["run_id"].as_str(),
-        Some(run_id.to_string().as_str()),
-        "{}",
+        again.body["accepted_at"].as_str(),
+        Some(accepted_at.as_str()),
+        "second POST must not change accepted_at: {}",
         again.body
     );
+}
 
-    let overview = call(
+#[tokio::test]
+async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
+    let posted = call(
+        &app,
+        "POST",
+        &partners_disclaimer(&ws),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(posted.status, StatusCode::OK, "post: {}", posted.body);
+    assert_eq!(posted.body["accepted"], true, "{}", posted.body);
+    assert!(
+        posted.body["accepted_at"].as_str().is_some(),
+        "ack is a timestamp only: {}",
+        posted.body
+    );
+
+    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
+    let hosts = call(
         &app,
         "GET",
-        &fleet(&ws, "/overview"),
+        &format!("/api/workspaces/{ws}/worker-hosts"),
         Some(&jar),
         None,
     )
     .await;
-    assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
-    let tickets = overview.body["tickets"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{}", overview.body));
-    assert!(
-        tickets.iter().any(|t| t["key"] == "ENG-42"),
+    assert_eq!(hosts.status, StatusCode::OK, "hosts: {}", hosts.body);
+    let host_list = hosts.body["hosts"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        host_list.len(),
+        1,
+        "ack must not create worker_hosts beyond the control plane: {}",
+        hosts.body
+    );
+    assert_eq!(
+        host_list[0]["kind"],
+        "control_plane",
+        "only the plane row may exist: {}",
+        hosts.body
+    );
+    assert_eq!(
+        host_list[0]["id"].as_str(),
+        Some(plane_id.to_string().as_str()),
         "{}",
-        overview.body
+        hosts.body
     );
 
-    let (replay, replay_action) = fleet_server::chat_tools::execute_tool(
-        &state,
+    let listed = fleet_db::repos::worker_hosts::list_for_workspace(&state.db, workspace_id)
+        .await
+        .expect("list_for_workspace");
+    assert!(
+        listed.is_empty(),
+        "ack must not insert worker_hosts rows: {listed:?}"
+    );
+
+    let assignable = fleet_db::repos::worker_hosts::list_assignable(
+        &state.db,
         workspace_id,
-        user_id,
-        "finish_ticket",
-        &json!({ "ticket": "ENG-42" }),
-        &llm,
+        chrono::Duration::seconds(30),
     )
-    .await;
-    assert!(replay_action.ok, "{replay_action:?} {replay}");
-    assert_eq!(replay["already_launched"], true, "{replay}");
+    .await
+    .expect("list_assignable");
+    assert!(
+        assignable.is_empty(),
+        "ack must not create assignable hosts: {assignable:?}"
+    );
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(tasks.status, StatusCode::OK, "tasks: {}", tasks.body);
+    let task_list = tasks.body["tasks"].as_array().cloned().unwrap_or_default();
+    assert!(
+        task_list.is_empty(),
+        "ack must not enqueue fleet tasks: {}",
+        tasks.body
+    );
+
+    let runs = call(&app, "GET", &fleet(&ws, "/runs"), Some(&jar), None).await;
+    assert_eq!(runs.status, StatusCode::OK, "runs: {}", runs.body);
+    let run_list = runs.body["runs"].as_array().cloned().unwrap_or_default();
+    assert!(
+        run_list.is_empty(),
+        "ack must not enqueue fleet runs: {}",
+        runs.body
+    );
+
+    let claimed = fleet_db::repos::work_claims::claim_next(
+        &state.db,
+        workspace_id,
+        Uuid::now_v7(),
+        chrono::Duration::minutes(1),
+    )
+    .await
+    .expect("claim_next");
+    assert!(
+        claimed.is_none(),
+        "ack must not enqueue work_claims: {claimed:?}"
+    );
 }

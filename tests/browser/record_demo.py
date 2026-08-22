@@ -92,6 +92,13 @@ def expand_agents_nav(page) -> None:
         pause(page, 400)
 
 
+def expand_runners_nav(page) -> None:
+    runners = page.get_by_text("Runners", exact=True).first
+    if runners.count():
+        runners.click()
+        pause(page, 400)
+
+
 class Demo:
     def __init__(self, page, out_dir: Path):
         self.page = page
@@ -219,6 +226,39 @@ class Demo:
         p.goto(f"{base}/sandboxes", wait_until="networkidle")
         pause(p, 1500)
 
+    def scene_cases(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/cases", wait_until="networkidle")
+        pause(p, 800)
+        title = p.locator("input[placeholder*='Title']")
+        policy = p.locator("textarea[placeholder*='Policy']")
+        if title.count() and policy.count():
+            title.first.fill("Demo case")
+            policy.first.fill("Wait until observed, then complete.")
+            create = p.get_by_role("button", name="Create case")
+            if create.count():
+                create.first.click()
+                pause(p, 1500)
+        first = p.locator("a[href*='/cases/']")
+        if first.count():
+            first.first.click()
+            pause(p, 800)
+            decide = p.get_by_role("button", name="Decide now")
+            if decide.count():
+                decide.first.click()
+                pause(p, 1500)
+
+    def scene_inbox(self) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/inbox", wait_until="networkidle")
+        pause(p, 800)
+        start = p.get_by_role("button", name="Start monitor")
+        if start.count():
+            start.first.click()
+            pause(p, 1200)
+
     def scene_agents(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -247,7 +287,138 @@ class Demo:
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/settings", wait_until="networkidle")
+        pause(p, 800)
+        members = p.get_by_text("Members", exact=True)
+        if members.count():
+            members.first.scroll_into_view_if_needed()
+            pause(p, 800)
+
+    def _film_self_hosted(self, rel: str) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}{rel}", wait_until="networkidle")
+        pause(p, 1000)
+        if rel != "/runners/self-hosted":
+            p.wait_for_url("**/runners/self-hosted", timeout=15_000)
+        body = p.inner_text("body")
+        heading = ""
+        if p.locator("h1").count():
+            heading = p.locator("h1").first.inner_text()
+        if not any(
+            label in heading or label in body
+            for label in ("Self-hosted", "Runners", "Workers")
+        ):
+            raise RuntimeError(
+                f"self-hosted runners page missing heading or text: {body[:300]}"
+            )
+        if "Control plane" not in body and p.locator("article").count() == 0:
+            raise RuntimeError("self-hosted page missing control plane or cards")
+        add = p.get_by_role("button", name="Add worker")
+        if add.count():
+            add.first.click()
+            pause(p, 1500)
+            unix_copy = (
+                p.locator("pre")
+                .filter(has_text="install-worker.sh")
+                .locator("xpath=..")
+                .get_by_role("button", name="Copy")
+            )
+            if unix_copy.count() and unix_copy.first.is_visible():
+                unix_copy.first.click()
+                pause(p, 600)
+            cancel = p.get_by_role("button", name="Cancel")
+            if cancel.count() and cancel.first.is_visible():
+                pause(p, 400)
+            done = p.get_by_role("button", name="Done")
+            if done.count() and done.first.is_visible():
+                done.first.click()
+                pause(p, 600)
+        hold = p.get_by_role("button", name="Stop taking new jobs")
+        if hold.count() and hold.first.is_visible():
+            hold.first.click()
+            pause(p, 1500)
+
+    def scene_runners(self) -> None:
+        self._film_self_hosted("/runners/self-hosted")
+
+    def scene_workers(self) -> None:
+        """Alias: /{ws}/workers redirects to the self-hosted runners page."""
+        self._film_self_hosted("/workers")
+
+    def _film_network_runners(
+        self,
+        rel: str,
+        heading_labels: tuple[str, ...],
+        copy_labels: tuple[str, ...],
+        nav_label: str,
+    ) -> None:
+        base = self.ensure_session()
+        p = self.page
+        p.goto(f"{base}/dashboard", wait_until="networkidle")
+        pause(p)
+        expand_runners_nav(p)
+        link = p.get_by_role("link", name=nav_label, exact=True)
+        if link.count():
+            link.first.click()
+            pause(p, 800)
+        else:
+            p.goto(f"{base}{rel}", wait_until="networkidle")
+            pause(p, 1000)
+        p.wait_for_url(f"**{rel}", timeout=15_000)
+        heading = ""
+        if p.locator("h1").count():
+            heading = p.locator("h1").first.inner_text()
+        if not any(label in heading for label in heading_labels):
+            raise RuntimeError(
+                f"{rel} missing heading {heading_labels}: {heading!r}"
+            )
+        # Prefer <main> so sidebar "Cloud" / "Partners" labels cannot false-green.
+        main = p.locator("main")
+        text = main.inner_text() if main.count() else p.inner_text("body")
+        if not any(label in text for label in copy_labels):
+            raise RuntimeError(
+                f"{rel} missing expected copy {copy_labels}: {text[:400]}"
+            )
         pause(p, 1500)
+
+    def scene_cloud(self) -> None:
+        self._film_network_runners(
+            "/runners/cloud",
+            ("Cloud",),
+            (
+                "AWS",
+                "GCP",
+                "Azure",
+                "Fleet Cloud",
+                "Public cloud",
+                "public cloud",
+                "Coming soon",
+                "placeholder",
+                "Placeholder",
+            ),
+            "Cloud",
+        )
+
+    def scene_partners(self) -> None:
+        self._film_network_runners(
+            "/runners/partners",
+            ("Partners",),
+            (
+                "Trust",
+                "Disclaimer",
+                "unused capacity",
+                "Coming soon",
+                "Verified",
+                "verified",
+                "acknowledge",
+            ),
+            "Partners",
+        )
+        p = self.page
+        ack = p.get_by_role("checkbox")
+        if ack.count() and ack.first.is_visible():
+            ack.first.check()
+            pause(p, 1200)
 
     def scene_sessions(self) -> None:
         base = self.ensure_session()
@@ -326,9 +497,15 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "chat": Demo.scene_chat,
     "fleet": Demo.scene_fleet,
     "sandboxes": Demo.scene_sandboxes,
+    "cases": Demo.scene_cases,
+    "inbox": Demo.scene_inbox,
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
     "settings": Demo.scene_settings,
+    "runners": Demo.scene_runners,
+    "workers": Demo.scene_workers,
+    "cloud": Demo.scene_cloud,
+    "partners": Demo.scene_partners,
     "sessions": Demo.scene_sessions,
     "dashboard": Demo.scene_dashboard,
     "lab": Demo.scene_lab,
@@ -344,9 +521,14 @@ CORE = [
     "chat",
     "fleet",
     "sandboxes",
+    "cases",
+    "inbox",
     "agents",
     "integrations",
     "settings",
+    "runners",
+    "cloud",
+    "partners",
     "sessions",
     "dashboard",
 ]
