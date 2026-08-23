@@ -533,6 +533,7 @@ Tools:\n\
 - monitor_tickets / list_tickets / finish_ticket (load spec only)\n\
 - start_case / list_cases / get_case / observe_case / cancel_case\n\n\
 Do NOT claim an external write succeeded unless integration_query (or a finished plan output) returned ok.\n\
+A GitHub PR is not done until list_checks is success (or the repo has no checks). If checks fail, fix and commit again.\n\
 If an app is disconnected, say Connect under Integrations and still do everything else.\n\
 After launch: one sentence, who + run id. Never ask the user to say continue.\n\
 Never create a Notion page without args.text (the actual result).\n\
@@ -1356,7 +1357,7 @@ pub fn build_multi_task_plan(
         policy: PlanPolicy {
             max_agents_override,
             on_task_fail: OnTaskFailPolicy::FailRun,
-            auto_sync_external: false,
+            auto_sync_external: true,
             ..Default::default()
         },
     }
@@ -2540,7 +2541,7 @@ fn short_id(id: &str) -> String {
 fn provider_capabilities(provider: &str) -> &'static str {
     match provider {
         "github" => {
-            "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, put_file, commit_files, create_branch, create_pr, create_issue, add_comment"
+            "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, list_checks, put_file, commit_files, create_branch, create_pr, create_issue, add_comment"
         }
         "gitlab" => {
             "list_repos, list_issues, get_issue, list_mrs, get_mr, get_file, list_commits, commit_files, create_branch, create_mr, create_issue, add_comment"
@@ -2566,7 +2567,7 @@ fn provider_capabilities(provider: &str) -> &'static str {
         "trello" => "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment",
         "asana" => "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment",
         "bitbucket" => {
-            "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, commit_files, create_branch, create_pr, create_issue, add_comment"
+            "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, commit_files, create_branch, create_pr, create_issue, update_issue, add_comment"
         }
         "confluence" => {
             "search, list_spaces, list_pages, get_page, create_page, update_page, add_comment"

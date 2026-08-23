@@ -153,7 +153,7 @@ impl AgentJob {
         });
         let hb_abort = hb.abort_handle();
         let handle = tokio::spawn(async move {
-            let code = run_loop(
+            let code = run_until_green(
                 &work_dir,
                 timeout,
                 &backend,
@@ -223,6 +223,204 @@ fn infer_talk(req: &SpawnRequest) -> Option<TeamTalk> {
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CiState {
+    Green,
+    None,
+    Pending,
+    Red(String),
+}
+
+fn classify_checks(data: &Value, ok: bool) -> CiState {
+    if !ok {
+        return CiState::None;
+    }
+    let state = data
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match state.as_str() {
+        "success" => CiState::Green,
+        "none" | "" => CiState::None,
+        "pending" => CiState::Pending,
+        "failure" | "error" => {
+            let mut bits = Vec::new();
+            if let Some(arr) = data.get("failing").and_then(|v| v.as_array()) {
+                for f in arr {
+                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("check");
+                    let sum = f.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                    if sum.is_empty() {
+                        bits.push(name.to_string());
+                    } else {
+                        bits.push(format!("{name}: {sum}"));
+                    }
+                }
+            }
+            CiState::Red(if bits.is_empty() {
+                "checks failed".into()
+            } else {
+                bits.join("\n")
+            })
+        }
+        _ => CiState::Pending,
+    }
+}
+
+fn ci_wait_budget() -> Duration {
+    if cfg!(test) {
+        return Duration::from_millis(0);
+    }
+    let secs = std::env::var("FLEET_CI_WAIT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(180u64)
+        .clamp(0, 900);
+    Duration::from_secs(secs)
+}
+
+async fn wait_pr_green(
+    work_dir: &Path,
+    io: super::io::IntegrationHandle,
+    workspace_id: uuid::Uuid,
+    spec: &str,
+) -> CiState {
+    let Some(inv) = io.get() else {
+        return CiState::None;
+    };
+    let blob = format!(
+        "{spec}\n{}\n{}",
+        read_opt(work_dir.join("task.md")).await,
+        read_opt(work_dir.join("SHIP.md")).await
+    );
+    let Some((owner, repo)) = find_owner_repo(&blob) else {
+        return CiState::None;
+    };
+    let branch = find_branch(&blob);
+    let deadline = tokio::time::Instant::now() + ci_wait_budget();
+    let poll = if cfg!(test) {
+        Duration::from_millis(0)
+    } else {
+        Duration::from_secs(8)
+    };
+    loop {
+        emit_live(work_dir, "tool", "list_checks").await;
+        let got = inv
+            .invoke(
+                workspace_id,
+                "github".into(),
+                "list_checks".into(),
+                json!({ "owner": owner, "repo": repo, "ref": branch }),
+            )
+            .await;
+        emit_live(work_dir, "tool_result", &truncate(&got.summary, 240)).await;
+        let state = classify_checks(&got.data, got.ok);
+        match &state {
+            CiState::Green | CiState::None | CiState::Red(_) => return state,
+            CiState::Pending => {
+                if tokio::time::Instant::now() >= deadline {
+                    return CiState::Pending;
+                }
+                emit_live(work_dir, "think", "Waiting for GitHub checks…").await;
+                if !poll.is_zero() {
+                    tokio::time::sleep(poll).await;
+                } else {
+                    return CiState::Pending;
+                }
+            }
+        }
+    }
+}
+
+async fn run_until_green(
+    work_dir: &Path,
+    timeout: Duration,
+    backend: &str,
+    model: Option<&str>,
+    talk: Option<&TeamTalk>,
+    io: super::io::IntegrationHandle,
+    workspace_id: uuid::Uuid,
+) -> Result<i32, String> {
+    for attempt in 1..=3 {
+        let last = run_loop(
+            work_dir,
+            timeout,
+            backend,
+            model,
+            talk,
+            io.clone(),
+            workspace_id,
+        )
+        .await?;
+        let task = read_opt(work_dir.join("task.md")).await;
+        let run_ctx = read_opt(work_dir.join("RUN.md")).await;
+        let team = read_opt(work_dir.join("TEAM.md")).await;
+        let spec = format!("{task}\n{run_ctx}\n{team}");
+        if !should_ensure_push(talk, &spec, work_dir) {
+            return Ok(last);
+        }
+        emit_live(
+            work_dir,
+            "think",
+            &format!("Ship attempt {attempt}: commit, open PR, wait until checks are green."),
+        )
+        .await;
+        let ship = run_ship(work_dir, io.clone(), workspace_id, &spec).await?;
+        if ship != 0 {
+            return Ok(ship);
+        }
+        match wait_pr_green(work_dir, io.clone(), workspace_id, &spec).await {
+            CiState::Green => {
+                let extra = read_opt(work_dir.join("result.md")).await;
+                write_result(
+                    work_dir,
+                    &format!("{extra}\n\nCI: green. Ticket-in / green-PR-out complete.\n"),
+                )
+                .await;
+                emit_live(work_dir, "done", "PR checks green.").await;
+                return Ok(0);
+            }
+            CiState::None => {
+                emit_live(work_dir, "done", "PR opened (no CI on this repo).").await;
+                return Ok(0);
+            }
+            CiState::Pending => {
+                let extra = read_opt(work_dir.join("result.md")).await;
+                write_result(
+                    work_dir,
+                    &format!("{extra}\n\nCI: still running. PR is open; not green yet.\n"),
+                )
+                .await;
+                emit_live(work_dir, "done", "PR open, checks still pending.").await;
+                return Ok(0);
+            }
+            CiState::Red(msg) => {
+                let _ = tokio::fs::write(
+                    work_dir.join("CI.md"),
+                    format!(
+                        "GitHub checks failed (attempt {attempt}/3).\n\n{msg}\n\n\
+                         Fix the code in work/ and leave files to commit. Do not only write notes.\n"
+                    ),
+                )
+                .await;
+                emit_live(
+                    work_dir,
+                    "think",
+                    "Checks failed. Fixing and pushing again.",
+                )
+                .await;
+            }
+        }
+    }
+    write_result(
+        work_dir,
+        "PR is still red after 3 fix attempts. Human needs to take over.\n",
+    )
+    .await;
+    emit_live(work_dir, "error", "CI still red after 3 attempts.").await;
+    Ok(1)
+}
+
 async fn run_loop(
     work_dir: &Path,
     timeout: Duration,
@@ -250,6 +448,8 @@ async fn run_loop(
          Use handoff/ files from finished teammates. Do not redo their work.\n\
          Work only inside this workspace. Use tools to read/write files and run shell commands.\n\
          To talk to connected apps call `use_integration` (provider, operation, args). The control plane decrypts; you never see tokens. If an op is unknown the error lists valid ops.\n\
+         Saying you will call a tool is not a call. If the spec says push or open a PR you MUST call `use_integration` with `commit_files` then `create_pr`. Writing commit_payload.json is not a push. If GitHub still has the old file, call `commit_files` again.\n\
+         A PR is not done until GitHub checks are green (`list_checks` state success) or the repo has no CI. If checks fail, read the failing summary, fix files in work/, commit again.\n\
          Do only what the spec asks. Do not assume you must write code or open a PR.\n\
          Do not request secrets. Do not leave the work directory.\n\
          Read RUN.md — the whole board, your acceptance, and shared files.\n\
@@ -275,6 +475,11 @@ async fn run_loop(
     if !team.trim().is_empty() {
         user.push_str("\n\n");
         user.push_str(&team);
+    }
+    let ci = read_opt(work_dir.join("CI.md")).await;
+    if !ci.trim().is_empty() {
+        user.push_str("\n\n# CI failed — this is not shipped. Fix the files in work/ so the PR goes green.\n\n");
+        user.push_str(&ci);
     }
 
     let mut messages = vec![
@@ -381,7 +586,7 @@ async fn run_loop(
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
             let args: Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
-            emit_live(work_dir, "tool", &name).await;
+            emit_live(work_dir, "tool", &tool_live_label(&name, &args)).await;
             let result = exec_tool(work_dir, talk, &name, &args, io.get(), workspace_id).await;
             append_log(
                 work_dir,
@@ -414,6 +619,25 @@ async fn run_loop(
     if !work_dir.join("result.md").exists() && !last_text.trim().is_empty() {
         write_result(work_dir, &last_text).await;
     }
+
+    let task = read_opt(work_dir.join("task.md")).await;
+    let run_ctx = read_opt(work_dir.join("RUN.md")).await;
+    let team_now = read_opt(work_dir.join("TEAM.md")).await;
+    let spec = format!("{task}\n{run_ctx}\n{team_now}");
+    if should_ensure_push(talk, &spec, work_dir) {
+        let landed = github_landed(work_dir, io.clone(), workspace_id, &spec).await;
+        if !landed {
+            emit_live(
+                work_dir,
+                "think",
+                "Work is not on GitHub yet. Pushing again with commit_files / create_pr.",
+            )
+            .await;
+            append_log(work_dir, "=== push did not land, running ship ===\n").await;
+            return run_ship(work_dir, io, workspace_id, &spec).await;
+        }
+    }
+
     append_log(work_dir, "=== agent loop done ===\n").await;
     emit_live(work_dir, "done", "Finished this turn.").await;
     Ok(0)
@@ -523,6 +747,205 @@ fn find_branch(text: &str) -> String {
     "agent-fleet/changes".into()
 }
 
+fn spec_wants_push(spec: &str) -> bool {
+    let t = spec.to_ascii_lowercase();
+    (t.contains("github.com") || t.contains("owner/repo") || t.contains('/'))
+        && (t.contains("push")
+            || t.contains("pull request")
+            || t.contains(" open a pr")
+            || t.contains("open pr")
+            || t.contains("create_pr")
+            || t.contains("commit_files")
+            || t.contains("commit ")
+            || t.contains(" pr ")
+            || t.contains("`pr`")
+            || t.contains("to https://github.com"))
+}
+
+fn is_reviewer_role(talk: Option<&TeamTalk>) -> bool {
+    let Some(t) = talk else {
+        return false;
+    };
+    let blob = format!("{} {}", t.me, t.me_profile).to_ascii_lowercase();
+    blob.contains("review")
+}
+
+fn should_ensure_push(talk: Option<&TeamTalk>, spec: &str, work_dir: &Path) -> bool {
+    if is_reviewer_role(talk) {
+        return false;
+    }
+    if !spec_wants_push(spec) {
+        return false;
+    }
+    !collect_ship_files(work_dir).is_empty()
+}
+
+fn distinctive_snippet(content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|l| {
+            l.len() >= 16
+                && !l.starts_with("//")
+                && !l.starts_with('#')
+                && !l.starts_with("import ")
+                && !l.starts_with("export {")
+        })
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+fn file_matches_remote(local: &str, remote: &str) -> bool {
+    let needle = distinctive_snippet(local);
+    !needle.is_empty() && remote.contains(&needle)
+}
+
+fn pr_url_for_branch(data: &Value, branch: &str) -> Option<String> {
+    let want = branch.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let items = data
+        .get("items")
+        .or_else(|| data.get("prs"))
+        .and_then(|v| v.as_array())?;
+    for item in items {
+        let head = item
+            .get("head")
+            .and_then(|v| v.as_str())
+            .or_else(|| item.pointer("/head/ref").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        if head != want {
+            continue;
+        }
+        if let Some(u) = item
+            .get("html_url")
+            .or_else(|| item.get("url"))
+            .and_then(|v| v.as_str())
+        {
+            if u.contains("/pull/") {
+                return Some(u.to_string());
+            }
+        }
+        if let Some(n) = item.get("number").and_then(|v| v.as_i64()) {
+            if let (Some(owner), Some(repo)) = (
+                item.pointer("/head/repo/owner/login")
+                    .or_else(|| item.pointer("/base/repo/owner/login"))
+                    .and_then(|v| v.as_str()),
+                item.pointer("/head/repo/name")
+                    .or_else(|| item.pointer("/base/repo/name"))
+                    .and_then(|v| v.as_str()),
+            ) {
+                return Some(format!("https://github.com/{owner}/{repo}/pull/{n}"));
+            }
+        }
+    }
+    None
+}
+
+fn existing_pr_for_branch(root: &Path, branch: &str) -> Option<String> {
+    let url = find_existing_pr_url(root)?;
+    let blob = [
+        std::fs::read_to_string(root.join("result.md")).unwrap_or_default(),
+        std::fs::read_to_string(root.join("SHIP.md")).unwrap_or_default(),
+        std::fs::read_to_string(root.join("work").join("SHIP.md")).unwrap_or_default(),
+    ]
+    .join("\n");
+    if blob.contains(branch) {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+async fn github_landed(
+    work_dir: &Path,
+    io: super::io::IntegrationHandle,
+    workspace_id: uuid::Uuid,
+    spec: &str,
+) -> bool {
+    let Some(inv) = io.get() else {
+        return true;
+    };
+    let Some((owner, repo)) = find_owner_repo(spec) else {
+        return true;
+    };
+    let files = collect_ship_files(work_dir);
+    if files.is_empty() {
+        return true;
+    }
+    let branch = find_branch(spec);
+    let (path, local) = &files[0];
+    let got = inv
+        .invoke(
+            workspace_id,
+            "github".into(),
+            "get_file".into(),
+            json!({
+                "owner": owner,
+                "repo": repo,
+                "path": path,
+                "ref": branch,
+            }),
+        )
+        .await;
+    if !got.ok {
+        return false;
+    }
+    let remote = got
+        .data
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !file_matches_remote(local, remote) {
+        return false;
+    }
+    let listed = inv
+        .invoke(
+            workspace_id,
+            "github".into(),
+            "list_prs".into(),
+            json!({ "owner": owner, "repo": repo, "state": "open" }),
+        )
+        .await;
+    listed.ok && pr_url_for_branch(&listed.data, &branch).is_some()
+}
+
+async fn file_on_github(
+    inv: &dyn super::io::IntegrationInvoker,
+    workspace_id: uuid::Uuid,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    path: &str,
+    local: &str,
+) -> bool {
+    let got = inv
+        .invoke(
+            workspace_id,
+            "github".into(),
+            "get_file".into(),
+            json!({
+                "owner": owner,
+                "repo": repo,
+                "path": path,
+                "ref": branch,
+            }),
+        )
+        .await;
+    if !got.ok {
+        return false;
+    }
+    let remote = got
+        .data
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    file_matches_remote(local, remote)
+}
+
 fn skip_ship_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
@@ -536,6 +959,8 @@ fn skip_ship_name(name: &str) -> bool {
             | "TEAM_CHAT.md"
             | "task.md"
             | "result.md"
+            | "CI.md"
+            | "SHIP.md"
             | "live.jsonl"
             | "RUN.md"
     ) {
@@ -659,14 +1084,25 @@ async fn run_ship(
     )
     .await;
 
-    if let Some(url) = find_existing_pr_url(work_dir) {
-        write_result(
-            work_dir,
-            &format!("Shipped.\n\nPR: {url}\n\nReused an existing pull request from the workspace.\n"),
-        )
-        .await;
-        emit_live(work_dir, "done", &format!("Opened {url}")).await;
-        return Ok(0);
+    let hinted_branch = find_branch(&blob);
+    let mut existing_url = existing_pr_for_branch(work_dir, &hinted_branch);
+    let files = collect_ship_files(work_dir);
+    if files.is_empty() {
+        if let Some(url) = existing_url.clone() {
+            let _ = tokio::fs::write(
+                work_dir.join("SHIP.md"),
+                format!("PR: {url}\nbranch: {hinted_branch}\n"),
+            )
+            .await;
+            write_result(
+                work_dir,
+                &format!("PR already open for `{hinted_branch}`.\n\nPR: {url}\n"),
+            )
+            .await;
+            return Ok(0);
+        }
+        write_result(work_dir, "Ship failed: work/ has no files to commit.\n").await;
+        return Ok(1);
     }
 
     let Some(inv) = io.get() else {
@@ -696,23 +1132,12 @@ async fn run_ship(
         )
         .await;
     if listed.ok {
-        if let Some(url) = pr_url_from_data(&listed.data).or_else(|| extract_github_pr_url(&listed.summary)) {
-            write_result(
-                work_dir,
-                &format!("Shipped {owner}/{repo}.\n\nPR: {url}\n\nAlready open on GitHub.\n"),
-            )
-            .await;
-            emit_live(work_dir, "done", &format!("Opened {url}")).await;
-            return Ok(0);
+        if let Some(url) = pr_url_for_branch(&listed.data, &hinted_branch) {
+            existing_url = Some(url);
         }
     }
 
-    let files = collect_ship_files(work_dir);
-    if files.is_empty() {
-        write_result(work_dir, "Ship failed: work/ has no files to commit.\n").await;
-        return Ok(1);
-    }
-    let branch = find_branch(&blob);
+    let branch = hinted_branch;
     emit_live(
         work_dir,
         "think",
@@ -723,22 +1148,65 @@ async fn run_ship(
         .iter()
         .map(|(p, c)| json!({ "path": p, "content": c }))
         .collect();
-    let commit = inv
+    let commit_args = json!({
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "message": "feat: apply fleet implementer work",
+        "files": file_json,
+    });
+    emit_live(work_dir, "tool", "commit_files").await;
+    let mut commit = inv
         .invoke(
             workspace_id,
             "github".into(),
             "commit_files".into(),
-            json!({
-                "owner": owner,
-                "repo": repo,
-                "branch": branch,
-                "message": "feat: apply fleet implementer work",
-                "files": file_json,
-            }),
+            commit_args.clone(),
         )
         .await;
-    emit_live(work_dir, "tool", "commit_files").await;
-    if !commit.ok {
+    emit_live(work_dir, "tool_result", &truncate(&commit.summary, 240)).await;
+    let (probe_path, probe_local) = &files[0];
+    let mut landed = commit.ok
+        && file_on_github(
+            inv.as_ref(),
+            workspace_id,
+            &owner,
+            &repo,
+            &branch,
+            probe_path,
+            probe_local,
+        )
+        .await;
+    if !landed {
+        emit_live(
+            work_dir,
+            "think",
+            "Commit did not land. Running commit_files again.",
+        )
+        .await;
+        emit_live(work_dir, "tool", "commit_files").await;
+        commit = inv
+            .invoke(
+                workspace_id,
+                "github".into(),
+                "commit_files".into(),
+                commit_args,
+            )
+            .await;
+        emit_live(work_dir, "tool_result", &truncate(&commit.summary, 240)).await;
+        landed = commit.ok
+            && file_on_github(
+                inv.as_ref(),
+                workspace_id,
+                &owner,
+                &repo,
+                &branch,
+                probe_path,
+                probe_local,
+            )
+            .await;
+    }
+    if !landed {
         write_result(
             work_dir,
             &format!("Ship commit failed: {}\n", commit.summary),
@@ -747,59 +1215,70 @@ async fn run_ship(
         emit_live(work_dir, "error", &commit.summary).await;
         return Ok(1);
     }
-    emit_live(work_dir, "think", "Opening pull request.").await;
-    let pr = inv
-        .invoke(
-            workspace_id,
-            "github".into(),
-            "create_pr".into(),
-            json!({
-                "owner": owner,
-                "repo": repo,
-                "head": branch,
-                "base": "main",
-                "title": format!("Fleet: {branch}"),
-                "body": "Opened by Agent Fleet ship step from work/.",
-            }),
-        )
-        .await;
-    emit_live(work_dir, "tool", "create_pr").await;
-    let mut url = pr_url_from_data(&pr.data).unwrap_or_default();
+    let mut url = existing_url.unwrap_or_default();
+    let mut pr_summary = String::new();
     if url.is_empty() {
-        url = extract_github_pr_url(&pr.summary).unwrap_or_default();
-    }
-    if !pr.ok && url.is_empty() {
-        let again = inv
+        emit_live(work_dir, "think", "Opening pull request.").await;
+        let pr = inv
             .invoke(
                 workspace_id,
                 "github".into(),
-                "list_prs".into(),
-                json!({ "owner": owner, "repo": repo, "state": "open" }),
+                "create_pr".into(),
+                json!({
+                    "owner": owner,
+                    "repo": repo,
+                    "head": branch,
+                    "base": "main",
+                    "title": format!("Fleet: {branch}"),
+                    "body": "Opened by Agent Fleet. Not done until checks are green.",
+                }),
             )
             .await;
-        url = pr_url_from_data(&again.data)
-            .or_else(|| extract_github_pr_url(&again.summary))
-            .unwrap_or_default();
-    }
-    if url.is_empty() && !pr.ok {
-        write_result(work_dir, &format!("Ship PR failed: {}\n", pr.summary)).await;
-        emit_live(work_dir, "error", &pr.summary).await;
-        return Ok(1);
+        emit_live(work_dir, "tool", "create_pr").await;
+        pr_summary = pr.summary.clone();
+        url = pr_url_from_data(&pr.data).unwrap_or_default();
+        if url.is_empty() {
+            url = extract_github_pr_url(&pr.summary).unwrap_or_default();
+        }
+        if !pr.ok && url.is_empty() {
+            let again = inv
+                .invoke(
+                    workspace_id,
+                    "github".into(),
+                    "list_prs".into(),
+                    json!({ "owner": owner, "repo": repo, "state": "open" }),
+                )
+                .await;
+            url = pr_url_for_branch(&again.data, &branch)
+                .or_else(|| pr_url_from_data(&again.data))
+                .or_else(|| extract_github_pr_url(&again.summary))
+                .unwrap_or_default();
+        }
+        if url.is_empty() && !pr.ok {
+            write_result(work_dir, &format!("Ship PR failed: {}\n", pr.summary)).await;
+            emit_live(work_dir, "error", &pr.summary).await;
+            return Ok(1);
+        }
     }
     let link = if url.is_empty() {
         format!("https://github.com/{owner}/{repo}/pulls")
     } else {
         url
     };
+    let _ = tokio::fs::write(
+        work_dir.join("SHIP.md"),
+        format!("PR: {link}\nbranch: {branch}\n"),
+    )
+    .await;
     write_result(
         work_dir,
         &format!(
-            "Shipped {owner}/{repo} on `{branch}`.\n\nPR: {link}\n\n{}\n",
-            pr.summary
+            "Opened PR for {owner}/{repo} on `{branch}`.\n\nPR: {link}\n\n{pr_summary}\n\
+             Waiting for GitHub checks before this counts as done.\n"
         ),
     )
     .await;
-    emit_live(work_dir, "done", &format!("Opened {link}")).await;
+    emit_live(work_dir, "think", &format!("Opened {link} — waiting on checks.")).await;
     Ok(0)
 }
 
@@ -1053,7 +1532,11 @@ async fn exec_tool(
                 let _ = std::fs::create_dir_all(parent);
             }
             match std::fs::write(&path, content) {
-                Ok(()) => format!("wrote {} bytes to {rel}", content.len()),
+                Ok(()) => {
+                    emit_live(root, "code", &format!("{rel}\n{}", truncate(content, 6_000)))
+                        .await;
+                    format!("wrote {} bytes to {rel}", content.len())
+                }
                 Err(e) => format!("error: {e}"),
             }
         }
@@ -1410,6 +1893,39 @@ async fn append_log(work: &Path, s: &str) {
     append_capped(&work.join("stdout.log"), s.as_bytes(), LOG_CAP_BYTES).await;
 }
 
+fn tool_live_label(name: &str, args: &Value) -> String {
+    match name {
+        "write_file" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| format!("write_file {p}"))
+            .unwrap_or_else(|| name.to_string()),
+        "read_file" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|p| format!("read_file {p}"))
+            .unwrap_or_else(|| name.to_string()),
+        "run_bash" => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|c| {
+                let one = c.replace('\n', " ");
+                format!("run_bash {}", truncate(&one, 80))
+            })
+            .unwrap_or_else(|| name.to_string()),
+        "use_integration" | "integration_query" => {
+            let p = args.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let o = args.get("operation").and_then(|v| v.as_str()).unwrap_or(name);
+            if p.is_empty() {
+                o.to_string()
+            } else {
+                format!("{p} {o}")
+            }
+        }
+        _ => name.to_string(),
+    }
+}
+
 async fn emit_live(work: &Path, kind: &str, text: &str) {
     let text = text.trim();
     if text.is_empty() {
@@ -1691,26 +2207,102 @@ mod tests {
         assert!(files.iter().all(|(p, _)| p != "commit_payload.json"), "{files:?}");
     }
 
+    #[test]
+    fn spec_wants_push_and_branch_pr_helpers() {
+        assert!(spec_wants_push(
+            "request in #eng, make it, push it to https://github.com/OmChillure/test"
+        ));
+        assert!(!spec_wants_push("just write a local README"));
+        let data = json!({
+            "items": [
+                {"html_url": "https://github.com/OmChillure/test/pull/2", "head": "feature/calculator"},
+                {"html_url": "https://github.com/OmChillure/test/pull/9", "head": "feature/weather-app"}
+            ]
+        });
+        assert_eq!(
+            pr_url_for_branch(&data, "feature/weather-app").as_deref(),
+            Some("https://github.com/OmChillure/test/pull/9")
+        );
+        assert!(pr_url_for_branch(&data, "feature/missing").is_none());
+        assert!(file_matches_remote(
+            "export default function Weather() { return <main>Open-Meteo</main>; }\n",
+            "export default function Weather() { return <main>Open-Meteo</main>; }\n"
+        ));
+        assert!(!file_matches_remote(
+            "export default function Weather() { return <main>Open-Meteo</main>; }\n",
+            "export default function Counter() { return <button>+1</button>; }\n"
+        ));
+    }
+
+    #[test]
+    fn classify_checks_green_pending_red_none() {
+        assert_eq!(
+            classify_checks(&json!({"state": "success", "failing": []}), true),
+            CiState::Green
+        );
+        assert_eq!(
+            classify_checks(&json!({"state": "none"}), true),
+            CiState::None
+        );
+        assert_eq!(
+            classify_checks(&json!({}), true),
+            CiState::None
+        );
+        assert_eq!(
+            classify_checks(&json!({"state": "pending"}), true),
+            CiState::Pending
+        );
+        let red = classify_checks(
+            &json!({
+                "state": "failure",
+                "failing": [{"name": "test", "summary": "boom"}]
+            }),
+            true,
+        );
+        match red {
+            CiState::Red(s) => assert!(s.contains("boom"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(classify_checks(&json!({"state": "success"}), false), CiState::None);
+    }
+
     #[tokio::test]
-    async fn run_ship_reuses_existing_pr_without_io() {
+    async fn run_ship_reuses_pr_only_for_same_branch() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
         std::fs::write(
             dir.path().join("work").join("SHIP.md"),
-            "PR: https://github.com/OmChillure/test/pull/2\n",
+            "feature/weather-app PR: https://github.com/OmChillure/test/pull/9\n",
         )
         .unwrap();
         let code = run_ship(
             dir.path(),
             crate::sandbox::io::IntegrationHandle::none(),
             uuid::Uuid::nil(),
-            "ship OmChillure/test",
+            "ship OmChillure/test on feature/weather-app",
         )
         .await
         .unwrap();
         assert_eq!(code, 0);
         let result = std::fs::read_to_string(dir.path().join("result.md")).unwrap();
-        assert!(result.contains("https://github.com/OmChillure/test/pull/2"), "{result}");
+        assert!(result.contains("/pull/9"), "{result}");
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir2.path().join("work")).unwrap();
+        std::fs::write(
+            dir2.path().join("work").join("SHIP.md"),
+            "PR: https://github.com/OmChillure/test/pull/2\n",
+        )
+        .unwrap();
+        let code = run_ship(
+            dir2.path(),
+            crate::sandbox::io::IntegrationHandle::none(),
+            uuid::Uuid::nil(),
+            "ship OmChillure/test on feature/weather-app",
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 1, "unrelated PR must not count as shipped");
     }
 
     #[tokio::test]

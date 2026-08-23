@@ -85,6 +85,15 @@ pub fn authorize_url(
                 "workspaces:read projects:read projects:write tasks:read tasks:write stories:read stories:write users:read"
             ),
         ),
+        "bitbucket" => format!(
+            "https://bitbucket.org/site/oauth2/authorize?client_id={client_id}&response_type=code&state={state_enc}&redirect_uri={redirect_enc}",
+        ),
+        "confluence" => format!(
+            "https://auth.atlassian.com/authorize?audience=api.atlassian.com&client_id={client_id}&scope={scope}&redirect_uri={redirect_enc}&state={state_enc}&response_type=code&prompt=consent",
+            scope = urlencoding(
+                "read:confluence-content.all write:confluence-content read:confluence-space.summary search:confluence offline_access"
+            ),
+        ),
         "trello" => {
             // Trello's authorize flow returns the user token in the URL fragment.
             // Callback HTML lifts `#token=` into `?code=` for the shared exchange path.
@@ -125,6 +134,8 @@ pub async fn exchange_code(
         "discord" => exchange_discord(cfg, client, code).await,
         "trello" => exchange_trello(client, code).await,
         "asana" => exchange_asana(cfg, client, code).await,
+        "bitbucket" => exchange_bitbucket(cfg, client, code).await,
+        "confluence" => exchange_confluence(cfg, client, code).await,
         _ => Err(AppError::bad_request(format!(
             "OAuth is not supported for {provider}"
         ))),
@@ -482,6 +493,147 @@ async fn exchange_jira(
         }),
         account_label,
     })
+}
+
+async fn exchange_confluence(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://auth.atlassian.com/oauth/token")
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "code": code,
+            "redirect_uri": cfg.callback_url("confluence"),
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("Confluence token request failed: {e}")))?;
+
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("Confluence token parse failed: {e}")))?;
+
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        let desc = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(err);
+        return Err(AppError::bad_request(format!("Confluence OAuth: {desc}")));
+    }
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("Confluence did not return an access token"))?
+        .to_string();
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expires_in = body.get("expires_in").cloned();
+    let scope = body.get("scope").cloned();
+    let site = fetch_atlassian_site(&http, &access_token).await;
+    let (cloud_id, site_name) = match site {
+        Some((id, name)) => (Some(id), Some(name)),
+        None => (None, None),
+    };
+    let account_label = site_name.clone().or_else(|| Some("Confluence".into()));
+
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "scope": scope,
+        }),
+        config: json!({
+            "provider": "confluence",
+            "cloud_id": cloud_id,
+            "site_name": site_name,
+        }),
+        account_label,
+    })
+}
+
+async fn exchange_bitbucket(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://bitbucket.org/site/oauth2/access_token")
+        .basic_auth(&client.client_id, Some(&client.client_secret))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &cfg.callback_url("bitbucket")),
+        ])
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("Bitbucket token request failed: {e}")))?;
+
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("Bitbucket token parse failed: {e}")))?;
+
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        let desc = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(err);
+        return Err(AppError::bad_request(format!("Bitbucket OAuth: {desc}")));
+    }
+
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("Bitbucket did not return an access token"))?
+        .to_string();
+    let refresh_token = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expires_in = body.get("expires_in").cloned();
+    let scope = body.get("scopes").or_else(|| body.get("scope")).cloned();
+    let account_label = fetch_bitbucket_username(&http, &access_token)
+        .await
+        .or_else(|| Some("Bitbucket".into()));
+
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "scope": scope,
+        }),
+        config: json!({ "provider": "bitbucket" }),
+        account_label,
+    })
+}
+
+async fn fetch_bitbucket_username(http: &reqwest::Client, token: &str) -> Option<String> {
+    let res = http
+        .get("https://api.bitbucket.org/2.0/user")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    let body: Value = res.json().await.ok()?;
+    body.get("username")
+        .or_else(|| body.get("display_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 async fn fetch_atlassian_site(
@@ -995,6 +1147,54 @@ fn http_client() -> AppResult<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| AppError::internal(format!("http client: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::CredentialsKey;
+
+    fn cfg() -> IntegrationsConfig {
+        IntegrationsConfig {
+            api_public_base: "http://localhost:8080".into(),
+            ui_public_base: "http://localhost:3030".into(),
+            state_secret: "dev-change-me-to-a-long-random-secret-at-least-32-chars".into(),
+            credentials_key: CredentialsKey::from_secret(
+                "dev-change-me-to-a-long-random-secret-at-least-32-chars",
+            )
+            .expect("key"),
+            github: None,
+            gitlab: None,
+            slack: None,
+            linear: None,
+            jira: None,
+            figma: None,
+            notion: None,
+            google_drive: None,
+            teams: None,
+            discord: None,
+            trello: None,
+            asana: None,
+            bitbucket: None,
+            confluence: None,
+        }
+    }
+
+    #[test]
+    fn bitbucket_and_confluence_authorize_urls() {
+        let client = OAuthClientConfig {
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            github_app_slug: None,
+        };
+        let c = cfg();
+        let bb = authorize_url("bitbucket", &c, &client, "st").unwrap();
+        assert!(bb.contains("bitbucket.org/site/oauth2/authorize"), "{bb}");
+        assert!(bb.contains("client_id=cid"), "{bb}");
+        let cf = authorize_url("confluence", &c, &client, "st").unwrap();
+        assert!(cf.contains("auth.atlassian.com/authorize"), "{cf}");
+        assert!(cf.contains("confluence"), "{cf}");
+    }
 }
 
 fn urlencoding(s: &str) -> String {

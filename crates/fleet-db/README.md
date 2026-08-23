@@ -22,6 +22,30 @@ src/
   repos/             # query helpers (no HTTP / JWT knowledge)
 ```
 
+### Tables that exist on purpose
+
+Everything else was speculative and is dropped in `020_drop_unused.sql`.
+Do not add a table until a repo reads and writes it.
+
+| Table | Role |
+| --- | --- |
+| `users` | Accounts |
+| `workspaces` | Tenant |
+| `workspace_members` | `(workspace_id, user_id)` + `role` |
+| `workspace_invites` | Email invite, accept on signup/login |
+| `auth_sessions` | Refresh-token families |
+| `integration_connections` | Per-workspace OAuth user tokens (encrypted) |
+| `integration_oauth_apps` | Per-workspace OAuth *app* client id/secret |
+| `personas` | Agents-page custom roles |
+| `chat_conversations` / `chat_messages` | Saved chats |
+| `ticket_monitors` / `ticket_inbox` | Inbox poll + rows |
+| `cases` / `case_events` | Durable case state machine |
+| `worker_hosts` / `worker_host_pair_tokens` | Self-hosted runners |
+| `work_claims` | Remote spawn lease (`FOR UPDATE SKIP LOCKED`) |
+| `workspace_plane_runners` | Control-plane runner settings |
+
+Orchestrator tables (same database, other migrator): `projects`, `project_configs`, `work_runs`, `work_plans`, `board_tasks`, `worker_sessions`, `worker_reports`. `projects.id` is the workspace id.
+
 ### Workspaces (multi-tenant foundation)
 
 | Table | Role |

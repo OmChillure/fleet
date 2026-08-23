@@ -628,6 +628,68 @@ pub struct SpawnAssignment {
     pub worker_token: String,
 }
 
+/// Custom Agents-page persona applied at spawn.
+#[derive(Debug, Clone)]
+pub struct WorkspacePersona {
+    pub name: String,
+    pub role_prompt: String,
+    pub description: String,
+    pub model_preference: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_budget_usd: Option<f64>,
+    pub tools: serde_json::Value,
+}
+
+impl WorkspacePersona {
+    pub fn persona_markdown(&self) -> String {
+        let mut body = format!("# {}\n\n", self.name);
+        if !self.description.trim().is_empty() {
+            body.push_str(self.description.trim());
+            body.push_str("\n\n");
+        }
+        body.push_str("## Role\n\n");
+        body.push_str(self.role_prompt.trim());
+        body.push('\n');
+        if let Some(model) = self
+            .model_preference
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            body.push_str("\n## Model\n\n");
+            body.push_str(model);
+            body.push('\n');
+        }
+        if let Some(budget) = self.max_budget_usd {
+            body.push_str(&format!("\n## Budget\n\nDo not exceed ${budget:.2} USD for this task.\n"));
+        }
+        let tools = tools_csv(&self.tools);
+        if !tools.is_empty() {
+            body.push_str("\n## Tools\n\nPrefer these tools: ");
+            body.push_str(&tools);
+            body.push_str(".\n");
+        }
+        body
+    }
+}
+
+pub fn tools_csv(tools: &serde_json::Value) -> String {
+    match tools {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::String(s) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    }
+}
+
 impl Store {
     pub async fn get_project(&self, project_id: Uuid) -> Result<Option<super::ProjectRow>> {
         sqlx::query_as::<_, super::ProjectRow>(
@@ -790,22 +852,39 @@ impl Store {
         Ok(())
     }
 
-    /// Workspace custom persona (Agents page) by slug. Same DB, project_id == workspace_id.
+    /// Workspace custom persona (Agents page) by slug, name, or worker_profile.
     pub async fn find_workspace_persona(
         &self,
         workspace_id: Uuid,
         slug: &str,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<WorkspacePersona>> {
         let key = slug.trim();
         if key.is_empty() {
             return Ok(None);
         }
-        let row = sqlx::query_as::<_, (String, String, String)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<f64>,
+                Option<f64>,
+                serde_json::Value,
+            ),
+        >(
             r#"
-            SELECT name, role_prompt, COALESCE(description, '')
+            SELECT name, role_prompt, COALESCE(description, ''),
+                   model_preference, temperature, max_budget_usd, tools
             FROM personas
             WHERE workspace_id = $1 AND status = 'active'
-              AND (slug = $2 OR lower(name) = lower($2))
+              AND (slug = $2 OR lower(name) = lower($2) OR worker_profile = $2)
+            ORDER BY CASE
+                WHEN slug = $2 THEN 0
+                WHEN lower(name) = lower($2) THEN 1
+                ELSE 2
+            END
             LIMIT 1
             "#,
         )
@@ -814,16 +893,16 @@ impl Store {
         .fetch_optional(&self.pool)
         .await;
         match row {
-            Ok(Some((name, role, desc))) => {
-                let mut body = format!("# {name}\n\n");
-                if !desc.trim().is_empty() {
-                    body.push_str(desc.trim());
-                    body.push_str("\n\n");
-                }
-                body.push_str("## Role\n\n");
-                body.push_str(role.trim());
-                body.push('\n');
-                Ok(Some((name, body)))
+            Ok(Some((name, role, desc, model, temp, budget, tools))) => {
+                Ok(Some(WorkspacePersona {
+                    name,
+                    role_prompt: role,
+                    description: desc,
+                    model_preference: model,
+                    temperature: temp,
+                    max_budget_usd: budget,
+                    tools,
+                }))
             }
             Ok(None) => Ok(None),
             Err(e) => {

@@ -1,6 +1,6 @@
 //! Inbox ingest: the Inbox page (Start monitor) or chat tool `monitor_tickets`
 //! watches connected sources. Chat `finish_ticket` loads the spec for the model
-//! to plan. Inbox Finish launches one generalist — the worker chooses tools.
+//! to plan. Inbox Finish asks the workspace model for a DAG, then launches it.
 //!
 //! Sources: GitHub / GitLab issues, Jira, Linear, Slack, Notion.
 //! Tokens stay on the control plane.
@@ -13,7 +13,7 @@ use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
 use fleet_db::TicketInboxItem;
 use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
-use fleet_orchestrator::domain::{ExternalRef, PlanTask};
+use fleet_orchestrator::domain::{ExternalRef, PlanIo, PlanTask};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -1662,9 +1662,17 @@ pub async fn finish_and_launch(
         .store
         .set_auto_sync_external(workspace_id, true)
         .await;
-    let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
+    let planned = plan_ticket_with_model(state, workspace_id, &prep).await;
+    let (tasks, outputs, planned_by_model) = match planned {
+        Some(p) => (p.tasks, p.outputs, true),
+        None => (prep.tasks.clone(), Vec::new(), false),
+    };
+    let mut plan = build_multi_task_plan(workspace_id, None, tasks);
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = true;
+    if !outputs.is_empty() {
+        plan.policy.outputs = outputs;
+    }
     stamp_inbox_llm(&mut plan, state, workspace_id).await;
     let (run, _) = state
         .orch
@@ -1684,6 +1692,7 @@ pub async fn finish_and_launch(
     Ok(json!({
         "ok": true,
         "run_id": run.id,
+        "planned_by_model": planned_by_model,
         "ticket": {
             "provider": prep.item.provider,
             "key": prep.item.external_key,
@@ -1691,6 +1700,167 @@ pub async fn finish_and_launch(
         },
         "title": prep.title,
     }))
+}
+
+struct PlannedInbox {
+    tasks: Vec<PlanTask>,
+    outputs: Vec<PlanIo>,
+}
+
+async fn plan_ticket_with_model(
+    state: &AppState,
+    workspace_id: Uuid,
+    prep: &PreparedFinish,
+) -> Option<PlannedInbox> {
+    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
+    let catalog = crate::chat_tools::connector_catalog_markdown(&[]);
+    let spec = prep
+        .tasks
+        .first()
+        .map(|t| t.spec_md.as_str())
+        .unwrap_or("");
+    let system = "You plan Agent Fleet inbox work. Reply with a single JSON object, no markdown.\n\
+{\"tasks\":[{\"id\":\"t1\",\"title\":\"...\",\"spec\":\"...\",\"worker_profile\":\"generalist\",\"depends_on\":[]}],\
+\"outputs\":[{\"provider\":\"jira\",\"operation\":\"add_comment\",\"args\":{}}]}\n\
+Rules: 1-6 tasks. Pick worker_profile from the request (generalist, coding, reviewer, …). \
+Use only connectors in the catalog. Do not assume coding or a PR. \
+outputs are write-backs when the run ends.";
+    let user = format!(
+        "Ticket: {title}\nSource: {provider} {key}\n\n{spec}\n\n{catalog}",
+        title = prep.title,
+        provider = prep.item.provider,
+        key = prep.item.external_key,
+    );
+    let raw = complete_for_planner(state, &llm, system, &user).await?;
+    parse_planned_inbox(&raw, prep)
+}
+
+async fn complete_for_planner(
+    state: &AppState,
+    llm: &crate::chat_tools::ChatLlmContext,
+    system: &str,
+    user: &str,
+) -> Option<String> {
+    let provider = llm.provider.trim().to_ascii_lowercase();
+    if provider == "grok" || provider.is_empty() && state.grok.enabled {
+        if let Ok(s) = crate::grok::complete_text(&state.grok, &llm.model, system, user).await {
+            return Some(s);
+        }
+    }
+    if provider == "ollama" || state.ollama.enabled {
+        if let Ok(s) = crate::chat::complete_text(&state.ollama, &llm.model, system, user).await {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn parse_planned_inbox(raw: &str, prep: &PreparedFinish) -> Option<PlannedInbox> {
+    let obj = extract_json_object(raw)?;
+    let tasks_v = obj.get("tasks")?.as_array()?;
+    if tasks_v.is_empty() {
+        return None;
+    }
+    let ext = ExternalRef {
+        provider: prep.item.provider.clone(),
+        key: prep.item.external_key.clone(),
+    };
+    let mut tasks = Vec::new();
+    for (i, t) in tasks_v.iter().take(8).enumerate() {
+        let id = t
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("t")
+            .to_string();
+        let title = t
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(prep.title.as_str())
+            .to_string();
+        let spec = t
+            .get("spec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let profile = t
+            .get("worker_profile")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("generalist")
+            .to_string();
+        let depends_on: Vec<String> = t
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let plan_task_id = if id == "t" {
+            format!("t{}", i + 1)
+        } else {
+            id
+        };
+        tasks.push(PlanTask {
+            plan_task_id,
+            title: title.chars().take(200).collect(),
+            summary: spec.chars().take(280).collect(),
+            spec_md: spec,
+            depends_on,
+            worker_profile: profile,
+            acceptance: vec!["result.md exists and is non-empty".into()],
+            priority: 100 - i as i32,
+            external_ref: Some(ext.clone()),
+            timeout_s: Some(3600),
+            max_retries: Some(1),
+        });
+    }
+    if tasks.is_empty() {
+        return None;
+    }
+    let mut outputs = Vec::new();
+    if let Some(arr) = obj.get("outputs").and_then(|v| v.as_array()) {
+        for o in arr {
+            let provider = o
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty());
+            let operation = o
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty());
+            let (Some(provider), Some(operation)) = (provider, operation) else {
+                continue;
+            };
+            outputs.push(PlanIo {
+                provider,
+                operation,
+                args: o.get("args").cloned().unwrap_or(json!({})),
+            });
+        }
+    }
+    Some(PlannedInbox { tasks, outputs })
+}
+
+fn extract_json_object(raw: &str) -> Option<Value> {
+    let s = raw.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(s) {
+        if v.is_object() {
+            return Some(v);
+        }
+    }
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    serde_json::from_str(&s[start..=end]).ok()
 }
 
 async fn stamp_inbox_llm(
@@ -1754,6 +1924,45 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].worker_profile, "generalist");
         assert!(!tasks.iter().any(|t| t.worker_profile.contains("review")));
+    }
+
+    #[test]
+    fn parse_planned_inbox_builds_dag_with_external_ref() {
+        let prep = PreparedFinish {
+            item: TicketInboxItem {
+                id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                provider: "jira".into(),
+                external_key: "ENG-1".into(),
+                title: "Fix login".into(),
+                url: None,
+                state: "open".into(),
+                summary: String::new(),
+                run_id: None,
+                last_seen_at: Utc::now(),
+                created_at: Utc::now(),
+            },
+            tasks: vec![],
+            title: "ENG-1: Fix login".into(),
+        };
+        let raw = r#"
+        here is the plan
+        {"tasks":[
+          {"id":"read","title":"Read ticket","spec":"fetch jira","worker_profile":"generalist"},
+          {"id":"do","title":"Do work","spec":"implement","worker_profile":"coding","depends_on":["read"]}
+        ],"outputs":[{"provider":"Jira","operation":"add_comment","args":{"key":"ENG-1"}}]}
+        "#;
+        let planned = parse_planned_inbox(raw, &prep).expect("plan");
+        assert_eq!(planned.tasks.len(), 2);
+        assert_eq!(planned.tasks[0].plan_task_id, "read");
+        assert_eq!(planned.tasks[1].depends_on, vec!["read"]);
+        assert_eq!(planned.tasks[1].worker_profile, "coding");
+        let ext = planned.tasks[0].external_ref.as_ref().unwrap();
+        assert_eq!(ext.provider, "jira");
+        assert_eq!(ext.key, "ENG-1");
+        assert_eq!(planned.outputs.len(), 1);
+        assert_eq!(planned.outputs[0].provider, "jira");
+        assert_eq!(planned.outputs[0].operation, "add_comment");
     }
 
     #[test]

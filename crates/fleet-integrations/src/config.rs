@@ -44,6 +44,8 @@ pub struct IntegrationsConfig {
     pub discord: Option<OAuthClientConfig>,
     pub trello: Option<OAuthClientConfig>,
     pub asana: Option<OAuthClientConfig>,
+    pub bitbucket: Option<OAuthClientConfig>,
+    pub confluence: Option<OAuthClientConfig>,
 }
 
 impl IntegrationsConfig {
@@ -83,6 +85,8 @@ impl IntegrationsConfig {
             discord: optional_oauth("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET")?,
             trello: optional_oauth("TRELLO_CLIENT_ID", "TRELLO_CLIENT_SECRET")?,
             asana: optional_oauth("ASANA_CLIENT_ID", "ASANA_CLIENT_SECRET")?,
+            bitbucket: optional_oauth("BITBUCKET_CLIENT_ID", "BITBUCKET_CLIENT_SECRET")?,
+            confluence: optional_oauth("CONFLUENCE_CLIENT_ID", "CONFLUENCE_CLIENT_SECRET")?,
         })
     }
 
@@ -100,6 +104,8 @@ impl IntegrationsConfig {
             "discord" => self.discord.as_ref(),
             "trello" => self.trello.as_ref(),
             "asana" => self.asana.as_ref(),
+            "bitbucket" => self.bitbucket.as_ref(),
+            "confluence" => self.confluence.as_ref(),
             _ => None,
         }
     }

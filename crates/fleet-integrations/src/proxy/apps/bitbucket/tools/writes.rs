@@ -204,6 +204,56 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     )
 }
 
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let (ws, repo) = match require_repo(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("bitbucket", "update_issue", "bad_args", e, None),
+    };
+    let id = args
+        .get("issue")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+    let Some(id) = id else {
+        return ProxyResult::err(
+            "bitbucket",
+            "update_issue",
+            "bad_args",
+            "issue id is required",
+            None,
+        );
+    };
+    let mut payload = json!({});
+    if let Some(state) = args.get("state").and_then(|v| v.as_str()).map(str::trim) {
+        if !state.is_empty() {
+            payload["state"] = json!(state);
+        }
+    }
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+        payload["title"] = json!(title);
+    }
+    if payload.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        return ProxyResult::err(
+            "bitbucket",
+            "update_issue",
+            "bad_args",
+            "provide state and/or title",
+            None,
+        );
+    }
+    let url = repo_url(&ws, &repo, &format!("/issues/{id}"));
+    let (status, body) = bb_put(http, token, &url, &payload).await;
+    if !(200..300).contains(&status) {
+        return upstream_err("update_issue", status, &body);
+    }
+    ProxyResult::ok_result(
+        "bitbucket",
+        "update_issue",
+        format!("Updated issue {id} on {ws}/{repo}"),
+        map_issue(&body),
+        Some(status),
+    )
+}
+
 pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (ws, repo) = match require_repo(args) {
         Ok(v) => v,

@@ -247,3 +247,25 @@ async fn update_fleet_settings_ollama_and_rejects_unknown_as_off() {
     assert_eq!(again.fleet_llm, "off");
     assert_eq!(again.max_agents, 1);
 }
+
+#[tokio::test]
+async fn unused_speculative_tables_are_dropped() {
+    let store = setup().await;
+    for name in [
+        "project_leases",
+        "idempotency_keys",
+        "orchestration_events",
+    ] {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = $1
+            )",
+        )
+        .bind(name)
+        .fetch_one(store.pool())
+        .await
+        .unwrap_or_else(|e| panic!("table exists check for {name}: {e}"));
+        assert!(!exists, "{name} is unused and must not exist after migrate");
+    }
+}

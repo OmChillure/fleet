@@ -97,10 +97,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "bitbucket".into(),
             name: "Bitbucket".into(),
-            description: "Connect Bitbucket Cloud for PRs and pipelines. Tools are ready; OAuth connect is coming soon.".into(),
+            description: "Sign in with Bitbucket Cloud so agents can work with repos, PRs, and issues.".into(),
             category: IntegrationCategory::CodeVersioning,
             category_label: "Source control".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "bitbucket".into(),
             docs_url: Some("https://developer.atlassian.com/cloud/bitbucket/oauth-2/".into()),
             auth_method: AuthMethod::Oauth,
@@ -182,10 +182,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "confluence".into(),
             name: "Confluence".into(),
-            description: "Pull Confluence pages as agent context and publish status. Tools are ready; OAuth connect is coming soon.".into(),
+            description: "Authorize Confluence so agents can read pages and publish status.".into(),
             category: IntegrationCategory::TaskControl,
             category_label: "Docs".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "confluence".into(),
             docs_url: Some("https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/".into()),
             auth_method: AuthMethod::Oauth,
@@ -273,6 +273,8 @@ pub fn oauth_app_create_url(provider: &str) -> Option<&'static str> {
         "discord" => "https://discord.com/developers/applications",
         "trello" => "https://trello.com/power-ups/admin",
         "asana" => "https://app.asana.com/0/my-apps",
+        "bitbucket" => "https://bitbucket.org/account/settings/oauth-consumers/",
+        "confluence" => "https://developer.atlassian.com/console/myapps/",
         _ => return None,
     })
 }
@@ -316,6 +318,22 @@ mod tests {
         assert_eq!(
             oauth_app_create_url("trello"),
             Some("https://trello.com/power-ups/admin")
+        );
+    }
+
+    #[test]
+    fn bitbucket_and_confluence_are_available() {
+        let b = find_provider("bitbucket").expect("bitbucket");
+        assert_eq!(b.availability, IntegrationAvailability::Available);
+        assert_eq!(
+            oauth_app_create_url("bitbucket"),
+            Some("https://bitbucket.org/account/settings/oauth-consumers/")
+        );
+        let c = find_provider("confluence").expect("confluence");
+        assert_eq!(c.availability, IntegrationAvailability::Available);
+        assert_eq!(
+            oauth_app_create_url("confluence"),
+            Some("https://developer.atlassian.com/console/myapps/")
         );
     }
 

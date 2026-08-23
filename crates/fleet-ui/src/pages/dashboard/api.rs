@@ -32,6 +32,8 @@ pub struct Overview {
     #[serde(default)]
     pub tasks_in_progress: u64,
     #[serde(default)]
+    pub tasks_blocked: u64,
+    #[serde(default)]
     pub changes_requested: u64,
     #[serde(default)]
     pub focus_run_id: Option<String>,

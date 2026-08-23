@@ -627,3 +627,26 @@ async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable()
         "disclaimer must still have been recorded"
     );
 }
+
+#[tokio::test]
+async fn unused_speculative_tables_are_dropped() {
+    let pool = connect_and_migrate().await;
+    for name in [
+        "audit_events",
+        "project_leases",
+        "idempotency_keys",
+        "orchestration_events",
+    ] {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = $1
+            )",
+        )
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("table exists check for {name}: {e}"));
+        assert!(!exists, "{name} is unused and must not exist after migrate");
+    }
+}

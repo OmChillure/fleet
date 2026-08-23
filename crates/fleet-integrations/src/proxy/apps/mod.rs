@@ -141,6 +141,7 @@ mod tests {
         let ops = operations_for("github");
         assert!(ops.contains(&"commit_files"));
         assert!(ops.contains(&"create_pr"));
+        assert!(ops.contains(&"list_checks"));
     }
 
     #[test]

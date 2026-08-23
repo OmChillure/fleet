@@ -229,6 +229,23 @@ impl ExternalBoardSync for IoBoardSync {
                             .await,
                             "bitbucket.add_comment",
                         );
+                        if let Some(state) = bitbucket_issue_state(&item.status) {
+                            log_io(
+                                inv.invoke(
+                                    ws,
+                                    "bitbucket".into(),
+                                    "update_issue".into(),
+                                    json!({
+                                        "workspace": workspace,
+                                        "repo": repo,
+                                        "issue": id,
+                                        "state": state,
+                                    }),
+                                )
+                                .await,
+                                "bitbucket.update_issue",
+                            );
+                        }
                     }
                 }
             }
@@ -243,6 +260,18 @@ impl ExternalBoardSync for IoBoardSync {
                     .await,
                     "trello.add_comment",
                 );
+                if matches!(item.status.as_str(), "done_success" | "done_failed" | "cancelled") {
+                    log_io(
+                        inv.invoke(
+                            ws,
+                            "trello".into(),
+                            "update_card".into(),
+                            json!({ "card_id": key, "closed": true }),
+                        )
+                        .await,
+                        "trello.update_card",
+                    );
+                }
             }
             "asana" => {
                 log_io(
@@ -255,6 +284,18 @@ impl ExternalBoardSync for IoBoardSync {
                     .await,
                     "asana.add_comment",
                 );
+                if matches!(item.status.as_str(), "done_success") {
+                    log_io(
+                        inv.invoke(
+                            ws,
+                            "asana".into(),
+                            "update_task".into(),
+                            json!({ "gid": key, "completed": true }),
+                        )
+                        .await,
+                        "asana.update_task",
+                    );
+                }
             }
             "slack" => {
                 if let Some((channel, ts)) = key.split_once(':') {
@@ -351,6 +392,15 @@ fn linear_state_type(status: &str) -> Option<&'static str> {
 fn github_issue_state(status: &str) -> Option<&'static str> {
     match status {
         "done_success" | "done_failed" | "cancelled" => Some("closed"),
+        _ => None,
+    }
+}
+
+fn bitbucket_issue_state(status: &str) -> Option<&'static str> {
+    match status {
+        "done_success" => Some("resolved"),
+        "done_failed" | "cancelled" => Some("closed"),
+        "in_progress" | "assigned" => Some("open"),
         _ => None,
     }
 }
@@ -534,6 +584,9 @@ mod tests {
             ("jira", "WEB-1"),
             ("linear", "ENG-9"),
             ("github", "acme/app#4"),
+            ("bitbucket", "acme/app#4"),
+            ("trello", "card1"),
+            ("asana", "123"),
         ] {
             sync.sync_task_status(TaskStatusSync {
                 board_task_id: uuid::Uuid::new_v4(),
@@ -553,6 +606,9 @@ mod tests {
         assert!(ops.contains(&"jira.transition_issue".into()), "{ops:?}");
         assert!(ops.contains(&"linear.update_issue".into()), "{ops:?}");
         assert!(ops.contains(&"github.update_issue".into()), "{ops:?}");
+        assert!(ops.contains(&"bitbucket.update_issue".into()), "{ops:?}");
+        assert!(ops.contains(&"trello.update_card".into()), "{ops:?}");
+        assert!(ops.contains(&"asana.update_task".into()), "{ops:?}");
         let gh = calls
             .iter()
             .find(|(p, o, _)| p == "github" && o == "update_issue")

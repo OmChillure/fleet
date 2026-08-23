@@ -13,7 +13,7 @@ pub use host_pool::{
 };
 pub use models::*;
 pub use pool::*;
-pub use tick_ops::SpawnAssignment;
+pub use tick_ops::{tools_csv, SpawnAssignment, WorkspacePersona};
 
 use crate::domain::{WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id};
 use crate::validate::validate_plan;

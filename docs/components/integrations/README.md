@@ -26,9 +26,8 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 | Discord | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | OAuth implemented |
 | Trello | `TRELLO_CLIENT_ID` / `TRELLO_CLIENT_SECRET` | OAuth implemented (API key + user token) |
 | Asana | `ASANA_CLIENT_ID` / `ASANA_CLIENT_SECRET` | OAuth implemented |
-
-Other catalog entries (Bitbucket, Confluence, …) may appear as
-**Coming soon** until OAuth is wired.
+| Bitbucket | `BITBUCKET_CLIENT_ID` / `BITBUCKET_CLIENT_SECRET` | OAuth implemented |
+| Confluence | `CONFLUENCE_CLIENT_ID` / `CONFLUENCE_CLIENT_SECRET` | OAuth implemented (Atlassian 3LO) |
 
 ### Chat + apps
 
@@ -125,7 +124,7 @@ register playbooks): GitHub and GitLab read/write; Slack channels/messages/threa
 Notion search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
 Drive list/export; Teams chat/channel send; Discord identity + guilds;
 Trello boards/cards; Asana tasks; Bitbucket repos/PRs/issues; Confluence pages.
-Coming soon (OAuth not wired; tools already exist): Bitbucket, Confluence.
+All catalog providers above have OAuth connect. If client id/secret is unset, Connect still starts a one-time app form then consent.
 
 ---
 

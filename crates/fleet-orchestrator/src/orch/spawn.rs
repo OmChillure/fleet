@@ -154,14 +154,16 @@ pub async fn schedule_and_spawn(
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
         let mut persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
-        if let Ok(Some((name, body))) = store
+        let workspace_persona = store
             .find_workspace_persona(project_id, &task.worker_profile)
             .await
-        {
-            persona.name = name;
-            persona.body = body;
+            .ok()
+            .flatten();
+        if let Some(ref ws_p) = workspace_persona {
+            persona.name = ws_p.name.clone();
+            persona.body = ws_p.persona_markdown();
         }
-        let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
+        let mut llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
             cached.clone()
         } else {
             let plan = store.get_plan_body(task.plan_id).await.ok().flatten();
@@ -174,6 +176,9 @@ pub async fn schedule_and_spawn(
             plan_llms.insert(task.plan_id, resolved.clone());
             resolved
         };
+        if let Some(ref ws_p) = workspace_persona {
+            apply_persona_llm(&mut llm, ws_p);
+        }
         let mut req = SpawnRequest {
             session_id: assignment.session_id,
             project_id,
@@ -198,6 +203,20 @@ pub async fn schedule_and_spawn(
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
+        if let Some(ref ws_p) = workspace_persona {
+            if let Some(budget) = ws_p.max_budget_usd {
+                req.env
+                    .insert("FLEET_MAX_BUDGET_USD".into(), format!("{budget:.2}"));
+            }
+            let tools = crate::store::tools_csv(&ws_p.tools);
+            if !tools.is_empty() {
+                req.env.insert("FLEET_PERSONA_TOOLS".into(), tools);
+            }
+            if let Some(temp) = ws_p.temperature {
+                req.env
+                    .insert("FLEET_PERSONA_TEMPERATURE".into(), format!("{temp}"));
+            }
+        }
         super::session_context::pass_through_driver_env(&mut req.env);
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
@@ -346,4 +365,98 @@ pub async fn apply_retry_after_failure(
         RetryAction::None => {}
     }
     Ok(())
+}
+
+/// Workspace persona model_preference wins over the plan/settings default
+/// unless it is `auto`.
+pub fn apply_persona_llm(
+    llm: &mut crate::sandbox::agent_loop::WorkerLlm,
+    persona: &crate::store::WorkspacePersona,
+) {
+    let Some(raw) = persona
+        .model_preference
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+    else {
+        return;
+    };
+    if let Some(backend) = crate::sandbox::agent_loop::normalize_provider(raw) {
+        llm.backend = Some(backend.clone());
+        llm.model = match backend.as_str() {
+            "grok" => Some("grok-4.5".into()),
+            "ollama" => Some(
+                std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into()),
+            ),
+            other => Some(other.to_string()),
+        };
+        return;
+    }
+    llm.model = Some(raw.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::WorkspacePersona;
+    use serde_json::json;
+
+    #[test]
+    fn persona_markdown_includes_model_tools_budget() {
+        let p = WorkspacePersona {
+            name: "Reviewer".into(),
+            role_prompt: "Be strict.".into(),
+            description: "PR reviews".into(),
+            model_preference: Some("grok".into()),
+            temperature: Some(0.2),
+            max_budget_usd: Some(3.5),
+            tools: json!(["git", "github"]),
+        };
+        let md = p.persona_markdown();
+        assert!(md.contains("# Reviewer"));
+        assert!(md.contains("Be strict."));
+        assert!(md.contains("## Model"));
+        assert!(md.contains("grok"));
+        assert!(md.contains("$3.50"));
+        assert!(md.contains("git, github"));
+    }
+
+    #[test]
+    fn persona_model_preference_overrides_auto() {
+        let p = WorkspacePersona {
+            name: "X".into(),
+            role_prompt: "r".into(),
+            description: String::new(),
+            model_preference: Some("ollama".into()),
+            temperature: None,
+            max_budget_usd: None,
+            tools: json!([]),
+        };
+        let mut llm = crate::sandbox::agent_loop::WorkerLlm {
+            backend: Some("grok".into()),
+            model: Some("grok-4.5".into()),
+        };
+        apply_persona_llm(&mut llm, &p);
+        assert_eq!(llm.backend.as_deref(), Some("ollama"));
+        assert!(llm.model.as_deref().is_some());
+    }
+
+    #[test]
+    fn persona_auto_leaves_plan_llm() {
+        let p = WorkspacePersona {
+            name: "X".into(),
+            role_prompt: "r".into(),
+            description: String::new(),
+            model_preference: Some("auto".into()),
+            temperature: None,
+            max_budget_usd: None,
+            tools: json!([]),
+        };
+        let mut llm = crate::sandbox::agent_loop::WorkerLlm {
+            backend: Some("grok".into()),
+            model: Some("grok-4.5".into()),
+        };
+        apply_persona_llm(&mut llm, &p);
+        assert_eq!(llm.backend.as_deref(), Some("grok"));
+    }
 }

@@ -33,7 +33,7 @@ src/
   sync/       # ExternalBoardSync + Noop/Log (PR4)
   store/      # Postgres repositories + migrate (PR3)
   orch/       # reconcile tick PR5a–c (materialize → spawn → cancel → rollup)
-migrations/   # 001_init.sql
+migrations/   # sqlx versions (init + follow-ups; unused tables dropped)
 tests/        # store_integration, tick_integration (need DATABASE_URL)
 schemas/workplan.v1.json
 ```

@@ -68,6 +68,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         discord: None,
         trello: None,
         asana: None,
+        bitbucket: None,
+        confluence: None,
     }
 }
 
@@ -917,7 +919,7 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
-    // Catalog: github + gitlab available; bitbucket still coming_soon.
+    // Catalog: github + gitlab + bitbucket available.
     let list = call(
         &app,
         "GET",
@@ -954,7 +956,12 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     assert_eq!(gitlab["availability"], "available", "{gitlab}");
     assert_eq!(trello["availability"], "available", "{trello}");
     assert_eq!(asana["availability"], "available", "{asana}");
-    assert_eq!(bitbucket["availability"], "coming_soon", "{bitbucket}");
+    assert_eq!(bitbucket["availability"], "available", "{bitbucket}");
+    let confluence = items
+        .iter()
+        .find(|i| i["id"] == "confluence")
+        .unwrap_or_else(|| panic!("confluence missing: {}", list.body));
+    assert_eq!(confluence["availability"], "available", "{confluence}");
     assert_eq!(
         github["oauth_start_path"],
         format!("/api/workspaces/{ws}/integrations/github/oauth/start"),
@@ -967,12 +974,17 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     );
     assert_eq!(
         bitbucket["oauth_start_path"],
-        serde_json::Value::Null,
-        "coming-soon providers must not expose oauth/start: {bitbucket}"
+        format!("/api/workspaces/{ws}/integrations/bitbucket/oauth/start"),
+        "bitbucket exposes oauth/start: {bitbucket}"
+    );
+    assert_eq!(
+        confluence["oauth_start_path"],
+        format!("/api/workspaces/{ws}/integrations/confluence/oauth/start"),
+        "confluence exposes oauth/start: {confluence}"
     );
 
-    // Coming-soon OAuth start → 4xx (not 500 / not 302).
-    let start = call(
+    // Bitbucket without a server client serves the one-time OAuth app form (not 500).
+    let bb_start = call(
         &app,
         "GET",
         &format!("/api/workspaces/{ws}/integrations/bitbucket/oauth/start"),
@@ -980,21 +992,12 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         None,
     )
     .await;
-    assert!(
-        start.status.is_client_error(),
-        "coming-soon oauth start must be 4xx not {}: {}",
-        start.status,
-        start.body
-    );
-    assert_eq!(start.status, StatusCode::BAD_REQUEST, "{}", start.body);
-    assert!(
-        start.body["error"]
-            .as_str()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .contains("not available"),
-        "coming-soon start should say not available: {}",
-        start.body
+    assert_eq!(
+        bb_start.status,
+        StatusCode::OK,
+        "bitbucket without a server client must serve the bootstrap form: {} {}",
+        bb_start.status,
+        bb_start.body
     );
 
     // GitLab without a server client serves the one-time OAuth app form.
