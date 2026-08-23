@@ -221,7 +221,7 @@ cmd_guide() {
 
   pause_step "Inbox" \
     "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
-    "Start monitor + Refresh now. Finish launches implement + review." \
+    "Start monitor + Refresh now. Finish plans a DAG then launches it." \
     "Empty is OK until Integrations are connected." || return 0
 
   pause_step "Settings members" \

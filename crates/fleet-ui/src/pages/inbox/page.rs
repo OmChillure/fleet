@@ -64,7 +64,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Inbox" }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Watches every connected integration. Finish starts one generalist on the item — the agent chooses tools from what you asked. Chat finish_ticket only loads the spec so the model can plan."
+                        "Watches every connected integration. Finish asks the workspace model to plan a DAG from the item (tools from the catalog), then launches it. Chat finish_ticket only loads the spec."
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "{status_line}" }
                     if let Some(err) = monitor().and_then(|m| m.last_error) {

@@ -1,5 +1,5 @@
-//! Bitbucket Cloud control-plane tools. OAuth may still be “coming soon”;
-//! ops are live so `integration_query` works the moment a connection exists.
+//! Bitbucket Cloud control-plane tools. OAuth connect is live;
+//! `integration_query` works the moment a connection exists.
 
 mod client;
 pub mod tools;

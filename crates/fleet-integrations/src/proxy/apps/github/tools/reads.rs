@@ -317,3 +317,168 @@ pub(crate) async fn list_commits(
     )
 }
 
+/// Combined commit status + check runs. `state` is success | pending | failure | none.
+pub(crate) async fn list_checks(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let (owner, repo) = match require_owner_repo(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("github", "list_checks", "bad_args", e, None),
+    };
+    let git_ref = args
+        .get("ref")
+        .or_else(|| args.get("sha"))
+        .or_else(|| args.get("branch"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HEAD");
+    let enc = urlencoding(git_ref);
+    let (st_status, status_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}/commits/{enc}/status"),
+    )
+    .await;
+    if st_status != 0 && !(200..300).contains(&st_status) {
+        return upstream_err("list_checks", st_status, &status_body);
+    }
+    let (st_runs, runs_body) = github_get(
+        http,
+        token,
+        &format!(
+            "https://api.github.com/repos/{owner}/{repo}/commits/{enc}/check-runs?per_page=50"
+        ),
+    )
+    .await;
+    if st_runs != 0 && !(200..300).contains(&st_runs) && st_status == 0 {
+        return upstream_err("list_checks", st_runs, &runs_body);
+    }
+
+    let mut items = Vec::new();
+    let mut failing = Vec::new();
+    let mut pending = false;
+    let mut saw_any = false;
+
+    if let Some(arr) = status_body.get("statuses").and_then(|v| v.as_array()) {
+        for s in arr {
+            saw_any = true;
+            let context = s
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("status")
+                .to_string();
+            let state = s
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let desc = s
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if state == "pending" {
+                pending = true;
+            }
+            if state == "failure" || state == "error" {
+                failing.push(json!({ "name": context, "state": state, "summary": desc }));
+            }
+            items.push(json!({ "name": context, "state": state, "summary": desc }));
+        }
+    }
+
+    if let Some(arr) = runs_body.get("check_runs").and_then(|v| v.as_array()) {
+        for r in arr {
+            saw_any = true;
+            let name = r
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("check")
+                .to_string();
+            let status = r
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let conclusion = r
+                .get("conclusion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let summary = r
+                .pointer("/output/summary")
+                .or_else(|| r.pointer("/output/title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if status != "completed" {
+                pending = true;
+            }
+            let bad = matches!(
+                conclusion.as_str(),
+                "failure" | "timed_out" | "cancelled" | "startup_failure" | "stale" | "action_required"
+            );
+            if bad {
+                failing.push(json!({
+                    "name": name,
+                    "state": conclusion,
+                    "summary": summary,
+                }));
+            }
+            items.push(json!({
+                "name": name,
+                "status": status,
+                "conclusion": conclusion,
+                "summary": truncate_str(&summary, 800),
+            }));
+        }
+    }
+
+    let combined = status_body
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if combined == "pending" {
+        pending = true;
+    }
+    if combined == "failure" || combined == "error" {
+        if failing.is_empty() {
+            failing.push(json!({
+                "name": "combined",
+                "state": combined,
+                "summary": "commit status failed",
+            }));
+        }
+    }
+
+    let state = if !failing.is_empty() {
+        "failure"
+    } else if pending {
+        "pending"
+    } else if !saw_any {
+        "none"
+    } else {
+        "success"
+    };
+    let n_fail = failing.len();
+    let summary = match state {
+        "failure" => format!("{n_fail} check(s) failed on {owner}/{repo}@{git_ref}"),
+        "pending" => format!("Checks still running on {owner}/{repo}@{git_ref}"),
+        "none" => format!("No CI checks on {owner}/{repo}@{git_ref}"),
+        _ => format!("Checks green on {owner}/{repo}@{git_ref}"),
+    };
+    ProxyResult::ok_result(
+        "github",
+        "list_checks",
+        summary,
+        json!({
+            "owner": owner,
+            "repo": repo,
+            "ref": git_ref,
+            "state": state,
+            "failing": failing,
+            "items": items,
+        }),
+        Some(if st_runs != 0 { st_runs } else { st_status }),
+    )
+}
+

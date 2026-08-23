@@ -574,39 +574,125 @@ async fn get_overview(
         .iter()
         .filter(|t| matches!(t.status.as_str(), "assigned" | "in_progress"))
         .count();
+    let blocked = tasks
+        .iter()
+        .filter(|t| matches!(t.status.as_str(), "blocked" | "retry_wait"))
+        .count();
     let changes = tasks
         .iter()
         .filter(|t| t.failure_reason.as_deref() == Some("changes_requested"))
         .count();
+    let open_ids: std::collections::HashSet<uuid::Uuid> = runs
+        .iter()
+        .filter(|r| !matches!(r.status.as_str(), "completed" | "failed" | "cancelled"))
+        .map(|r| r.id)
+        .collect();
+    let mut board: Vec<&fleet_orchestrator::store::BoardTaskRow> = tasks
+        .iter()
+        .filter(|t| open_ids.contains(&t.run_id))
+        .collect();
+    if board.len() < 60 {
+        for t in &tasks {
+            if board.len() >= 60 {
+                break;
+            }
+            if !board.iter().any(|x| x.id == t.id) {
+                board.push(t);
+            }
+        }
+    }
+    let sess_by_id: std::collections::HashMap<uuid::Uuid, &fleet_orchestrator::store::WorkerSessionRow> =
+        sessions.iter().map(|s| (s.id, s)).collect();
+    let sess_by_task: std::collections::HashMap<uuid::Uuid, &fleet_orchestrator::store::WorkerSessionRow> = {
+        let mut m = std::collections::HashMap::new();
+        for s in &sessions {
+            m.insert(s.board_task_id, s);
+        }
+        m
+    };
+
+    let mut waiting_all = waiting;
+    for rid in open_ids.iter().take(8) {
+        if Some(*rid) == run_id {
+            continue;
+        }
+        let talk = fleet_orchestrator::sandbox::team_chat::TeamTalk::from_spawn(
+            state.orch.tick.data_dir(),
+            workspace_id,
+            *rid,
+            "human",
+            "human",
+        );
+        let extra = fleet_orchestrator::sandbox::team_chat::list_messages(&talk).await;
+        let replied_x: std::collections::HashSet<uuid::Uuid> =
+            extra.iter().filter_map(|m| m.in_reply_to).collect();
+        for m in extra {
+            if m.kind == "ask" && !replied_x.contains(&m.id) {
+                waiting_all.push(json!({
+                    "id": m.id,
+                    "from": m.from,
+                    "from_profile": m.from_profile,
+                    "to": m.to,
+                    "body": m.body,
+                    "ts": m.ts,
+                }));
+            }
+        }
+    }
 
     Ok(Json(json!({
         "sandbox_backend": state.orch.tick.runtime_backend(),
-        "open_runs": runs.iter().filter(|r| {
-            !matches!(r.status.as_str(), "completed" | "failed" | "cancelled")
-        }).count(),
+        "open_runs": open_ids.len(),
         "total_runs": runs.len(),
         "live_agents": live_agents,
         "tasks_in_progress": in_progress,
+        "tasks_blocked": blocked,
         "changes_requested": changes,
         "focus_run_id": run_id,
-        "runs": runs.iter().take(8).map(|r| json!({
+        "runs": runs.iter().take(12).map(|r| json!({
             "id": r.id,
             "status": r.status,
             "source": r.source,
             "created_at": r.created_at,
         })).collect::<Vec<_>>(),
-        "tasks": tasks.iter().filter(|t| run_id.map(|id| t.run_id == id).unwrap_or(true)).take(40).map(|t| json!({
-            "id": t.id,
-            "run_id": t.run_id,
-            "plan_task_id": t.plan_task_id,
-            "title": t.title,
-            "status": t.status,
-            "worker_profile": t.worker_profile,
-            "failure_reason": t.failure_reason,
-            "attempt": t.attempt,
-        })).collect::<Vec<_>>(),
-        "waiting": waiting,
-        "activity": collect_activity(&sessions, 40),
+        "tasks": board.iter().take(80).map(|t| {
+            let sess = t
+                .claimed_session_id
+                .and_then(|id| sess_by_id.get(&id).copied())
+                .or_else(|| sess_by_task.get(&t.id).copied());
+            let sess_status = sess.map(|s| s.status.as_str()).unwrap_or("");
+            let exit = sess.and_then(|s| s.exit_reason.as_deref()).unwrap_or("");
+            let worker_state = if matches!(sess_status, "spawning" | "healthy") {
+                "live"
+            } else if sess_status == "stuck" || exit == "stale" || exit == "timeout" {
+                "reclaimed"
+            } else if matches!(sess_status, "killing" | "failed_spawn") {
+                "dead"
+            } else if sess_status.is_empty() {
+                "none"
+            } else {
+                "ended"
+            };
+            json!({
+                "id": t.id,
+                "run_id": t.run_id,
+                "plan_task_id": t.plan_task_id,
+                "title": t.title,
+                "status": t.status,
+                "worker_profile": t.worker_profile,
+                "failure_reason": t.failure_reason,
+                "block_reason": t.block_reason,
+                "hitl_notes": t.hitl_notes,
+                "attempt": t.attempt,
+                "progress_pct": t.progress_pct,
+                "claimed_session_id": t.claimed_session_id,
+                "session_status": sess_status,
+                "worker_state": worker_state,
+                "updated_at": t.updated_at,
+            })
+        }).collect::<Vec<_>>(),
+        "waiting": waiting_all,
+        "activity": collect_activity(&sessions, 80),
         "chat": chat.iter().rev().take(30).rev().map(|m| json!({
             "id": m.id,
             "seq": m.seq,
@@ -776,7 +862,7 @@ fn collect_activity(
     let mut out = Vec::new();
     for s in live_sess.into_iter().take(8) {
         let dir = s.work_dir.clone().unwrap_or_default();
-        for ev in read_live_events(&dir, 8).into_iter().rev() {
+        for ev in read_live_events(&dir, 64).into_iter().rev() {
             let text = ev
                 .get("text")
                 .and_then(|v| v.as_str())

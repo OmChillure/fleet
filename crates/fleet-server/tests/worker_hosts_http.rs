@@ -68,6 +68,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         discord: None,
         trello: None,
         asana: None,
+        bitbucket: None,
+        confluence: None,
     }
 }
 

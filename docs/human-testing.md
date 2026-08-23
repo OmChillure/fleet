@@ -109,7 +109,7 @@ same change. The walkthrough is allowed to go stale only if the product did.
 16. **Cases** — `/{ws}/cases` list (empty is OK). Open a case if chat started one;
     events + Observe / Cancel. The LLM invents the workflow; this page is the log.
 17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK.
-    Start monitor / Finish launches implement + review (needs an integration).
+    Start monitor / Finish asks the model for a DAG, then launches it (needs an integration).
 18. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
 19. **User menu** — theme Black/White (not persisted), Log out → `/login`.
 20. **This MR** — do the new thing this change added. If the script has no
@@ -172,7 +172,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). `/{ws}/workers` redirects |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
 | `crates/fleet-ui` Partners `/{ws}/runners/partners` | `partners` | trust copy, disclaimer, verified vs open. Ack does not enable lending |
-| `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
+| `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Workforce board (Ready/Blocked/…, empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
 | `sandbox-lab/workspace/workspace_agent.py` | `lab` | same |

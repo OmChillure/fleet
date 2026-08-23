@@ -9,8 +9,9 @@
 //! | [`repos`] | Query helpers (no HTTP / JWT knowledge) |
 //! | `migrations/` | Schema (embedded via `sqlx::migrate!`) |
 //!
-//! Schema is designed for high concurrency (UUID PKs, SKIP LOCKED claims,
-//! single-row session revoke). See migration comments.
+//! Live tables are listed in `README.md`. Unused speculative tables
+//! (`audit_events`, orchestrator `project_leases` / `idempotency_keys` /
+//! `orchestration_events`) are dropped in `020_drop_unused.sql`.
 
 #![forbid(unsafe_code)]
 

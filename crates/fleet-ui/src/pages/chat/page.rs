@@ -899,10 +899,7 @@ fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
                 UserBubble { text: message.content.clone() }
             } else {
                 if !actions.is_empty() {
-                    ToolCallGroup {
-                        actions: actions.clone(),
-                        workspace_id: workspace_id.clone(),
-                    }
+                    ToolCallGroup { actions: actions.clone() }
                 }
                 if let Some(run_id) = actions.iter().find_map(|a| {
                     if a.ok && is_fleet_launch(&a.tool) {
@@ -971,10 +968,6 @@ fn UserBubble(text: String) -> Element {
     }
 }
 
-fn short_id(id: &str) -> String {
-    id.get(..8).unwrap_or(id).to_string()
-}
-
 fn looks_like_later_copy(s: &str) -> bool {
     let t = s.to_ascii_lowercase();
     t.contains("when it finishes")
@@ -985,14 +978,141 @@ fn looks_like_later_copy(s: &str) -> bool {
         || t.contains("say continue")
 }
 
-fn tool_used_label(raw: &str) -> String {
-    let t = raw
-        .trim()
+#[derive(Clone, PartialEq)]
+struct LiveItem {
+    profile: String,
+    kind: String,
+    text: String,
+}
+
+fn skip_live_kind(kind: &str, text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    matches!(kind, "start" | "timeout" | "code" | "done" | "inbox" | "error")
+        || t.eq_ignore_ascii_case("finished this turn.")
+}
+
+fn is_tool_kind(kind: &str) -> bool {
+    kind == "tool" || kind.starts_with("use_")
+}
+
+fn short_tool_name(raw: &str) -> String {
+    raw.trim()
         .trim_start_matches("Using ")
         .trim_start_matches("using ")
         .trim_end_matches('…')
-        .trim_end_matches("...");
-    format!("Used {t}")
+        .trim_end_matches("...")
+        .to_string()
+}
+
+/// Grok Build verb-group label: "Read 3 files, Wrote 2 files".
+fn verb_bucket(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n.contains("write") {
+        "Wrote"
+    } else if n.contains("read") || n.contains("list_") || n.contains("get_") || n.contains("search")
+    {
+        "Read"
+    } else if n.contains("bash") || n.contains("run_") {
+        "Ran"
+    } else if n.contains("commit") || n.contains("create_pr") || n.contains("push") {
+        "Pushed"
+    } else if n.contains("integration")
+        || n.contains("slack")
+        || n.contains("notion")
+        || n.contains("github")
+        || n.contains("jira")
+        || n.contains("linear")
+    {
+        "Looked up"
+    } else if n.contains("request_changes") {
+        "Requested"
+    } else {
+        "Used"
+    }
+}
+
+fn verb_group_label(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut order: Vec<&str> = Vec::new();
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for name in names {
+        let b = verb_bucket(name);
+        if let Some((_, n)) = counts.iter_mut().find(|(k, _)| *k == b) {
+            *n += 1;
+        } else {
+            order.push(b);
+            counts.push((b, 1));
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(k, n)| match k {
+            "Wrote" => format!("Wrote {n} file{}", if n == 1 { "" } else { "s" }),
+            "Read" => format!("Read {n} file{}", if n == 1 { "" } else { "s" }),
+            "Ran" => format!("Ran {n} command{}", if n == 1 { "" } else { "s" }),
+            "Pushed" => format!("Pushed {n}"),
+            "Looked up" => format!("Looked up {n}"),
+            "Requested" => "Requested changes".into(),
+            "Started" => format!("Started {n} agent{}", if n == 1 { "" } else { "s" }),
+            _ => format!("Used {n} tool{}", if n == 1 { "" } else { "s" }),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn verb_group_label_now(names: &[String], running: bool) -> String {
+    let past = verb_group_label(names);
+    if !running || past.is_empty() {
+        return past;
+    }
+    past.replace("Wrote ", "Writing ")
+        .replace("Read ", "Reading ")
+        .replace("Ran ", "Running ")
+        .replace("Pushed ", "Pushing ")
+        .replace("Looked up ", "Looking up ")
+        .replace("Used ", "Using ")
+        .replace("Requested ", "Requesting ")
+        .replace("Started ", "Starting ")
+}
+
+fn is_live_status(status: &str) -> bool {
+    matches!(
+        status,
+        "in_progress" | "assigned" | "spawning" | "healthy" | "active"
+    )
+}
+
+fn live_tools_and_think(items: &[LiveItem]) -> (Vec<(String, String)>, Option<String>) {
+    let mut tools = Vec::new();
+    let mut think = None;
+    let mut i = 0;
+    while i < items.len() {
+        if is_tool_kind(&items[i].kind) {
+            let name = short_tool_name(&items[i].text);
+            i += 1;
+            let result = if i < items.len() && items[i].kind == "tool_result" {
+                let r = items[i].text.clone();
+                i += 1;
+                r
+            } else {
+                String::new()
+            };
+            if !name.is_empty() {
+                tools.push((name, result));
+            }
+            continue;
+        }
+        if items[i].kind == "think" {
+            think = Some(items[i].text.clone());
+        }
+        i += 1;
+    }
+    (tools, think)
 }
 
 fn clip_live_text(raw: &str) -> Option<String> {
@@ -1047,8 +1167,7 @@ fn agent_phase(status: &str) -> String {
 #[component]
 fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
     let mut tasks = use_signal(Vec::<(String, String, String, String)>::new);
-    let mut activity = use_signal(Vec::<(String, String, String)>::new);
-    let mut chat = use_signal(Vec::<(String, String, String)>::new);
+    let mut activity = use_signal(Vec::<LiveItem>::new);
     let mut run_status = use_signal(|| "active".to_string());
     let mut live = use_signal(|| 0u64);
     let mut err = use_signal(|| None::<String>);
@@ -1108,34 +1227,25 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                                 .iter()
                                 .filter_map(|a| {
                                     let kind = a.get("kind")?.as_str()?.to_string();
-                                    if kind == "tool_result" {
+                                    let raw = a.get("text")?.as_str()?.to_string();
+                                    if skip_live_kind(&kind, &raw) {
                                         return None;
                                     }
-                                    let text = clip_live_text(a.get("text")?.as_str()?)?;
-                                    Some((
-                                        a.get("profile")?.as_str()?.to_string(),
+                                    let text = if kind == "tool"
+                                        || kind == "code"
+                                        || kind.starts_with("use_")
+                                    {
+                                        raw
+                                    } else {
+                                        clip_live_text(&raw)?
+                                    };
+                                    Some(LiveItem {
+                                        profile: a.get("profile")?.as_str()?.to_string(),
                                         kind,
                                         text,
-                                    ))
+                                    })
                                 })
-                                .take(24)
-                                .collect(),
-                        );
-                        chat.set(
-                            o.chat
-                                .iter()
-                                .rev()
-                                .filter_map(|m| {
-                                    Some((
-                                        m.get("from")?.as_str()?.to_string(),
-                                        m.get("to").and_then(|x| x.as_str()).unwrap_or("*").to_string(),
-                                        m.get("body")?.as_str()?.to_string(),
-                                    ))
-                                })
-                                .take(6)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
+                                .take(64)
                                 .collect(),
                         );
                         err.set(None);
@@ -1151,69 +1261,93 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
     });
 
     let done = is_terminal_run(&run_status());
-    let _ = live;
+    let any_live = tasks().iter().any(|(_, _, _, st)| is_live_status(st));
+    let working = !done;
+    let n_live = live();
     let _ = workspace_id;
     rsx! {
         div { class: "mt-5 flex flex-col gap-3",
-            // Who is working / queued — a line in the thread, not a board.
-            div { class: "flex flex-wrap gap-x-3 gap-y-1 text-[13px]",
+            div { class: "flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]",
+                if working {
+                    span { class: "inline-flex items-center gap-1.5 text-sky-400",
+                        span { class: "chat-thinking-star", "✶" }
+                        if n_live > 0 {
+                            "Running · {n_live} live"
+                        } else {
+                            "Running"
+                        }
+                    }
+                } else if run_status() == "failed" || run_status() == "cancelled" {
+                    span { class: "text-red-400", "Ended · {run_status()}" }
+                } else {
+                    span { class: "text-emerald-400", "Done" }
+                }
                 for (id, title, profile, status) in tasks() {
                     {
                         let who = if profile.is_empty() { title.clone() } else { profile.clone() };
                         let phase = agent_phase(&status);
+                        let live_one = is_live_status(&status);
                         rsx! {
-                            span { class: "text-[var(--app-muted)]",
+                            span { class: "inline-flex items-center gap-1 text-[var(--app-muted)]",
+                                if live_one {
+                                    span { class: "chat-thinking-star text-[11px]", "✶" }
+                                } else if matches!(status.as_str(), "done_failed" | "failed" | "failed_spawn") {
+                                    span { class: "text-red-400", "!" }
+                                } else if matches!(status.as_str(), "done_success" | "completed") {
+                                    span { class: "text-emerald-400", "✓" }
+                                } else {
+                                    span { "○" }
+                                }
                                 span { class: "font-medium text-[var(--app-fg)]", "{id}" }
-                                " "
                                 span { class: "{status_tone(&status)}", "{phase}" }
-                                span { class: "opacity-50", " · {who}" }
+                                span { class: "opacity-50", "{who}" }
                             }
                         }
                     }
                 }
-                if tasks().is_empty() && !done {
+                if tasks().is_empty() && working {
                     span { class: "text-[var(--app-muted)]", "starting agents…" }
-                }
-                if done {
-                    span { class: "text-emerald-400", "all shipped" }
                 }
             }
             if let Some(e) = err() {
                 p { class: "m-0 text-xs text-red-400", "{e}" }
             }
-            // Grok-style tool / think lines in the same chat column.
-            div { class: "flex flex-col gap-2.5",
-                for (i, (profile, kind, text)) in activity().into_iter().enumerate() {
-                    {
-                        let is_tool = kind == "tool" || kind.starts_with("use_");
-                        let is_think = kind == "think" || kind == "start";
-                        rsx! {
-                            div { key: "{i}", class: "min-w-0",
-                                p { class: "m-0 mb-0.5 text-[11px] text-[var(--app-muted)]",
-                                    "{profile}"
-                                }
-                                if is_tool {
-                                    div { class: "chat-tool-rail pl-3 text-[13px] text-[var(--app-muted)]",
-                                        span { class: "font-medium text-[var(--app-fg)]", "{tool_used_label(&text)}" }
-                                    }
-                                } else if is_think {
-                                    p { class: "m-0 text-[15px] leading-6 text-[var(--app-fg)]",
-                                        "{text}"
-                                    }
-                                } else {
-                                    p { class: "m-0 text-[13px] leading-5 text-[var(--app-muted)]",
-                                        "{text}"
-                                    }
-                                }
-                            }
+            {
+                let (tools, think) = live_tools_and_think(&activity());
+                let names: Vec<String> = tools.iter().map(|(n, _)| n.clone()).collect();
+                let current = tools
+                    .iter()
+                    .rev()
+                    .find(|(_, r)| r.is_empty())
+                    .map(|(n, _)| n.clone());
+                let mut label = verb_group_label_now(&names, working);
+                if working {
+                    if let Some(cur) = current {
+                        if !label.is_empty() {
+                            label = format!("{label} · {cur}");
+                        } else {
+                            label = format!("Using {cur}");
                         }
+                    } else if label.is_empty() && any_live {
+                        label = "Working".into();
                     }
                 }
-            }
-            for (from, _to, body) in chat() {
-                p { class: "m-0 text-[13px] leading-5 text-[var(--app-muted)]",
-                    span { class: "font-medium text-[var(--app-fg)]", "{from}" }
-                    " {body}"
+                rsx! {
+                    if !label.is_empty() {
+                        VerbGroup {
+                            label,
+                            members: tools,
+                            running: working,
+                        }
+                    }
+                    if let Some(text) = think {
+                        p { class: "m-0 text-[15px] leading-6 text-[var(--app-fg)]",
+                            if working {
+                                span { class: "chat-thinking-star mr-1.5", "✶" }
+                            }
+                            "{text}"
+                        }
+                    }
                 }
             }
         }
@@ -1233,41 +1367,142 @@ fn is_fleet_launch(tool: &str) -> bool {
     tool == "launch_agent_plan" || tool == "launch_agent_task"
 }
 
-/// Claude-style collapsible tool rail (clock + check, muted body).
-#[component]
-fn ToolCallGroup(actions: Vec<ChatActionDto>, workspace_id: String) -> Element {
-    let _ = workspace_id;
-    let mut open = use_signal(|| true);
-    let all_ok = actions.iter().all(|a| a.ok);
-    let fleet = actions.iter().find(|a| a.ok && is_fleet_launch(&a.tool));
-    let n_agents = fleet
-        .and_then(|a| a.sandbox_ids.as_ref())
-        .map(|ids| ids.len())
+fn action_line(action: &ChatActionDto) -> String {
+    if is_fleet_launch(&action.tool) {
+        let n = action
+            .sandbox_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or(0);
+        if n > 0 {
+            return format!("Started {n} agents");
+        }
+        return "Started agents".into();
+    }
+    if !action.summary.is_empty() {
+        return action.summary.clone();
+    }
+    action.tool.clone()
+}
+
+fn composer_group_title(actions: &[ChatActionDto]) -> String {
+    let lookups = actions
+        .iter()
+        .filter(|a| a.tool == "integration_query" || a.tool == "use_integration")
+        .count();
+    let agents = actions
+        .iter()
+        .filter(|a| is_fleet_launch(&a.tool))
+        .filter_map(|a| a.sandbox_ids.as_ref().map(|ids| ids.len()))
+        .max()
         .unwrap_or(0);
-    let title = if let Some(f) = fleet {
-        if n_agents > 0 {
-            format!("Fleet · {n_agents} agents")
-        } else {
-            f.summary.clone()
-        }
-    } else if actions.len() == 1 {
-        let a = &actions[0];
-        if a.summary.is_empty() {
-            a.tool.clone()
-        } else {
-            a.summary.clone()
-        }
-    } else {
+    let other = actions
+        .iter()
+        .filter(|a| {
+            a.tool != "integration_query"
+                && a.tool != "use_integration"
+                && !is_fleet_launch(&a.tool)
+        })
+        .count();
+    let mut parts = Vec::new();
+    if lookups > 0 {
+        parts.push(format!(
+            "Looked up {lookups} source{}",
+            if lookups == 1 { "" } else { "s" }
+        ));
+    }
+    if agents > 0 {
+        parts.push(format!(
+            "Started {agents} agent{}",
+            if agents == 1 { "" } else { "s" }
+        ));
+    }
+    if other > 0 {
+        parts.push(format!(
+            "Used {other} tool{}",
+            if other == 1 { "" } else { "s" }
+        ));
+    }
+    if parts.is_empty() {
         format!("Used {} tools", actions.len())
-    };
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Grok-style folded tool run. One header; expand for the list.
+#[component]
+fn VerbGroup(label: String, members: Vec<(String, String)>, running: bool) -> Element {
+    let mut open = use_signal(|| false);
     rsx! {
-        div { class: "mb-4",
+        div { class: "min-w-0",
             button {
                 class: "flex w-full items-center gap-2 py-0.5 text-left text-[13px] text-[var(--app-muted)] transition hover:text-[var(--app-fg)]",
                 r#type: "button",
                 onclick: move |_| open.set(!open()),
-                span { class: "min-w-0 flex-1 truncate", "{title}" }
-                span { class: "shrink-0 text-[11px] opacity-60",
+                if running {
+                    span { class: "chat-thinking-star shrink-0", "✶" }
+                } else {
+                    span { class: "chat-tool-check shrink-0", "✓" }
+                }
+                span { class: "min-w-0 flex-1 truncate font-medium text-[var(--app-fg)]",
+                    "{label}"
+                }
+                span { class: "shrink-0 text-[11px] opacity-50",
+                    if running { "running" } else { "done" }
+                    " "
+                    if open() { "▾" } else { "▸" }
+                }
+            }
+            if open() {
+                div { class: "chat-tool-rail mt-1 pl-3",
+                    for (i, (name, result)) in members.iter().enumerate() {
+                        {
+                            let ended = !result.is_empty();
+                            rsx! {
+                                div { key: "{i}", class: "mb-1.5 last:mb-0",
+                                    p { class: "m-0 text-[13px] text-[var(--app-fg)]",
+                                        if ended {
+                                            span { class: "text-emerald-400", "✓ " }
+                                        } else {
+                                            span { class: "chat-thinking-star mr-1", "✶" }
+                                        }
+                                        "{name}"
+                                        span { class: "ml-1.5 text-[11px] font-normal text-[var(--app-muted)]",
+                                            if ended { "done" } else { "running" }
+                                        }
+                                    }
+                                    if ended {
+                                        p { class: "m-0 mt-0.5 text-[12px] leading-5 text-[var(--app-muted)]",
+                                            "{result}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Composer fetches + launch, folded like Grok Build verb groups.
+#[component]
+fn ToolCallGroup(actions: Vec<ChatActionDto>) -> Element {
+    let mut open = use_signal(|| false);
+    let title = composer_group_title(&actions);
+    let all_ok = actions.iter().all(|a| a.ok);
+    rsx! {
+        div { class: "mb-3",
+            button {
+                class: "flex w-full items-center gap-2 py-0.5 text-left text-[13px] text-[var(--app-muted)] transition hover:text-[var(--app-fg)]",
+                r#type: "button",
+                onclick: move |_| open.set(!open()),
+                span { class: "min-w-0 flex-1 truncate font-medium text-[var(--app-fg)]",
+                    "{title}"
+                }
+                span { class: "shrink-0 text-[11px] opacity-50",
                     if open() { "▾" } else { "▸" }
                 }
             }
@@ -1275,38 +1510,16 @@ fn ToolCallGroup(actions: Vec<ChatActionDto>, workspace_id: String) -> Element {
                 div { class: "chat-tool-rail mt-1.5 pl-3",
                     for (i, action) in actions.iter().enumerate() {
                         {
-                            let extra = action.run_id.as_ref().map(|id| format!("run {}", short_id(id)));
-                            let boxes = action.sandbox_ids.as_ref().and_then(|ids| {
-                                if ids.is_empty() {
-                                    None
-                                } else {
-                                    Some(format!(
-                                        "{} agent{}",
-                                        ids.len(),
-                                        if ids.len() == 1 { "" } else { "s" }
-                                    ))
-                                }
-                            });
                             let href = action_url(action);
+                            let line = action_line(action);
                             rsx! {
-                                div {
-                                    key: "{i}",
-                                    class: "mb-2.5 last:mb-1",
+                                div { key: "{i}", class: "mb-2 last:mb-0.5",
                                     div { class: "flex items-start gap-2 text-[13px] leading-5 text-[var(--app-muted)]",
                                         span { class: "chat-tool-clock mt-0.5 shrink-0",
                                             if action.ok { "✓" } else { "!" }
                                         }
                                         div { class: "min-w-0",
-                                            p { class: "m-0 font-medium text-[var(--app-fg)]",
-                                                if is_fleet_launch(&action.tool) {
-                                                    "Fleet launch"
-                                                } else {
-                                                    "{action.tool}"
-                                                }
-                                            }
-                                            if !action.summary.is_empty() {
-                                                p { class: "m-0 mt-0.5", "{action.summary}" }
-                                            }
+                                            p { class: "m-0 text-[var(--app-fg)]", "{line}" }
                                             if let Some(url) = href {
                                                 a {
                                                     class: "mt-0.5 block truncate text-[12px] underline-offset-2 hover:underline",
@@ -1314,16 +1527,6 @@ fn ToolCallGroup(actions: Vec<ChatActionDto>, workspace_id: String) -> Element {
                                                     target: "_blank",
                                                     rel: "noreferrer",
                                                     "{url}"
-                                                }
-                                            }
-                                            if let Some(line) = &extra {
-                                                p { class: "m-0 mt-0.5 font-mono text-[11px] opacity-80",
-                                                    "{line}"
-                                                }
-                                            }
-                                            if let Some(line) = &boxes {
-                                                p { class: "m-0 mt-0.5 font-mono text-[11px] opacity-80",
-                                                    "{line}"
                                                 }
                                             }
                                         }
@@ -1334,11 +1537,7 @@ fn ToolCallGroup(actions: Vec<ChatActionDto>, workspace_id: String) -> Element {
                     }
                     div { class: "mt-1 flex items-center gap-2 text-[13px] text-[var(--app-muted)]",
                         span {
-                            class: if all_ok {
-                                "chat-tool-check"
-                            } else {
-                                "chat-tool-fail"
-                            },
+                            class: if all_ok { "chat-tool-check" } else { "chat-tool-fail" },
                             if all_ok { "✓" } else { "○" }
                         }
                         span { if all_ok { "Done" } else { "Failed" } }
