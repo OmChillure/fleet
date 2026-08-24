@@ -18,7 +18,7 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 | **Chat assistant** | Grok (xAI CLI) or local Ollama | Reply, call tools (up to 6 rounds per turn), persist history. |
 | **Chat tools (control plane)** | Server-side functions the model invokes | Read fleet state, launch plans/tasks, query integrations, commit/PR on GitHub. Tokens never leave the control plane. |
 | **Orchestrator tick** | Background loop + on-demand `POST …/tick` | Lock project → inbox → cancel → HITL resume → materialize → deps → spawn → stuck/kill → rollup → reap → optional external sync → wipe old workdirs. |
-| **Sandbox runtime** | `stub` / `process` / `local\|shell` / `docker` | Spawn, signal (TERM/KILL), destroy, report state, list live handles. |
+| **Sandbox runtime** | `stub` / `process` / `local\|shell` / `docker` / `k8s` | Spawn, signal (TERM/KILL), destroy, report state, list live handles. |
 | **Process worker** | `fleet-worker` binary (`SANDBOX_BACKEND=process`) | Heartbeat + status to `/v1`, run `FLEET_WORK_CMD` / `run.sh` / write artifacts from spec. |
 | **Process driver** | `fleet-driver` (`FLEET_HARNESS=mock\|grok`) | Same `FLEET_*` contract as `fleet-worker`, plus ACP harness (mock or Grok Build). Clones `FLEET_REPO_URL` when set. |
 | **Sandbox-lab driver** | `fleet-sandbox-driver` in Compose | HMAC handshake, provision volume, drive OpenCode / Pi / Codex / Grok over ACP, report on Redis. |
@@ -58,7 +58,8 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
     ├── stub      in-process timer
     ├── process   spawn fleet-worker (or PROCESS_WORKER_BIN)
     ├── local     bash commands.sh / fleet_worker.sh (Om path)
-    └── docker    docker run (no --rm; exit file)
+    ├── docker    docker run (no --rm; exit file)
+    └── k8s       create FleetSandbox CR (operator → pod)
 
  Process worker/driver ──HTTP──▶ /v1/.../heartbeat|status
 
@@ -520,7 +521,8 @@ Set `SANDBOX_BACKEND` on the server (not per user).
 | `process` | process | `fleet-worker` (or `PROCESS_WORKER_BIN`) as a process group. Workdir + `FLEET_*`. Optional git clone via isolate. | Process exit + last worker status. |
 | `local` / `shell` | process (Om) | Writes `commands.sh` from bash fences, runs `fleet_worker.sh` / bash. | Script exit. |
 | `docker` / `container` | docker | `docker run` **without** `--rm`; wait on `.fleet_exit`. | Exit file / container state. |
-| anything else | — | Server fails to start runtime. `k8s` is **not** a `SANDBOX_BACKEND` value. | |
+| `k8s` / `kubernetes` | k8s | Create a `FleetSandbox` CR. Operator makes a pod + NetworkPolicy. Worker is `fleet-worker` (image `K8S_WORKER_IMAGE`). Spec rides in `FLEET_SPEC_MD`. Callback URL must not be loopback. | Worker HTTP status + CR phase (`Succeeded`/`Failed`). Host `DATA_DIR` has prompt/spec; pod writes stay in `emptyDir` (no live.jsonl pull yet). |
+| anything else | — | Server fails to start runtime. | |
 
 **Git isolate (process/docker):** if Settings has `repo_url`, spawn clones (or worktree) into the session dir before the worker starts. No OAuth token is passed; clone uses whatever the host/container git can see (deploy key, public HTTPS, etc.).
 
@@ -587,7 +589,7 @@ Independent of `SANDBOX_BACKEND`. Used on kind / in-cluster.
 
 Labels: `fleet.agentfleet.io/sandbox`, `session-id`, `workspace-id`, `project-id`.
 
-The UI tick does **not** create CRs today. Kind smoke deploys the control plane; creating a CR is a cluster-admin / sample-YAML action (`infra/samples/fleetsandbox.yaml`).
+With `SANDBOX_BACKEND=k8s`, the tick creates/deletes CRs. Otherwise Kind smoke deploys the control plane and creating a CR is a cluster-admin / sample-YAML action (`infra/samples/fleetsandbox.yaml`).
 
 ---
 
@@ -707,7 +709,7 @@ These look like product features in vision docs or UI chrome but are **not** imp
 - OpenAI chat provider (coming-soon placeholder).
 - Approvals before merge (landing copy; no approval object).
 - Zenoh/NATS event bus in the running server (contracts crate + docs only).
-- Operator CR creation from the orchestrator tick.
+- Operator CR creation from the orchestrator tick unless `SANDBOX_BACKEND=k8s`.
 - VM sandboxes.
 - Sharing a chat or making conversations workspace-wide.
 

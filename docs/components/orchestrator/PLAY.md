@@ -64,4 +64,23 @@ cargo run -p fleet-server
 
 Sessions write `spec.md`, `task.json`, `prompt.md`, optional `workspace.json`, plus `artifacts/transcript.md` and `artifacts/result.json`. The cloned tree (if configured) is `repo/`. See [`crates/fleet-driver/README.md`](../../../crates/fleet-driver/README.md).
 
+### Kubernetes (`FleetSandbox` CRs)
+
+Tick creates CRs; [`fleet-operator`](../../../crates/fleet-operator/) turns each into a pod. Cluster from [`infra/README.md`](../../../infra/README.md) (k3d or kind). Do **not** point workers at `http://127.0.0.1:8080` — the pod cannot reach host loopback.
+
+```bash
+export SANDBOX_BACKEND=k8s
+export K8S_NAMESPACE=agent-fleet
+export K8S_WORKER_IMAGE=agent-fleet-api:local
+export K8S_WORKER_COMMAND=fleet-worker
+# In-cluster API (the API ServiceAccount also needs FleetSandbox create/delete):
+export K8S_WORKER_API_URL=http://api.agent-fleet.svc.cluster.local:8080
+# Host API + cluster (ports 8080/3030 must stay on the host, not kind extraPortMappings).
+# Use a host IPv4/IPv6 literal — allowlisted /32 or /128. DNS names are not CIDRs.
+# export K8S_WORKER_API_URL=http://172.18.0.1:8080
+cargo run -p fleet-server
+```
+
+Needs `KUBECONFIG` or in-cluster config, the CRD, and the operator. Missing client/CRD is a spawn **fail**, not a stub fallback. Spec is passed as `FLEET_SPEC_MD` (max ~200KiB). SessionDetail tails host `DATA_DIR`; pod artifacts stay in the pod `emptyDir` until a later pull.
+
 Optional: set `ADMIN_TOKEN` to enable `/v1/*` bearer automation (`./scripts/demo-orch.sh`).

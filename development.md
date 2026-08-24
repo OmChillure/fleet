@@ -155,8 +155,9 @@ SANDBOX_BACKEND=stub
 | `CORS_ORIGINS` | Needed if the browser calls the API origin directly |
 | `API_PUBLIC_BASE` | OAuth callbacks, absolute API links |
 | `UI_PUBLIC_BASE` | OAuth return / UI links |
-| `SANDBOX_BACKEND` | `stub` (default) or `process` |
+| `SANDBOX_BACKEND` | `stub` (default), `process`, `docker`, or `k8s` |
 | `PROCESS_WORKER_BIN` | e.g. `/usr/local/bin/fleet-worker` in the API image |
+| `K8S_*` | Only when `SANDBOX_BACKEND=k8s`. See [`docs/components/orchestrator/PLAY.md`](docs/components/orchestrator/PLAY.md). Worker callback must not be loopback. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
 
 ---
@@ -189,6 +190,18 @@ In Compose, set on `api`:
 ```yaml
 SANDBOX_BACKEND: process
 PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
+```
+
+### Kubernetes sandboxes (optional)
+
+Tick creates `FleetSandbox` CRs. The operator must be running (k3d/kind from [`infra/README.md`](infra/README.md)).
+
+```bash
+export SANDBOX_BACKEND=k8s
+export K8S_WORKER_API_URL=http://api.agent-fleet.svc.cluster.local:8080
+# Host API + cluster: a host IP pods can route — not 127.0.0.1, not DNS
+# export K8S_WORKER_API_URL=http://172.18.0.1:8080
+cargo run -p fleet-server
 ```
 
 ---

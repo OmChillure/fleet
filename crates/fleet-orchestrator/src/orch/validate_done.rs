@@ -1,8 +1,9 @@
 //! Gate: a task is not `done_success` until the workspace proves it.
 //!
-//! Stub sandboxes have no files — they skip the file checks so existing
-//! fixture tests still pass. Process / local / docker must produce `result.md`
-//! and meet `exists:` / `contains:` acceptance lines.
+//! Stub and k8s skip host file checks. k8s work lives in a pod emptyDir
+//! until artifact pull exists; HTTP status + CR phase complete the task.
+//! Process / local / docker must produce host `result.md` and meet
+//! `exists:` / `contains:` acceptance lines.
 
 use std::path::Path;
 
@@ -67,7 +68,7 @@ pub fn validate_task_done(
     runtime_backend: &str,
 ) -> DoneCheck {
     let backend = runtime_backend.trim().to_ascii_lowercase();
-    if backend == "stub" || backend.is_empty() {
+    if backend == "stub" || backend == "k8s" || backend == "kubernetes" || backend.is_empty() {
         return DoneCheck::pass();
     }
     if !work_dir.exists() {
@@ -270,6 +271,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let c = validate_task_done(&task(json!([])), dir.path(), "stub");
         assert!(c.ok, "{c:?}");
+    }
+
+    #[test]
+    fn k8s_skips_host_result_md() {
+        let dir = tempdir().unwrap();
+        let c = validate_task_done(&task(json!([])), dir.path(), "k8s");
+        assert!(c.ok, "{c:?}");
+        let missing = validate_task_done(
+            &task(json!([])),
+            &dir.path().join("no-such-session"),
+            "kubernetes",
+        );
+        assert!(missing.ok, "{missing:?}");
     }
 
     #[test]

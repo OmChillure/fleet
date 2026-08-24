@@ -4,6 +4,21 @@ use std::path::Path;
 
 use super::{SandboxError, SpawnRequest};
 
+/// Write `spec.md` when the env-carried spec is present and the file is missing.
+/// Used by `fleet-worker` in k8s pods (`emptyDir` has no host files).
+pub fn write_spec_md_if_absent(work_dir: &Path, spec: &str) -> std::io::Result<bool> {
+    if spec.trim().is_empty() {
+        return Ok(false);
+    }
+    let path = work_dir.join("spec.md");
+    if path.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(work_dir)?;
+    std::fs::write(&path, spec)?;
+    Ok(true)
+}
+
 pub async fn materialize_workspace(req: &SpawnRequest) -> Result<(), SandboxError> {
     tokio::fs::create_dir_all(&req.work_dir)
         .await
@@ -216,5 +231,21 @@ ls -la
         assert!(WORKER_SH.contains(r#"bash "$WORK/commands.sh""#));
         assert!(WORKER_SH.contains(r#"head -n 5 "$WORK/task.md""#));
         assert!(WORKER_SH.contains(r#""$WORK/.fleet_exit""#));
+    }
+
+    #[test]
+    fn spec_md_from_env_writes_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_spec_md_if_absent(dir.path(), "hello spec").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("spec.md")).unwrap(),
+            "hello spec"
+        );
+        assert!(!write_spec_md_if_absent(dir.path(), "other").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("spec.md")).unwrap(),
+            "hello spec"
+        );
+        assert!(!write_spec_md_if_absent(dir.path(), "   ").unwrap());
     }
 }

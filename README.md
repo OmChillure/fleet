@@ -92,6 +92,7 @@ dx serve --package fleet-ui --port 3030
    - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
    - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
    - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
+   - `k8s` — `FleetSandbox` CR; operator creates a pod. Set `K8S_WORKER_API_URL` to a URL pods can reach (not `127.0.0.1`)
    Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
 8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
    command and one-time pair token. The machine pairs outbound (no inbound

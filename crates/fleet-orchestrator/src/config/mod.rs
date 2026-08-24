@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::sandbox::K8sOpts;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     Token,
@@ -51,6 +53,8 @@ pub struct Config {
     pub stub_duration: Duration,
     /// Process backend worker argv (`PROCESS_WORKER_BIN`, whitespace-split).
     pub process_worker_argv: Vec<String>,
+    /// Kubernetes backend (`SANDBOX_BACKEND=k8s`). Snapshotted at Config build.
+    pub k8s: K8sOpts,
     pub lock_wait_timeout: Duration,
     pub log_level: String,
     pub leadership_mode: String,
@@ -109,6 +113,7 @@ impl Config {
             sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
             stub_duration: duration_secs("STUB_DURATION_S", 3),
             process_worker_argv: process_worker_argv_from_env(),
+            k8s: K8sOpts::from_env(),
             lock_wait_timeout: tick_interval,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),
@@ -174,6 +179,7 @@ impl Config {
             sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
             stub_duration: duration_secs("STUB_DURATION_S", 3),
             process_worker_argv: process_worker_argv_from_env(),
+            k8s: K8sOpts::from_env(),
             lock_wait_timeout: lock_wait,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -462,6 +463,37 @@ class Demo:
         self.page.goto(html_path.as_uri(), wait_until="domcontentloaded")
         pause(self.page, 2000)
 
+    def scene_k8s(self) -> None:
+        """Operator-visible k8s path: CRD + operator, then Fleet backend header."""
+        lines: list[str] = []
+        kubectl = shutil.which("kubectl")
+        if kubectl:
+            for args in (
+                ["get", "crd", "fleetsandboxes.fleet.agentfleet.io"],
+                ["-n", "agent-fleet", "get", "deploy", "fleet-operator"],
+                ["-n", "agent-fleet", "get", "fleetsandboxes"],
+            ):
+                proc = subprocess.run(
+                    [kubectl, *args], capture_output=True, text=True, timeout=30
+                )
+                lines.append("$ kubectl " + " ".join(args))
+                lines.append((proc.stdout or proc.stderr or "").strip() or "(no output)")
+                lines.append("")
+        else:
+            lines.append("kubectl not on PATH — film host Fleet header only")
+
+        html_path = self.out_dir.resolve() / "k8s-sandbox.html"
+        html_path.write_text(
+            "<!doctype html><meta charset=utf-8><title>k8s sandbox</title>"
+            "<pre style='font:14px/1.4 ui-monospace,monospace;padding:24px'>"
+            + _escape("\n".join(lines))
+            + "</pre>",
+            encoding="utf-8",
+        )
+        self.page.goto(html_path.as_uri(), wait_until="domcontentloaded")
+        pause(self.page, 1500)
+        self.scene_fleet()
+
     def scene_kind(self) -> None:
         try:
             with urlopen("http://127.0.0.1:8080/health", timeout=3) as r:
@@ -510,6 +542,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "dashboard": Demo.scene_dashboard,
     "lab": Demo.scene_lab,
     "kind": Demo.scene_kind,
+    "k8s": Demo.scene_k8s,
 }
 
 CORE = [

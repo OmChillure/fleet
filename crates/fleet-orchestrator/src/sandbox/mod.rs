@@ -1,7 +1,8 @@
-//! Sandbox runtime: `stub` | `process` | `docker` (`SANDBOX_BACKEND`).
+//! Sandbox runtime: `stub` | `process` | `docker` | `k8s` (`SANDBOX_BACKEND`).
 //! Only `FLEET_*` env + task files enter sandboxes — no OAuth tokens.
 //!
 //! `process` is main's fleet-worker. `local`/`shell` is Om's `bash fleet_worker.sh`.
+//! `k8s` creates `FleetSandbox` CRs; the operator turns them into pods.
 
 pub mod agent_loop;
 mod docker;
@@ -14,7 +15,7 @@ pub mod team_chat;
 mod worker_script;
 
 pub use docker::{DockerRuntime, docker_runtime};
-pub use worker_script::{extract_bash_blocks, materialize_workspace};
+pub use worker_script::{extract_bash_blocks, materialize_workspace, write_spec_md_if_absent};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -239,9 +240,11 @@ impl SandboxRuntime for StubRuntime {
 
 mod process;
 mod process_om;
+mod k8s;
 
 pub use process::{ProcessRuntime, build_process_runtime, worker_argv_from_env};
 pub use process_om::process_runtime;
+pub use k8s::{K8sOpts, K8sRuntime};
 
 /// Options for [`build_runtime`].
 #[derive(Debug, Clone)]
@@ -251,6 +254,7 @@ pub struct RuntimeBuildOpts {
     pub data_dir: PathBuf,
     /// argv for process backend (program + args). Empty → env `PROCESS_WORKER_BIN` / default.
     pub worker_argv: Vec<String>,
+    pub k8s: K8sOpts,
 }
 
 /// Build runtime from config backend name.
@@ -267,8 +271,9 @@ pub fn build_runtime(opts: &RuntimeBuildOpts) -> Result<Arc<dyn SandboxRuntime>,
         }
         "local" | "shell" => Ok(process_runtime()),
         "docker" | "container" => Ok(docker_runtime()),
+        "k8s" | "kubernetes" => Ok(Arc::new(K8sRuntime::new(opts.k8s.clone())?)),
         other => Err(SandboxError::Spawn(format!(
-            "unknown sandbox backend {other:?} (supports stub|process|local|docker)"
+            "unknown sandbox backend {other:?} (supports stub|process|local|docker|k8s)"
         ))),
     }
 }
@@ -384,6 +389,7 @@ mod tests {
             stub_duration: Duration::from_secs(1),
             data_dir: PathBuf::from("/tmp"),
             worker_argv: vec![],
+            k8s: K8sOpts::default(),
         };
         let rt = build_runtime(&opts).unwrap();
         assert_eq!(rt.backend_name(), "stub");
@@ -393,8 +399,11 @@ mod tests {
         let mut local = opts.clone();
         local.backend = "local".into();
         assert_eq!(build_runtime(&local).unwrap().backend_name(), "process");
+        let mut k8s = opts.clone();
+        k8s.backend = "k8s".into();
+        assert_eq!(build_runtime(&k8s).unwrap().backend_name(), "k8s");
         let mut bad = opts.clone();
-        bad.backend = "k8s".into();
+        bad.backend = "vm".into();
         assert!(build_runtime(&bad).is_err());
     }
 }
