@@ -142,6 +142,7 @@ fn remote_is_not_a_sandbox_backend_env_value() {
         stub_duration: Duration::from_secs(1),
         data_dir: PathBuf::from("/tmp"),
         worker_argv: vec![],
+        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
     };
     let err = match build_runtime(&opts) {
         Ok(_) => panic!("remote must not be a SANDBOX_BACKEND"),

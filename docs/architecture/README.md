@@ -27,7 +27,8 @@ Related component folders (stubs for deeper specs):
 (auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
 (Postgres). UI on `:3030` talks to the API with cookie credentials.
 Orchestrator tick + process sandbox (`fleet-worker`) and the Kubernetes
-`FleetSandbox` operator are on `main`. OAuth connect is live.
+`FleetSandbox` operator are on `main`. `SANDBOX_BACKEND=k8s` creates CRs
+(the operator still makes the pods). OAuth connect is live.
 **Cases (general durable workflows):** workspace-scoped `cases` + `case_events`
 with backend wake loop and free-form stages — see
 [`docs/components/cases/`](../components/cases/). Agent fleets remain the

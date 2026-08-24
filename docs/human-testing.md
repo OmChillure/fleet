@@ -163,6 +163,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-orchestrator` tick, plans, store, team chat | `fleet` | Start 2-task run, Run tick, cards change column. LLM workers use TEAM_CHAT.md |
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
 | `crates/fleet-driver`, `fleet-worker`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
+| `SANDBOX_BACKEND=k8s`, `fleet-orchestrator` k8s adapter | `k8s` then `fleet` | CRD + operator present; Fleet header can show `k8s`. Kind overlay stays `process` |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
 | `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | list (empty OK) + sidebar Cases; detail if a case exists |
 | `crates/fleet-server` `tickets.rs`, `fleet-ui` inbox | `inbox` | list (empty OK) + sidebar Inbox under Monitoring |

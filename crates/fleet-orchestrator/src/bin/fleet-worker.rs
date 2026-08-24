@@ -214,6 +214,12 @@ enum WorkError {
 }
 
 fn execute_work(cfg: &WorkerConfig) -> Result<String, WorkError> {
+    if let Ok(spec) = env::var("FLEET_SPEC_MD") {
+        fleet_orchestrator::sandbox::write_spec_md_if_absent(&cfg.work_dir, &spec).map_err(
+            |e| WorkError::Failed(format!("write spec.md from FLEET_SPEC_MD: {e}")),
+        )?;
+    }
+
     // HITL re-entry: notes available for the worker to apply.
     if let Some(notes) = &cfg.hitl_notes {
         let notes_path = cfg.work_dir.join("hitl_notes.txt");

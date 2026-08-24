@@ -208,11 +208,18 @@ cmd_guide() {
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \
+    "Header shows the live SANDBOX_BACKEND (stub / process / docker / k8s)." \
     "Default backend is stub — board should move. Ticker may also tick on its own." \
     "With Fleet LLM on, live agents message each other (TEAM_CHAT.md / chat read_team_chat)." || return 0
 
   pause_step "Sandboxes" \
     "Same worker sessions as Fleet (status, backend, work dir)." || return 0
+
+  pause_step "Kubernetes sandboxes" \
+    "SANDBOX_BACKEND=k8s makes a tick create a FleetSandbox CR (operator → pod)." \
+    "Kind in-cluster API stays process unless you set k8s + give the API SA CR verbs." \
+    "Host API: KUBECONFIG + K8S_WORKER_API_URL a pod can reach (not 127.0.0.1)." \
+    "Optional: kubectl -n agent-fleet get fleetsandboxes,pods." || return 0
 
   pause_step "Cases" \
     "/{ws}/cases — New case form (title + policy) creates a durable workflow." \

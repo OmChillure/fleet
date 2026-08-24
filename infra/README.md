@@ -125,12 +125,29 @@ Status: `phase` (`Creating` / `Running` / `Succeeded` / `Failed`), `podName`, `n
 | `API_NAMESPACE` | `agent-fleet` |
 | `API_POD_LABEL` | `fleet-api` (`app.kubernetes.io/name`) |
 
-## Orchestrator hookup (next)
+## Orchestrator hookup
 
-Today the tick loop uses `SANDBOX_BACKEND=process` inside the API pod. A later
-`SANDBOX_BACKEND=k8s` adapter should create/delete `FleetSandbox` CRs instead
-of exec'ing `fleet-worker` on the API node. The CRD + operator are the hosting
-half of that path.
+`SANDBOX_BACKEND=k8s` on `fleet-server` / `fleet-orchestrator` creates and
+deletes `FleetSandbox` CRs. The operator still creates the Pod + NetworkPolicy.
+Worker heartbeats stay `POST /v1/.../heartbeat|status`.
+
+| Env | Default | Role |
+| --- | --- | --- |
+| `SANDBOX_BACKEND` | `stub` (in-cluster API Deployment: `process`) | set `k8s`. The API ServiceAccount cannot create CRs until you bind it the same verbs as `fleet-operator`. Host `KUBECONFIG` works without that. |
+| `K8S_NAMESPACE` | `agent-fleet` | CR namespace |
+| `K8S_WORKER_IMAGE` | `agent-fleet-api:local` | pod image (`fleet-worker`) |
+| `K8S_WORKER_COMMAND` | `fleet-worker` | container command |
+| `K8S_WORKER_API_URL` | `http://api.agent-fleet.svc.cluster.local:8080` | heartbeat base — **not** `127.0.0.1` / `localhost` |
+
+In-cluster: patch the API Deployment (it still defaults to `process`) or set
+those env vars and restart. Hybrid (host API + cluster operator): keep host
+`:8080`/`:3030` off the kind/k3d port map and set `K8S_WORKER_API_URL` to a
+host IPv4/IPv6 literal pods can route (allowlisted `/32` or `/128`). DNS
+names such as `host.k3d.internal` are not CIDRs. Missing kube client or
+CRD fails spawn — no stub fallback.
+
+v1 does not pull pod logs back to host `DATA_DIR`. The board still moves on
+worker HTTP status + CR phase.
 
 ## Uninstall
 

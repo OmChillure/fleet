@@ -42,6 +42,7 @@ pub async fn build_app_state_with_pool_io(
         stub_duration: cfg.stub_duration,
         data_dir: cfg.data_dir.clone(),
         worker_argv: cfg.process_worker_argv.clone(),
+        k8s: cfg.k8s.clone(),
     })
     .map_err(|e| anyhow::anyhow!(e))?;
     let orch_url = cfg.orchestrator_public_url.clone();

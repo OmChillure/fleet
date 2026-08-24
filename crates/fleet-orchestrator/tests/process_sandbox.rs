@@ -66,6 +66,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         sandbox_backend: "process".into(),
         stub_duration: Duration::from_millis(0),
         process_worker_argv: vec![worker_bin().to_string_lossy().into_owned()],
+        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),

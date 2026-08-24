@@ -14,7 +14,7 @@ Design: [`artifacts/orchestration-service-design.md`](artifacts/orchestration-se
 | SQL | **SQLx** (runtime-checked queries) | Async Postgres without heavy ORM |
 | Migrations | `sqlx::migrate!` + `migrations/` | Forward-only greenfield |
 | IDs | **UUIDv5** stable board tasks | Idempotent rematerialize |
-| Sandbox | `SandboxRuntime` + **`stub`** / **`process`** | In-process fake or real exec + pidfile (PR4/PR7) |
+| Sandbox | `SandboxRuntime` + **`stub`** / **`process`** / **`k8s`** | In-process fake, exec + pidfile, or `FleetSandbox` CRs |
 | Notify / sync | `NotificationSink` noops; `ExternalBoardSync` log wired in tick | PR8 webhooks still open; PR10 landed |
 | Auth (later HTTP) | `ADMIN_TOKEN` / session worker tokens (SHA-256) | Design K24/K31 |
 | Leadership | **Single process per DB** | Do not scale replicas in MVP |
