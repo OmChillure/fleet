@@ -338,6 +338,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_exec_default_off_unless_fleet_allow_raw_exec() {
+        // Missing / empty / explicit off — production default.
+        for off in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("FALSE"),
+        ] {
+            assert!(!raw_exec_allowed(off), "expected raw exec off for {off:?}");
+        }
+        // FLEET_ALLOW_RAW_EXEC required; 1/true/yes/on, trim + case-insensitive.
+        for on in ["1", "true", "yes", "on", "TRUE", " Yes ", "ON", " 1 "] {
+            assert!(
+                raw_exec_allowed(Some(on)),
+                "expected raw exec on for {on:?}"
+            );
+        }
+    }
+
+    #[test]
     fn permission_default_deny_and_star() {
         assert!(!permission_allowed(false, &[], "bash npm test"));
         assert!(permission_allowed(false, &["*".into()], "anything"));

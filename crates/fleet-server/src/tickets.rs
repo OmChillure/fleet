@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult};
+use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
-use fleet_db::TicketInboxItem;
 use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -281,6 +281,21 @@ pub struct PreparedFinish {
     pub title: String,
 }
 
+/// Inbox finish/monitor are scoped to the route workspace. Missing membership
+/// is 403 — same error the HTTP handlers return from `require_member`.
+fn require_workspace_role(role: Option<String>) -> AppResult<String> {
+    role.ok_or_else(|| AppError::forbidden("not a member of this workspace"))
+}
+
+/// Knowing a ticket id from workspace A must not finish or monitor it via B.
+/// Wrong workspace is 403 (or 404); never launch or mutate that row.
+fn require_ticket_workspace(item: &TicketInboxItem, workspace_id: Uuid) -> AppResult<()> {
+    if item.workspace_id != workspace_id {
+        return Err(AppError::forbidden("ticket is not in this workspace"));
+    }
+    Ok(())
+}
+
 pub async fn prepare_finish(
     state: &AppState,
     workspace_id: Uuid,
@@ -288,6 +303,7 @@ pub async fn prepare_finish(
     args: FinishTicketArgs,
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
+    require_ticket_workspace(&item, workspace_id)?;
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
     let spec = format!(
         "{}\n\n# I/O\n\
@@ -361,11 +377,7 @@ pub async fn mark_ticket_launched(
     Ok(())
 }
 
-pub async fn poll_workspace(
-    state: &AppState,
-    workspace_id: Uuid,
-    force: bool,
-) -> AppResult<Value> {
+pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -> AppResult<Value> {
     let Some(monitor) = ticket_repo::get_monitor(&state.db, workspace_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
@@ -390,16 +402,18 @@ pub async fn poll_workspace(
     let mut seen = 0usize;
     for provider in &monitor.providers {
         match provider.as_str() {
-            "github" => match poll_github(state, workspace_id, &monitor.github_repos, &caller).await
-            {
-                Ok(n) => seen += n,
-                Err(e) => errors.push(format!("github: {e}")),
-            },
-            "jira" => match poll_jira(state, workspace_id, monitor.jira_jql.as_deref(), &caller).await
-            {
-                Ok(n) => seen += n,
-                Err(e) => errors.push(format!("jira: {e}")),
-            },
+            "github" => {
+                match poll_github(state, workspace_id, &monitor.github_repos, &caller).await {
+                    Ok(n) => seen += n,
+                    Err(e) => errors.push(format!("github: {e}")),
+                }
+            }
+            "jira" => {
+                match poll_jira(state, workspace_id, monitor.jira_jql.as_deref(), &caller).await {
+                    Ok(n) => seen += n,
+                    Err(e) => errors.push(format!("jira: {e}")),
+                }
+            }
             "linear" => match poll_linear(state, workspace_id, &caller).await {
                 Ok(n) => seen += n,
                 Err(e) => errors.push(format!("linear: {e}")),
@@ -408,11 +422,12 @@ pub async fn poll_workspace(
                 Ok(n) => seen += n,
                 Err(e) => errors.push(format!("gitlab: {e}")),
             },
-            "slack" => match poll_slack(state, workspace_id, &monitor.slack_channels, &caller).await
-            {
-                Ok(n) => seen += n,
-                Err(e) => errors.push(format!("slack: {e}")),
-            },
+            "slack" => {
+                match poll_slack(state, workspace_id, &monitor.slack_channels, &caller).await {
+                    Ok(n) => seen += n,
+                    Err(e) => errors.push(format!("slack: {e}")),
+                }
+            }
             "notion" => {
                 match poll_notion(state, workspace_id, &monitor.notion_databases, &caller).await {
                     Ok(n) => seen += n,
@@ -496,10 +511,7 @@ pub async fn poll_due_workspaces(state: &AppState) {
     }
 }
 
-async fn connected_task_providers(
-    state: &AppState,
-    workspace_id: Uuid,
-) -> AppResult<Vec<String>> {
+async fn connected_task_providers(state: &AppState, workspace_id: Uuid) -> AppResult<Vec<String>> {
     let rows = integ_repo::list_for_workspace(&state.db, workspace_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -735,14 +747,8 @@ async fn poll_linear(
             .unwrap_or(key.as_str())
             .to_string();
         let url = i.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let desc = i
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let state_type = i
-            .get("state_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let desc = i.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let state_type = i.get("state_type").and_then(|v| v.as_str()).unwrap_or("");
         let closed = matches!(state_type, "completed" | "canceled");
         ticket_repo::upsert_inbox(
             &state.db,
@@ -1055,7 +1061,12 @@ fn json_items(data: &Value) -> Vec<Value> {
 
 fn json_text(v: &Value, keys: &[&str]) -> String {
     for k in keys {
-        if let Some(s) = v.get(*k).and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(s) = v
+            .get(*k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return s.to_string();
         }
         if let Some(n) = v.get(*k).and_then(|x| x.as_u64()) {
@@ -1141,12 +1152,10 @@ async fn poll_asana(
     if !spaces.ok {
         return Err(spaces.summary);
     }
-    let ws_gid = json_items(&spaces.data)
-        .into_iter()
-        .find_map(|w| {
-            let id = json_text(&w, &["gid", "id"]);
-            (!id.is_empty()).then_some(id)
-        });
+    let ws_gid = json_items(&spaces.data).into_iter().find_map(|w| {
+        let id = json_text(&w, &["gid", "id"]);
+        (!id.is_empty()).then_some(id)
+    });
     let Some(ws_gid) = ws_gid else {
         return Ok(0);
     };
@@ -1166,7 +1175,10 @@ async fn poll_asana(
     for t in json_items(&listed.data) {
         let key = json_text(&t, &["gid", "id"]);
         let title = json_text(&t, &["name", "title"]);
-        let closed = t.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let closed = t
+            .get("completed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         upsert_inbox_item(
             state,
             workspace_id,
@@ -1354,7 +1366,23 @@ async fn poll_confluence(
 }
 
 fn status_done(status: &str) -> bool {
-    let s = status.to_ascii_lowercase();
+    let s = status.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    // Substring match would mark "Incomplete" / "Not Done" closed and hide open work.
+    // Same for Jira/Asana/Linear "not completed" / "not closed" / "not resolved".
+    if s.contains("incomplete")
+        || s.contains("not done")
+        || s.contains("unclosed")
+        || s.contains("unresolved")
+        || s.contains("reopened")
+        || s.contains("not completed")
+        || s.contains("not closed")
+        || s.contains("not resolved")
+    {
+        return false;
+    }
     s.contains("done") || s.contains("closed") || s.contains("resolved") || s.contains("complete")
 }
 
@@ -1376,6 +1404,13 @@ async fn resolve_ticket(
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .or_else(|| parsed.as_ref().and_then(|p| p.provider.clone()));
+    if let Some(p) = provider.as_deref() {
+        if !TASK_PROVIDERS.iter().any(|known| *known == p) {
+            return Err(AppError::bad_request(format!(
+                "unknown inbox provider `{p}`"
+            )));
+        }
+    }
     let key = parsed.as_ref().map(|p| p.key.clone());
 
     if let (Some(provider), Some(key)) = (provider.as_deref(), key.as_deref()) {
@@ -1454,7 +1489,10 @@ async fn fetch_ticket_details(
     let (op, args) = match item.provider.as_str() {
         "github" => {
             let (owner, repo, number) = parse_github_owner_repo_num(&item.external_key)?;
-            ("get_issue", json!({ "owner": owner, "repo": repo, "number": number }))
+            (
+                "get_issue",
+                json!({ "owner": owner, "repo": repo, "number": number }),
+            )
         }
         "gitlab" => {
             let (project, iid) = item.external_key.split_once('#')?;
@@ -1477,11 +1515,7 @@ async fn fetch_ticket_details(
         _ => return None,
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
-    if result.ok {
-        Some(result.data)
-    } else {
-        None
-    }
+    if result.ok { Some(result.data) } else { None }
 }
 
 fn ticket_spec_md(item: &TicketInboxItem, live: Option<&Value>) -> String {
@@ -1554,7 +1588,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AuthState};
+use fleet_auth::{AuthState, require_user};
 use fleet_db::repos::workspaces as workspace_repo;
 
 pub fn router() -> Router<AppState> {
@@ -1563,10 +1597,7 @@ pub fn router() -> Router<AppState> {
             "/api/workspaces/{workspace_id}/inbox",
             get(http_list).post(http_monitor),
         )
-        .route(
-            "/api/workspaces/{workspace_id}/inbox/poll",
-            post(http_poll),
-        )
+        .route("/api/workspaces/{workspace_id}/inbox/poll", post(http_poll))
         .route(
             "/api/workspaces/{workspace_id}/inbox/finish",
             post(http_finish),
@@ -1583,9 +1614,9 @@ async fn require_member(
         config: state.auth.clone(),
     };
     let user = require_user(&auth, jar).await?;
-    let role = workspace_repo::user_role(&state.db, workspace_id, user.id)
-        .await?
-        .ok_or_else(|| AppError::forbidden("not a member of this workspace"))?;
+    let role = require_workspace_role(
+        workspace_repo::user_role(&state.db, workspace_id, user.id).await?,
+    )?;
     Ok((user, role))
 }
 
@@ -1764,5 +1795,53 @@ mod tests {
         let p = parse_ticket_ref("notion:page-abc").unwrap();
         assert_eq!(p.provider.as_deref(), Some("notion"));
         assert_eq!(p.key, "page-abc");
+    }
+
+    /// Inbox poll marks Jira/Bitbucket items closed via `status_done`.
+    /// A done-word as a substring of an open label must not hide the ticket.
+    #[test]
+    fn status_done_does_not_close_incomplete_or_not_done() {
+        for closed in [
+            "done",
+            "Done",
+            "closed",
+            "resolved",
+            "complete",
+            "completed",
+        ] {
+            assert!(status_done(closed), "expected closed: {closed}");
+        }
+        for open in [
+            "",
+            "open",
+            "in progress",
+            "todo",
+            "incomplete",
+            "Incomplete",
+            "not done",
+            "Not Done",
+            "reopened",
+        ] {
+            assert!(!status_done(open), "expected open: {open:?}");
+        }
+    }
+
+    /// Inbox poll close-detection (tested-behavior): negated done-words
+    /// (`not completed` / `not closed` / `not resolved`) stay open.
+    #[test]
+    fn status_done_does_not_close_not_completed_not_closed_or_not_resolved() {
+        for closed in ["completed", "closed", "resolved"] {
+            assert!(status_done(closed), "expected closed: {closed}");
+        }
+        for open in [
+            "not completed",
+            "Not Completed",
+            "not closed",
+            "Not Closed",
+            "not resolved",
+            "Not Resolved",
+        ] {
+            assert!(!status_done(open), "expected open: {open:?}");
+        }
     }
 }

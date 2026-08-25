@@ -2,7 +2,7 @@
 //!
 //! | Method | Path | Role |
 //! | --- | --- | --- |
-//! | `GET` | `/api/workspaces/:id/chat/status` | Providers + model lists |
+//! | `GET` | `/api/workspaces/:id/chat/status` | Runner heartbeat inventory (`?runner_id=`) |
 //! | `GET` | `/api/workspaces/:id/chat/conversations` | List saved chats |
 //! | `POST` | `/api/workspaces/:id/chat/conversations` | Create empty chat |
 //! | `GET` | `/api/workspaces/:id/chat/conversations/:cid` | Load chat + messages |
@@ -14,24 +14,25 @@
 use std::env;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::User;
+use fleet_db::WorkerAgentRuntime;
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue,
-    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, ChatAction,
-    ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
+    tool_definitions,
 };
 use crate::state::AppState;
 
@@ -121,6 +122,11 @@ pub struct ChatRequest {
     /// When set, continue this saved conversation (must belong to the user).
     #[serde(default)]
     pub conversation_id: Option<Uuid>,
+    /// Self-hosted runner that should take launched agent work.
+    #[serde(default)]
+    pub runner_id: Option<Uuid>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -257,11 +263,7 @@ struct OllamaToolFunction {
     arguments: Value,
 }
 
-async fn require_member(
-    state: &AppState,
-    jar: &CookieJar,
-    workspace_id: Uuid,
-) -> AppResult<User> {
+async fn require_member(state: &AppState, jar: &CookieJar, workspace_id: Uuid) -> AppResult<User> {
     let auth = AuthState {
         db: state.db.clone(),
         config: state.auth.clone(),
@@ -375,10 +377,9 @@ async fn ensure_conversation(
     first_user_text: &str,
 ) -> AppResult<Uuid> {
     if let Some(cid) = conversation_id {
-        let exists =
-            chat_repo::get_conversation(&state.db, cid, workspace_id, user_id)
-                .await
-                .map_err(|e| AppError::internal(e.to_string()))?;
+        let exists = chat_repo::get_conversation(&state.db, cid, workspace_id, user_id)
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?;
         if exists.is_none() {
             return Err(AppError::not_found("conversation"));
         }
@@ -531,8 +532,12 @@ async fn fetch_models(cfg: &OllamaConfig) -> Result<Vec<ChatModelInfo>, String> 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatProgress {
-    Status { text: String },
-    Delta { text: String },
+    Status {
+        text: String,
+    },
+    Delta {
+        text: String,
+    },
     Action {
         tool: String,
         ok: bool,
@@ -551,7 +556,9 @@ pub enum ChatProgress {
         conversation_id: Uuid,
         actions: Vec<ChatAction>,
     },
-    Error { error: String },
+    Error {
+        error: String,
+    },
 }
 
 impl ChatProgress {
@@ -882,11 +889,7 @@ async fn chat_with_tools(
                     .map(|a| format!("• {}: {}", a.tool, a.summary))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Ok((
-                    used_model,
-                    format!("Done.\n{summary}"),
-                    actions,
-                ));
+                return Ok((used_model, format!("Done.\n{summary}"), actions));
             }
             return Ok((used_model, content, actions));
         }
@@ -911,11 +914,10 @@ async fn chat_with_tools(
             let llm = ChatLlmContext {
                 provider: "ollama".into(),
                 model: model.to_string(),
+                runner_id: None,
+                effort: None,
             };
-            let prior: Vec<Value> = actions
-                .iter()
-                .filter_map(|a| a.detail.clone())
-                .collect();
+            let prior: Vec<Value> = actions.iter().filter_map(|a| a.detail.clone()).collect();
             emit_progress(
                 &progress,
                 ChatProgress::Status {
@@ -923,16 +925,9 @@ async fn chat_with_tools(
                 },
             )
             .await;
-            let (result_json, action) = execute_tool_with_retry(
-                state,
-                workspace_id,
-                user_id,
-                name,
-                &args,
-                &llm,
-                &prior,
-            )
-            .await;
+            let (result_json, action) =
+                execute_tool_with_retry(state, workspace_id, user_id, name, &args, &llm, &prior)
+                    .await;
             emit_progress(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
 
@@ -982,105 +977,176 @@ async fn chat_with_tools(
 
 // ── handlers ────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize, Default)]
+struct ChatStatusQuery {
+    #[serde(default)]
+    runner_id: Option<Uuid>,
+}
+
+const STATUS_CATALOG: &[(&str, &str)] = &[
+    ("grok", "Grok"),
+    ("claude", "Claude"),
+    ("openai", "OpenAI"),
+    ("ollama", "Private (Ollama)"),
+];
+
+fn agent_status_phrase(id: &str, installed: bool, logged_in: bool) -> &'static str {
+    let uses_login = id != "ollama";
+    if !installed {
+        "not installed"
+    } else if uses_login && !logged_in {
+        "installed · logged out"
+    } else if uses_login {
+        "installed · logged in"
+    } else {
+        "installed"
+    }
+}
+
+fn providers_from_runner_agents(
+    agents: &[WorkerAgentRuntime],
+    openai_ready: bool,
+) -> Vec<ChatProviderInfo> {
+    STATUS_CATALOG
+        .iter()
+        .map(|(id, name)| {
+            let reported = agents.iter().find(|a| a.id == *id);
+            let installed = reported.map(|a| a.installed).unwrap_or(false);
+            let logged_in = reported.map(|a| a.logged_in).unwrap_or(false);
+            let models: Vec<ChatModelInfo> = reported
+                .map(|a| {
+                    a.models
+                        .iter()
+                        .map(|n| ChatModelInfo {
+                            name: n.clone(),
+                            size: None,
+                            parameter_size: None,
+                            family: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let phrase = agent_status_phrase(id, installed, logged_in);
+            let available = if *id == "openai" {
+                openai_ready
+            } else if *id == "ollama" {
+                installed && !models.is_empty()
+            } else {
+                installed && logged_in
+            };
+            ChatProviderInfo {
+                id: (*id).into(),
+                name: (*name).into(),
+                available,
+                coming_soon: false,
+                error: if available && (*id == "ollama" || !models.is_empty()) {
+                    None
+                } else {
+                    Some(phrase.to_string())
+                },
+                models,
+                default_model: reported.and_then(|a| a.models.first().cloned()),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use fleet_db::WorkerAgentRuntime;
+
+    #[test]
+    fn claude_logged_in_without_models_is_not_logged_out() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "claude".into(),
+            name: Some("Claude".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "claude")
+            .expect("claude");
+        assert!(p.available);
+        assert_ne!(p.error.as_deref().unwrap_or(""), "installed · logged out");
+    }
+
+    #[test]
+    fn ollama_status_label_is_private() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: true,
+            models: vec!["llama3.2".into()],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
+        assert_eq!(p.name, "Private (Ollama)");
+        assert!(p.available);
+    }
+}
+
 /// `GET /api/workspaces/:id/chat/status`
+///
+/// Provider login/models come from the selected runner's last heartbeat.
+/// The control plane is not a second inventory.
 async fn chat_status(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(workspace_id): Path<Uuid>,
+    Query(q): Query<ChatStatusQuery>,
 ) -> AppResult<Json<ChatStatusResponse>> {
     let _user = require_member(&state, &jar, workspace_id).await?;
 
-    let cfg = &state.ollama;
-    let grok = crate::grok::provider_status(&state.grok).await;
-
-    let (ollama, ollama_models, ollama_err) = if !cfg.enabled {
-        (
-            ollama_provider(
-                cfg,
-                vec![],
-                Some("Ollama chat is disabled (OLLAMA_ENABLED=false)".into()),
-            ),
-            vec![],
-            Some("Ollama chat is disabled (OLLAMA_ENABLED=false)".into()),
-        )
-    } else {
-        match fetch_models(cfg).await {
-            Ok(models) => {
-                tracing::info!(
-                    count = models.len(),
-                    models = ?models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
-                    "ollama models listed (live from /api/tags)"
-                );
-                let err = if models.is_empty() {
-                    Some(
-                        "No models in Ollama. Run: ollama pull llama3.2".to_string(),
-                    )
-                } else {
-                    None
-                };
-                let p = ollama_provider(cfg, models.clone(), err.clone());
-                (p, models, err)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "ollama unavailable");
-                (
-                    ollama_provider(cfg, vec![], Some(e.clone())),
-                    vec![],
-                    Some(e),
-                )
-            }
-        }
+    let Some(runner_id) = q.runner_id else {
+        let openai = crate::providers::openai_status(&state.openai);
+        return Ok(Json(ChatStatusResponse {
+            available: openai.available,
+            enabled: true,
+            base_url: state.ollama.base_url.clone(),
+            default_model: openai.default_model.clone(),
+            models: openai.models.clone(),
+            providers: vec![openai],
+            error: None,
+            hint: "Select a runner for Grok / Claude / Private (Ollama). OpenAI uses the control-plane API key.".into(),
+        }));
     };
 
-    // Prefer Grok first when local CLI auth is present.
-    let mut providers = Vec::new();
-    if grok.available {
-        providers.push(grok.clone());
-        providers.push(ollama);
-    } else {
-        providers.push(ollama);
-        providers.push(grok.clone());
+    let host = crate::worker_hosts::load_visible_host(&state, workspace_id, runner_id).await?;
+    let public = host.as_public(Utc::now());
+    let mut providers = providers_from_runner_agents(&public.agents, state.openai.available());
+    if let Some(p) = providers.iter_mut().find(|p| p.id == "openai") {
+        *p = crate::providers::openai_status(&state.openai);
     }
-    providers.push(crate::providers::openai_status(&state.openai));
-    providers.push(crate::providers::claude_status(&state.claude));
-
     let any_available = providers.iter().any(|p| p.available);
-    let hint = if grok.available {
-        "Grok is ready (local CLI auth). Model: grok-4.5 — or use Ollama locally.".to_string()
-    } else if ollama_err.is_none() && !ollama_models.is_empty() {
-        "Ollama is ready. For Grok: run `grok login` (uses ~/.grok/auth.json).".to_string()
-    } else {
-        format!(
-            "Start Ollama (`ollama serve && ollama pull {}`) and/or run `grok login` for Grok.",
-            cfg.default_model.as_deref().unwrap_or("llama3.2")
-        )
-    };
-
-    // Top-level error only when nothing works.
+    let ollama_models = providers
+        .iter()
+        .find(|p| p.id == "ollama")
+        .map(|p| p.models.clone())
+        .unwrap_or_default();
+    let default_model = providers
+        .iter()
+        .find(|p| p.available)
+        .and_then(|p| p.default_model.clone());
+    let hint = format!("Providers are the last heartbeat from {}.", public.name);
     let error = if any_available {
         None
     } else {
-        let parts: Vec<String> = providers
-            .iter()
-            .filter(|p| !p.coming_soon)
-            .filter_map(|p| p.error.clone())
-            .collect();
-        if parts.is_empty() {
-            Some("No chat providers available".into())
-        } else {
-            Some(parts.join(" · "))
-        }
+        Some(format!("No ready provider on {}.", public.name))
     };
 
     Ok(Json(ChatStatusResponse {
         available: any_available,
-        enabled: cfg.enabled || state.grok.enabled,
-        base_url: cfg.base_url.clone(),
-        default_model: grok
-            .default_model
-            .clone()
-            .or_else(|| cfg.default_model.clone()),
-        // Flat list keeps older clients on Ollama models.
+        enabled: true,
+        base_url: state.ollama.base_url.clone(),
+        default_model,
         models: ollama_models,
         providers,
         error,
@@ -1135,7 +1201,9 @@ async fn chat_complete(
     }
 
     if pairs.is_empty() {
-        return Err(AppError::bad_request("no non-empty user/assistant messages"));
+        return Err(AppError::bad_request(
+            "no non-empty user/assistant messages",
+        ));
     }
 
     let last_user = pairs
@@ -1170,8 +1238,63 @@ async fn chat_complete(
         pairs.clone()
     };
     if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
-        pairs_for_llm = pairs_for_llm
-            .split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+        pairs_for_llm = pairs_for_llm.split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+    }
+
+    if crate::runner_chat::runner_cli_provider(&provider) {
+        let runner_id = body.runner_id.ok_or_else(|| {
+            AppError::bad_request(
+                "select a runner — Grok / Claude / Ollama chat runs on that box's official CLI"
+                    .to_string(),
+            )
+        })?;
+        let model = body
+            .model
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let conversation_id = ensure_conversation(
+            &state,
+            workspace_id,
+            user.id,
+            body.conversation_id,
+            &provider,
+            &model,
+            &last_user,
+        )
+        .await?;
+        let (used_model, content) = crate::runner_chat::run_on_runner(
+            &state,
+            workspace_id,
+            runner_id,
+            &provider,
+            &model,
+            body.effort.as_deref(),
+            &pairs_for_llm,
+            None,
+        )
+        .await?;
+        persist_user_and_assistant(
+            &state,
+            conversation_id,
+            &last_user,
+            &content,
+            &provider,
+            &used_model,
+            &[],
+        )
+        .await?;
+        return Ok(Json(ChatResponse {
+            message: ChatMessageOut {
+                role: "assistant".into(),
+                content,
+            },
+            model: used_model,
+            provider,
+            actions: vec![],
+            conversation_id,
+        }));
     }
 
     match provider.as_str() {
@@ -1330,7 +1453,9 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
         }
     }
     if pairs.is_empty() {
-        return Err(AppError::bad_request("no non-empty user/assistant messages"));
+        return Err(AppError::bad_request(
+            "no non-empty user/assistant messages",
+        ));
     }
     let last_user = pairs
         .iter()
@@ -1338,10 +1463,7 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
         .find(|(r, _)| r == "user")
         .map(|(_, c)| c.clone())
         .ok_or_else(|| AppError::bad_request("last turn must include a user message"))?;
-    Ok(PreparedChat {
-        pairs,
-        last_user,
-    })
+    Ok(PreparedChat { pairs, last_user })
 }
 
 async fn run_chat_turn(
@@ -1378,6 +1500,59 @@ async fn run_chat_turn(
     };
     if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
         pairs_for_llm = pairs_for_llm.split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
+    }
+
+    if crate::runner_chat::runner_cli_provider(provider) {
+        let runner_id = body.runner_id.ok_or_else(|| {
+            AppError::bad_request(
+                "select a runner — Grok / Claude / Ollama chat runs on that box's official CLI"
+                    .to_string(),
+            )
+        })?;
+        let model = body
+            .model
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let conversation_id = ensure_conversation(
+            state,
+            workspace_id,
+            user_id,
+            body.conversation_id,
+            provider,
+            &model,
+            last_user,
+        )
+        .await?;
+        let (used_model, content) = crate::runner_chat::run_on_runner(
+            state,
+            workspace_id,
+            runner_id,
+            provider,
+            &model,
+            body.effort.as_deref(),
+            &pairs_for_llm,
+            progress.as_ref(),
+        )
+        .await?;
+        persist_user_and_assistant(
+            state,
+            conversation_id,
+            last_user,
+            &content,
+            provider,
+            &used_model,
+            &[],
+        )
+        .await?;
+        return Ok(ChatProgress::Done {
+            message: content,
+            model: used_model,
+            provider: provider.to_string(),
+            conversation_id,
+            actions: vec![],
+        });
     }
 
     match provider {
@@ -1478,7 +1653,7 @@ async fn chat_complete_grok(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::grok::GROK_MODEL.to_string());
+        .unwrap_or_else(crate::grok::default_model);
 
     let conversation_id = ensure_conversation(
         state,
@@ -1506,6 +1681,8 @@ async fn chat_complete_grok(
         &model,
         &pairs,
         progress,
+        body.runner_id,
+        body.effort.clone(),
     )
     .await?;
 
@@ -1572,14 +1749,11 @@ async fn chat_complete_ollama(
             tracing::error!(error = %e, "ollama models for default pick failed");
             AppError::bad_request(e)
         })?;
-        models
-            .first()
-            .map(|m| m.name.clone())
-            .ok_or_else(|| {
-                AppError::bad_request(
-                    "no models installed in Ollama. Run: ollama pull llama3.2".to_string(),
-                )
-            })?
+        models.first().map(|m| m.name.clone()).ok_or_else(|| {
+            AppError::bad_request(
+                "no models installed in Ollama. Run `ollama pull` on the runner.".to_string(),
+            )
+        })?
     };
 
     let conversation_id = ensure_conversation(
@@ -1601,8 +1775,7 @@ async fn chat_complete_ollama(
     );
 
     let (used_model, content, actions) =
-        chat_with_tools(state, workspace_id, user_id, cfg, &model, history, progress)
-            .await?;
+        chat_with_tools(state, workspace_id, user_id, cfg, &model, history, progress).await?;
 
     persist_user_and_assistant(
         state,
@@ -1641,7 +1814,7 @@ async fn chat_complete_openai(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::providers::OPENAI_DEFAULT_MODEL.to_string());
+        .unwrap_or_default();
     let conversation_id = ensure_conversation(
         state,
         workspace_id,
@@ -1660,6 +1833,7 @@ async fn chat_complete_openai(
         &model,
         &pairs,
         progress,
+        body.runner_id,
     )
     .await?;
     persist_user_and_assistant(
@@ -1698,7 +1872,7 @@ async fn chat_complete_claude(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| crate::providers::CLAUDE_DEFAULT_MODEL.to_string());
+        .unwrap_or_default();
     let conversation_id = ensure_conversation(
         state,
         workspace_id,
@@ -1717,6 +1891,7 @@ async fn chat_complete_claude(
         &model,
         &pairs,
         progress,
+        body.runner_id,
     )
     .await?;
     persist_user_and_assistant(

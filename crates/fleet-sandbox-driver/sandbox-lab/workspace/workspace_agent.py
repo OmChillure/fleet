@@ -9,7 +9,14 @@ POLL = float(os.environ.get("FLEET_WORKSPACE_POLL_SEC", "0.4"))
 FLEET_UID = int(os.environ.get("FLEET_UID", "1000"))
 FLEET_GID = int(os.environ.get("FLEET_GID", "1000"))
 BIN = Path(os.environ.get("FLEET_BIN_DIR", "/workspace/bin"))
-ALLOW_RAW = os.environ.get("FLEET_ALLOW_RAW_EXEC", "0") in ("1", "true", "yes")
+def raw_exec_allowed(env_flag: str | None) -> bool:
+    """Whether free-form shell is allowed. Matches Rust policy::raw_exec_allowed."""
+    if env_flag is None:
+        return False
+    return env_flag.strip().lower() in ("1", "true", "yes", "on")
+
+
+ALLOW_RAW = raw_exec_allowed(os.environ.get("FLEET_ALLOW_RAW_EXEC"))
 
 # job_id -> tools map from the signed provision request (immutable vs harness file writes)
 TOOLS_BY_JOB: dict[str, dict] = {}

@@ -573,4 +573,75 @@ mod tests {
         assert!(spec.egress.as_ref().unwrap().len() >= 2);
         assert_eq!(np.metadata.name.as_deref(), Some("fsb-demo-t1-net"));
     }
+
+    fn sample_cfg() -> OperatorConfig {
+        OperatorConfig {
+            worker_image_default: "agent-fleet-api:local".into(),
+            api_service_url: "http://api.agent-fleet.svc:8080".into(),
+            api_namespace: "agent-fleet".into(),
+            api_pod_label_name: "fleet-api".into(),
+        }
+    }
+
+    fn sandbox_created_ago(ttl_seconds: Option<i64>, age_secs: i64) -> FleetSandbox {
+        let mut sb = sample_sb();
+        sb.spec.ttl_seconds = ttl_seconds;
+        sb.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            Utc::now() - chrono::Duration::seconds(age_secs),
+        ));
+        sb
+    }
+
+    #[test]
+    fn ttl_expired_deletes_sandbox_session() {
+        // apply() deletes the FleetSandbox CR when this is true; kube then
+        // runs cleanup() which deletes the session pod + NetworkPolicy.
+        let sb = sandbox_created_ago(Some(600), 601);
+        assert!(ttl_expired(&sb));
+        assert_eq!(sb.spec.session_id, "sess-1");
+        assert_eq!(pod_name_for(&sb.name_any()), "fsb-demo-t1");
+
+        let at_boundary = sandbox_created_ago(Some(600), 600);
+        assert!(ttl_expired(&at_boundary));
+    }
+
+    #[test]
+    fn ttl_missing_does_not_delete_early() {
+        let mut no_ttl = sandbox_created_ago(None, 10_000);
+        assert!(!ttl_expired(&no_ttl));
+
+        no_ttl.spec.ttl_seconds = Some(0);
+        assert!(!ttl_expired(&no_ttl));
+
+        no_ttl.spec.ttl_seconds = Some(-1);
+        assert!(!ttl_expired(&no_ttl));
+
+        let mut no_created = sample_sb();
+        no_created.spec.ttl_seconds = Some(1);
+        no_created.metadata.creation_timestamp = None;
+        assert!(!ttl_expired(&no_created));
+
+        let still_fresh = sandbox_created_ago(Some(600), 1);
+        assert!(!ttl_expired(&still_fresh));
+
+        let one_second_left = sandbox_created_ago(Some(600), 599);
+        assert!(!ttl_expired(&one_second_left));
+    }
+
+    #[test]
+    fn ttl_finalizer_cleanup_targets_pod_and_network_policy() {
+        let sb = sample_sb();
+        let name = sb.name_any();
+        let pod_name = pod_name_for(&name);
+        let np_name = network_policy_name(&pod_name);
+        assert_eq!(FINALIZER, "fleet.agentfleet.io/sandbox-cleanup");
+        assert_eq!(pod_name, "fsb-demo-t1");
+        assert_eq!(np_name, "fsb-demo-t1-net");
+
+        let cfg = sample_cfg();
+        let desired_pod = build_pod(&sb, &pod_name, &cfg);
+        let desired_np = build_network_policy(&sb, &pod_name, &cfg);
+        assert_eq!(desired_pod.metadata.name.as_deref(), Some(pod_name.as_str()));
+        assert_eq!(desired_np.metadata.name.as_deref(), Some(np_name.as_str()));
+    }
 }

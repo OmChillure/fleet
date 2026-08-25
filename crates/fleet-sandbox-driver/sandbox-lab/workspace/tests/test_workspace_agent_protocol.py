@@ -22,11 +22,14 @@ from pathlib import Path
 AGENT_PATH = Path(__file__).resolve().parents[1] / "workspace_agent.py"
 
 
-def load_agent(fleet_dir: Path, jobs_root: Path):
+def load_agent(fleet_dir: Path, jobs_root: Path, allow_raw: str | None = "0"):
     """Load workspace_agent with isolated FLEET_DIR / FLEET_JOBS_ROOT."""
     os.environ["FLEET_DIR"] = str(fleet_dir)
     os.environ["FLEET_JOBS_ROOT"] = str(jobs_root)
-    os.environ["FLEET_ALLOW_RAW_EXEC"] = "0"
+    if allow_raw is None:
+        os.environ.pop("FLEET_ALLOW_RAW_EXEC", None)
+    else:
+        os.environ["FLEET_ALLOW_RAW_EXEC"] = allow_raw
     os.environ["FLEET_HANDSHAKE_SECRET"] = "protocol-test-secret"
     # Unique module name per load so env is re-read if needed
     name = f"workspace_agent_under_test_{jobs_root.name}"
@@ -153,6 +156,49 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
                 {"job_id": self.job_id, "cmd": "echo pwned", "cwd": str(self.cwd)}
             )
         self.assertIn("raw exec disabled", str(cm.exception))
+
+    def test_raw_exec_policy_matches_rust(self):
+        """Truth table must match crates/fleet-sandbox-driver/src/policy.rs raw_exec_allowed."""
+        for off in (None, "", "   ", "0", "false", "no", "off", "FALSE"):
+            self.assertFalse(self.agent.raw_exec_allowed(off), off)
+        for on in ("1", "true", "yes", "on", "TRUE", " Yes ", "ON", " 1 "):
+            self.assertTrue(self.agent.raw_exec_allowed(on), on)
+
+    def test_raw_exec_default_off_from_env(self):
+        self.assertFalse(self.agent.ALLOW_RAW)
+        unset = load_agent(self.fleet, self.jobs, allow_raw=None)
+        self.assertFalse(unset.ALLOW_RAW)
+        enabled = load_agent(self.fleet, self.jobs, allow_raw="1")
+        self.assertTrue(enabled.ALLOW_RAW)
+
+    def test_raw_exec_enabled_when_allow_flag(self):
+        prev = self.agent.ALLOW_RAW
+        self.agent.ALLOW_RAW = True
+        try:
+            result = self.agent.handle_exec_legacy(
+                {"job_id": self.job_id, "cmd": "echo pwned-allowed", "cwd": str(self.cwd)}
+            )
+        finally:
+            self.agent.ALLOW_RAW = prev
+        self.assertTrue(result["ok"], result)
+        self.assertIn("pwned-allowed", result["stdout"])
+        self.assertEqual(result["cmd"], "echo pwned-allowed")
+
+    def test_handle_request_exec_rejected_by_default(self):
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "exec",
+                "req_id": "raw-off",
+                "cmd": "echo should-not-run",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-raw-off.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        self.assertIn("raw exec disabled", body.get("error") or "")
+        self.assertNotIn("should-not-run", body.get("stdout") or "")
 
     def test_path_under_jobs_accepts_job_tree(self):
         self.assertTrue(self.agent.path_under_jobs(self.cwd))

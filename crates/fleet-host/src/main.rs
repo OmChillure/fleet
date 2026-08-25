@@ -27,7 +27,14 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Version => {
-            println!("fleet-host {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "fleet-host {}",
+                fleet_host::software::host_pkg_version()
+            );
+            println!(
+                "fleet-driver {}",
+                fleet_host::software::driver_pkg_version()
+            );
             match fleet_host::software::baked_git_sha() {
                 Some(sha) => println!("git_sha {sha}"),
                 None => println!("git_sha unknown"),

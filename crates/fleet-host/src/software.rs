@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::config::LocalConfig;
@@ -11,11 +11,49 @@ use crate::config::LocalConfig;
 /// Logical package names (no `.exe`). On-disk Windows names add the suffix.
 pub const PACKAGE_BINS: [&str; 2] = ["fleet-host", "fleet-driver"];
 
+/// Distinctive ASCII so `strings` / a sibling extract can read the version.
+/// Prefixes are part of the contract — do not rename.
+pub const HOST_PKG_STAMP_PREFIX: &[u8] = b"FLEET_HOST_PKG=";
+pub const DRIVER_PKG_STAMP_PREFIX: &[u8] = b"FLEET_DRIVER_PKG=";
+
+#[used]
+static HOST_PKG_STAMP: &[u8] =
+    concat!("FLEET_HOST_PKG=", env!("FLEET_HOST_PKG_VERSION"), "\0").as_bytes();
+
 /// Compile-time tree-id (`FLEET_GIT_SHA`), same bake as fleet-server.
 /// `build.rs` reruns rustc when the env changes so a cached object without
 /// the sha cannot be reused.
 pub fn baked_git_sha() -> Option<&'static str> {
     option_env!("FLEET_GIT_SHA").filter(|s| !s.is_empty())
+}
+
+pub fn host_pkg_version() -> &'static str {
+    option_env!("FLEET_HOST_PKG_VERSION").unwrap_or("0.0.0")
+}
+
+/// Bake-time fleet-driver version (`fleet-host version` CLI). Heartbeat
+/// does not use this — it reads the on-disk `FLEET_DRIVER_PKG=` stamp or omits.
+pub fn driver_pkg_version() -> &'static str {
+    option_env!("FLEET_DRIVER_PKG_VERSION").unwrap_or("0.0.0")
+}
+
+/// Version stamped into a binary (`FLEET_*_PKG=`). Same number on every OS.
+pub fn pkg_version_from_bytes(bytes: &[u8], prefix: &[u8]) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let pos = bytes.windows(prefix.len()).position(|w| w == prefix)?;
+    let rest = &bytes[pos + prefix.len()..];
+    let end = rest
+        .iter()
+        .position(|&b| b == 0 || b.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    let s = std::str::from_utf8(&rest[..end]).ok()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+pub fn pkg_version_from_file(path: &Path, prefix: &[u8]) -> Option<String> {
+    pkg_version_from_bytes(&fs::read(path).ok()?, prefix)
 }
 
 /// `updating` is true only while a **host-bin** apply is waiting / restarting.
@@ -30,10 +68,18 @@ pub fn heartbeat_software(cfg: &LocalConfig, updating: bool) -> Value {
 fn bin_shas(cfg: &LocalConfig) -> Value {
     let host = std::env::current_exe().ok();
     json!({
-        "fleet-host": host.as_deref().and_then(file_sha256),
-        "fleet-driver": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
-            .as_deref()
-            .and_then(file_sha256),
+        "fleet-host": {
+            "sha256": host.as_deref().and_then(file_sha256),
+            "version": host_pkg_version(),
+        },
+        "fleet-driver": {
+            "sha256": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
+                .as_deref()
+                .and_then(file_sha256),
+            "version": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
+                .as_deref()
+                .and_then(|p| pkg_version_from_file(p, DRIVER_PKG_STAMP_PREFIX)),
+        },
     })
 }
 
@@ -94,10 +140,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pkg_version_from_bytes_reads_stamp() {
+        let blob = b"xxxxFLEET_DRIVER_PKG=9.9.9\0yyyy";
+        assert_eq!(
+            pkg_version_from_bytes(blob, DRIVER_PKG_STAMP_PREFIX).as_deref(),
+            Some("9.9.9")
+        );
+        assert_eq!(
+            pkg_version_from_bytes(b"no stamp here", DRIVER_PKG_STAMP_PREFIX),
+            None
+        );
+        let host_blob = format!(
+            "pad{}end",
+            std::str::from_utf8(HOST_PKG_STAMP).expect("ascii stamp")
+        );
+        assert_eq!(
+            pkg_version_from_bytes(host_blob.as_bytes(), HOST_PKG_STAMP_PREFIX).as_deref(),
+            Some(host_pkg_version())
+        );
+    }
+
+    #[test]
+    fn driver_version_prefers_on_disk_stamp() {
+        let dir = std::env::temp_dir().join(format!("fleet-host-ver-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("fleet-driver");
+        fs::write(&p, b"header\nFLEET_DRIVER_PKG=0.2.3\0tail").unwrap();
+        assert_eq!(
+            pkg_version_from_file(&p, DRIVER_PKG_STAMP_PREFIX).as_deref(),
+            Some("0.2.3")
+        );
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
     fn heartbeat_software_always_sends_git_sha_key() {
         let v = heartbeat_software(&LocalConfig::default(), false);
         assert!(v.get("git_sha").is_some(), "git_sha key must be present");
         assert!(v.get("bins").is_some());
+        assert_eq!(
+            v["bins"]["fleet-host"]["version"].as_str(),
+            Some(host_pkg_version())
+        );
         assert_eq!(v.get("updating"), Some(&json!(false)));
         let updating = heartbeat_software(&LocalConfig::default(), true);
         assert_eq!(updating.get("updating"), Some(&json!(true)));
@@ -108,6 +192,47 @@ mod tests {
             }
             None => assert!(v.get("git_sha").unwrap().is_null()),
         }
+    }
+
+    #[test]
+    fn heartbeat_driver_version_only_from_on_disk_stamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-host-hb-drv-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let mut cfg = LocalConfig::default();
+
+        cfg.fleet_driver_bin = dir.join("missing-driver").display().to_string();
+        let missing = heartbeat_software(&cfg, false);
+        assert!(
+            missing["bins"]["fleet-driver"]["version"].is_null(),
+            "omit driver version when the file is missing: {}",
+            missing
+        );
+
+        let p = dir.join("fleet-driver");
+        fs::write(&p, b"no stamp in this blob").unwrap();
+        cfg.fleet_driver_bin = p.display().to_string();
+        let unstamped = heartbeat_software(&cfg, false);
+        assert!(
+            unstamped["bins"]["fleet-driver"]["version"].is_null(),
+            "omit driver version when the on-disk stamp is missing: {}",
+            unstamped
+        );
+
+        fs::write(&p, b"header\nFLEET_DRIVER_PKG=1.2.3\0tail").unwrap();
+        let stamped = heartbeat_software(&cfg, false);
+        assert_eq!(
+            stamped["bins"]["fleet-driver"]["version"].as_str(),
+            Some("1.2.3")
+        );
+        assert_ne!(
+            stamped["bins"]["fleet-driver"]["version"].as_str(),
+            Some(driver_pkg_version()),
+            "must not invent the host bake version"
+        );
+        let _ = fs::remove_file(&p);
     }
 
     #[test]

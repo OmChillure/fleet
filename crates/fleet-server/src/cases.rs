@@ -13,12 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::cases as case_repo;
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{Case, CaseEvent};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest};
@@ -83,10 +83,19 @@ impl CaseStatus {
 static ALLOWED: LazyLock<HashMap<CaseStatus, Vec<CaseStatus>>> = LazyLock::new(|| {
     use CaseStatus::*;
     HashMap::from([
-        (Open, vec![Waiting, Deciding, Acting, Completed, Failed, Cancelled]),
+        (
+            Open,
+            vec![Waiting, Deciding, Acting, Completed, Failed, Cancelled],
+        ),
         (Waiting, vec![Open, Deciding, Completed, Failed, Cancelled]),
-        (Deciding, vec![Open, Waiting, Acting, Completed, Failed, Cancelled]),
-        (Acting, vec![Open, Waiting, Deciding, Completed, Failed, Cancelled]),
+        (
+            Deciding,
+            vec![Open, Waiting, Acting, Completed, Failed, Cancelled],
+        ),
+        (
+            Acting,
+            vec![Open, Waiting, Deciding, Completed, Failed, Cancelled],
+        ),
         // terminals: no outbound
     ])
 });
@@ -98,10 +107,7 @@ pub fn can_transition(from: CaseStatus, to: CaseStatus) -> bool {
     if from.is_terminal() {
         return false;
     }
-    ALLOWED
-        .get(&from)
-        .map(|v| v.contains(&to))
-        .unwrap_or(false)
+    ALLOWED.get(&from).map(|v| v.contains(&to)).unwrap_or(false)
 }
 
 // ── Decision schema ─────────────────────────────────────────────────────────
@@ -126,7 +132,9 @@ pub struct CaseDecision {
 pub fn parse_decision_json(raw: &str) -> Result<CaseDecision, String> {
     let trimmed = raw.trim();
     let json_str = if let Some(start) = trimmed.find('{') {
-        let end = trimmed.rfind('}').ok_or_else(|| "no closing brace".to_string())?;
+        let end = trimmed
+            .rfind('}')
+            .ok_or_else(|| "no closing brace".to_string())?;
         &trimmed[start..=end]
     } else {
         return Err("decision is not JSON object".into());
@@ -257,11 +265,7 @@ async fn http_list(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
-    let filter = q
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let filter = q.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let rows = case_repo::list_for_workspace(&state.db, workspace_id, filter, q.limit)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -405,15 +409,16 @@ pub fn case_json(case: &Case, events: Option<&[CaseEvent]>) -> Value {
         "updated_at": case.updated_at,
     });
     if let Some(ev) = events {
-        v["events"] = json!(ev
-            .iter()
-            .map(|e| json!({
-                "id": e.id,
-                "kind": e.kind,
-                "payload": e.payload,
-                "created_at": e.created_at,
-            }))
-            .collect::<Vec<_>>());
+        v["events"] = json!(
+            ev.iter()
+                .map(|e| json!({
+                    "id": e.id,
+                    "kind": e.kind,
+                    "payload": e.payload,
+                    "created_at": e.created_at,
+                }))
+                .collect::<Vec<_>>()
+        );
     }
     v
 }
@@ -531,11 +536,7 @@ pub async fn observe_case(
     Ok(updated)
 }
 
-pub async fn cancel_case(
-    state: &AppState,
-    workspace_id: Uuid,
-    case_id: Uuid,
-) -> AppResult<Case> {
+pub async fn cancel_case(state: &AppState, workspace_id: Uuid, case_id: Uuid) -> AppResult<Case> {
     let case = case_repo::get(&state.db, workspace_id, case_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
@@ -568,14 +569,7 @@ pub async fn cancel_case(
     )
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
-    let _ = case_repo::append_event(
-        &state.db,
-        case_id,
-        workspace_id,
-        "cancelled",
-        json!({}),
-    )
-    .await;
+    let _ = case_repo::append_event(&state.db, case_id, workspace_id, "cancelled", json!({})).await;
     Ok(updated)
 }
 
@@ -610,14 +604,24 @@ pub async fn apply_decision(
     .await;
 
     let mut stage = case.stage.clone();
-    if let Some(s) = decision.stage.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(s) = decision
+        .stage
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         stage = s.to_string();
     }
     let mut ctx = case.context.clone();
     if !ctx.is_object() {
         ctx = json!({});
     }
-    if let Some(note) = decision.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(note) = decision
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         push_observation(&mut ctx, note, "decision");
         let _ = case_repo::append_event(
             &state.db,
@@ -795,6 +799,58 @@ async fn fail_case_with(
     Ok(updated)
 }
 
+/// `CASE_AUTO_DECIDE` unset / on applies decide. `off` / `0` / `false` / `no` skip it.
+fn case_auto_decide_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        None => true,
+        Some(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "off" || t == "no")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessDueClaimAction {
+    /// LLM / heuristic `decide_for_case` + `apply_decision`.
+    ApplyDecide,
+    /// Return the claimed case to waiting; do not decide or bump `decision_count`.
+    UnclaimWaiting,
+}
+
+fn process_due_claim_action(auto_decide: bool) -> ProcessDueClaimAction {
+    if auto_decide {
+        ProcessDueClaimAction::ApplyDecide
+    } else {
+        ProcessDueClaimAction::UnclaimWaiting
+    }
+}
+
+fn auto_decide_off_unclaim_patch(case: &Case) -> case_repo::CasePatch {
+    let next = case
+        .next_wake_at
+        .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(DEFAULT_WAIT_SECS));
+    case_repo::CasePatch {
+        status: CaseStatus::Waiting.as_str().into(),
+        stage: case.stage.clone(),
+        context: case.context.clone(),
+        next_wake_at: Some(next),
+        last_error: Some("CASE_AUTO_DECIDE=off".into()),
+        run_id: None,
+        clear_run_id: false,
+        bump_decision: false,
+        expected_version: case.version,
+    }
+}
+
+/// Claim already set `deciding`. A failed unclaim must retry waiting — never decide.
+fn process_due_after_unclaim_failure(case: &Case) -> (ProcessDueClaimAction, case_repo::CasePatch) {
+    (
+        ProcessDueClaimAction::UnclaimWaiting,
+        auto_decide_off_unclaim_patch(case),
+    )
+}
+
 /// Background: claim due cases and apply a heuristic or LLM decision.
 ///
 /// Claims one case at a time so a slow LLM decide cannot leave the rest of
@@ -809,12 +865,7 @@ pub async fn process_due(state: &AppState, limit: i64) {
     }
     reconcile_acting_runs(state).await;
 
-    let auto = std::env::var("CASE_AUTO_DECIDE")
-        .map(|v| {
-            let t = v.trim().to_ascii_lowercase();
-            !(t == "0" || t == "false" || t == "off" || t == "no")
-        })
-        .unwrap_or(true);
+    let auto = case_auto_decide_enabled(std::env::var("CASE_AUTO_DECIDE").ok().as_deref());
 
     let limit = limit.clamp(1, 20);
     for _ in 0..limit {
@@ -828,27 +879,24 @@ pub async fn process_due(state: &AppState, limit: i64) {
         let Some(case) = due.into_iter().next() else {
             break;
         };
-        if !auto {
-            let next = case
-                .next_wake_at
-                .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(DEFAULT_WAIT_SECS));
-            let _ = case_repo::apply_patch(
-                &state.db,
-                case.workspace_id,
-                case.id,
-                &case_repo::CasePatch {
-                    status: CaseStatus::Waiting.as_str().into(),
-                    stage: case.stage.clone(),
-                    context: case.context.clone(),
-                    next_wake_at: Some(next),
-                    last_error: Some("CASE_AUTO_DECIDE=off".into()),
-                    run_id: None,
-                    clear_run_id: false,
-                    bump_decision: false,
-                    expected_version: case.version,
-                },
-            )
-            .await;
+        if process_due_claim_action(auto) == ProcessDueClaimAction::UnclaimWaiting {
+            let patch = auto_decide_off_unclaim_patch(&case);
+            if case_repo::apply_patch(&state.db, case.workspace_id, case.id, &patch)
+                .await
+                .is_err()
+            {
+                let (action, retry) = process_due_after_unclaim_failure(&case);
+                debug_assert_eq!(action, ProcessDueClaimAction::UnclaimWaiting);
+                if let Err(e) =
+                    case_repo::apply_patch(&state.db, case.workspace_id, case.id, &retry).await
+                {
+                    tracing::warn!(
+                        case_id = %case.id,
+                        error = %e,
+                        "CASE_AUTO_DECIDE=off unclaim failed; leaving decide unapplied"
+                    );
+                }
+            }
             continue;
         }
         let _ = case_repo::append_event(
@@ -969,7 +1017,7 @@ async fn llm_decision(state: &AppState, case: &Case) -> Result<CaseDecision, Str
     let system = decision_system_prompt();
 
     let raw = if state.grok.enabled {
-        crate::grok::complete_text(&state.grok, crate::grok::GROK_MODEL, system, &user)
+        crate::grok::complete_text(&state.grok, &crate::grok::default_model(), system, &user)
             .await
             .map_err(|e| e.to_string())?
     } else if state.ollama.enabled {
@@ -1305,7 +1353,10 @@ async fn apply_launch_agents(
         Ok(run_id) => {
             if let Some(obj) = ctx.as_object_mut() {
                 obj.insert("pending_launch".into(), launch.clone());
-                obj.insert("fleet_run".into(), json!({ "id": run_id, "status": "accepted" }));
+                obj.insert(
+                    "fleet_run".into(),
+                    json!({ "id": run_id, "status": "accepted" }),
+                );
             }
             let _ = case_repo::append_event(
                 &state.db,
@@ -1369,11 +1420,7 @@ async fn apply_launch_agents(
     }
 }
 
-async fn launch_case_plan(
-    state: &AppState,
-    case: &Case,
-    launch: &Value,
-) -> Result<Uuid, String> {
+async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Result<Uuid, String> {
     let title = launch
         .get("title")
         .and_then(|v| v.as_str())
@@ -1423,10 +1470,7 @@ async fn launch_case_plan(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(title);
-            let spec = t
-                .get("spec")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let spec = t.get("spec").and_then(|v| v.as_str()).unwrap_or("");
             let profile = t
                 .get("worker_profile")
                 .and_then(|v| v.as_str())
@@ -1486,8 +1530,6 @@ async fn launch_case_plan(
     Ok(run.id)
 }
 
-
-
 pub fn wake_interval() -> Duration {
     let secs = std::env::var("CASE_WAKE_INTERVAL_S")
         .ok()
@@ -1500,6 +1542,16 @@ pub fn wake_interval() -> Duration {
 mod tests {
     use super::*;
 
+    const ALL_STATUSES: [CaseStatus; 7] = [
+        CaseStatus::Open,
+        CaseStatus::Waiting,
+        CaseStatus::Deciding,
+        CaseStatus::Acting,
+        CaseStatus::Completed,
+        CaseStatus::Failed,
+        CaseStatus::Cancelled,
+    ];
+
     #[test]
     fn transition_matrix_basics() {
         assert!(can_transition(CaseStatus::Open, CaseStatus::Waiting));
@@ -1508,6 +1560,130 @@ mod tests {
         assert!(!can_transition(CaseStatus::Completed, CaseStatus::Open));
         assert!(!can_transition(CaseStatus::Failed, CaseStatus::Waiting));
         assert!(can_transition(CaseStatus::Open, CaseStatus::Open));
+    }
+
+    #[test]
+    fn acting_can_leave_to_every_non_self_non_impossible() {
+        use CaseStatus::*;
+        for to in [Open, Waiting, Deciding, Completed, Failed, Cancelled] {
+            assert!(
+                can_transition(Acting, to),
+                "acting → {} must be allowed",
+                to.as_str()
+            );
+        }
+        assert!(can_transition(Acting, Acting));
+    }
+
+    #[test]
+    fn terminals_have_no_outbound_except_same_status() {
+        use CaseStatus::*;
+        let terminals = [Completed, Failed, Cancelled];
+        let all = [
+            Open, Waiting, Deciding, Acting, Completed, Failed, Cancelled,
+        ];
+        for from in terminals {
+            for to in all {
+                if from == to {
+                    assert!(can_transition(from, to), "same-status {from:?}");
+                } else {
+                    assert!(
+                        !can_transition(from, to),
+                        "{:?} → {:?} must be forbidden",
+                        from,
+                        to
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_and_terminal_flags() {
+        for (wire, want) in [
+            ("open", CaseStatus::Open),
+            ("waiting", CaseStatus::Waiting),
+            ("deciding", CaseStatus::Deciding),
+            ("acting", CaseStatus::Acting),
+            ("completed", CaseStatus::Completed),
+            ("failed", CaseStatus::Failed),
+            ("cancelled", CaseStatus::Cancelled),
+        ] {
+            assert_eq!(CaseStatus::parse(wire), Some(want));
+            assert_eq!(want.as_str(), wire);
+        }
+        assert_eq!(CaseStatus::parse(""), None);
+        assert_eq!(CaseStatus::parse("native"), None);
+        assert!(CaseStatus::Completed.is_terminal());
+        assert!(CaseStatus::Failed.is_terminal());
+        assert!(CaseStatus::Cancelled.is_terminal());
+        assert!(!CaseStatus::Acting.is_terminal());
+        assert!(!CaseStatus::Open.is_terminal());
+    }
+
+    #[test]
+    fn acting_can_transition_to_completed_failed_cancelled_waiting_deciding_open_and_self() {
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Completed));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Failed));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Cancelled));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Waiting));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Deciding));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Open));
+        assert!(can_transition(CaseStatus::Acting, CaseStatus::Acting));
+    }
+
+    #[test]
+    fn terminal_completed_failed_cancelled_cannot_leave_same_status_ok() {
+        for from in [
+            CaseStatus::Completed,
+            CaseStatus::Failed,
+            CaseStatus::Cancelled,
+        ] {
+            for to in ALL_STATUSES {
+                if from == to {
+                    assert!(
+                        can_transition(from, to),
+                        "same-status {from:?} → {to:?} must be allowed"
+                    );
+                } else {
+                    assert!(
+                        !can_transition(from, to),
+                        "terminal {from:?} → {to:?} must be denied"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_unknown_and_blank_none_all_seven_wires_some() {
+        assert_eq!(CaseStatus::parse("unknown"), None);
+        assert_eq!(CaseStatus::parse(""), None);
+        assert_eq!(CaseStatus::parse("   "), None);
+        assert_eq!(CaseStatus::parse("OPEN"), None);
+
+        assert_eq!(CaseStatus::parse("open"), Some(CaseStatus::Open));
+        assert_eq!(CaseStatus::parse("waiting"), Some(CaseStatus::Waiting));
+        assert_eq!(CaseStatus::parse("deciding"), Some(CaseStatus::Deciding));
+        assert_eq!(CaseStatus::parse("acting"), Some(CaseStatus::Acting));
+        assert_eq!(CaseStatus::parse("completed"), Some(CaseStatus::Completed));
+        assert_eq!(CaseStatus::parse("failed"), Some(CaseStatus::Failed));
+        assert_eq!(CaseStatus::parse("cancelled"), Some(CaseStatus::Cancelled));
+
+        for status in ALL_STATUSES {
+            assert_eq!(CaseStatus::parse(status.as_str()), Some(status));
+        }
+    }
+
+    #[test]
+    fn is_terminal_only_completed_failed_cancelled() {
+        assert!(!CaseStatus::Open.is_terminal());
+        assert!(!CaseStatus::Waiting.is_terminal());
+        assert!(!CaseStatus::Deciding.is_terminal());
+        assert!(!CaseStatus::Acting.is_terminal());
+        assert!(CaseStatus::Completed.is_terminal());
+        assert!(CaseStatus::Failed.is_terminal());
+        assert!(CaseStatus::Cancelled.is_terminal());
     }
 
     #[test]
@@ -1575,7 +1751,12 @@ mod tests {
         let arr = ctx["observations"].as_array().expect("arr");
         assert_eq!(arr.len(), MAX_OBSERVATIONS);
         assert!(arr[0]["note"].as_str().unwrap().contains("note 20"));
-        assert!(arr.last().unwrap()["note"].as_str().unwrap().contains("note 59"));
+        assert!(
+            arr.last().unwrap()["note"]
+                .as_str()
+                .unwrap()
+                .contains("note 59")
+        );
     }
 
     #[test]
@@ -1599,5 +1780,78 @@ mod tests {
         // by checking the boolean logic with known inputs when env is unset.
         let _ = llm_decide_wanted(true, false);
         let _ = llm_decide_wanted(false, false);
+    }
+
+    fn deciding_case(decision_count: i32, version: i64) -> Case {
+        Case {
+            id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            kind: "generic".into(),
+            title: "t".into(),
+            policy_md: "p".into(),
+            status: "deciding".into(),
+            stage: "start".into(),
+            context: json!({ "force_complete": true }),
+            next_wake_at: Some(Utc::now()),
+            last_error: None,
+            run_id: None,
+            decision_count,
+            created_by: None,
+            version,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn case_auto_decide_off_0_false_does_not_apply_decide() {
+        for raw in ["off", "0", "false", "no", "OFF", " False ", " 0 "] {
+            assert!(
+                !case_auto_decide_enabled(Some(raw)),
+                "CASE_AUTO_DECIDE={raw:?} must disable auto-decide"
+            );
+            assert_eq!(
+                process_due_claim_action(case_auto_decide_enabled(Some(raw))),
+                ProcessDueClaimAction::UnclaimWaiting,
+                "CASE_AUTO_DECIDE={raw:?} must not apply LLM/heuristic decide"
+            );
+        }
+        assert!(case_auto_decide_enabled(None));
+        assert!(case_auto_decide_enabled(Some("on")));
+        assert!(case_auto_decide_enabled(Some("1")));
+        assert_eq!(
+            process_due_claim_action(true),
+            ProcessDueClaimAction::ApplyDecide
+        );
+    }
+
+    #[test]
+    fn case_auto_decide_off_unclaim_does_not_bump_decision_count() {
+        let case = deciding_case(7, 3);
+        let patch = auto_decide_off_unclaim_patch(&case);
+        assert_eq!(patch.status, CaseStatus::Waiting.as_str());
+        assert!(!patch.bump_decision);
+        assert_eq!(patch.expected_version, case.version);
+        assert_eq!(patch.last_error.as_deref(), Some("CASE_AUTO_DECIDE=off"));
+        assert_eq!(patch.next_wake_at, case.next_wake_at);
+        // force_complete would complete if decide ran; off-path must stay waiting.
+        assert_eq!(heuristic_decision(&case).action, "complete");
+        assert_eq!(
+            process_due_claim_action(case_auto_decide_enabled(Some("off"))),
+            ProcessDueClaimAction::UnclaimWaiting
+        );
+    }
+
+    #[test]
+    fn case_auto_decide_off_failed_unclaim_does_not_leave_deciding() {
+        let case = deciding_case(4, 2);
+        let (action, retry) = process_due_after_unclaim_failure(&case);
+        assert_eq!(action, ProcessDueClaimAction::UnclaimWaiting);
+        assert_ne!(action, ProcessDueClaimAction::ApplyDecide);
+        assert_eq!(retry.status, CaseStatus::Waiting.as_str());
+        assert_ne!(retry.status, CaseStatus::Deciding.as_str());
+        assert!(!retry.bump_decision);
+        assert_eq!(retry.expected_version, case.version);
+        assert_eq!(retry.last_error.as_deref(), Some("CASE_AUTO_DECIDE=off"));
     }
 }

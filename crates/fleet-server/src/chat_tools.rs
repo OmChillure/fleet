@@ -5,17 +5,17 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    self, format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyRequest,
-    ProxyResult,
+    self, ProxyCaller, ProxyRequest, ProxyResult, format_context_markdown, operations_for,
+    supported_providers,
 };
-use fleet_integrations::{catalog, IntegrationAvailability};
+use fleet_integrations::{IntegrationAvailability, catalog};
 use fleet_orchestrator::domain::{
-    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
-    MAX_TASKS_PER_PLAN,
+    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
+    WorkPlanStatus,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -551,9 +551,9 @@ pub fn last_user_text(history: &[Value]) -> String {
 
 /// Model tried to stop and ask the human to continue after launching a fleet.
 pub fn rewrite_if_asked_to_continue(content: &str, actions: &[ChatAction]) -> Option<String> {
-    let launched = actions.iter().find(|a| {
-        a.ok && matches!(a.tool.as_str(), "launch_agent_plan" | "launch_agent_task")
-    })?;
+    let launched = actions
+        .iter()
+        .find(|a| a.ok && matches!(a.tool.as_str(), "launch_agent_plan" | "launch_agent_task"))?;
     let lower = content.to_ascii_lowercase();
     let asks = lower.contains("continue")
         || lower.contains("say \"continue\"")
@@ -568,10 +568,7 @@ pub fn rewrite_if_asked_to_continue(content: &str, actions: &[ChatAction]) -> Op
     if !asks {
         return None;
     }
-    let run = launched
-        .run_id
-        .as_deref()
-        .unwrap_or("the open run");
+    let run = launched.run_id.as_deref().unwrap_or("the open run");
     Some(format!(
         "Fleet `{run}` is live on this screen. Stay here — task status and agent activity show in the live panel. \
 I will not ask you to continue."
@@ -633,10 +630,7 @@ pub async fn system_prompt_for_workspace(state: &AppState, workspace_id: Uuid) -
         .collect();
     base.push_str(&connector_catalog_markdown(&ids));
     if !connected.is_empty() {
-        base.push_str(&format!(
-            "Connected accounts: {}.\n",
-            connected.join(", ")
-        ));
+        base.push_str(&format!("Connected accounts: {}.\n", connected.join(", ")));
     }
     base
 }
@@ -708,25 +702,54 @@ struct ListTasksArgs {
 pub struct ChatLlmContext {
     pub provider: String,
     pub model: String,
+    pub runner_id: Option<Uuid>,
+    pub effort: Option<String>,
 }
 
 /// Composer dropdown first (last chat in this workspace), then Grok/Ollama host defaults.
 pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatLlmContext {
+    if let Ok(conns) =
+        fleet_db::repos::integrations::list_for_workspace(&state.db, workspace_id).await
+    {
+        for c in conns {
+            let d = fleet_db::IntegrationAgentDefaults::from_config(&c.config);
+            if let (Some(provider), Some(model)) = (d.default_provider, d.default_model) {
+                return ChatLlmContext {
+                    provider,
+                    model,
+                    runner_id: d
+                        .default_runner_id
+                        .as_deref()
+                        .and_then(|s| Uuid::parse_str(s).ok()),
+                    effort: None,
+                };
+            }
+        }
+    }
     if let Ok(Some((provider, model))) =
         fleet_db::repos::chats::latest_composer_llm(&state.db, workspace_id).await
     {
-        return ChatLlmContext { provider, model };
+        return ChatLlmContext {
+            provider,
+            model,
+            runner_id: None,
+            effort: None,
+        };
     }
     if state.grok.enabled {
         return ChatLlmContext {
             provider: "grok".into(),
-            model: crate::grok::GROK_MODEL.into(),
+            model: crate::grok::default_model(),
+            runner_id: None,
+            effort: None,
         };
     }
     if state.ollama.enabled {
         return ChatLlmContext {
             provider: "ollama".into(),
             model: state.ollama.default_model.clone().unwrap_or_default(),
+            runner_id: None,
+            effort: None,
         };
     }
     ChatLlmContext::default()
@@ -861,21 +884,22 @@ pub async fn execute_tool(
             }
         }
         "finish_ticket" => {
-            let args = serde_json::from_value::<crate::tickets::FinishTicketArgs>(arguments.clone())
-                .unwrap_or(crate::tickets::FinishTicketArgs {
-                    ticket: arguments
-                        .get("ticket")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    provider: arguments
-                        .get("provider")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    key: arguments
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                });
+            let args =
+                serde_json::from_value::<crate::tickets::FinishTicketArgs>(arguments.clone())
+                    .unwrap_or(crate::tickets::FinishTicketArgs {
+                        ticket: arguments
+                            .get("ticket")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        provider: arguments
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        key: arguments
+                            .get("key")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    });
             match crate::tickets::ticket_context_for_model(state, workspace_id, user_id, args).await
             {
                 Ok(v) => Ok((
@@ -1053,9 +1077,7 @@ fn required_args(provider: &str, operation: &str) -> &'static [&'static str] {
         ("notion", "append_blocks") => &["page_id", "text"],
         ("slack", "post_message") => &["channel", "text"],
         ("slack", "get_channel_history" | "get_thread") => &["channel"],
-        ("github", "list_issues" | "get_issue" | "create_pr" | "add_comment") => {
-            &["owner", "repo"]
-        }
+        ("github", "list_issues" | "get_issue" | "create_pr" | "add_comment") => &["owner", "repo"],
         _ => &[],
     }
 }
@@ -1098,40 +1120,38 @@ pub fn coerce_integration_args(
             changed = true;
         }
     }
-    if matches!(
-        (provider, operation),
-        ("notion", "create_page")
-    ) && next.get("parent_page_id").and_then(|v| v.as_str()).is_none()
-        && next.get("parent_database_id").and_then(|v| v.as_str()).is_none()
+    if matches!((provider, operation), ("notion", "create_page"))
+        && next
+            .get("parent_page_id")
+            .and_then(|v| v.as_str())
+            .is_none()
+        && next
+            .get("parent_database_id")
+            .and_then(|v| v.as_str())
+            .is_none()
     {
         if let Some(id) = harvest_notion_parent(prior) {
-            next.as_object_mut()?.insert("parent_page_id".into(), json!(id));
+            next.as_object_mut()?
+                .insert("parent_page_id".into(), json!(id));
             changed = true;
         }
     }
     if matches!(
         (provider, operation),
-        ("slack", "post_message")
-            | ("slack", "get_channel_history")
-            | ("slack", "get_thread")
+        ("slack", "post_message") | ("slack", "get_channel_history") | ("slack", "get_thread")
     ) {
         let ch = next.get("channel").and_then(|v| v.as_str()).unwrap_or("");
-        let needs_id = ch.is_empty()
-            || !(ch.starts_with('C') && ch.len() >= 8);
+        let needs_id = ch.is_empty() || !(ch.starts_with('C') && ch.len() >= 8);
         if needs_id {
-            if let Some(id) = harvest_slack_channel(prior).or_else(|| {
-                harvest_slack_channel_named(prior, ch)
-            }) {
+            if let Some(id) =
+                harvest_slack_channel(prior).or_else(|| harvest_slack_channel_named(prior, ch))
+            {
                 next.as_object_mut()?.insert("channel".into(), json!(id));
                 changed = true;
             }
         }
     }
-    if changed {
-        Some(next)
-    } else {
-        None
-    }
+    if changed { Some(next) } else { None }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -1165,10 +1185,7 @@ fn harvest_slack_text(prior: &[Value]) -> Option<String> {
         for item in items {
             if let Some(t) = item.get("text").and_then(|v| v.as_str()).map(str::trim) {
                 if !t.is_empty() {
-                    let who = item
-                        .get("user")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("slack");
+                    let who = item.get("user").and_then(|v| v.as_str()).unwrap_or("slack");
                     lines.push(format!("{who}: {t}"));
                 }
             }
@@ -1335,6 +1352,17 @@ fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
     }
     if !model.is_empty() {
         plan.policy.llm_model = Some(model.to_string());
+    }
+    if let Some(id) = llm.runner_id {
+        plan.policy.preferred_host_id = Some(id);
+    }
+    if let Some(e) = llm
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        plan.policy.reasoning_effort = Some(e.to_string());
     }
 }
 
@@ -1597,9 +1625,10 @@ async fn list_agent_personas_tool(
     if let Some(d) = division {
         personas.retain(|p| p.division.eq_ignore_ascii_case(d));
     }
-    let custom = fleet_db::repos::personas::list_for_workspace(&state.db, workspace_id, Some("active"))
-        .await
-        .unwrap_or_default();
+    let custom =
+        fleet_db::repos::personas::list_for_workspace(&state.db, workspace_id, Some("active"))
+            .await
+            .unwrap_or_default();
     let custom_json: Vec<Value> = custom
         .iter()
         .map(|p| {
@@ -1652,8 +1681,7 @@ async fn resolve_chat_run(
 ) -> AppResult<Uuid> {
     ensure_project(state, workspace_id).await?;
     if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
-        return Uuid::parse_str(raw)
-            .map_err(|_| AppError::bad_request("run_id must be a UUID"));
+        return Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"));
     }
     let runs = state
         .orch
@@ -1661,12 +1689,9 @@ async fn resolve_chat_run(
         .list_runs(workspace_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
-    let open = runs.iter().find(|r| {
-        !matches!(
-            r.status.as_str(),
-            "completed" | "failed" | "cancelled"
-        )
-    });
+    let open = runs
+        .iter()
+        .find(|r| !matches!(r.status.as_str(), "completed" | "failed" | "cancelled"));
     open.or(runs.first())
         .map(|r| r.id)
         .ok_or_else(|| AppError::bad_request("no fleet runs yet"))
@@ -1767,8 +1792,8 @@ async fn get_case_tool(
         .get("case_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("case_id is required"))?;
-    let case_id = Uuid::parse_str(id.trim())
-        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let case_id =
+        Uuid::parse_str(id.trim()).map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
     let case = fleet_db::repos::cases::get(&state.db, workspace_id, case_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
@@ -1799,8 +1824,8 @@ async fn observe_case_tool(
         .get("case_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("case_id is required"))?;
-    let case_id = Uuid::parse_str(id.trim())
-        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let case_id =
+        Uuid::parse_str(id.trim()).map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
     let note = arguments
         .get("note")
         .and_then(|v| v.as_str())
@@ -1834,8 +1859,8 @@ async fn cancel_case_tool(
         .get("case_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("case_id is required"))?;
-    let case_id = Uuid::parse_str(id.trim())
-        .map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
+    let case_id =
+        Uuid::parse_str(id.trim()).map_err(|_| AppError::bad_request("case_id must be a UUID"))?;
     let case = crate::cases::cancel_case(state, workspace_id, case_id).await?;
     let content = crate::cases::case_json(&case, None);
     Ok((
@@ -1925,10 +1950,7 @@ async fn send_team_message_tool(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::bad_request("body is required"))?;
-    let to = arguments
-        .get("to")
-        .and_then(|v| v.as_str())
-        .unwrap_or("*");
+    let to = arguments.get("to").and_then(|v| v.as_str()).unwrap_or("*");
     let run_id = resolve_chat_run(
         state,
         workspace_id,
@@ -2192,12 +2214,7 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
     }
     let open_runs = runs
         .iter()
-        .filter(|r| {
-            !matches!(
-                r.status.as_str(),
-                "completed" | "failed" | "cancelled"
-            )
-        })
+        .filter(|r| !matches!(r.status.as_str(), "completed" | "failed" | "cancelled"))
         .count();
     let active_sandboxes = sessions
         .iter()
@@ -2254,7 +2271,10 @@ async fn launch_agent_task(
     args: LaunchArgs,
     llm: &ChatLlmContext,
 ) -> AppResult<(Value, ChatAction)> {
-    let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
+    let max_agents = args
+        .max_agents
+        .unwrap_or_else(chat_max_agents)
+        .clamp(1, chat_max_agents());
     ensure_project_capacity(state, workspace_id, max_agents).await?;
 
     let profile = args
@@ -2285,7 +2305,15 @@ async fn launch_agent_task(
 
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
-    accept_and_drive_plan(state, workspace_id, plan, "launch_agent_task", &args.title, ctx).await
+    accept_and_drive_plan(
+        state,
+        workspace_id,
+        plan,
+        "launch_agent_task",
+        &args.title,
+        ctx,
+    )
+    .await
 }
 
 async fn launch_agent_plan(
@@ -2295,7 +2323,10 @@ async fn launch_agent_plan(
     args: LaunchPlanArgs,
     llm: &ChatLlmContext,
 ) -> AppResult<(Value, ChatAction)> {
-    let max_agents = args.max_agents.unwrap_or_else(chat_max_agents).clamp(1, chat_max_agents());
+    let max_agents = args
+        .max_agents
+        .unwrap_or_else(chat_max_agents)
+        .clamp(1, chat_max_agents());
     ensure_project_capacity(state, workspace_id, max_agents).await?;
 
     let ctx = if let Some(ref cf) = args.context_from {
@@ -2380,15 +2411,7 @@ async fn launch_agent_plan(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("multi-agent plan");
-    accept_and_drive_plan(
-        state,
-        workspace_id,
-        plan,
-        "launch_agent_plan",
-        label,
-        ctx,
-    )
-    .await
+    accept_and_drive_plan(state, workspace_id, plan, "launch_agent_plan", label, ctx).await
 }
 
 async fn accept_and_drive_plan(
@@ -2548,9 +2571,7 @@ fn provider_capabilities(provider: &str) -> &'static str {
         "jira" => {
             "search_issues, get_issue, list_projects, create_issue, add_comment, list_transitions, transition_issue"
         }
-        "linear" => {
-            "list_issues, get_issue, list_teams, create_issue, update_issue, add_comment"
-        }
+        "linear" => "list_issues, get_issue, list_teams, create_issue, update_issue, add_comment",
         "slack" => "list_channels, list_users, post_message, get_channel_history, get_thread",
         "figma" => {
             "get_me, get_file, get_file_nodes, list_comments, list_team_projects, get_project_files"
@@ -2563,8 +2584,12 @@ fn provider_capabilities(provider: &str) -> &'static str {
             "get_me, list_chats, list_teams, list_channels, list_chat_messages, send_chat_message, send_channel_message"
         }
         "discord" => "get_me, list_guilds (user OAuth; no channel posts)",
-        "trello" => "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment",
-        "asana" => "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment",
+        "trello" => {
+            "list_boards, list_lists, list_cards, get_card, create_card, update_card, add_comment"
+        }
+        "asana" => {
+            "list_workspaces, list_projects, list_tasks, get_task, create_task, update_task, add_comment"
+        }
         "bitbucket" => {
             "list_repos, list_issues, get_issue, list_prs, get_pr, get_file, list_commits, commit_files, create_branch, create_pr, create_issue, add_comment"
         }
@@ -2688,7 +2713,11 @@ async fn get_integration(
             summary: format!(
                 "{} · {}",
                 view.name,
-                if connected { "connected" } else { "not connected" }
+                if connected {
+                    "connected"
+                } else {
+                    "not connected"
+                }
             ),
             run_id: None,
             sandbox_ids: None,
@@ -2709,6 +2738,8 @@ mod tests {
             &ChatLlmContext {
                 provider: "Grok".into(),
                 model: "grok-4.5".into(),
+                runner_id: None,
+                effort: None,
             },
         );
         assert_eq!(plan.policy.llm_provider.as_deref(), Some("grok"));
@@ -2718,10 +2749,12 @@ mod tests {
     #[test]
     fn parse_launch_plan_rejects_empty_and_blank_ids() {
         assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": " ", "title": "X" }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": " ", "title": "X" }]
+            }))
+            .is_err()
+        );
         let ok = parse_launch_plan_args(&json!({
             "outputs": [{
                 "provider": "notion",
@@ -2856,7 +2889,13 @@ mod tests {
     fn retry_hint_names_required_text() {
         let h = retry_hint("notion", "append_blocks");
         assert_eq!(h["should_retry"], true);
-        assert!(h["required"].as_array().unwrap().iter().any(|x| x == "text"));
+        assert!(
+            h["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x == "text")
+        );
     }
 
     #[test]
@@ -2869,11 +2908,9 @@ mod tests {
             sandbox_ids: None,
             detail: None,
         }];
-        let rewritten = rewrite_if_asked_to_continue(
-            "Say continue and I'll commit_files.",
-            &launched,
-        )
-        .expect("rewrite");
+        let rewritten =
+            rewrite_if_asked_to_continue("Say continue and I'll commit_files.", &launched)
+                .expect("rewrite");
         assert!(
             rewritten.contains("Fleet `r` is live") || rewritten.contains("is live on this screen"),
             "{rewritten}"

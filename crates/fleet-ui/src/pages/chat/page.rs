@@ -2,17 +2,24 @@
 
 use std::sync::Mutex;
 
-use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use super::api::{
     create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
     stream_chat, ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
     ChatStreamEvent,
 };
-use super::markdown::{MdPart, highlight, markdown_to_parts};
-use crate::Route;
+use super::markdown::{highlight, markdown_to_parts, MdPart};
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
+use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
+use crate::Route;
+use dioxus::prelude::*;
+use fleet_runners_view::{
+    agent_status_phrase, catalog_provider_display_name, claude_cli_model_aliases,
+    claude_effort_values, display_name, find_model_detail, format_chat_elapsed, is_removed,
+    pick_chat_provider_and_model, pick_effort_value,
+    should_apply_chat_defaults, ChatProviderCandidate, ChatProviderPick,
+};
+use gloo_timers::future::TimeoutFuture;
 
 /// Hand off the first message across the `/chat` → `/chat/{id}` route switch.
 struct PendingFirstSend {
@@ -20,6 +27,8 @@ struct PendingFirstSend {
     text: String,
     provider: String,
     model: String,
+    runner_id: String,
+    effort: String,
 }
 
 static PENDING_FIRST_SEND: Mutex<Option<PendingFirstSend>> = Mutex::new(None);
@@ -27,6 +36,263 @@ static PENDING_FIRST_SEND: Mutex<Option<PendingFirstSend>> = Mutex::new(None);
 fn stash_pending_first_send(p: PendingFirstSend) {
     if let Ok(mut g) = PENDING_FIRST_SEND.lock() {
         *g = Some(p);
+    }
+}
+
+fn peek_pending_runner(conversation_id: Option<&str>) -> Option<String> {
+    let cid = conversation_id?;
+    let Ok(g) = PENDING_FIRST_SEND.lock() else {
+        return None;
+    };
+    g.as_ref()
+        .filter(|p| p.conversation_id == cid)
+        .map(|p| p.runner_id.clone())
+        .filter(|s| !s.is_empty())
+}
+
+fn storage_pref_key(kind: &str, workspace_id: &str) -> String {
+    format!("fleet-chat-{kind}:{workspace_id}")
+}
+
+fn read_stored_pref(kind: &str, workspace_id: &str) -> Option<String> {
+    let key = storage_pref_key(kind, workspace_id);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let window = web_sys::window()?;
+        let storage = window.local_storage().ok().flatten()?;
+        let v = storage.get_item(&key).ok().flatten()?;
+        if v.trim().is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = key;
+        None
+    }
+}
+
+fn write_stored_pref(kind: &str, workspace_id: &str, value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    let key = storage_pref_key(kind, workspace_id);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(Some(storage)) = window.local_storage() else {
+            return;
+        };
+        let _ = storage.set_item(&key, value);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = key;
+    }
+}
+
+fn read_stored_runner(workspace_id: &str) -> Option<String> {
+    read_stored_pref("runner", workspace_id)
+}
+
+fn write_stored_runner(workspace_id: &str, runner_id: &str) {
+    write_stored_pref("runner", workspace_id, runner_id);
+}
+
+fn read_stored_effort(workspace_id: &str) -> Option<String> {
+    read_stored_pref("effort", workspace_id)
+}
+
+fn write_stored_effort(workspace_id: &str, effort: &str) {
+    write_stored_pref("effort", workspace_id, effort);
+}
+
+fn read_stored_provider(workspace_id: &str) -> Option<String> {
+    read_stored_pref("provider", workspace_id)
+}
+
+fn write_stored_provider(workspace_id: &str, provider: &str) {
+    write_stored_pref("provider", workspace_id, provider);
+}
+
+fn read_stored_model(workspace_id: &str) -> Option<String> {
+    read_stored_pref("model", workspace_id)
+}
+
+fn write_stored_model(workspace_id: &str, model: &str) {
+    write_stored_pref("model", workspace_id, model);
+}
+
+fn write_stored_composer(workspace_id: &str, provider: &str, model: &str) {
+    write_stored_provider(workspace_id, provider);
+    write_stored_model(workspace_id, model);
+}
+
+const CATALOG_PROVIDER_IDS: &[&str] = &["grok", "claude", "openai", "ollama"];
+
+fn plane_openai_from_status(status: Option<&ChatStatus>) -> Option<&ChatProviderInfo> {
+    status.and_then(|s| s.providers.iter().find(|p| p.id == "openai"))
+}
+
+fn unavailable_openai() -> ChatProviderInfo {
+    ChatProviderInfo {
+        id: "openai".into(),
+        name: catalog_provider_display_name("openai").to_string(),
+        available: false,
+        coming_soon: false,
+        error: Some("Set OPENAI_API_KEY to enable OpenAI chat.".into()),
+        models: vec![],
+        default_model: None,
+    }
+}
+
+fn providers_from_runner(
+    host: &HostPublic,
+    plane_openai: Option<&ChatProviderInfo>,
+) -> Vec<ChatProviderInfo> {
+    CATALOG_PROVIDER_IDS
+        .iter()
+        .map(|id| {
+            if *id == "openai" {
+                return plane_openai.cloned().unwrap_or_else(unavailable_openai);
+            }
+            let reported = host.agents.iter().find(|a| a.id == *id);
+            let installed = reported.map(|a| a.installed).unwrap_or(false);
+            let logged_in = reported.map(|a| a.logged_in).unwrap_or(false);
+            let mut models: Vec<ChatModelInfo> = reported
+                .map(|a| {
+                    a.models
+                        .iter()
+                        .map(|n| ChatModelInfo {
+                            name: n.clone(),
+                            size: None,
+                            parameter_size: None,
+                            family: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let phrase = agent_status_phrase(id, installed, logged_in);
+            let available = if *id == "ollama" {
+                installed && !models.is_empty()
+            } else {
+                installed && logged_in
+            };
+            // Claude Code has no `models` command (it hangs). Show official aliases.
+            if *id == "claude" && available && models.is_empty() {
+                models = claude_cli_model_aliases()
+                    .iter()
+                    .map(|n| ChatModelInfo {
+                        name: (*n).into(),
+                        size: None,
+                        parameter_size: None,
+                        family: None,
+                    })
+                    .collect();
+            }
+            let error = if available && (*id == "ollama" || !models.is_empty()) {
+                None
+            } else {
+                Some(phrase.to_string())
+            };
+            let default_model = reported
+                .and_then(|a| a.models.first().cloned())
+                .or_else(|| models.first().map(|m| m.name.clone()));
+            ChatProviderInfo {
+                id: (*id).into(),
+                name: catalog_provider_display_name(id).to_string(),
+                available,
+                coming_soon: false,
+                error,
+                models,
+                default_model,
+            }
+        })
+        .collect()
+}
+
+fn provider_candidates(providers: &[ChatProviderInfo]) -> Vec<ChatProviderCandidate> {
+    providers
+        .iter()
+        .map(|p| ChatProviderCandidate {
+            id: p.id.clone(),
+            available: p.available,
+            models: p.models.iter().map(|m| m.name.clone()).collect(),
+            default_model: p.default_model.clone(),
+        })
+        .collect()
+}
+
+fn apply_composer_defaults(
+    workspace_id: &str,
+    host: Option<&HostPublic>,
+    plane_openai: Option<&ChatProviderInfo>,
+    mut selected_provider: Signal<String>,
+    mut selected_model: Signal<String>,
+    selected_effort: Signal<String>,
+    user_picked: bool,
+) {
+    let providers = match host {
+        Some(h) => providers_from_runner(h, plane_openai),
+        None => plane_openai.cloned().into_iter().collect(),
+    };
+    if providers.is_empty() {
+        return;
+    }
+    let candidates = provider_candidates(&providers);
+    if should_apply_chat_defaults(&candidates, &selected_provider(), user_picked) {
+        if let Some(ChatProviderPick { provider_id, model }) = pick_chat_provider_and_model(
+            &candidates,
+            read_stored_provider(workspace_id).as_deref(),
+            read_stored_model(workspace_id).as_deref(),
+        ) {
+            selected_provider.set(provider_id);
+            selected_model.set(model);
+        }
+    }
+    if let Some(host) = host {
+        apply_effort_for_model(
+            host,
+            &selected_provider(),
+            &selected_model(),
+            workspace_id,
+            selected_effort,
+        );
+    }
+}
+
+fn apply_effort_for_model(
+    host: &HostPublic,
+    provider: &str,
+    model: &str,
+    workspace_id: &str,
+    mut selected_effort: Signal<String>,
+) {
+    let detail = host
+        .agents
+        .iter()
+        .find(|a| a.id == provider)
+        .and_then(|a| find_model_detail(&a.model_details, model));
+    let Some(value) = pick_effort_value(detail, read_stored_effort(workspace_id).as_deref())
+    else {
+        return;
+    };
+    let cur = selected_effort();
+    if cur != value {
+        selected_effort.set(value);
+    }
+}
+
+fn provider_option_label(p: &ChatProviderInfo) -> String {
+    let phrase = p.error.as_deref().unwrap_or("");
+    if phrase.is_empty() {
+        p.name.clone()
+    } else {
+        format!("{} · {phrase}", p.name)
     }
 }
 
@@ -61,6 +327,22 @@ struct ChatMessage {
     model: Option<String>,
     /// Tool/sandbox actions attached to assistant replies.
     actions: Vec<ChatActionDto>,
+    /// Send → reply, milliseconds. Assistant turns only.
+    latency_ms: Option<u64>,
+}
+
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +396,8 @@ fn send_on_existing_session(
     workspace_id: String,
     provider: String,
     model: String,
+    runner_id: String,
+    effort: String,
     conversation_id: String,
     mut messages: Signal<Vec<ChatMessage>>,
     mut next_id: Signal<u64>,
@@ -125,10 +409,13 @@ fn send_on_existing_session(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() {
-        show_toast().error("Select a model first (Grok CLI · Ollama: `ollama pull …`).");
+    if model.trim().is_empty() && provider == "ollama" {
+        show_toast().error("Select a model first (`ollama pull …` on the runner).");
         return;
     }
+    write_stored_runner(&workspace_id, &runner_id);
+    write_stored_effort(&workspace_id, &effort);
+    write_stored_composer(&workspace_id, &provider, &model);
 
     if messages().is_empty() {
         thread_title.set(title_from_text(&text));
@@ -143,10 +430,12 @@ fn send_on_existing_session(
         content: text.clone(),
         model: None,
         actions: vec![],
+        latency_ms: None,
     });
     messages.set(list);
     draft.set(String::new());
     sending.set(true);
+    let sent_at = now_ms();
 
     let history: Vec<ChatMessageDto> = messages()
         .iter()
@@ -171,23 +460,33 @@ fn send_on_existing_session(
             content: String::new(),
             model: Some(model_for_api.clone()),
             actions: vec![],
+            latency_ms: None,
         });
         messages.set(list);
     }
 
     spawn(async move {
         let mut streamed = String::new();
+        let stamp = |last: &mut ChatMessage| {
+            last.latency_ms = Some(now_ms().saturating_sub(sent_at));
+        };
         let result = stream_chat(
             &workspace_id,
             history,
             provider,
             Some(model_for_api.clone()),
             Some(conversation_id),
+            if runner_id.trim().is_empty() {
+                None
+            } else {
+                Some(runner_id.clone())
+            },
+            Some(effort.clone()),
             |ev| match ev {
                 ChatStreamEvent::Status { text } => {
                     let mut list = messages();
                     if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
-                        if last.content.is_empty() {
+                        if last.content.is_empty() || last.content.starts_with('_') {
                             last.content = format!("_{text}_");
                         }
                     }
@@ -220,6 +519,7 @@ fn send_on_existing_session(
                         if !res.actions.is_empty() {
                             last.actions = res.actions.clone();
                         }
+                        stamp(last);
                     }
                     messages.set(list);
                 }
@@ -227,6 +527,7 @@ fn send_on_existing_session(
                     let mut list = messages();
                     if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
                         last.content = format!("⚠️ {error}");
+                        stamp(last);
                     }
                     messages.set(list);
                 }
@@ -240,6 +541,7 @@ fn send_on_existing_session(
                 if last.content.is_empty() || last.content.starts_with('_') {
                     last.content = format!("⚠️ {}", e.message());
                 }
+                last.latency_ms = Some(now_ms().saturating_sub(sent_at));
             }
             messages.set(list);
         }
@@ -253,6 +555,8 @@ fn send_message(
     workspace_id: String,
     provider: String,
     model: String,
+    runner_id: String,
+    effort: String,
     messages: Signal<Vec<ChatMessage>>,
     next_id: Signal<u64>,
     mut sending: Signal<bool>,
@@ -265,8 +569,8 @@ fn send_message(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() {
-        show_toast().error("Select a model first (Grok CLI · Ollama: `ollama pull …`).");
+    if model.trim().is_empty() && provider == "ollama" {
+        show_toast().error("Select a model first (`ollama pull …` on the runner).");
         return;
     }
 
@@ -276,6 +580,8 @@ fn send_message(
             workspace_id,
             provider,
             model,
+            runner_id,
+            effort,
             cid,
             messages,
             next_id,
@@ -292,6 +598,7 @@ fn send_message(
     let title = title_from_text(&text);
     let provider_for_create = provider.clone();
     let model_for_create = model.clone();
+    let runner_id = runner_id.clone();
 
     spawn(async move {
         match create_conversation(
@@ -303,12 +610,17 @@ fn send_message(
         .await
         {
             Ok(conv) => {
+                write_stored_runner(&workspace_id, &runner_id);
+                write_stored_effort(&workspace_id, &effort);
+                write_stored_composer(&workspace_id, &provider_for_create, &model_for_create);
                 // Hand off first user message to the new `/chat/{id}` page.
                 stash_pending_first_send(PendingFirstSend {
                     conversation_id: conv.id.clone(),
                     text: text.clone(),
                     provider: provider_for_create,
                     model: model_for_create,
+                    runner_id,
+                    effort,
                 });
                 navigator.replace(Route::ChatThread {
                     workspace_id: workspace_id.clone(),
@@ -349,45 +661,11 @@ fn refresh_status(
 fn apply_status(
     s: ChatStatus,
     mut status: Signal<Option<ChatStatus>>,
-    mut selected_provider: Signal<String>,
-    mut selected_model: Signal<String>,
+    _selected_provider: Signal<String>,
+    _selected_model: Signal<String>,
 ) {
-    let providers = &s.providers;
-    // Keep selection if still listed; else first available (Grok is ordered first when ready).
-    let pref = selected_provider();
-    let pref_still_available = providers
-        .iter()
-        .any(|p| p.id == pref && p.available && !p.coming_soon);
-    let provider_id = if pref_still_available {
-        pref
-    } else if let Some(p) = providers.iter().find(|p| p.available && !p.coming_soon) {
-        p.id.clone()
-    } else {
-        providers
-            .iter()
-            .find(|p| !p.coming_soon)
-            .map(|p| p.id.clone())
-            .or_else(|| providers.first().map(|p| p.id.clone()))
-            .unwrap_or_else(|| "grok".into())
-    };
-    selected_provider.set(provider_id.clone());
-
-    let models = providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .map(|p| p.models.clone())
-        .unwrap_or_default();
-
-    let current_model = selected_model();
-    if current_model.is_empty() || !models.iter().any(|m| m.name == current_model) {
-        let pick = providers
-            .iter()
-            .find(|p| p.id == provider_id)
-            .map(pick_default_model)
-            .unwrap_or_default();
-        selected_model.set(pick);
-    }
-
+    // Runner inventory owns provider/model. Status is only the hint / error banner.
+    let _ = (_selected_provider, _selected_model);
     status.set(Some(s));
 }
 
@@ -418,14 +696,40 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
     let mut next_id = use_signal(|| 1u64);
     let sending = use_signal(|| false);
     let status = use_signal(|| None::<ChatStatus>);
-    // Server prefers Grok when CLI auth (~/.grok/auth.json) is present.
-    let mut selected_provider = use_signal(|| "grok".to_string());
-    let mut selected_model = use_signal(|| String::new());
+    let mut selected_provider =
+        use_signal(|| read_stored_provider(&workspace_id).unwrap_or_default());
+    let mut selected_model = use_signal(|| read_stored_model(&workspace_id).unwrap_or_default());
+    let mut user_picked_provider = use_signal(|| false);
+    let mut selected_runner = use_signal(|| {
+        peek_pending_runner(initial_conversation_id.as_deref())
+            .or_else(|| read_stored_runner(&workspace_id))
+            .unwrap_or_default()
+    });
+    let mut selected_effort =
+        use_signal(|| read_stored_effort(&workspace_id).unwrap_or_default());
+    let mut hosts = use_signal(Vec::<HostPublic>::new);
     let status_loading = use_signal(|| true);
     let mut conversation_id = use_signal(|| initial_conversation_id.clone());
     let mut loading_thread = use_signal(|| initial_conversation_id.is_some());
     let mut thread_title = use_signal(|| "New chat".to_string());
+    let mut wait_tick = use_signal(|| 0u32);
+    let mut send_started_ms = use_signal(|| None::<u64>);
     let navigator = use_navigator();
+
+    use_effect(move || {
+        if sending() {
+            send_started_ms.set(Some(now_ms()));
+            wait_tick.set(0);
+            spawn(async move {
+                while sending() {
+                    TimeoutFuture::new(250).await;
+                    wait_tick.set(wait_tick() + 1);
+                }
+            });
+        } else {
+            send_started_ms.set(None);
+        }
+    });
 
     // Run once on mount — do NOT re-subscribe to status signals (that loops forever
     // and leaves the UI stuck on "Loading models…").
@@ -443,6 +747,44 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             selected_model,
             status_loading,
         );
+    });
+
+    let ws_hosts = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_hosts.clone();
+        spawn(async move {
+            loop {
+                if let Ok((list, _, _)) = list_workers_page(&ws).await {
+                    let active: Vec<_> = list
+                        .into_iter()
+                        .filter(|h| !is_removed(h) && h.kind != "control_plane")
+                        .collect();
+                    if selected_runner().is_empty() {
+                        if let Some(h) = active
+                            .iter()
+                            .find(|h| h.is_this_machine)
+                            .or_else(|| active.iter().find(|h| h.is_control_plane_box))
+                            .or_else(|| active.iter().find(|h| h.status == "online"))
+                        {
+                            selected_runner.set(h.id.clone());
+                            write_stored_runner(&ws, &h.id);
+                        }
+                    }
+                    let runner = selected_runner();
+                    apply_composer_defaults(
+                        &ws,
+                        active.iter().find(|h| h.id == runner),
+                        plane_openai_from_status(status().as_ref()),
+                        selected_provider,
+                        selected_model,
+                        selected_effort,
+                        user_picked_provider(),
+                    );
+                    hosts.set(active);
+                }
+                TimeoutFuture::new(10_000).await;
+            }
+        });
     });
 
     // Open `/chat/{id}`: either drain a pending first message (just switched from /chat)
@@ -468,11 +810,19 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             thread_title.set(title_from_text(&pending.text));
             selected_provider.set(pending.provider.clone());
             selected_model.set(pending.model.clone());
+            selected_runner.set(pending.runner_id.clone());
+            selected_effort.set(pending.effort.clone());
+            user_picked_provider.set(true);
+            write_stored_runner(&ws_load, &pending.runner_id);
+            write_stored_effort(&ws_load, &pending.effort);
+            write_stored_composer(&ws_load, &pending.provider, &pending.model);
             send_on_existing_session(
                 pending.text,
                 ws_load.clone(),
                 pending.provider,
                 pending.model,
+                pending.runner_id,
+                pending.effort,
                 cid,
                 messages,
                 next_id,
@@ -491,6 +841,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                     thread_title.set(conv.title);
                     if let Some(p) = conv.provider {
                         selected_provider.set(p);
+                        user_picked_provider.set(true);
                     }
                     if let Some(m) = conv.model {
                         selected_model.set(m);
@@ -510,6 +861,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             content: m.content,
                             model: m.model,
                             actions,
+                            latency_ms: None,
                         });
                         nid += 1;
                     }
@@ -524,10 +876,13 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
         });
     });
 
-    let providers: Vec<ChatProviderInfo> = status()
-        .as_ref()
-        .map(|s| s.providers.clone())
-        .unwrap_or_default();
+    let runner_host = hosts().into_iter().find(|h| h.id == selected_runner());
+    let status_now = status();
+    let plane_openai = plane_openai_from_status(status_now.as_ref());
+    let providers: Vec<ChatProviderInfo> = match runner_host.as_ref() {
+        Some(h) => providers_from_runner(h, plane_openai),
+        None => plane_openai.cloned().into_iter().collect(),
+    };
 
     let active_provider = providers
         .iter()
@@ -539,17 +894,83 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
         .map(|p| p.models.clone())
         .unwrap_or_default();
 
-    let can_chat = active_provider
-        .as_ref()
-        .map(|p| p.available && !p.models.is_empty())
-        .unwrap_or(false);
+    let model_detail = runner_host.as_ref().and_then(|h| {
+        h.agents
+            .iter()
+            .find(|a| a.id == selected_provider())
+            .and_then(|a| find_model_detail(&a.model_details, &selected_model()))
+    });
+    let effort_choices: Vec<(String, String)> = model_detail
+        .map(|d| {
+            d.efforts
+                .iter()
+                .map(|e| {
+                    (
+                        e.value.clone(),
+                        e.label.clone().unwrap_or_else(|| e.value.clone()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            if selected_provider() == "claude"
+                && active_provider.as_ref().is_some_and(|p| p.available)
+            {
+                claude_effort_values()
+                    .iter()
+                    .map(|v| ((*v).to_string(), (*v).to_string()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        });
+    let preferred_effort = {
+        let cur = selected_effort();
+        if !cur.is_empty() {
+            Some(cur)
+        } else {
+            read_stored_effort(&workspace_id)
+        }
+    };
+    let resolved_effort = pick_effort_value(model_detail, preferred_effort.as_deref())
+        .unwrap_or_else(|| selected_effort());
+
+    let openai_plane_available = providers
+        .iter()
+        .find(|p| p.id == "openai")
+        .is_some_and(|p| p.available);
+    let can_chat = if selected_provider() == "openai" && openai_plane_available {
+        true
+    } else {
+        !selected_runner().is_empty() && active_provider.as_ref().is_some_and(|p| p.available)
+    };
+    let hosts_ready = !hosts().is_empty() || !selected_runner().is_empty();
+    let empty_hint = if selected_runner().is_empty() && selected_provider() != "openai" {
+        "Select a runner. Login and models are whatever that box last reported.".to_string()
+    } else if let Some(p) = active_provider.as_ref() {
+        format!(
+            "{} · {} on this runner.",
+            p.name,
+            p.error
+                .clone()
+                .unwrap_or_else(|| agent_status_phrase(&p.id, true, true).to_string())
+        )
+    } else {
+        "Pick a provider on the selected runner.".into()
+    };
 
     let thinking_label = {
+        let _ = wait_tick();
+        let clock = send_started_ms()
+            .map(|t| now_ms().saturating_sub(t))
+            .filter(|ms| *ms > 0)
+            .map(|ms| format!(" · {}", format_chat_elapsed(ms)))
+            .unwrap_or_default();
         let m = selected_model();
         if m.is_empty() {
-            "Thinking…".to_string()
+            format!("Thinking…{clock}")
         } else {
-            format!("Thinking with {m}…")
+            format!("Thinking with {m}…{clock}")
         }
     };
 
@@ -605,10 +1026,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                         p { class: "m-0 max-w-md text-sm text-[var(--app-muted)]",
                             if can_chat {
                                 "Say it in plain language. For implement + push, a fleet of agents runs the work — not just chat tools."
-                            } else if let Some(s) = status() {
-                                "{s.hint}"
                             } else {
-                                "Run `grok login` and/or start local Ollama."
+                                "{empty_hint}"
                             }
                         }
                         if can_chat {
@@ -625,7 +1044,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 }
                             }
                         }
-                        if let Some(err) = status().and_then(|s| s.error.clone()) {
+                        if let Some(err) = active_provider.as_ref().and_then(|p| p.error.clone()) {
                             p { class: "m-0 max-w-md rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-left text-xs text-[var(--app-muted)]",
                                 "{err}"
                             }
@@ -661,13 +1080,14 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             placeholder: if can_chat {
                                 "Write a message…"
                             } else {
-                                "Grok login or Ollama required…"
+                                "Grok login or Private (Ollama) required…"
                             },
                             value: "{draft}",
                             disabled: !can_chat || sending(),
                             oninput: move |e| draft.set(e.value()),
                             onkeydown: {
                                 let ws = workspace_id.clone();
+                                let effort = resolved_effort.clone();
                                 move |e| {
                                     if e.key() == Key::Enter && !e.modifiers().shift() {
                                         e.prevent_default();
@@ -676,7 +1096,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                 status()
                                                     .and_then(|s| s.error.clone())
                                                     .unwrap_or_else(|| {
-                                                        "No chat provider ready (Grok or Ollama)"
+                                                        "No chat provider ready (Grok or Private (Ollama))"
                                                             .into()
                                                     }),
                                             );
@@ -687,6 +1107,8 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                             ws.clone(),
                                             selected_provider(),
                                             selected_model(),
+                                            selected_runner(),
+                                            effort.clone(),
                                             messages,
                                             next_id,
                                             sending,
@@ -704,54 +1126,102 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             div { class: "flex min-w-0 items-center gap-1.5",
                                 span {
                                     class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
+                                    "Runner"
+                                }
+                                select {
+                                    class: "max-w-[9rem] cursor-pointer truncate rounded-lg border-0 bg-[var(--app-bg)] px-2 py-1.5 text-xs font-medium text-[var(--app-fg)] outline-none",
+                                    value: "{selected_runner}",
+                                    title: "Self-hosted runner for this chat",
+                                    onchange: {
+                                        let ws = workspace_id.clone();
+                                        move |e| {
+                                            let id = e.value();
+                                            if id.is_empty() {
+                                                return;
+                                            }
+                                            selected_runner.set(id.clone());
+                                            write_stored_runner(&ws, &id);
+                                            user_picked_provider.set(false);
+                                            apply_composer_defaults(
+                                                &ws,
+                                                hosts().iter().find(|h| h.id == id),
+                                                plane_openai_from_status(status().as_ref()),
+                                                selected_provider,
+                                                selected_model,
+                                                selected_effort,
+                                                false,
+                                            );
+                                        }
+                                    },
+                                    option { value: "", "Select runner" }
+                                    if !selected_runner().is_empty()
+                                        && !hosts().iter().any(|h| h.id == selected_runner())
+                                    {
+                                        option {
+                                            value: "{selected_runner}",
+                                            selected: true,
+                                            "Selected runner"
+                                        }
+                                    }
+                                    for h in hosts() {
+                                        option {
+                                            key: "{h.id}",
+                                            value: "{h.id}",
+                                            selected: selected_runner() == h.id,
+                                            "{display_name(&h)}"
+                                        }
+                                    }
+                                }
+                            }
+
+                            div { class: "flex min-w-0 items-center gap-1.5",
+                                span {
+                                    class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
                                     title: "Fleet agents use this same provider and model",
                                     "Provider"
                                 }
                                 select {
                                     class: "max-w-[10rem] cursor-pointer truncate rounded-lg border-0 bg-[var(--app-bg)] px-2 py-1.5 text-xs font-medium text-[var(--app-fg)] outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0 disabled:opacity-50",
                                     value: "{selected_provider}",
-                                    disabled: status_loading() || providers.is_empty(),
+                                    disabled: sending() || providers.is_empty(),
                                     title: "Chat provider",
-                                    onchange: move |e| {
-                                        let id = e.value();
-                                        selected_provider.set(id.clone());
-                                        if let Some(p) = status()
-                                            .as_ref()
-                                            .and_then(|s| s.providers.iter().find(|p| p.id == id))
-                                        {
-                                            if p.coming_soon {
-                                                show_toast().info(format!(
-                                                    "{} — coming soon.",
-                                                    p.name
-                                                ));
-                                                // Fall back to first available provider.
-                                                if let Some(ready) = status()
-                                                    .as_ref()
-                                                    .and_then(|s| {
-                                                        s.providers
-                                                            .iter()
-                                                            .find(|p| p.available && !p.coming_soon)
-                                                    })
-                                                {
-                                                    selected_provider.set(ready.id.clone());
-                                                    selected_model
-                                                        .set(pick_default_model(ready));
-                                                }
-                                            } else if !p.available {
-                                                show_toast().error(
-                                                    p.error
-                                                        .clone()
-                                                        .unwrap_or_else(|| {
-                                                            format!("{} is offline", p.name)
+                                    onchange: {
+                                        let providers = providers.clone();
+                                        let ws = workspace_id.clone();
+                                        move |e| {
+                                            let id = e.value();
+                                            selected_provider.set(id.clone());
+                                            user_picked_provider.set(true);
+                                            let model = if let Some(p) =
+                                                providers.iter().find(|p| p.id == id)
+                                            {
+                                                if !p.available {
+                                                    show_toast().error(
+                                                        p.error.clone().unwrap_or_else(|| {
+                                                            format!("{} is not ready on that runner", p.name)
                                                         }),
-                                                );
+                                                    );
+                                                }
+                                                pick_default_model(p)
                                             } else {
-                                                selected_model.set(pick_default_model(p));
+                                                String::new()
+                                            };
+                                            selected_model.set(model.clone());
+                                            write_stored_composer(&ws, &id, &model);
+                                            if let Some(h) = hosts().iter().find(|h| h.id == selected_runner())
+                                            {
+                                                apply_effort_for_model(
+                                                    h,
+                                                    &id,
+                                                    &model,
+                                                    &ws,
+                                                    selected_effort,
+                                                );
                                             }
                                         }
                                     },
                                     if providers.is_empty() {
-                                        option { value: "grok", "Grok (CLI)" }
+                                        option { value: "", "Pick a runner first" }
                                     } else {
                                         for p in providers.iter() {
                                             option {
@@ -759,13 +1229,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                 value: "{p.id}",
                                                 selected: selected_provider() == p.id,
                                                 disabled: p.coming_soon,
-                                                if p.coming_soon {
-                                                    "{p.name} · soon"
-                                                } else if p.available {
-                                                    "{p.name}"
-                                                } else {
-                                                    "{p.name} · offline"
-                                                }
+                                                { provider_option_label(p) }
                                             }
                                         }
                                     }
@@ -779,18 +1243,48 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 select {
                                     class: "min-w-0 max-w-full flex-1 cursor-pointer truncate rounded-lg border-0 bg-[var(--app-bg)] px-2 py-1.5 text-xs font-medium text-[var(--app-fg)] outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0 disabled:opacity-50",
                                     value: "{selected_model}",
-                                    disabled: status_loading() || models.is_empty() || sending(),
+                                    disabled: sending()
+                                        || providers.is_empty()
+                                        || (models.is_empty() && selected_provider() == "ollama"),
                                     title: "Model for the selected provider",
-                                    onchange: move |e| selected_model.set(e.value()),
+                                    onchange: {
+                                        let details = runner_host
+                                            .as_ref()
+                                            .and_then(|h| {
+                                                h.agents.iter().find(|a| a.id == selected_provider())
+                                            })
+                                            .map(|a| a.model_details.clone())
+                                            .unwrap_or_default();
+                                        let ws = workspace_id.clone();
+                                        move |e| {
+                                            let name = e.value();
+                                            selected_model.set(name.clone());
+                                            write_stored_composer(&ws, &selected_provider(), &name);
+                                            if let Some(value) = pick_effort_value(
+                                                find_model_detail(&details, &name),
+                                                read_stored_effort(&ws).as_deref(),
+                                            ) {
+                                                selected_effort.set(value);
+                                            }
+                                        }
+                                    },
                                     if models.is_empty() {
                                         option {
                                             value: "",
-                                            if status_loading() {
-                                                "Loading models…"
-                                            } else if selected_provider() == "grok" {
-                                                "Run `grok login` for grok-4.5"
+                                            if !hosts_ready && selected_provider() != "openai" {
+                                                "Loading runner inventory…"
+                                            } else if selected_runner().is_empty()
+                                                && selected_provider() != "openai"
+                                            {
+                                                "Pick a runner first"
+                                            } else if selected_provider() != "ollama"
+                                                && active_provider.as_ref().is_some_and(|p| p.available)
+                                            {
+                                                "CLI default"
+                                            } else if let Some(p) = active_provider.as_ref() {
+                                                { p.error.clone().unwrap_or_else(|| "No models reported".into()) }
                                             } else {
-                                                "No models — ollama pull …"
+                                                "No models reported"
                                             }
                                         }
                                     } else {
@@ -806,22 +1300,64 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 }
                             }
 
+                            if !effort_choices.is_empty() {
+                            div { class: "flex min-w-0 items-center gap-1.5",
+                                span {
+                                    class: "hidden text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)] sm:inline",
+                                    "Effort"
+                                }
+                                select {
+                                    class: "max-w-[8rem] cursor-pointer truncate rounded-lg border-0 bg-[var(--app-bg)] px-2 py-1.5 text-xs font-medium text-[var(--app-fg)] outline-none",
+                                    value: "{resolved_effort}",
+                                    title: "Reasoning effort advertised by this model",
+                                    onchange: {
+                                        let ws = workspace_id.clone();
+                                        move |e| {
+                                            let v = e.value();
+                                            selected_effort.set(v.clone());
+                                            write_stored_effort(&ws, &v);
+                                        }
+                                    },
+                                    for (value, label) in effort_choices.iter() {
+                                        option {
+                                            value: "{value}",
+                                            selected: resolved_effort == *value,
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                            }
+
                             button {
                                 class: "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-0 text-[var(--app-muted)] transition hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)] focus:outline-none focus:ring-0 disabled:opacity-40",
                                 r#type: "button",
                                 title: "Refresh providers and models",
                                 "aria-label": "Refresh models",
-                                disabled: status_loading(),
+                                disabled: sending(),
                                 onclick: {
                                     let ws = workspace_id.clone();
                                     move |_| {
-                                        refresh_status(
-                                            ws.clone(),
-                                            status,
-                                            selected_provider,
-                                            selected_model,
-                                            status_loading,
-                                        );
+                                        let ws = ws.clone();
+                                        spawn(async move {
+                                            if let Ok((list, _, _)) = list_workers_page(&ws).await {
+                                                let active: Vec<_> = list
+                                                    .into_iter()
+                                                    .filter(|h| !is_removed(h) && h.kind != "control_plane")
+                                                    .collect();
+                                                let runner = selected_runner();
+                                                apply_composer_defaults(
+                                                    &ws,
+                                                    active.iter().find(|h| h.id == runner),
+                                                    plane_openai_from_status(status().as_ref()),
+                                                    selected_provider,
+                                                    selected_model,
+                                                    selected_effort,
+                                                    user_picked_provider(),
+                                                );
+                                                hosts.set(active);
+                                            }
+                                        });
                                     }
                                 },
                                 RefreshIcon {}
@@ -835,12 +1371,15 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                 disabled: draft().trim().is_empty() || sending() || !can_chat,
                                 onclick: {
                                     let ws = workspace_id.clone();
+                                    let effort = resolved_effort.clone();
                                     move |_| {
                                         send_message(
                                             draft(),
                                             ws.clone(),
                                             selected_provider(),
                                             selected_model(),
+                                            selected_runner(),
+                                            effort.clone(),
                                             messages,
                                             next_id,
                                             sending,
@@ -854,6 +1393,9 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                             }
                         }
                     }
+                }
+                p { class: "pointer-events-auto mx-auto mt-1.5 max-w-3xl px-1 text-[10px] leading-4 text-[var(--app-muted)]",
+                    "Grok, Claude, and Private (Ollama) turns run on the selected runner’s official CLI. OpenAI still uses the API key on the control plane."
                 }
             }
         }
@@ -878,7 +1420,13 @@ fn ExampleChip(text: String, mut draft: Signal<String>, disabled: bool) -> Eleme
 fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
     let is_user = message.role == MessageRole::User;
     let actions = message.actions.clone();
-    let shown = if !is_user && looks_like_later_copy(&message.content) && message.actions.iter().any(|a| a.ok && is_fleet_launch(&a.tool)) {
+    let shown = if !is_user
+        && looks_like_later_copy(&message.content)
+        && message
+            .actions
+            .iter()
+            .any(|a| a.ok && is_fleet_launch(&a.tool))
+    {
         "Agents are working in this thread. Tool calls stay highlighted until implement → review → ship is done.".to_string()
     } else {
         message.content.clone()
@@ -936,9 +1484,18 @@ fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
                         }
                     }
                 }
-                if let Some(model) = &message.model {
+                if message.model.is_some() || message.latency_ms.is_some() {
                     p { class: "m-0 mt-3 text-[11px] text-[var(--app-muted)]",
-                        "{model}"
+                        {
+                            match (&message.model, message.latency_ms) {
+                                (Some(model), Some(ms)) => {
+                                    format!("{model} · {}", format_chat_elapsed(ms))
+                                }
+                                (Some(model), None) => model.clone(),
+                                (None, Some(ms)) => format_chat_elapsed(ms),
+                                (None, None) => String::new(),
+                            }
+                        }
                     }
                 }
             }
@@ -1013,7 +1570,10 @@ fn clip_live_text(raw: &str) -> Option<String> {
     let one = t.replace('\n', " ");
     let chars: Vec<char> = one.chars().collect();
     if chars.len() > 140 {
-        Some(format!("{}…", chars.into_iter().take(137).collect::<String>()))
+        Some(format!(
+            "{}…",
+            chars.into_iter().take(137).collect::<String>()
+        ))
     } else {
         Some(one)
     }
@@ -1087,7 +1647,9 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                             .filter(|t| {
                                 t.get("run_id")
                                     .and_then(|x| x.as_str())
-                                    .map(|id| id == rid || id.starts_with(&rid) || rid.starts_with(id))
+                                    .map(|id| {
+                                        id == rid || id.starts_with(&rid) || rid.starts_with(id)
+                                    })
                                     .unwrap_or(false)
                             })
                             .filter_map(|t| {
@@ -1112,11 +1674,7 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                                         return None;
                                     }
                                     let text = clip_live_text(a.get("text")?.as_str()?)?;
-                                    Some((
-                                        a.get("profile")?.as_str()?.to_string(),
-                                        kind,
-                                        text,
-                                    ))
+                                    Some((a.get("profile")?.as_str()?.to_string(), kind, text))
                                 })
                                 .take(24)
                                 .collect(),
@@ -1128,7 +1686,10 @@ fn AgentChatStream(workspace_id: String, run_id: String) -> Element {
                                 .filter_map(|m| {
                                     Some((
                                         m.get("from")?.as_str()?.to_string(),
-                                        m.get("to").and_then(|x| x.as_str()).unwrap_or("*").to_string(),
+                                        m.get("to")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("*")
+                                            .to_string(),
                                         m.get("body")?.as_str()?.to_string(),
                                     ))
                                 })

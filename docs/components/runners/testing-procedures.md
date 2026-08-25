@@ -95,7 +95,7 @@ Catalog → test (layer 2):
 | Specs on a live card | `test_catalog_specs.test_specs_on_a_live_card` |
 | Software line after pair; not on plane | `test_14g_software_line`; `test_catalog_software` |
 | last seen relative (“just now” / “never”) | `test_14j_last_seen`; `test_catalog_last_seen.test_last_seen_never_then_just_now` |
-| Package banner short id | `test_05` asserts Current runner build / Serving this build |
+| Package banner is Current fleet-host version / Current fleet-driver version | `test_05` must not say Current runner build |
 | Logout (must stay last in unittest name order) | `test_18_logout_returns_to_login` |
 
 Human-test steps: **Runners / Self-hosted**, **Workers**, **Cloud**,

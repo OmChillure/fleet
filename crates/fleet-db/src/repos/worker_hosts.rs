@@ -25,7 +25,9 @@ const HOST_COLS: &str = r#"
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
     software_git_sha, software_bins, software_reported_at, software_updating, auto_update,
     update_requested_at, machine_id,
-    hardware, settings_gen, settings_ack_gen,
+    hardware, agent_runtimes, settings_gen, settings_ack_gen,
+    install_request, install_requested_at,
+    runtime_settings, runtime_reported,
     created_by, created_at, paired_at, updated_at
 "#;
 
@@ -194,6 +196,16 @@ pub async fn patch_cp_settings(
     } else {
         current.update_requested_at
     };
+    let (install_request, install_requested_at) = if let Some(spec) = patch.install_model.as_ref() {
+        (Some(spec.clone()), Some(Utc::now()))
+    } else {
+        (current.install_request.clone(), current.install_requested_at)
+    };
+    let runtime_settings = if let Some(incoming) = patch.runtime_settings.as_ref() {
+        merge_json_objects(&current.runtime_settings, incoming)
+    } else {
+        current.runtime_settings.clone()
+    };
     let bump = name.as_str() != current.name.as_str()
         || enabled != current.enabled
         || paused != current.paused
@@ -204,7 +216,8 @@ pub async fn patch_cp_settings(
         || max_concurrent != current.max_concurrent
         || max_job_timeout_s != current.max_job_timeout_s
         || labels != &current.labels
-        || auto_update != current.auto_update;
+        || auto_update != current.auto_update
+        || runtime_settings != current.runtime_settings;
     let settings_gen = if bump {
         current.settings_gen.saturating_add(1)
     } else {
@@ -227,6 +240,9 @@ pub async fn patch_cp_settings(
             auto_update = $12,
             update_requested_at = $13,
             settings_gen = $14,
+            install_request = $15,
+            install_requested_at = $16,
+            runtime_settings = $17,
             updated_at = now()
         WHERE id = $1
         RETURNING {HOST_COLS}
@@ -247,6 +263,78 @@ pub async fn patch_cp_settings(
         .bind(auto_update)
         .bind(update_requested_at)
         .bind(settings_gen)
+        .bind(install_request)
+        .bind(install_requested_at)
+        .bind(runtime_settings)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+fn merge_json_objects(base: &serde_json::Value, incoming: &serde_json::Value) -> serde_json::Value {
+    let mut out = base.as_object().cloned().unwrap_or_default();
+    if let Some(map) = incoming.as_object() {
+        for (k, v) in map {
+            if v.is_null() {
+                out.remove(k);
+            } else {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+pub async fn set_runtime_reported(
+    pool: &PgPool,
+    host_id: Uuid,
+    runtime: serde_json::Value,
+) -> DbResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE worker_hosts
+        SET runtime_reported = $2, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(host_id)
+    .bind(runtime)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(())
+}
+
+pub async fn clear_install_request(pool: &PgPool, host_id: Uuid) -> DbResult<WorkerHost> {
+    clear_install_request_if(pool, host_id, None).await
+}
+
+/// Clear only when `ack_spec` is omitted (old host) or matches the queued spec.
+pub async fn clear_install_request_if(
+    pool: &PgPool,
+    host_id: Uuid,
+    ack_spec: Option<&str>,
+) -> DbResult<WorkerHost> {
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET install_request = NULL,
+            install_requested_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND (
+            $2::text IS NULL
+            OR install_request IS NULL
+            OR COALESCE(install_request->>'spec', '') = ''
+            OR install_request->>'spec' = $2
+          )
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(ack_spec)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?
@@ -633,6 +721,7 @@ pub async fn heartbeat(
         software_updating,
         hardware,
         None,
+        None,
     )
     .await
 }
@@ -652,6 +741,7 @@ pub async fn heartbeat_with_machine(
     software_updating: Option<bool>,
     hardware: Option<serde_json::Value>,
     machine_id: Option<Uuid>,
+    agent_runtimes: Option<serde_json::Value>,
 ) -> DbResult<WorkerHost> {
     let current_jobs = current_jobs.max(0);
     let advertised_max_concurrent = advertised_max_concurrent.map(|n| n.clamp(1, 256));
@@ -673,6 +763,7 @@ pub async fn heartbeat_with_machine(
             software_reported_at = CASE WHEN $11 THEN now() ELSE software_reported_at END,
             software_updating = COALESCE($12, software_updating),
             hardware = COALESCE($13, hardware),
+            agent_runtimes = COALESCE($15, agent_runtimes),
             machine_id = CASE
                 WHEN $14::uuid IS NULL THEN COALESCE(machine_id, id)
                 WHEN EXISTS (
@@ -703,6 +794,7 @@ pub async fn heartbeat_with_machine(
         .bind(software_updating)
         .bind(hardware)
         .bind(machine_id)
+        .bind(agent_runtimes)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?

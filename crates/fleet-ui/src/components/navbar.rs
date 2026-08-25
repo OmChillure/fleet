@@ -8,7 +8,11 @@ pub fn Navbar() -> Element {
         header { class: "sticky top-0 z-50 h-16 border-b border-neutral-800 bg-black/90 backdrop-blur-md",
             div { class: "flex h-full w-full items-center justify-between gap-4 px-4",
                 Link { class: "flex items-center gap-2.5 font-bold tracking-tight text-white", to: Route::Home {},
-                    div { class: "h-7 w-7 rounded-lg bg-white" }
+                    img {
+                        class: "h-7 w-7 rounded-lg",
+                        src: asset!("/assets/app-icon.png"),
+                        alt: "",
+                    }
                     span { class: "text-[1.05rem]", "Agent Fleet" }
                 }
 

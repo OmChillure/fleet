@@ -88,8 +88,9 @@ same change. The walkthrough is allowed to go stale only if the product did.
 8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
    paste the install command on the machine (Linux/macOS or Windows). Copy
    Unix, Windows, and token (works on HTTP LAN). Token panel is success —
-   do not require a second machine. `/{ws}/workers` redirects here
-   (`workers` scene is an alias).
+   do not require a second machine. On a runner with Ollama: disk free, a
+   searchable current top-50 popular-model list, and an Unlisted field for
+   any name/URL. `/{ws}/workers` redirects here (`workers` scene is an alias).
 9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
    (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
 10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;
@@ -97,8 +98,12 @@ same change. The walkthrough is allowed to go stale only if the product did.
 11. **Agents** — Seed starters (8 personas). Creating/archiving is optional.
 12. **Integrations** — catalog. Connect only if this MR is OAuth and secrets
     are in `.env`.
-13. **Chat** — provider/model dropdown. Send a line only if Grok or Ollama is
-    actually up. Otherwise still open the page (empty composer is success).
+13. **Chat** — provider/model dropdown defaults to last used if that pair is
+    ready on the selected runner, else the first installed/ready provider.
+    Ollama is labeled **Private (Ollama)**. Claude uses official aliases
+    (do not run `claude models`). After a reply the bubble shows send →
+    response time. Send a line only if Grok or Private (Ollama) is actually
+    up. Otherwise still open the page (empty composer is success).
     Plain language is enough (read Slack, implement, push GitHub, write Notion). Connect apps first.
     Inbox tickets: Start monitor, then Finish on a row (or chat: finish ENG-123).
 14. **Fleet** — Start 2-task run → Run tick (or Run until done). Default
@@ -158,7 +163,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-ui` sidebar, theme, logout | `shell` | expand sections, user menu, theme toggle |
 | `crates/fleet-ui` + `fleet-auth` workspaces | `workspace` | switcher + create workspace |
 | `crates/fleet-server` `/health`, `/`, `/api` | `api` | browser opens API `/health` JSON (`status: ok`, `apis` includes auth/fleet/chat) |
-| `crates/fleet-server` chat, `chat_tools`, `grok` | `chat` | New chat composer + provider/model. Send only if a provider is live |
+| `crates/fleet-server` chat, `chat_tools`, `grok` | `chat` | New chat composer + provider/model. Defaults to last used if ready, else first installed. Ollama labeled Private (Ollama). Send only if a provider is live |
 | `crates/fleet-db` chats repo | `chat` + `sessions` | new thread appears under Chat history |
 | `crates/fleet-orchestrator` tick, plans, store, team chat | `fleet` | Start 2-task run, Run tick, cards change column. LLM workers use TEAM_CHAT.md |
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
@@ -171,7 +176,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
 | unify-runners (isolation, picker, single guest, self-hosted) | `unify` | Settings Isolation save; Self-hosted Add worker; Fleet Start 2-task + tick; Sandboxes. Process-only host must not take a container workspace |
-| `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. `/{ws}/workers` redirects |
+| `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. Private (Ollama): top-50, tags, models directory, disk/RAM/VRAM guards. Sandboxing Native / VMs / Containers. `/{ws}/workers` redirects |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
 | `crates/fleet-ui` Partners `/{ws}/runners/partners` | `partners` | trust copy, disclaimer, verified vs open. Ack does not enable lending |
 | `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |

@@ -19,8 +19,19 @@ use fleet_driver::report;
 use serde_json::json;
 use tracing::{error, info, warn};
 
+fn main() {
+    let mut args = std::env::args().skip(1);
+    if let Some(a) = args.next() {
+        if matches!(a.as_str(), "-V" | "--version" | "version") {
+            println!("fleet-driver {}", fleet_driver::pkg_version());
+            return;
+        }
+    }
+    tokio_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn tokio_main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

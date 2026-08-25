@@ -202,8 +202,51 @@ mod tests {
     fn wrong_key_fails() {
         let a = CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let b = CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
-        let sealed = a.encrypt(&json!({ "t": "x" })).unwrap();
-        assert!(b.decrypt(&sealed).is_err());
+        let secret = "tok_wrong_key_must_not_leak";
+        let sealed = a.encrypt(&json!({ "access_token": secret })).unwrap();
+        let err = b.decrypt(&sealed).unwrap_err().to_string();
+        assert!(!err.contains(secret), "decrypt error must not leak plaintext: {err}");
+    }
+
+    #[test]
+    fn truncated_ciphertext_fails() {
+        let key = CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").unwrap();
+        let secret = "tok_trunc_must_not_leak";
+        let mut sealed = key.encrypt(&json!({ "access_token": secret })).unwrap();
+        let ct = sealed["ct"].as_str().unwrap().to_string();
+        let cut = ct.len() / 2;
+        assert!(cut > 0 && cut < ct.len());
+        sealed["ct"] = json!(&ct[..cut]);
+        let err = key.decrypt(&sealed).unwrap_err().to_string();
+        assert!(!err.contains(secret), "decrypt error must not leak plaintext: {err}");
+    }
+
+    #[test]
+    fn garbled_ciphertext_fails() {
+        let key = CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").unwrap();
+        let secret = "tok_garbled_must_not_leak";
+        let mut sealed = key.encrypt(&json!({ "access_token": secret })).unwrap();
+        let ct = sealed["ct"].as_str().unwrap().to_string();
+        let last = ct.chars().last().unwrap();
+        let flipped = format!(
+            "{}{}",
+            &ct[..ct.len() - 1],
+            if last == '0' { '1' } else { '0' }
+        );
+        sealed["ct"] = json!(flipped);
+        let err = key.decrypt(&sealed).unwrap_err().to_string();
+        assert!(!err.contains(secret), "decrypt error must not leak plaintext: {err}");
+    }
+
+    #[test]
+    fn empty_ciphertext_fails() {
+        let key = CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").unwrap();
+        let sealed = json!({
+            "_enc": "v1",
+            "nonce": hex::encode([0u8; NONCE_LEN]),
+            "ct": "",
+        });
+        assert!(key.decrypt(&sealed).is_err());
     }
 
     #[test]

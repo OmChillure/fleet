@@ -11,9 +11,12 @@ pub mod config;
 pub mod fleet_routes;
 pub mod grok;
 pub mod install_routes;
+pub mod local_models;
+pub mod package_versions;
 pub mod partners;
 pub mod providers;
 pub mod retry;
+pub mod runner_chat;
 pub mod state;
 pub mod tickets;
 pub mod work_io;
@@ -251,6 +254,8 @@ pub async fn api_index() -> Json<Value> {
                 "note": "Grok / Ollama / OpenAI / Claude; NDJSON stream; fleet + integration tools",
             },
             "worker_hosts": {
+                "local_models": "GET /api/workspaces/{workspace_id}/local-models",
+                "local_model_tags": "GET /api/workspaces/{workspace_id}/local-models/{name}/tags",
                 "list": "GET /api/workspaces/{workspace_id}/worker-hosts",
                 "create": "POST /api/workspaces/{workspace_id}/worker-hosts",
                 "get": "GET /api/workspaces/{workspace_id}/worker-hosts/{host_id}",

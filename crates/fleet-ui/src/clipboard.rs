@@ -6,21 +6,72 @@
 //! Fall back to a hidden textarea + `document.execCommand("copy")` in the
 //! click gesture.
 
+/// Copy backends in the order `copy_text` tries them.
+///
+/// Textarea/`execCommand` is first so HTTP LAN (no secure context) never
+/// reads `navigator.clipboard`. The clipboard API is only used if that
+/// fallback fails and a Reflect probe says the object exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyBackend {
+    ExecCommandTextarea,
+    ClipboardApiIfPresent,
+}
+
+const HTTP_LAN_THEN_API: &[CopyBackend] = &[
+    CopyBackend::ExecCommandTextarea,
+    CopyBackend::ClipboardApiIfPresent,
+];
+
+/// Ordered backends for `text`. Empty payload → none (fail closed).
+fn copy_backends(text: &str) -> &'static [CopyBackend] {
+    if fleet_runners_view::clipboard_has_payload(text) {
+        HTTP_LAN_THEN_API
+    } else {
+        &[]
+    }
+}
+
+/// Whether `Reflect.get(navigator, "clipboard")` produced a usable object.
+///
+/// Missing, undefined, null, or a non-Clipboard value is false. Do not
+/// read `navigator.clipboard` directly — that getter panics on Firefox
+/// HTTP LAN.
+fn clipboard_api_usable(
+    reflect_ok: bool,
+    is_undefined: bool,
+    is_null: bool,
+    is_clipboard: bool,
+) -> bool {
+    reflect_ok && !is_undefined && !is_null && is_clipboard
+}
+
 /// Returns whether the text was placed on the clipboard.
 pub fn copy_text(text: &str) -> bool {
-    if !fleet_runners_view::clipboard_has_payload(text) {
+    let backends = copy_backends(text);
+    if backends.is_empty() {
         return false;
     }
     #[cfg(target_arch = "wasm32")]
     {
-        if copy_via_textarea(text) {
-            return true;
+        for backend in backends {
+            match *backend {
+                CopyBackend::ExecCommandTextarea => {
+                    if copy_via_textarea(text) {
+                        return true;
+                    }
+                }
+                CopyBackend::ClipboardApiIfPresent => {
+                    if copy_via_clipboard_api(text) {
+                        return true;
+                    }
+                }
+            }
         }
-        copy_via_clipboard_api(text)
+        false
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = text;
+        let _ = backends;
         false
     }
 }
@@ -72,13 +123,21 @@ fn copy_via_clipboard_api(text: &str) -> bool {
     let Some(window) = web_sys::window() else {
         return false;
     };
-    let clip = js_sys::Reflect::get(
+    let got = js_sys::Reflect::get(
         window.navigator().as_ref(),
         &wasm_bindgen::JsValue::from_str("clipboard"),
-    )
-    .ok()
-    .filter(|v| !v.is_undefined() && !v.is_null())
-    .and_then(|v| v.dyn_into::<web_sys::Clipboard>().ok());
+    );
+    let (undefined, null, clip) = match &got {
+        Ok(v) => (
+            v.is_undefined(),
+            v.is_null(),
+            v.clone().dyn_into::<web_sys::Clipboard>().ok(),
+        ),
+        Err(_) => (true, true, None),
+    };
+    if !clipboard_api_usable(got.is_ok(), undefined, null, clip.is_some()) {
+        return false;
+    }
     let Some(clip) = clip else {
         return false;
     };
@@ -92,4 +151,38 @@ fn spawn_clipboard_write(clip: web_sys::Clipboard, text: String) {
     dioxus::prelude::spawn(async move {
         let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_lan_fallback_is_textarea_before_clipboard_api() {
+        let steps = copy_backends("curl -fsSL http://192.168.1.10/install-worker.sh");
+        assert_eq!(
+            steps,
+            &[
+                CopyBackend::ExecCommandTextarea,
+                CopyBackend::ClipboardApiIfPresent,
+            ]
+        );
+        assert!(copy_backends("flp_token").starts_with(&[CopyBackend::ExecCommandTextarea]));
+        assert!(copy_backends("").is_empty());
+    }
+
+    #[test]
+    fn missing_clipboard_api_does_not_panic() {
+        assert!(!clipboard_api_usable(false, true, true, false));
+        assert!(!clipboard_api_usable(true, true, false, false));
+        assert!(!clipboard_api_usable(true, false, true, false));
+        assert!(!clipboard_api_usable(true, false, false, false));
+        assert!(clipboard_api_usable(true, false, false, true));
+        // Host has no clipboard API. Must return false, not panic.
+        assert!(!copy_text("flp_token"));
+        assert!(!copy_text(
+            "curl -fsSL http://192.168.0.2/install-worker.sh"
+        ));
+        assert!(!copy_text(""));
+    }
 }

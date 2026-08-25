@@ -7,11 +7,13 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::workspaces as workspace_repo;
-use fleet_orchestrator::domain::{OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus};
+use fleet_orchestrator::domain::{
+    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
+};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -38,18 +40,9 @@ pub fn router() -> Router<AppState> {
             "/api/workspaces/{workspace_id}/fleet/runs/fixture",
             post(post_fixture),
         )
-        .route(
-            "/api/workspaces/{workspace_id}/fleet/tick",
-            post(post_tick),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/fleet/tasks",
-            get(get_tasks),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/fleet/runs",
-            get(get_runs),
-        )
+        .route("/api/workspaces/{workspace_id}/fleet/tick", post(post_tick))
+        .route("/api/workspaces/{workspace_id}/fleet/tasks", get(get_tasks))
+        .route("/api/workspaces/{workspace_id}/fleet/runs", get(get_runs))
         .route(
             "/api/workspaces/{workspace_id}/fleet/sessions",
             get(get_sessions),
@@ -124,7 +117,10 @@ async fn get_fleet_project(
     Path(workspace_id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let (user, role) = require_member(&state, &jar, workspace_id).await?;
-    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
+    let name = format!(
+        "{} fleet",
+        user.email.split('@').next().unwrap_or("workspace")
+    );
     ensure_project(&state, workspace_id, &name).await?;
     let project = state
         .orch
@@ -240,8 +236,7 @@ async fn patch_settings(
         .unwrap_or_else(|| current.fleet_llm_model.clone());
 
     if let Some(raw) = body.min_isolation.as_deref() {
-        workspace_repo::set_min_isolation(&state.db, workspace_id, raw)
-            .await?;
+        workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
     }
 
     let cfg = state
@@ -382,7 +377,9 @@ fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
                 plan_task_id: "t1".into(),
                 title: "Root task".into(),
                 summary: "Prepare workspace artifacts for the child task.".into(),
-                spec_md: "# Root task\n\nWrite a short plan artifact, then succeed so `t2` can run.\n".into(),
+                spec_md:
+                    "# Root task\n\nWrite a short plan artifact, then succeed so `t2` can run.\n"
+                        .into(),
                 depends_on: vec![],
                 worker_profile: "coding".into(),
                 acceptance: vec!["artifact exists".into()],
@@ -395,7 +392,8 @@ fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
                 plan_task_id: "t2".into(),
                 title: "Child task".into(),
                 summary: "Consume root output and finish the chain.".into(),
-                spec_md: "# Child task\n\nDepends on `t1`. Produce a final summary artifact.\n".into(),
+                spec_md: "# Child task\n\nDepends on `t1`. Produce a final summary artifact.\n"
+                    .into(),
                 depends_on: vec!["t1".into()],
                 worker_profile: "coding".into(),
                 acceptance: vec!["chain complete".into()],
@@ -415,7 +413,10 @@ async fn post_fixture(
     Json(body): Json<FixtureRequest>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
+    let name = format!(
+        "{} fleet",
+        user.email.split('@').next().unwrap_or("workspace")
+    );
     ensure_project(&state, workspace_id, &name).await?;
 
     let kind = body
@@ -472,7 +473,10 @@ async fn post_tick(
     Path(workspace_id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let name = format!("{} fleet", user.email.split('@').next().unwrap_or("workspace"));
+    let name = format!(
+        "{} fleet",
+        user.email.split('@').next().unwrap_or("workspace")
+    );
     ensure_project(&state, workspace_id, &name).await?;
 
     let report = state
@@ -535,12 +539,9 @@ async fn get_overview(
         .await
         .map_err(|e| map_orch_err("list_sessions", e))?;
 
-    let open_run = runs.iter().find(|r| {
-        !matches!(
-            r.status.as_str(),
-            "completed" | "failed" | "cancelled"
-        )
-    });
+    let open_run = runs
+        .iter()
+        .find(|r| !matches!(r.status.as_str(), "completed" | "failed" | "cancelled"));
     let focus = open_run.or(runs.first());
     let run_id = focus.map(|r| r.id);
 
@@ -556,10 +557,8 @@ async fn get_overview(
         chat = fleet_orchestrator::sandbox::team_chat::list_messages(&talk).await;
     }
 
-    let replied: std::collections::HashSet<uuid::Uuid> = chat
-        .iter()
-        .filter_map(|m| m.in_reply_to)
-        .collect();
+    let replied: std::collections::HashSet<uuid::Uuid> =
+        chat.iter().filter_map(|m| m.in_reply_to).collect();
     let waiting: Vec<Value> = chat
         .iter()
         .filter(|m| m.kind == "ask" && !replied.contains(&m.id))
@@ -634,8 +633,6 @@ async fn get_overview(
         })).collect::<Vec<_>>(),
     })))
 }
-
-
 
 async fn get_tasks(
     State(state): State<AppState>,
@@ -731,9 +728,10 @@ async fn get_session_detail(
         transcript = read_capped_file(std::path::Path::new(&work_dir).join("stdout.log"), 80_000);
     }
     let prompt = read_capped_file(std::path::Path::new(&work_dir).join("prompt.md"), 16_000);
-    let result = std::fs::read_to_string(std::path::Path::new(&work_dir).join("artifacts/result.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let result =
+        std::fs::read_to_string(std::path::Path::new(&work_dir).join("artifacts/result.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     Ok(Json(json!({
         "session": {
             "id": session.id,

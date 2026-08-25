@@ -1,6 +1,8 @@
 //! Paired worker host: pair with the control plane and run leased jobs.
 
+pub mod agents;
 pub mod bus;
+pub mod chat_cli;
 pub mod client;
 pub mod config;
 pub mod exec_k8s;

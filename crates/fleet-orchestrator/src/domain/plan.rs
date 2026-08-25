@@ -67,6 +67,11 @@ pub struct PlanPolicy {
     /// Exact model id selected in chat (not a random default).
     #[serde(default)]
     pub llm_model: Option<String>,
+    /// Prefer this self-hosted runner when assigning work.
+    #[serde(default)]
+    pub preferred_host_id: Option<Uuid>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// Extra write-backs (in addition to a reply on each task `external_ref`).
     #[serde(default)]
     pub outputs: Vec<PlanIo>,
@@ -84,6 +89,8 @@ impl Default for PlanPolicy {
             auto_sync_external: false,
             llm_provider: None,
             llm_model: None,
+            preferred_host_id: None,
+            reasoning_effort: None,
             outputs: Vec::new(),
         }
     }

@@ -287,6 +287,7 @@ cmd_setup() {
   else
     warn "Skipping cargo build (FLEET_SKIP_BUILD=1)"
   fi
+  bash "$ROOT/scripts/check-worker-dist.sh" || true
 
   ok "Setup complete."
   echo "  .env          → $ROOT/.env"
@@ -423,6 +424,7 @@ cmd_start() {
     log "Ensuring fleet-server + fleet-host are built (FLEET_GIT_SHA=${FLEET_GIT_SHA})…"
     cargo build -p fleet-server -p fleet-host
   fi
+  bash "$ROOT/scripts/check-worker-dist.sh" || true
 
   start_server
   start_ui

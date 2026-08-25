@@ -1,5 +1,6 @@
 //! Worker-local settings (`~/.config/fleet-host/config.toml`).
-//! Never accepted from the control plane.
+//! Pair/token stay local. The plane may set work_dir, models dir, and
+//! sandbox knobs via heartbeat `runtime_settings`.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -46,6 +47,19 @@ pub struct LocalConfig {
     pub container_backend: ContainerBackend,
     #[serde(default = "paths::default_work_dir_string")]
     pub work_dir: String,
+    /// Ollama models directory (`OLLAMA_MODELS`). Empty = CLI default.
+    #[serde(default)]
+    pub ollama_models_dir: String,
+    #[serde(default = "default_k8s_namespace")]
+    pub k8s_namespace: String,
+    #[serde(default = "default_k8s_cpu")]
+    pub k8s_cpu: String,
+    #[serde(default = "default_k8s_memory")]
+    pub k8s_memory: String,
+    #[serde(default = "default_k8s_ephemeral")]
+    pub k8s_ephemeral: String,
+    #[serde(default = "default_egress")]
+    pub egress_mode: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
     #[serde(default = "default_k3d_cluster")]
@@ -122,6 +136,21 @@ fn default_heartbeat() -> u64 {
 fn default_poll() -> u64 {
     2
 }
+fn default_k8s_namespace() -> String {
+    "agent-fleet".into()
+}
+fn default_k8s_cpu() -> String {
+    "250m".into()
+}
+fn default_k8s_memory() -> String {
+    "256Mi".into()
+}
+fn default_k8s_ephemeral() -> String {
+    "1Gi".into()
+}
+fn default_egress() -> String {
+    "none".into()
+}
 
 impl Default for LocalConfig {
     fn default() -> Self {
@@ -130,6 +159,12 @@ impl Default for LocalConfig {
             run_container: false,
             container_backend: ContainerBackend::K3d,
             work_dir: paths::default_work_dir_string(),
+            ollama_models_dir: String::new(),
+            k8s_namespace: default_k8s_namespace(),
+            k8s_cpu: default_k8s_cpu(),
+            k8s_memory: default_k8s_memory(),
+            k8s_ephemeral: default_k8s_ephemeral(),
+            egress_mode: default_egress(),
             max_concurrent: 8,
             k3d_cluster: default_k3d_cluster(),
             k3d_memory: default_k3d_memory(),
@@ -187,6 +222,122 @@ impl LocalConfig {
                 self.docker_image = t.to_string();
             }
         }
+        if let Ok(v) = std::env::var("K8S_NAMESPACE") {
+            let t = v.trim();
+            if !t.is_empty() {
+                self.k8s_namespace = t.to_string();
+            }
+        }
+        if let Ok(v) = std::env::var("OLLAMA_MODELS") {
+            let t = v.trim();
+            if !t.is_empty() {
+                self.ollama_models_dir = t.to_string();
+            }
+        }
+    }
+
+    pub fn apply_ollama_models_env(&self) {
+        let dir = self.ollama_models_dir.trim();
+        if dir.is_empty() {
+            return;
+        }
+        let path = expand_tilde(dir);
+        // SAFETY: host process is the only writer; ollama child inherits this.
+        unsafe {
+            std::env::set_var("OLLAMA_MODELS", path);
+        }
+    }
+
+    /// Merge plane `runtime_settings`. Returns true if LocalConfig changed.
+    pub fn apply_runtime_settings(&mut self, v: &serde_json::Value) -> bool {
+        let Some(obj) = v.as_object() else {
+            return false;
+        };
+        let mut changed = false;
+        let mut set_str = |slot: &mut String, key: &str| {
+            if let Some(s) = obj.get(key).and_then(|x| x.as_str()).map(str::trim) {
+                if s != slot.as_str() {
+                    *slot = s.to_string();
+                    changed = true;
+                }
+            }
+        };
+        set_str(&mut self.work_dir, "work_dir");
+        set_str(&mut self.ollama_models_dir, "ollama_models_dir");
+        set_str(&mut self.docker_image, "docker_image");
+        set_str(&mut self.docker_network, "docker_network");
+        set_str(&mut self.k8s_namespace, "k8s_namespace");
+        set_str(&mut self.k3d_cluster, "k3d_cluster");
+        set_str(&mut self.k3d_memory, "k3d_memory");
+        set_str(&mut self.k8s_cpu, "k8s_cpu");
+        set_str(&mut self.k8s_memory, "k8s_memory");
+        set_str(&mut self.k8s_ephemeral, "k8s_ephemeral");
+        set_str(&mut self.egress_mode, "egress_mode");
+        if let Some(s) = obj
+            .get("container_backend")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+        {
+            let next = match s {
+                "docker" => ContainerBackend::Docker,
+                "k3d" => ContainerBackend::K3d,
+                _ => self.container_backend,
+            };
+            if next != self.container_backend {
+                self.container_backend = next;
+                changed = true;
+            }
+        }
+        if let Some(b) = obj.get("run_host").and_then(|x| x.as_bool()) {
+            if b != self.run_host {
+                self.run_host = b;
+                changed = true;
+            }
+        }
+        if let Some(b) = obj.get("run_container").and_then(|x| x.as_bool()) {
+            if b != self.run_container {
+                self.run_container = b;
+                changed = true;
+            }
+        }
+        if let Some(b) = obj.get("allow_privileged").and_then(|x| x.as_bool()) {
+            if b != self.allow_privileged {
+                self.allow_privileged = b;
+                changed = true;
+            }
+        }
+        if let Some(n) = obj.get("k3d_agents").and_then(|x| x.as_i64()) {
+            let n = n.clamp(0, 16) as u32;
+            if n != self.k3d_agents {
+                self.k3d_agents = n;
+                changed = true;
+            }
+        }
+        if changed {
+            self.apply_ollama_models_env();
+        }
+        changed
+    }
+
+    pub fn runtime_snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "work_dir": self.work_dir,
+            "ollama_models_dir": self.ollama_models_dir,
+            "run_host": self.run_host,
+            "run_container": self.run_container,
+            "container_backend": self.container_backend.as_str(),
+            "docker_image": self.docker_image,
+            "docker_network": self.docker_network,
+            "k8s_namespace": self.k8s_namespace,
+            "k3d_cluster": self.k3d_cluster,
+            "k3d_memory": self.k3d_memory,
+            "k3d_agents": self.k3d_agents,
+            "allow_privileged": self.allow_privileged,
+            "k8s_cpu": self.k8s_cpu,
+            "k8s_memory": self.k8s_memory,
+            "k8s_ephemeral": self.k8s_ephemeral,
+            "egress_mode": self.egress_mode,
+        })
     }
 
     pub fn load_path(path: &Path) -> Result<Self> {

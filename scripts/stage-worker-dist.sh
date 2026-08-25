@@ -15,6 +15,7 @@
 #   scripts/stage-worker-dist.sh --windows    # mingw-w64 gnu → windows-x86_64 .exe
 #   scripts/stage-worker-dist.sh --windows-arm64 # llvm-mingw gnullvm → windows-arm64 .exe
 #   scripts/stage-worker-dist.sh --portable   # bookworm + musl (x86_64)
+#   scripts/stage-worker-dist.sh --all        # every required OS
 #   scripts/stage-worker-dist.sh --write-manifest [dir]
 #       write manifest.json next to already-staged bins (no rebuild)
 #
@@ -54,7 +55,8 @@ while [[ $# -gt 0 ]]; do
     --windows|--windows-x86_64) MODE=windows ;;
     --windows-arm64) MODE=windows-arm64 ;;
     --musl) MODE=musl ;;
-    --portable|--all) MODE=portable ;;
+    --portable) MODE=portable ;;
+    --all) MODE=all ;;
     --write-manifest)
       MODE=write-manifest
       if [[ $# -gt 1 && "${2:-}" != -* ]]; then
@@ -94,6 +96,29 @@ write_sha256() {
 
 json_quote() {
   printf '"%s"' "${1//\"/\\\"}"
+}
+
+pkg_version_from_toml() {
+  local name="$1"
+  local file="$ROOT/runner-packages.toml"
+  python3 - "$file" versions "$name" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+section, name = sys.argv[2], sys.argv[3]
+header = f"[{section}]"
+in_section = False
+for line in text.splitlines():
+    line = line.strip()
+    if line.startswith("["):
+        in_section = line == header
+        continue
+    if not in_section:
+        continue
+    m = re.match(rf"{re.escape(name)}\s*=\s*\"([^\"]+)\"", line)
+    if m:
+        sys.stdout.write(m.group(1))
+        break
+PY
 }
 
 # Bake recorded in fleet-host (option_env FLEET_GIT_SHA), immediately before
@@ -164,18 +189,27 @@ write_manifest() {
 
   local staged_at
   staged_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local host_ver driver_ver
+  host_ver="$(pkg_version_from_toml fleet-host)"
+  driver_ver="$(pkg_version_from_toml fleet-driver)"
 
   {
     printf '{\n  "git_sha": %s,\n  "platform": %s,\n  "staged_at": %s,\n  "bins": {\n' \
       "$(json_quote "$git_sha")" "$(json_quote "$platform")" "$(json_quote "$staged_at")"
     local i=0
     local n=${#names[@]}
-    local sha size
+    local sha size ver stem
     for bin in "${names[@]}"; do
       sha="$(file_sha256 "$out/$bin")"
       size="$(wc -c <"$out/$bin" | tr -d '[:space:]')"
-      printf '    %s: { "sha256": %s, "size": %s }' \
-        "$(json_quote "$bin")" "$(json_quote "$sha")" "$size"
+      stem="${bin%.exe}"
+      if [[ "$stem" == "fleet-driver" ]]; then
+        ver="$driver_ver"
+      else
+        ver="$host_ver"
+      fi
+      printf '    %s: { "sha256": %s, "size": %s, "version": %s }' \
+        "$(json_quote "$bin")" "$(json_quote "$sha")" "$size" "$(json_quote "$ver")"
       i=$((i + 1))
       if [[ "$i" -lt "$n" ]]; then
         printf ',\n'
@@ -357,19 +391,19 @@ stage_windows_host() {
 
   local target_dir="${FLEET_WINDOWS_GNU_TARGET_DIR:-$ROOT/target/docker-windows-gnu}"
   mkdir -p "$target_dir"
-  echo "building fleet-host fleet-driver (debug) for windows-x86_64"
+  echo "building fleet-host fleet-driver (release) for windows-x86_64"
   if ! CARGO_TARGET_DIR="$target_dir" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
       CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
       CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++ \
       AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
-      cargo build -p fleet-host -p fleet-driver \
+      cargo build --release -p fleet-host -p fleet-driver \
         --target x86_64-pc-windows-gnu; then
     echo "stage-worker-dist: host windows-gnu cargo build failed; will try docker" >&2
     return 1
   fi
 
-  copy_exe_bins "$target_dir/x86_64-pc-windows-gnu/debug" "$DEST/windows-x86_64"
+  copy_exe_bins "$target_dir/x86_64-pc-windows-gnu/release" "$DEST/windows-x86_64"
 }
 
 stage_windows() {
@@ -506,6 +540,16 @@ case "$MODE" in
   portable)
     stage_bookworm
     stage_musl
+    ;;
+  all)
+    stage_bookworm
+    stage_musl
+    stage_aarch64
+    stage_armv7
+    stage_aarch64_musl
+    stage_armv7_musl
+    stage_windows
+    stage_windows_arm64
     ;;
   *)
     echo "stage-worker-dist: internal error: mode=$MODE" >&2

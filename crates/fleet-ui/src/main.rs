@@ -122,6 +122,8 @@ fn main() {
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
+        document::Link { rel: "icon", href: asset!("/assets/app-icon.png") }
+        document::Link { rel: "apple-touch-icon", href: asset!("/assets/app-icon.png") }
         ToastProvider {
             Router::<Route> {}
         }

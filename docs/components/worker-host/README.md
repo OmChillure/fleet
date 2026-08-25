@@ -36,7 +36,10 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
 - Identity: served binaries, if any, should match `scripts/tree-id.sh`
   (same fail-closed rule as API/UI images). Stage writes `manifest.json`
   next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
-  outdated” compares the box report to that file, not `/health.git_sha`.
+  outdated” compares against `[verify]` in `runner-packages.toml` (staging
+  writes `[versions]`). cargo warns when a package version is higher than
+  `[verify]`. File hashes still prove the bytes on one OS; not
+  `/health.git_sha`.
 
 ### Worker machine
 
@@ -295,9 +298,11 @@ true only when the status is `behind`.
 
 - No software report → `unknown` (not outdated).
 - No manifest for `host.platform` → `unknown` (no prebuilt).
-- Any of the three present package bins (`fleet-host` /
-  `fleet-host.exe`, worker, driver) whose sha256 disagrees with the
-  manifest → `behind`. Mixed match/mismatch is behind.
+- Compare `fleet-host` and `fleet-driver` independently. Version
+  (`0.0.1`) is the operator-facing number and is the same on every OS.
+  File sha256 is integrity on one OS. Version mismatch, or same version
+  with a hash mismatch, is `behind`. Mixed match/mismatch is behind.
+- Old hosts that do not report a version still compare by hash.
 - If no bin pair exists, fall back to `software.git_sha` vs
   `manifest.git_sha` when both are non-empty.
 - All compared bins (or both git shas) match → `current`.
@@ -364,7 +369,7 @@ Use existing `work_claims` (`kind = spawn_session`,
 | `/install-worker.ps1` | `scripts/install-worker/install-worker.ps1` |
 | `/install/worker/{name}` | `scripts/install-worker/{name}` (`..` rejected) |
 | `/install/worker/bin/{platform}/{bin}` | `$FLEET_WORKER_DIST_DIR/{platform}/{bin}` or 404 |
-| `/install/worker/bin/{platform}/manifest.json` | staged package identity (`git_sha`, `platform`, `bins.{name}.{sha256,size}`). 404 if that platform is not staged. Windows keys are `fleet-host.exe` etc. |
+| `/install/worker/bin/{platform}/manifest.json` | staged package identity (`git_sha`, `platform`, `bins.{name}.{sha256,size,version}`). 404 if that platform is not staged. Windows keys are `fleet-host.exe` etc. `version` is the same on every OS. |
 
 ---
 
@@ -504,9 +509,8 @@ Heartbeat response (host client parses even if an older CP omits it):
     "git_sha": "…",
     "platform": "windows-x86_64",
     "bins": {
-      "fleet-host.exe": { "sha256": "…", "size": N },
-      "fleet-worker.exe": { … },
-      "fleet-driver.exe": { … }
+      "fleet-host.exe": { "sha256": "…", "size": N, "version": "0.0.1" },
+      "fleet-driver.exe": { "sha256": "…", "size": N, "version": "0.0.1" }
     }
   } | null }
 ```

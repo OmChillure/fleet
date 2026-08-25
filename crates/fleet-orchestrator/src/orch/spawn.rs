@@ -5,7 +5,7 @@ use crate::sandbox::remote::{self, RemoteHostHandle};
 use crate::sandbox::{SandboxRuntime, SpawnRequest, fleet_worker_env};
 use crate::store::{
     BoardSnapshot, Store, enqueue_remote_spawn, hold_ready_for_host_update,
-    select_assignable_runner, workspace_has_updating_host,
+    select_assignable_runner_preferring, workspace_has_updating_host,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -79,7 +79,12 @@ pub async fn schedule_and_spawn(
             break;
         }
         // Missing worker_hosts must not fail the tick.
-        let remote_host = select_assignable_runner(store, project_id).await;
+        let plan_hint = store.get_plan_body(task.plan_id).await.ok().flatten();
+        let preferred = plan_hint
+            .as_ref()
+            .and_then(|p| p.policy.preferred_host_id);
+        let remote_host =
+            select_assignable_runner_preferring(store, project_id, preferred).await;
         let updating = workspace_has_updating_host(store, project_id).await;
         if hold_ready_for_host_update(remote_host.is_some(), updating) {
             tracing::info!(
@@ -224,6 +229,15 @@ pub async fn schedule_and_spawn(
             req.env
                 .entry("FLEET_MODEL".into())
                 .or_insert_with(|| model.to_string());
+        }
+        if let Some(effort) = plan_hint
+            .as_ref()
+            .and_then(|p| p.policy.reasoning_effort.clone())
+            .filter(|s| !s.trim().is_empty())
+        {
+            req.env
+                .entry("FLEET_REASONING_EFFORT".into())
+                .or_insert(effort);
         }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());

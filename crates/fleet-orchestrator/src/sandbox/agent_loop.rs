@@ -44,8 +44,11 @@ pub fn grok_env_enabled() -> bool {
     )
 }
 
-fn grok_model() -> String {
-    std::env::var("GROK_MODEL").unwrap_or_else(|_| "grok-4.5".into())
+fn grok_model() -> Option<String> {
+    std::env::var("GROK_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Normalize chat/plan provider ids to a worker backend.
@@ -77,10 +80,11 @@ pub fn resolve_worker_llm(
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .or_else(|| match backend.as_str() {
-                "grok" => Some(grok_model()),
-                "ollama" => Some(
-                    std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into()),
-                ),
+                "grok" => grok_model(),
+                "ollama" => std::env::var("OLLAMA_MODEL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
                 _ => None,
             });
         return WorkerLlm {
@@ -91,20 +95,23 @@ pub fn resolve_worker_llm(
     if grok_env_enabled() {
         return WorkerLlm {
             backend: Some("grok".into()),
-            model: Some(grok_model()),
+            model: grok_model(),
         };
     }
     let llm = fleet_llm.trim().to_ascii_lowercase();
     if llm == "ollama" {
         let model = fleet_llm_model.trim().to_string();
         let model = if model.is_empty() {
-            std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into())
+            std::env::var("OLLAMA_MODEL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         } else {
-            model
+            Some(model)
         };
         return WorkerLlm {
             backend: Some("ollama".into()),
-            model: Some(model),
+            model,
         };
     }
     WorkerLlm {
@@ -1286,9 +1293,13 @@ async fn complete(messages: &[Value], backend: &str, model: Option<&str>) -> Res
             let model = model
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into())
-                });
+                .or_else(|| {
+                    std::env::var("OLLAMA_MODEL")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .ok_or_else(|| "no Ollama model: set OLLAMA_MODEL or pick one".to_string())?;
             (format!("{base}/v1/chat/completions"), String::new(), model)
         }
         _ => {
@@ -1296,7 +1307,8 @@ async fn complete(messages: &[Value], backend: &str, model: Option<&str>) -> Res
             let model = model
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(grok_model);
+                .or_else(grok_model)
+                .ok_or_else(|| "no Grok model: set GROK_MODEL or pick one".to_string())?;
             (
                 "https://api.x.ai/v1/chat/completions".into(),
                 key,

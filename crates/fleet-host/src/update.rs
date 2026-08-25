@@ -268,17 +268,29 @@ pub fn check_pe_machine(bytes: &[u8], platform: &str) -> Result<()> {
     Ok(())
 }
 
-/// `update.cmd` next to the bins. Wait for fleet-host.exe, `move /Y` `.new`, start run.
+/// Fallback helper. Prefer `swap_staged` while still running (Windows can
+/// rename a locked PE; it cannot overwrite it). This script is only used
+/// when that rename fails.
+///
+/// Do not wait forever on `tasklist` — any other `fleet-host.exe` would
+/// stall the swap. Cap the wait, log, start with an explicit working dir.
 pub fn write_windows_updater(bin_dir: &Path, changed_files: &[String]) -> Result<PathBuf> {
     let script = bin_dir.join("update.cmd");
     let mut body = String::from(
         "@echo off\r\n\
          setlocal EnableExtensions\r\n\
          set \"DIR=%~dp0\"\r\n\
+         set \"LOG=%DIR%update.log\"\r\n\
+         echo %DATE% %TIME% updater start>>\"%LOG%\"\r\n\
+         set /a n=0\r\n\
          :wait\r\n\
          timeout /t 1 /nobreak >nul\r\n\
+         set /a n+=1\r\n\
          tasklist /FI \"IMAGENAME eq fleet-host.exe\" 2>nul | find /I \"fleet-host.exe\" >nul\r\n\
-         if not errorlevel 1 goto wait\r\n",
+         if not errorlevel 1 (\r\n\
+           if %n% LSS 60 goto wait\r\n\
+           echo %DATE% %TIME% still running after 60s; swapping anyway>>\"%LOG%\"\r\n\
+         )\r\n",
     );
     for name in changed_files {
         let name = name.trim();
@@ -286,10 +298,16 @@ pub fn write_windows_updater(bin_dir: &Path, changed_files: &[String]) -> Result
             continue;
         }
         body.push_str(&format!(
-            "if exist \"%DIR%{name}.new\" move /Y \"%DIR%{name}.new\" \"%DIR%{name}\"\r\n"
+            "if exist \"%DIR%{name}.new\" (\r\n\
+             if exist \"%DIR%{name}\" move /Y \"%DIR%{name}\" \"%DIR%{name}.bak\" >>\"%LOG%\" 2>&1\r\n\
+             move /Y \"%DIR%{name}.new\" \"%DIR%{name}\" >>\"%LOG%\" 2>&1\r\n\
+             )\r\n"
         ));
     }
-    body.push_str("start \"\" \"%DIR%fleet-host.exe\" run\r\n");
+    body.push_str(
+        "echo %DATE% %TIME% starting fleet-host>>\"%LOG%\"\r\n\
+         start \"\" /D \"%DIR%\" \"%DIR%fleet-host.exe\" run\r\n",
+    );
     fs::write(&script, body).with_context(|| format!("write {}", script.display()))?;
     Ok(script)
 }
@@ -493,6 +511,70 @@ fn unix_restart(exe: &Path) -> Result<()> {
     }
 }
 
+/// Windows can rename a running PE; it cannot overwrite it. Put the new
+/// file at the original name, start it detached, then exit. Fall back to
+/// `update.cmd` only if rename-aside fails (AV, missing ACL, …).
+fn windows_host_restart(
+    dest_dir: &Path,
+    staged: &[Staged],
+    state: &UpdateState,
+    opts: &ApplyOptions,
+) -> Result<ApplyOutcome> {
+    match swap_named(staged, |_| true) {
+        Ok(()) => {
+            info!("Windows PE renamed aside; new bins are in place");
+            if !opts.dry_restart {
+                spawn_windows_host(&dest_dir.join("fleet-host.exe"))?;
+                state.exit_process.store(true, Ordering::SeqCst);
+            }
+            Ok(ApplyOutcome::HostRestartPending)
+        }
+        Err(e) => {
+            warn!(error = %e, "rename-aside failed; falling back to update.cmd");
+            let names: Vec<String> = staged.iter().map(|s| s.file_name.clone()).collect();
+            match write_windows_updater(dest_dir, &names) {
+                Ok(script) => {
+                    info!(path = %script.display(), "wrote Windows updater; exiting so PE can be replaced");
+                    if !opts.dry_restart {
+                        spawn_windows_updater(&script)?;
+                        state.exit_process.store(true, Ordering::SeqCst);
+                    }
+                    Ok(ApplyOutcome::HostRestartPending)
+                }
+                Err(e2) => {
+                    discard_all(staged);
+                    state.updating.store(false, Ordering::SeqCst);
+                    state.stop_claiming.store(false, Ordering::SeqCst);
+                    Err(e2)
+                }
+            }
+        }
+    }
+}
+
+fn spawn_windows_host(exe: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let dir = exe.parent().unwrap_or(Path::new("."));
+        std::process::Command::new(exe)
+            .arg("run")
+            .current_dir(dir)
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .spawn()
+            .with_context(|| format!("spawn {}", exe.display()))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = exe;
+        Ok(())
+    }
+}
+
 fn spawn_windows_updater(script: &Path) -> Result<()> {
     #[cfg(windows)]
     {
@@ -593,23 +675,7 @@ pub async fn apply_desired(
             state.stop_claiming.store(true, Ordering::SeqCst);
             wait_jobs_idle(jobs).await;
             if opts.windows_self_replace {
-                let names: Vec<String> = staged.iter().map(|s| s.file_name.clone()).collect();
-                match write_windows_updater(dest_dir, &names) {
-                    Ok(script) => {
-                        info!(path = %script.display(), "wrote Windows updater; exiting so PE can be replaced");
-                        if !opts.dry_restart {
-                            spawn_windows_updater(&script)?;
-                            state.exit_process.store(true, Ordering::SeqCst);
-                        }
-                        Ok(ApplyOutcome::HostRestartPending)
-                    }
-                    Err(e) => {
-                        discard_all(&staged);
-                        state.updating.store(false, Ordering::SeqCst);
-                        state.stop_claiming.store(false, Ordering::SeqCst);
-                        Err(e)
-                    }
-                }
+                windows_host_restart(dest_dir, &staged, state, opts)
             } else {
                 if let Err(e) = swap_named(&staged, |_| true) {
                     discard_all(&staged);
@@ -676,7 +742,7 @@ pub async fn run_manual() -> Result<()> {
         )
     })?;
     let client = HostClient::with_machine_token(&url, token, &cfg)?;
-    let resp = client.heartbeat(&cfg, 0, None, false).await?;
+    let resp = client.heartbeat(&cfg, 0, None, false, None).await?;
     let Some(desired) = resp.desired else {
         println!("no prebuilt for {}", detect_platform());
         return Ok(());
@@ -775,6 +841,7 @@ mod tests {
                 DesiredBin {
                     sha256: sha(bytes),
                     size: Some(bytes.len() as u64),
+                    version: None,
                 },
             );
         }
@@ -888,6 +955,7 @@ mod tests {
                 DesiredBin {
                     sha256: "aa".into(),
                     size: None,
+                    version: None,
                 },
             )]),
         };
@@ -962,8 +1030,9 @@ mod tests {
         let text = fs::read_to_string(&script).unwrap();
         assert!(text.contains("move /Y"), "{text}");
         assert!(text.contains("fleet-host.exe.new"), "{text}");
+        assert!(text.contains("LSS 60"), "must not wait forever: {text}");
         assert!(
-            text.contains("start \"\" \"%DIR%fleet-host.exe\" run"),
+            text.contains("start \"\" /D \"%DIR%\" \"%DIR%fleet-host.exe\" run"),
             "{text}"
         );
         assert!(!text.to_ascii_lowercase().contains("paused"));
@@ -973,6 +1042,20 @@ mod tests {
         assert_eq!(fs::read(&exe).unwrap(), b"running-pe");
         assert_eq!(fs::read(&_driver).unwrap(), b"old-d");
         drop(held);
+    }
+
+    #[test]
+    fn swap_staged_renames_open_dest_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = write_bin(dir.path(), "fleet-host.exe", b"running-pe");
+        let _held = fs::OpenOptions::new().read(true).open(&exe).unwrap();
+        stage_new_file(&exe, b"new-host-bytes").unwrap();
+        swap_staged(&exe).expect("Windows can rename a running PE");
+        assert_eq!(fs::read(&exe).unwrap(), b"new-host-bytes");
+        assert_eq!(
+            fs::read(dir.path().join("fleet-host.exe.bak")).unwrap(),
+            b"running-pe"
+        );
     }
 
     #[test]
@@ -1151,11 +1234,10 @@ mod tests {
         assert_eq!(out, ApplyOutcome::HostRestartPending);
         assert!(state.is_updating());
         assert!(state.stop_claiming.load(Ordering::SeqCst));
-        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), old_h);
-        assert!(
-            dir.path().join("fleet-host.new").is_file() || dir.path().join("update.cmd").is_file()
-        );
-        assert!(dir.path().join("update.cmd").is_file());
+        // Rename-aside while still running: dest is the new PE, old is .bak.
+        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), new_h);
+        assert_eq!(fs::read(dir.path().join("fleet-host.bak")).unwrap(), old_h);
+        assert!(!dir.path().join("fleet-host.new").is_file());
         for (method, path) in mock.log.lock().unwrap().iter() {
             assert_eq!(method, "GET", "host apply must not {method} {path}");
             assert!(!path.contains("drain") && !path.contains("paused"));
@@ -1181,6 +1263,7 @@ mod tests {
                 DesiredBin {
                     sha256: "aa".into(),
                     size: None,
+                    version: None,
                 },
             )]),
         };

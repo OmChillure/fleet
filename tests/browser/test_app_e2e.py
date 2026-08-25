@@ -500,8 +500,11 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("Control plane", card)
         self.assertNotIn("heartbeating", card.lower())
         self.assertNotIn("Served packages", card)
-        self.assertIn("Current runner build", card)
-        self.assertIn("Serving this build:", card)
+        self.assertNotIn("Current runner build", card)
+        self.assertRegex(card, r"Current fleet-host version \d+\.\d+\.\d+")
+        self.assertRegex(card, r"Current fleet-driver version \d+\.\d+\.\d+")
+        self.assertNotIn("Serving this build:", card)
+        self.assertNotIn("Outdated packages:", card)
         self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
         self.assertNotIn("Isolation", card)
@@ -1440,20 +1443,17 @@ class BrowserE2ETests(unittest.TestCase):
         card = page.locator("article").filter(has_text=name)
         card.first.wait_for(timeout=15_000)
         self.assertNotIn("Control plane", card.first.inner_text())
-        card.get_by_text(bake_short).wait_for(timeout=15_000)
+        card.first.wait_for(timeout=15_000)
         text = card.first.inner_text()
         lowered = text.lower()
-        self.assertIn("software ", lowered)
-        self.assertIn(bake_short, text)
+        self.assertIn("fleet-host", lowered)
+        self.assertIn("fleet-driver", lowered)
         self.assertNotIn(
             bin_prefix,
             text,
             "file hash must not be used as the bake / version id",
         )
-        self.assertRegex(
-            lowered,
-            rf"software {bake_short} · linux-x86_64 · (up to date|outdated|unknown|old package|updating)",
-        )
+        self.assertNotIn("software linux-x86_64", lowered)
 
     def test_14c_remove_confirm(self) -> None:
         # catalog:e2e-remove-confirm — Confirm removes; Cancel aborts.

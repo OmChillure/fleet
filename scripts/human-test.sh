@@ -168,11 +168,11 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; does not run sandboxes; cannot remove). After signup, a `cluster-host` / local fleet-host may appear (bootstrap pair — no second machine). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Cards show name, status, last seen, jobs — click a card for the right panel (settings, providers, Apply, Remove). The API box is labeled (control plane). (this machine) only appears when you opened the UI on that box (localhost). Opening the LAN URL from another PC must not tag the plane as this machine. Software: Current fleet-host version / Current fleet-driver version are semver from runner-packages.toml (same on every OS). Amber banner lists any required OS that is not on both current versions. Each card lists those versions, not file hashes. Providers always lists Grok / Claude / OpenAI / Private (Ollama). Not installed: OS-specific copy-paste install. Private (Ollama) installed: disk free, popular list, tag picker (size / RAM when published), models directory, Unlisted name/URL. Disk-too-small refuses install. Sandboxing: Native (work root + process allow), VMs placeholder, Containers (k8s/docker knobs). Add worker — paste the install command (Windows needs the LAN URL, not localhost)." \
     "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
-    "No Native/Sandboxed checkboxes. Isolation is Settings min isolation (process < container < vm). Stop taking jobs is the Behavior button. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Auto-update and Max jobs stay disabled until the runner acks." \
+    "Workspace Settings still owns min isolation (process < container < vm). Behavior is above Providers. One Apply bar appears only when something changed and stays visible while you scroll. Sandboxing: Native work root, VMs placeholder, Containers as selects plus Advanced. Models directory is pre-filled. Stop taking jobs is the Behavior button. After Apply it says Pending apply until the box acks." \
     "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
@@ -199,11 +199,13 @@ cmd_guide() {
     "Catalog + search. Connect is enabled for available providers (GitHub, GitLab, Jira, Trello, Asana, …)." \
     "GitHub: new tab → github.com (first time creates a local GitHub App, then install/consent)." \
     "GitLab / Trello / Asana: new tab → one-time OAuth app form if needed, then provider consent." \
-    "Jira: new tab → one-time Atlassian OAuth app if needed, then Atlassian login + consent." || return 0
+    "Jira: new tab → one-time Atlassian OAuth app if needed, then Atlassian login + consent." \
+    "Connected cards: set default runner / provider / model and Save. Inbox Finish uses those defaults." || return 0
 
   pause_step "Chat" \
-    "New chat: provider/model dropdown." \
-    "Send a line only if Grok or Ollama is actually up; else the empty composer is enough." \
+    "New chat: runner → provider → model → effort. Defaults to last used if that pair is ready on the runner; otherwise the first installed/ready provider. Effort options come from that model (Grok 4.6 includes xhigh). Models come from the official CLI on that runner (no pinned third-party versions). Claude lists official aliases (sonnet/opus/haiku/fable) — never run `claude models` (that hangs). Ollama is labeled Private (Ollama) and says installed / pull a model, not logged in. After a reply, the bubble shows how long send → response took." \
+    "Starting a chat must keep the selected runner. Note under the composer: Grok / Claude / Private (Ollama) run on that runner’s official CLI; OpenAI stays on the control-plane API key." \
+    "Send a line only if a runner is selected and that provider is ready; else the empty composer is enough." \
     "Plain language is enough: read Slack / implement / push GitHub / write Notion. Connect apps under Integrations." || return 0
 
   pause_step "Fleet" \

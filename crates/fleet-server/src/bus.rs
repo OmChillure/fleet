@@ -7,8 +7,8 @@ use fleet_bus::{
     KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS, decode_sample, key_for_message,
     put_bus_message, try_open_from_env,
 };
-use fleet_db::repos::control_plane_events;
 use fleet_db::PgPool;
+use fleet_db::repos::control_plane_events;
 use tracing::{info, warn};
 
 /// Start subscriber + outbox publisher when `ZENOH_LOCATOR` is set.
@@ -91,16 +91,16 @@ async fn drain_loop(session: zenoh::Session, pool: PgPool) {
             }
         };
         for row in rows {
-            let msg = match serde_json::from_value::<agent_fleet_contracts::BusMessage>(
-                row.body.clone(),
-            ) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(error = %e, id = %row.id, "outbox row is not a BusMessage");
-                    let _ = control_plane_events::mark_published(&pool, row.id).await;
-                    continue;
-                }
-            };
+            let msg =
+                match serde_json::from_value::<agent_fleet_contracts::BusMessage>(row.body.clone())
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(error = %e, id = %row.id, "outbox row is not a BusMessage");
+                        let _ = control_plane_events::mark_published(&pool, row.id).await;
+                        continue;
+                    }
+                };
             let tenant = msg
                 .envelope
                 .tenant_id

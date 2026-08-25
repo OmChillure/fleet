@@ -74,6 +74,18 @@ pub struct ConnectionPublic {
     pub connected: bool,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub defaults: ConnectionDefaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct ConnectionDefaults {
+    #[serde(default)]
+    pub default_runner_id: Option<String>,
+    #[serde(default)]
+    pub default_provider: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -185,6 +197,50 @@ async fn authorized_put_json(
         .send()
         .await
         .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
+}
+
+async fn authorized_patch_json(
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, IntegrationsError> {
+    let first = with_credentials(client().patch(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
+    if first.status().as_u16() != 401 {
+        return Ok(first);
+    }
+    refresh_session()
+        .await
+        .map_err(|e| IntegrationsError::Message(e.message()))?;
+    with_credentials(client().patch(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
+}
+
+pub async fn patch_integration_defaults(
+    workspace_id: &str,
+    provider: &str,
+    runner_id: Option<&str>,
+    llm_provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), IntegrationsError> {
+    let path = format!("/api/workspaces/{workspace_id}/integrations/{provider}");
+    let res = authorized_patch_json(
+        &path,
+        &json!({
+            "default_runner_id": runner_id,
+            "default_provider": llm_provider,
+            "default_model": model,
+        }),
+    )
+    .await?;
+    if res.status().is_success() {
+        return Ok(());
+    }
+    parse_json_or_error::<ErrorBody>(res).await?;
+    Ok(())
 }
 
 /// Save workspace OAuth app credentials, then start the provider consent flow.

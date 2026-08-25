@@ -37,6 +37,10 @@ pub struct KubePodOpts {
     pub image: String,
     pub command: Vec<String>,
     pub worker_api_url: String,
+    pub cpu: String,
+    pub memory: String,
+    pub ephemeral: String,
+    pub egress_mode: String,
 }
 
 impl KubePodOpts {
@@ -51,11 +55,43 @@ impl KubePodOpts {
             .unwrap_or("fleet-driver")
             .to_string();
         Self {
-            namespace: namespace_from_env(),
+            namespace: if cfg.k8s_namespace.trim().is_empty() {
+                namespace_from_env()
+            } else {
+                cfg.k8s_namespace.trim().to_string()
+            },
             image: cfg.docker_image.clone(),
             command: vec![bin],
             worker_api_url: payload.orchestrator_url.clone(),
+            cpu: nonempty(&cfg.k8s_cpu, DEFAULT_CPU),
+            memory: nonempty(&cfg.k8s_memory, DEFAULT_MEMORY),
+            ephemeral: nonempty(&cfg.k8s_ephemeral, DEFAULT_EPHEMERAL),
+            egress_mode: nonempty(&cfg.egress_mode, "none"),
         }
+    }
+}
+
+fn nonempty(s: &str, fallback: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        fallback.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+fn network_for_opts(opts: &KubePodOpts) -> SandboxNetwork {
+    let mode = opts.egress_mode.trim().to_ascii_lowercase();
+    if mode == "allowlist" {
+        return network_for_worker_url(&opts.worker_api_url);
+    }
+    SandboxNetwork {
+        egress_mode: if mode == "dns_only" {
+            "dns_only".into()
+        } else {
+            "none".into()
+        },
+        allowlist: vec![],
     }
 }
 
@@ -197,11 +233,11 @@ pub fn spec_from_payload(
         args: None,
         env: cr_env,
         resources: Some(SandboxResources {
-            cpu: Some(DEFAULT_CPU.into()),
-            memory: Some(DEFAULT_MEMORY.into()),
-            ephemeral_storage: Some(DEFAULT_EPHEMERAL.into()),
+            cpu: Some(opts.cpu.clone()),
+            memory: Some(opts.memory.clone()),
+            ephemeral_storage: Some(opts.ephemeral.clone()),
         }),
-        network: Some(network_for_worker_url(&opts.worker_api_url)),
+        network: Some(network_for_opts(opts)),
         ttl_seconds: Some(ttl),
     })
 }
@@ -401,6 +437,10 @@ mod tests {
             image: "agent-fleet-api:local".into(),
             command: vec!["fleet-driver".into()],
             worker_api_url: "http://api.agent-fleet.svc.cluster.local:8080".into(),
+            cpu: DEFAULT_CPU.into(),
+            memory: DEFAULT_MEMORY.into(),
+            ephemeral: DEFAULT_EPHEMERAL.into(),
+            egress_mode: "none".into(),
         }
     }
 

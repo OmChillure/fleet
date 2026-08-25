@@ -61,7 +61,10 @@ pub fn is_retryable_tool(action: &ChatAction, content: &Value) -> bool {
         .get("error_code")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if matches!(code, "bad_args" | "not_connected" | "unknown_op" | "unknown_provider") {
+    if matches!(
+        code,
+        "bad_args" | "not_connected" | "unknown_op" | "unknown_provider"
+    ) {
         return false;
     }
     let status = content
@@ -103,8 +106,12 @@ mod tests {
 
     #[test]
     fn provider_retries_network_and_429() {
-        assert!(is_retryable_provider("cannot reach Ollama at http://x: timeout"));
-        assert!(is_retryable_provider("Grok rate limited — try again shortly"));
+        assert!(is_retryable_provider(
+            "cannot reach Ollama at http://x: timeout"
+        ));
+        assert!(is_retryable_provider(
+            "Grok rate limited — try again shortly"
+        ));
         assert!(is_retryable_provider("Grok error (503): unavailable"));
         assert!(!is_retryable_provider("model `llama` not found in Ollama"));
         assert!(!is_retryable_provider("Grok auth failed — run grok login"));

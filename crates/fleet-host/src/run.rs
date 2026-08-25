@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -9,10 +11,53 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::client::{BootstrapPending, EffectiveModes, HostClient, PairResponse};
+use crate::client::{BootstrapPending, EffectiveModes, HostClient, InstallAck, PairResponse};
 use crate::config::{LocalConfig, read_machine_token};
 use crate::spawn;
 use crate::update::{self, ApplyOptions, UpdateState, maybe_queue_auto};
+
+static INSTALL_ACK: std::sync::Mutex<Option<InstallAck>> = std::sync::Mutex::new(None);
+static INSTALLING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn take_install_ack() -> Option<InstallAck> {
+    INSTALL_ACK.lock().ok().and_then(|mut g| g.take())
+}
+
+fn queue_install(spec: String) {
+    let mut guard = match INSTALLING.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.as_deref() == Some(spec.as_str()) {
+        return;
+    }
+    if guard.is_some() {
+        return;
+    }
+    *guard = Some(spec.clone());
+    drop(guard);
+    std::thread::spawn(move || {
+        let result = crate::agents::ollama_pull(&spec);
+        if let Ok(mut g) = INSTALL_ACK.lock() {
+            *g = Some(match result {
+                Ok(()) => InstallAck {
+                    spec: spec.clone(),
+                    ok: true,
+                    error: None,
+                },
+                Err(e) => InstallAck {
+                    spec: spec.clone(),
+                    ok: false,
+                    error: Some(e),
+                },
+            });
+        }
+        if let Ok(mut g) = INSTALLING.lock() {
+            *g = None;
+        }
+        crate::agents::invalidate_probe_cache();
+    });
+}
 
 const CONTROL_PLANE_URL_ENV: &str = "FLEET_CONTROL_PLANE_URL";
 const PAIR_TOKEN_ENV: &str = "FLEET_PAIR_TOKEN";
@@ -149,7 +194,6 @@ pub fn acquire_run_lock() -> Result<File> {
         .with_context(|| format!("open {}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             bail!(
@@ -271,7 +315,8 @@ pub fn init_tracing(level: &str) {
         .try_init();
 }
 
-async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
+async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()> {
+    cfg.apply_ollama_models_env();
     let bus = crate::bus::BusHandle::from_env().await;
     let client = HostClient::with_machine_token(&url, token, &cfg)?;
     let jobs: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -295,7 +340,7 @@ async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
                     break;
                 }
                 let n = jobs.lock().await.len() as u32;
-                match client.heartbeat(&cfg, n, None, update_state.is_updating()).await {
+                match client.heartbeat(&cfg, n, None, update_state.is_updating(), take_install_ack()).await {
                     Ok(resp) => {
                         let mut eff = effective.lock().await;
                         if resp.effective.max_concurrent > 0 {
@@ -306,6 +351,26 @@ async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
                         }
                         if !resp.host.accepts_leases() {
                             warn!(status = ?resp.host.status, "host not accepting leases");
+                        }
+                        if let Some(rs) = resp.host.runtime_settings.as_ref() {
+                            if cfg.apply_runtime_settings(rs) {
+                                if let Err(e) = cfg.save() {
+                                    warn!(error = %e, "failed to persist runtime_settings");
+                                } else {
+                                    info!("applied runtime_settings from control plane");
+                                }
+                            }
+                        }
+                        if let Some(spec) = resp.install.as_ref().and_then(|v| {
+                            let provider = v.get("provider").and_then(|p| p.as_str()).unwrap_or("");
+                            let spec = v.get("spec").and_then(|s| s.as_str()).unwrap_or("").trim();
+                            if provider == "ollama" && !spec.is_empty() {
+                                Some(spec.to_string())
+                            } else {
+                                None
+                            }
+                        }) {
+                            queue_install(spec);
                         }
                         if let Some(desired) =
                             maybe_queue_auto(&update_state, &cfg, &resp.host, resp.desired.as_ref())
@@ -320,7 +385,7 @@ async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
                             let state2 = update_state.clone();
                             let n2 = n;
                             tokio::spawn(async move {
-                                let _ = client2.heartbeat(&cfg2, n2, None, true).await;
+                                let _ = client2.heartbeat(&cfg2, n2, None, true, None).await;
                                 let dest = match update::install_dir() {
                                     Ok(p) => p,
                                     Err(e) => {
@@ -406,53 +471,99 @@ async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
                         let client2 = client.clone();
                         let cfg2 = cfg.clone();
                         let bus2 = bus.clone();
-                        let session_id = claim.payload.session_id;
-                        let signal = claim.payload.kind == "signal_session";
+                        let kind = claim
+                            .payload
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let session_id = claim
+                            .payload
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok())
+                            .unwrap_or(Uuid::nil());
+                        let signal = kind == "signal_session";
+                        let chat = kind == "chat_turn";
                         let eff_host = eff.host;
                         let eff_ctr = eff.container;
                         tokio::spawn(async move {
-                            if !signal {
+                            if !signal && !chat {
                                 bus2.session_started(session_id).await;
                             }
+                            let mut chat_result = None;
                             let outcome = if signal {
                                 spawn::kill_session(session_id).await
-                            } else {
-                                spawn::run_claim(
-                                    &cfg2,
-                                    &claim.payload,
-                                    eff_host,
-                                    eff_ctr,
-                                )
+                            } else if chat {
+                                match tokio::task::spawn_blocking({
+                                    let payload = claim.payload.clone();
+                                    move || crate::chat_cli::run_chat_turn(&payload)
+                                })
                                 .await
+                                {
+                                    Ok(Ok(v)) => {
+                                        chat_result = Some(v);
+                                        Ok(())
+                                    }
+                                    Ok(Err(e)) => Err(e),
+                                    Err(e) => Err(anyhow!(e.to_string())),
+                                }
+                            } else {
+                                match serde_json::from_value::<crate::client::SpawnPayload>(
+                                    claim.payload.clone(),
+                                ) {
+                                    Ok(payload) => {
+                                        spawn::run_claim(&cfg2, &payload, eff_host, eff_ctr).await
+                                    }
+                                    Err(e) => Err(anyhow!("invalid spawn payload: {e}")),
+                                }
                             };
                             let (ok, err) = match outcome {
                                 Ok(()) => {
-                                    if !signal {
-                                        let dir = cfg2.session_dir(session_id);
-                                        if let Err(e) =
-                                            spawn::publish_guest_proof(&claim.payload, &dir).await
+                                    if !signal && !chat {
+                                        if let Ok(payload) =
+                                            serde_json::from_value::<crate::client::SpawnPayload>(
+                                                claim.payload.clone(),
+                                            )
                                         {
-                                            warn!(
-                                                claim = %claim_id,
-                                                error = %e,
-                                                "publish guest proof failed"
-                                            );
+                                            let dir = cfg2.session_dir(session_id);
+                                            if let Err(e) =
+                                                spawn::publish_guest_proof(&payload, &dir).await
+                                            {
+                                                warn!(
+                                                    claim = %claim_id,
+                                                    error = %e,
+                                                    "publish guest proof failed"
+                                                );
+                                            }
                                         }
                                     }
                                     (true, None)
                                 }
                                 Err(e) => {
                                     error!(claim = %claim_id, error = %e, "job failed");
+                                    if chat {
+                                        chat_result = Some(serde_json::json!({
+                                            "ok": false,
+                                            "error": e.to_string(),
+                                        }));
+                                    }
                                     (false, Some(e.to_string()))
                                 }
                             };
                             if signal {
                                 bus2.session_cancelled(session_id).await;
-                            } else {
+                            } else if !chat {
                                 bus2.session_finished(session_id, ok, err.as_deref()).await;
                             }
                             if let Err(e) = client2
-                                .complete(claim_id, &claim.lease_token, ok, err.as_deref())
+                                .complete(
+                                    claim_id,
+                                    &claim.lease_token,
+                                    ok,
+                                    err.as_deref(),
+                                    chat_result,
+                                )
                                 .await
                             {
                                 error!(claim = %claim_id, error = %e, "complete failed");
@@ -547,6 +658,7 @@ Usage:
   fleet-host update
   fleet-host status
   fleet-host unpair
+  fleet-host --version
 
 Config:  {}
 Token:   {}

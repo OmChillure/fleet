@@ -6,17 +6,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Request, StatusCode};
-use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
-use fleet_db::{connect_and_migrate_with, PoolConfig};
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
+use fleet_db::{PoolConfig, connect_and_migrate_with};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
 };
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -555,9 +555,8 @@ async fn tick_until_tasks_done(
         last_tasks = tasks.body;
         let list = last_tasks["tasks"].as_array().cloned().unwrap_or_default();
         let done = want.iter().all(|id| {
-            list.iter().any(|t| {
-                t["plan_task_id"].as_str() == Some(*id) && t["status"] == "done_success"
-            })
+            list.iter()
+                .any(|t| t["plan_task_id"].as_str() == Some(*id) && t["status"] == "done_success")
         });
         if done && !list.is_empty() {
             return last_tasks;
@@ -583,7 +582,14 @@ async fn health_ok_healthz_ok_api_index_lists_auth_and_fleet() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect::<Vec<_>>();
-    for need in ["auth", "workspaces", "personas", "integrations", "chat", "fleet"] {
+    for need in [
+        "auth",
+        "workspaces",
+        "personas",
+        "integrations",
+        "chat",
+        "fleet",
+    ] {
         assert!(
             apis.contains(&need),
             "health.apis must advertise {need}: {apis:?}"
@@ -679,7 +685,8 @@ async fn fixture_bff_start_and_tick_with_cookie() {
         tasks.body
     );
     assert!(
-        list.iter().any(|t| t["plan_task_id"].as_str() == Some("t1")),
+        list.iter()
+            .any(|t| t["plan_task_id"].as_str() == Some("t1")),
         "expected plan_task_id t1: {}",
         tasks.body
     );
@@ -832,7 +839,12 @@ async fn patch_fleet_config_round_trip_empty_clears_git_ref_only_400() {
         Some(json!({ "git_ref": "feature" })),
     )
     .await;
-    assert_eq!(ref_only.status, StatusCode::BAD_REQUEST, "{}", ref_only.body);
+    assert_eq!(
+        ref_only.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        ref_only.body
+    );
 }
 
 // ── 6. workers / sessions after stub run ────────────────────────────────────
@@ -985,12 +997,7 @@ async fn personas_seed_starters_create_patch_archive() {
     assert_eq!(patched.body["description"], "Updated reviewer");
 
     let archived = call(&app, "DELETE", &format!("{base}/{pid}"), Some(&jar), None).await;
-    assert_eq!(
-        archived.status,
-        StatusCode::NO_CONTENT,
-        "{}",
-        archived.body
-    );
+    assert_eq!(archived.status, StatusCode::NO_CONTENT, "{}", archived.body);
 
     let got = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
@@ -1276,9 +1283,7 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     let cb_access = call(
         &app,
         "GET",
-        &format!(
-            "/api/integrations/oauth/callback/github?code=fake-code&state={bad_state}"
-        ),
+        &format!("/api/integrations/oauth/callback/github?code=fake-code&state={bad_state}"),
         None,
         None,
     )
@@ -1325,32 +1330,17 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
 
     let status = call(&app, "GET", &format!("{chat}/status"), Some(&jar), None).await;
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
-    let providers = status.body["providers"]
-        .as_array()
-        .expect("providers")
-        .iter()
-        .filter_map(|p| p["id"].as_str())
-        .collect::<Vec<_>>();
-    assert!(providers.contains(&"grok"), "{providers:?}");
-    assert!(providers.contains(&"ollama"), "{providers:?}");
-    let openai = status.body["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["id"] == "openai");
-    if let Some(p) = openai {
-        assert_eq!(p["available"], false, "{p}");
-        assert_eq!(p["coming_soon"], false, "{p}");
-    }
-    let claude = status.body["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["id"] == "claude");
-    if let Some(p) = claude {
-        assert_eq!(p["available"], false, "{p}");
-        assert_eq!(p["coming_soon"], false, "{p}");
-    }
+    let providers = status.body["providers"].as_array().expect("providers");
+    assert!(
+        providers.is_empty(),
+        "without runner_id, inventory is empty (not the control plane): {}",
+        status.body
+    );
+    let hint = status.body["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.to_ascii_lowercase().contains("runner"),
+        "status must point at the runner inventory: {hint}"
+    );
 
     let empty = call(
         &app,
@@ -1497,6 +1487,8 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
             "worker_profile": "coding"
         }),
         &fleet_server::chat_tools::ChatLlmContext {
+            runner_id: None,
+            effort: None,
             provider: "grok".into(),
             model: "grok-4.5".into(),
         },
@@ -1535,9 +1527,7 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
     let run_id = action.run_id.as_deref().unwrap();
     let run_list = runs.body["runs"].as_array().cloned().unwrap_or_default();
     assert!(
-        run_list
-            .iter()
-            .any(|r| r["id"].as_str() == Some(run_id)),
+        run_list.iter().any(|r| r["id"].as_str() == Some(run_id)),
         "BFF runs missing tool run_id {run_id}: {}",
         runs.body
     );
@@ -1604,7 +1594,9 @@ async fn fleet_requires_membership() {
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
     let _ = tick_until_tasks_done(&app, &a_jar, &a_ws, &["t1"]).await;
     let sessions = call(&app, "GET", &fleet(&a_ws, "/sessions"), Some(&a_jar), None).await;
-    let sid = sessions.body["sessions"][0]["id"].as_str().expect("session");
+    let sid = sessions.body["sessions"][0]["id"]
+        .as_str()
+        .expect("session");
     let stolen = call(
         &app,
         "GET",
@@ -1631,7 +1623,10 @@ async fn fleet_settings_get_patch_and_rejects_grok_store() {
     let got = call(&app, "GET", &fleet(&ws, "/settings"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(got.body["fleet_llm"], "off", "{}", got.body);
-    assert_eq!(got.body["grok_env"], false, "unit/http tests force grok env off");
+    assert_eq!(
+        got.body["grok_env"], false,
+        "unit/http tests force grok env off"
+    );
     assert!(
         got.body["max_agents_cap"].as_i64().unwrap_or(0) >= 16,
         "{}",
@@ -1653,8 +1648,16 @@ async fn fleet_settings_get_patch_and_rejects_grok_store() {
     assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
     assert_eq!(patched.body["max_agents"], 4, "{}", patched.body);
     assert_eq!(patched.body["fleet_llm"], "ollama", "{}", patched.body);
-    assert_eq!(patched.body["fleet_llm_model"], "llama3.2", "{}", patched.body);
-    assert_eq!(patched.body["effective_backend"], "ollama", "{}", patched.body);
+    assert_eq!(
+        patched.body["fleet_llm_model"], "llama3.2",
+        "{}",
+        patched.body
+    );
+    assert_eq!(
+        patched.body["effective_backend"], "ollama",
+        "{}",
+        patched.body
+    );
 
     let grok = call(
         &app,
@@ -1690,12 +1693,11 @@ async fn fleet_personas_lists_builtin_or_roster() {
         out.body
     );
     assert!(
-        personas.iter().any(|p| p["slug"]
-            .as_str()
-            .unwrap_or("")
-            .contains("backend")
-            || p["slug"].as_str().unwrap_or("").contains("reviewer")
-            || p["name"].as_str().is_some()),
+        personas
+            .iter()
+            .any(|p| p["slug"].as_str().unwrap_or("").contains("backend")
+                || p["slug"].as_str().unwrap_or("").contains("reviewer")
+                || p["name"].as_str().is_some()),
         "{}",
         out.body
     );
@@ -1711,6 +1713,8 @@ async fn chat_tool_list_agent_personas_and_launch_plan_stamps_llm() {
     let llm = fleet_server::chat_tools::ChatLlmContext {
         provider: "grok".into(),
         model: "grok-4.5-internal".into(),
+        runner_id: None,
+        effort: None,
     };
 
     let (listed, action) = fleet_server::chat_tools::execute_tool(
@@ -1724,10 +1728,7 @@ async fn chat_tool_list_agent_personas_and_launch_plan_stamps_llm() {
     .await;
     assert!(action.ok, "{action:?} {listed}");
     assert_eq!(action.tool, "list_agent_personas");
-    assert!(
-        listed["count"].as_u64().unwrap_or(0) >= 1,
-        "{listed}"
-    );
+    assert!(listed["count"].as_u64().unwrap_or(0) >= 1, "{listed}");
 
     let (content, launched) = fleet_server::chat_tools::execute_tool(
         &state,
@@ -1784,6 +1785,8 @@ async fn chat_tools_human_can_talk_on_team_channel() {
     let llm = fleet_server::chat_tools::ChatLlmContext {
         provider: "grok".into(),
         model: "grok-4.5".into(),
+        runner_id: None,
+        effort: None,
     };
 
     let (content, launched) = fleet_server::chat_tools::execute_tool(
@@ -1834,14 +1837,7 @@ async fn chat_tools_human_can_talk_on_team_channel() {
         "{read}"
     );
 
-    let overview = call(
-        &app,
-        "GET",
-        &fleet(&ws, "/overview"),
-        Some(&jar),
-        None,
-    )
-    .await;
+    let overview = call(&app, "GET", &fleet(&ws, "/overview"), Some(&jar), None).await;
     assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
     assert!(
         overview.body["total_runs"].as_u64().unwrap_or(0) >= 1,
@@ -1861,6 +1857,8 @@ async fn chat_tools_ticket_inbox_is_available() {
     let llm = fleet_server::chat_tools::ChatLlmContext {
         provider: "grok".into(),
         model: "grok-4.5".into(),
+        runner_id: None,
+        effort: None,
     };
 
     let (listed, action) = fleet_server::chat_tools::execute_tool(
@@ -1874,8 +1872,14 @@ async fn chat_tools_ticket_inbox_is_available() {
     .await;
     assert!(action.ok, "list_tickets {action:?} {listed}");
 
-    let inbox = call(&app, "GET", &format!("/api/workspaces/{ws}/inbox"), Some(&jar), None)
-        .await;
+    let inbox = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/inbox"),
+        Some(&jar),
+        None,
+    )
+    .await;
     assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
 }
 
@@ -2113,8 +2117,7 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         hosts.body
     );
     assert_eq!(
-        host_list[0]["kind"],
-        "control_plane",
+        host_list[0]["kind"], "control_plane",
         "only the plane row may exist: {}",
         hosts.body
     );
@@ -2175,4 +2178,656 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         claimed.is_none(),
         "ack must not enqueue work_claims: {claimed:?}"
     );
+}
+
+// ── 14. cases authz + FSM ───────────────────────────────────────────────────
+
+fn cases_path(ws: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        format!("/api/workspaces/{ws}/cases")
+    } else {
+        format!("/api/workspaces/{ws}/cases{suffix}")
+    }
+}
+
+fn inbox_path(ws: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        format!("/api/workspaces/{ws}/inbox")
+    } else {
+        format!("/api/workspaces/{ws}/inbox{suffix}")
+    }
+}
+
+async fn create_open_case(app: &axum::Router, jar: &CookieJar, ws: &str, title: &str) -> String {
+    let created = call(
+        app,
+        "POST",
+        &cases_path(ws, ""),
+        Some(jar),
+        Some(json!({
+            "title": title,
+            "policy_md": "test policy",
+            "wake_in_s": 3600
+        })),
+    )
+    .await;
+    assert_eq!(
+        created.status,
+        StatusCode::OK,
+        "create case: {}",
+        created.body
+    );
+    created.body["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("case id: {}", created.body))
+        .to_string()
+}
+
+fn parse_next_wake_at(body: &Value) -> chrono::DateTime<chrono::Utc> {
+    let raw = body["next_wake_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("next_wake_at must be an RFC3339 string: {body}"));
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|e| panic!("next_wake_at rfc3339 {raw}: {e}"))
+        .with_timezone(&chrono::Utc)
+}
+
+fn assert_case_denied(out: &HttpOut, case_id: &str, title: &str) {
+    assert!(
+        out.status == StatusCode::NOT_FOUND || out.status == StatusCode::FORBIDDEN,
+        "must be 403/404, never leak a case: {} {}",
+        out.status,
+        out.body
+    );
+    assert_ne!(
+        out.status,
+        StatusCode::OK,
+        "must not return 200 with another workspace's case: {}",
+        out.body
+    );
+    if out.body.get("id").and_then(|v| v.as_str()) == Some(case_id) {
+        panic!("leaked case id {case_id} in {}: {}", out.status, out.body);
+    }
+    if out.body.get("title").and_then(|v| v.as_str()) == Some(title) {
+        panic!("leaked case title {title} in {}: {}", out.status, out.body);
+    }
+}
+
+fn assert_inbox_denied(out: &HttpOut) {
+    assert!(
+        out.status == StatusCode::FORBIDDEN || out.status == StatusCode::UNAUTHORIZED,
+        "other workspace inbox must be 403/401, not 200 with data: {} {}",
+        out.status,
+        out.body
+    );
+    assert_ne!(
+        out.status,
+        StatusCode::OK,
+        "must not return inbox data: {}",
+        out.body
+    );
+}
+
+#[tokio::test]
+async fn cases_other_workspace_cannot_get_observe_decide_cancel_wake() {
+    let app = app().await;
+    let (_a_email, a_jar, a_ws) = signup_and_login(&app).await;
+    let (_b_email, b_jar, b_ws) = signup_and_login(&app).await;
+
+    let title = "tenant-a-secret-case";
+    let case_id = create_open_case(&app, &a_jar, &a_ws, title).await;
+
+    let observe_body = json!({ "note": "should not land", "wake": false });
+    let decide_body = json!({
+        "decision": { "action": "wait", "reason": "cross-tenant" }
+    });
+
+    // B hitting A's workspace routes.
+    let a_routes = [
+        ("GET", cases_path(&a_ws, &format!("/{case_id}")), None),
+        (
+            "POST",
+            cases_path(&a_ws, &format!("/{case_id}/observe")),
+            Some(observe_body.clone()),
+        ),
+        (
+            "POST",
+            cases_path(&a_ws, &format!("/{case_id}/decide")),
+            Some(decide_body.clone()),
+        ),
+        (
+            "POST",
+            cases_path(&a_ws, &format!("/{case_id}/cancel")),
+            Some(json!({})),
+        ),
+        (
+            "POST",
+            cases_path(&a_ws, &format!("/{case_id}/wake")),
+            Some(json!({})),
+        ),
+    ];
+    for (method, uri, body) in &a_routes {
+        let out = call(&app, method, uri, Some(&b_jar), body.clone()).await;
+        assert_case_denied(&out, &case_id, title);
+    }
+
+    // IDOR: B's workspace + A's case id must not resolve A's row.
+    let b_routes = [
+        ("GET", cases_path(&b_ws, &format!("/{case_id}")), None),
+        (
+            "POST",
+            cases_path(&b_ws, &format!("/{case_id}/observe")),
+            Some(observe_body),
+        ),
+        (
+            "POST",
+            cases_path(&b_ws, &format!("/{case_id}/decide")),
+            Some(decide_body),
+        ),
+        (
+            "POST",
+            cases_path(&b_ws, &format!("/{case_id}/cancel")),
+            Some(json!({})),
+        ),
+        (
+            "POST",
+            cases_path(&b_ws, &format!("/{case_id}/wake")),
+            Some(json!({})),
+        ),
+    ];
+    for (method, uri, body) in &b_routes {
+        let out = call(&app, method, uri, Some(&b_jar), body.clone()).await;
+        assert_case_denied(&out, &case_id, title);
+    }
+
+    let still = call(
+        &app,
+        "GET",
+        &cases_path(&a_ws, &format!("/{case_id}")),
+        Some(&a_jar),
+        None,
+    )
+    .await;
+    assert_eq!(still.status, StatusCode::OK, "{}", still.body);
+    assert_eq!(still.body["id"], case_id);
+    assert_eq!(still.body["title"], title);
+    assert_eq!(still.body["status"], "open");
+}
+
+#[tokio::test]
+async fn cases_cancel_is_terminal_and_idempotent() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "cancel-fsm").await;
+
+    let cancelled = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/cancel")),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+    assert_eq!(cancelled.body["status"], "cancelled");
+
+    let observed = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/observe")),
+        Some(&jar),
+        Some(json!({ "note": "after cancel", "wake": false })),
+    )
+    .await;
+    assert_eq!(
+        observed.status,
+        StatusCode::BAD_REQUEST,
+        "observe on terminal: {}",
+        observed.body
+    );
+
+    let decided = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/decide")),
+        Some(&jar),
+        Some(json!({ "decision": { "action": "wait" } })),
+    )
+    .await;
+    assert_eq!(
+        decided.status,
+        StatusCode::BAD_REQUEST,
+        "decide on terminal: {}",
+        decided.body
+    );
+
+    let again = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/cancel")),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "cancel again: {}", again.body);
+    assert_eq!(again.body["status"], "cancelled", "{}", again.body);
+}
+
+#[tokio::test]
+async fn cases_observe_empty_note_is_required() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "observe-note").await;
+
+    for note in ["", "   ", "\t\n"] {
+        let out = call(
+            &app,
+            "POST",
+            &cases_path(&ws, &format!("/{case_id}/observe")),
+            Some(&jar),
+            Some(json!({ "note": note, "wake": false })),
+        )
+        .await;
+        assert_eq!(
+            out.status,
+            StatusCode::BAD_REQUEST,
+            "note={note:?}: {}",
+            out.body
+        );
+        let err = out.body["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("note is required"),
+            "expected 'note is required', got {err:?} body={}",
+            out.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn cases_observe_too_long() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "observe-too-long").await;
+
+    let note = "x".repeat(4001);
+    assert_eq!(note.chars().count(), 4001);
+
+    let out = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/observe")),
+        Some(&jar),
+        Some(json!({ "note": note, "wake": false })),
+    )
+    .await;
+    assert_eq!(
+        out.status,
+        StatusCode::BAD_REQUEST,
+        "4001-char observe must 400: {}",
+        out.body
+    );
+    let err = out.body["error"].as_str().unwrap_or("");
+    assert!(
+        err.to_ascii_lowercase().contains("too long") || err.contains("4000"),
+        "expected note-too-long error, got {err:?} body={}",
+        out.body
+    );
+
+    let still = call(
+        &app,
+        "GET",
+        &cases_path(&ws, &format!("/{case_id}")),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(still.status, StatusCode::OK, "{}", still.body);
+    assert_eq!(still.body["status"], "open", "{}", still.body);
+    let events = still.body["events"].as_array().cloned().unwrap_or_default();
+    let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
+    assert!(
+        !kinds.contains(&"observed"),
+        "rejected observe must not append an event: {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn cases_wait_seconds_zero_clamps_to_min() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "wait-seconds-zero").await;
+
+    let t0 = chrono::Utc::now();
+    let decided = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/decide")),
+        Some(&jar),
+        Some(json!({
+            "decision": {
+                "action": "wait",
+                "wait_seconds": 0,
+                "reason": "clamp min"
+            }
+        })),
+    )
+    .await;
+    let t1 = chrono::Utc::now();
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
+
+    let next = parse_next_wake_at(&decided.body);
+    let min = t0 + chrono::Duration::seconds(5);
+    let max = t1 + chrono::Duration::seconds(7);
+    assert!(
+        next >= min,
+        "wait_seconds=0 must yield next_wake >= now+5s: next={next} min={min} body={}",
+        decided.body
+    );
+    assert!(
+        next <= max,
+        "wait_seconds=0 must clamp to the 5s floor, not default/huge: next={next} max={max} body={}",
+        decided.body
+    );
+}
+
+#[tokio::test]
+async fn cases_wait_seconds_huge_clamps_to_max() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "wait-seconds-huge").await;
+
+    let huge: i64 = 1_000_000_000_000; // 10^12 — would overflow chrono if unclamped
+    let t0 = chrono::Utc::now();
+    let decided = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/decide")),
+        Some(&jar),
+        Some(json!({
+            "decision": {
+                "action": "wait",
+                "wait_seconds": huge,
+                "reason": "clamp max"
+            }
+        })),
+    )
+    .await;
+    let t1 = chrono::Utc::now();
+    assert_eq!(
+        decided.status,
+        StatusCode::OK,
+        "huge wait_seconds must not overflow: {}",
+        decided.body
+    );
+    assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
+
+    let next = parse_next_wake_at(&decided.body);
+    let max_wait = fleet_server::cases::MAX_WAIT_SECS;
+    let min = t0 + chrono::Duration::seconds(max_wait);
+    let max = t1 + chrono::Duration::seconds(max_wait + 2);
+    assert!(
+        next >= min,
+        "10^12 must clamp to MAX_WAIT_SECS, not collapse: next={next} min={min} body={}",
+        decided.body
+    );
+    assert!(
+        next <= max,
+        "10^12 must clamp (no overflow / far-future abuse): next={next} max={max} body={}",
+        decided.body
+    );
+    assert!(
+        next <= t1 + chrono::Duration::days(8),
+        "clamped wake must be days away, not 10^12s: next={next} body={}",
+        decided.body
+    );
+}
+
+#[tokio::test]
+async fn cases_wake_owner_ok_other_workspace_forbidden() {
+    let app = app().await;
+    let (_a_email, a_jar, a_ws) = signup_and_login(&app).await;
+    let (_b_email, b_jar, _b_ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &a_jar, &a_ws, "wake-owner").await;
+
+    let owner = call(
+        &app,
+        "POST",
+        &cases_path(&a_ws, &format!("/{case_id}/wake")),
+        Some(&a_jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_ne!(
+        owner.status,
+        StatusCode::NOT_FOUND,
+        "owner wake must not 404: {}",
+        owner.body
+    );
+    assert!(
+        owner.status == StatusCode::OK || owner.status == StatusCode::BAD_REQUEST,
+        "owner wake should be 200 or 400 if engine refuses: {} {}",
+        owner.status,
+        owner.body
+    );
+
+    let other = call(
+        &app,
+        "POST",
+        &cases_path(&a_ws, &format!("/{case_id}/wake")),
+        Some(&b_jar),
+        Some(json!({})),
+    )
+    .await;
+    assert!(
+        other.status == StatusCode::FORBIDDEN || other.status == StatusCode::NOT_FOUND,
+        "other workspace member must not wake: {} {}",
+        other.status,
+        other.body
+    );
+}
+
+#[tokio::test]
+async fn cases_decide_unknown_action_waits_with_last_error() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let case_id = create_open_case(&app, &jar, &ws, "unknown-action").await;
+
+    let decided = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{case_id}/decide")),
+        Some(&jar),
+        Some(json!({
+            "decision": { "action": "not_a_real_action", "reason": "probe" }
+        })),
+    )
+    .await;
+    assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+    assert_eq!(decided.body["status"], "waiting", "{}", decided.body);
+    let err = decided.body["last_error"].as_str().unwrap_or("");
+    assert!(
+        err.to_ascii_lowercase().contains("unknown action"),
+        "last_error must mention unknown action: {err:?} body={}",
+        decided.body
+    );
+}
+
+#[tokio::test]
+async fn cases_list_status_filter_open_excludes_cancelled() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let open_id = create_open_case(&app, &jar, &ws, "stay-open").await;
+    let cancel_id = create_open_case(&app, &jar, &ws, "to-cancel").await;
+
+    let cancelled = call(
+        &app,
+        "POST",
+        &cases_path(&ws, &format!("/{cancel_id}/cancel")),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+    assert_eq!(cancelled.body["status"], "cancelled");
+
+    let open_list = call(
+        &app,
+        "GET",
+        &format!("{}?status=open", cases_path(&ws, "")),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(open_list.status, StatusCode::OK, "{}", open_list.body);
+    let open_ids: Vec<&str> = open_list.body["cases"]
+        .as_array()
+        .unwrap_or_else(|| panic!("cases: {}", open_list.body))
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert!(
+        open_ids.contains(&open_id.as_str()),
+        "open list missing {open_id}: {}",
+        open_list.body
+    );
+    assert!(
+        !open_ids.contains(&cancel_id.as_str()),
+        "open list must not include cancelled {cancel_id}: {}",
+        open_list.body
+    );
+
+    let cancelled_list = call(
+        &app,
+        "GET",
+        &format!("{}?status=cancelled", cases_path(&ws, "")),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        cancelled_list.status,
+        StatusCode::OK,
+        "{}",
+        cancelled_list.body
+    );
+    let cancelled_ids: Vec<&str> = cancelled_list.body["cases"]
+        .as_array()
+        .unwrap_or_else(|| panic!("cases: {}", cancelled_list.body))
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert!(
+        cancelled_ids.contains(&cancel_id.as_str()),
+        "cancelled list missing {cancel_id}: {}",
+        cancelled_list.body
+    );
+}
+
+// ── 15. inbox HTTP authz ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn inbox_other_workspace_forbidden() {
+    let app = app().await;
+    let (_a_email, _a_jar, a_ws) = signup_and_login(&app).await;
+    let (_b_email, b_jar, _b_ws) = signup_and_login(&app).await;
+
+    let get = call(&app, "GET", &inbox_path(&a_ws, ""), Some(&b_jar), None).await;
+    assert_inbox_denied(&get);
+
+    let poll = call(
+        &app,
+        "POST",
+        &inbox_path(&a_ws, "/poll"),
+        Some(&b_jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_inbox_denied(&poll);
+
+    let finish = call(
+        &app,
+        "POST",
+        &inbox_path(&a_ws, "/finish"),
+        Some(&b_jar),
+        Some(json!({ "provider": "github", "key": "acme/app#1" })),
+    )
+    .await;
+    assert_inbox_denied(&finish);
+}
+
+#[tokio::test]
+async fn inbox_finish_missing_or_unknown_provider_rejected() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    for (label, body) in [
+        ("missing fields", json!({})),
+        (
+            "fake provider+key",
+            json!({ "provider": "not_a_real_provider", "key": "FAKE-KEY-000" }),
+        ),
+    ] {
+        let out = call(
+            &app,
+            "POST",
+            &inbox_path(&ws, "/finish"),
+            Some(&jar),
+            Some(body),
+        )
+        .await;
+        assert!(
+            out.status == StatusCode::BAD_REQUEST || out.status == StatusCode::NOT_FOUND,
+            "{label} must be 400/404, not launch: {} {}",
+            out.status,
+            out.body
+        );
+        assert_ne!(
+            out.body.get("ok"),
+            Some(&json!(true)),
+            "{label} must not return ok: {}",
+            out.body
+        );
+        assert!(
+            out.body.get("run_id").is_none() || out.body["run_id"].is_null(),
+            "{label} must not return run_id: {}",
+            out.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn inbox_poll_without_monitor_is_not_500() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let out = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, "/poll"),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_ne!(
+        out.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "poll with no monitor must not 500: {}",
+        out.body
+    );
+    assert!(
+        out.status == StatusCode::OK || out.status == StatusCode::BAD_REQUEST,
+        "expected 200 empty/error structure or 400: {} {}",
+        out.status,
+        out.body
+    );
+}
+
+#[tokio::test]
+async fn inbox_unauthenticated_get_is_401() {
+    let app = app().await;
+    let (_email, _jar, ws) = signup_and_login(&app).await;
+
+    let out = call(&app, "GET", &inbox_path(&ws, ""), None, None).await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
 }

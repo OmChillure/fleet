@@ -161,6 +161,7 @@ impl HostClient {
         current_jobs: u32,
         error: Option<&str>,
         updating: bool,
+        install_ack: Option<InstallAck>,
     ) -> Result<HeartbeatResponse> {
         let token = self.bearer()?;
         let body = HeartbeatRequest {
@@ -172,9 +173,12 @@ impl HostClient {
             max_concurrent: cfg.max_concurrent,
             error: error.map(|s| s.to_string()),
             software: Some(crate::software::heartbeat_software(cfg, updating)),
+            agents: Some(crate::agents::heartbeat_agents()),
             hardware: Some(crate::hardware::heartbeat_hardware()),
             machine_id: crate::paths::load_or_create_machine_id().ok(),
             settings_ack_gen: self.take_settings_ack(),
+            install_ack,
+            runtime: Some(cfg.runtime_snapshot()),
         };
         let resp = self
             .http
@@ -213,12 +217,14 @@ impl HostClient {
         lease_token: &str,
         ok: bool,
         error: Option<&str>,
+        result: Option<serde_json::Value>,
     ) -> Result<()> {
         let token = self.bearer()?;
         let body = CompleteRequest {
             lease_token: lease_token.to_string(),
             ok,
             error: error.map(|s| s.to_string()),
+            result,
         };
         let path = format!("/api/worker-hosts/me/lease/{claim_id}/complete");
         let resp = self
@@ -372,11 +378,25 @@ struct HeartbeatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     software: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    agents: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     hardware: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_ack_gen: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_ack: Option<InstallAck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallAck {
+    pub spec: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -388,6 +408,8 @@ pub struct HeartbeatResponse {
     /// Served dist for this host's platform. `null` / omitted = no prebuilt.
     #[serde(default)]
     pub desired: Option<DesiredSoftware>,
+    #[serde(default)]
+    pub install: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -405,6 +427,8 @@ pub struct DesiredBin {
     pub sha256: String,
     #[serde(default)]
     pub size: Option<u64>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -429,6 +453,8 @@ pub struct HostPublic {
     pub update_requested_at: Option<String>,
     #[serde(default)]
     pub settings_gen: Option<i32>,
+    #[serde(default)]
+    pub runtime_settings: Option<serde_json::Value>,
 }
 
 impl HostPublic {
@@ -492,7 +518,7 @@ struct LeaseResponse {
 pub struct LeaseClaim {
     pub id: Uuid,
     pub lease_token: String,
-    pub payload: SpawnPayload,
+    pub payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -615,6 +641,8 @@ struct CompleteRequest {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

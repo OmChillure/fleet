@@ -173,4 +173,37 @@ mod tests {
             other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
+
+    #[test]
+    fn expired_oauth_state_is_unauthorized() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let secret = "oauth-state-test-secret";
+        let now = chrono::Utc::now().timestamp();
+        let token = encode(
+            &Header::default(),
+            &OAuthStateClaims {
+                sub: Uuid::now_v7().to_string(),
+                workspace_id: Uuid::now_v7().to_string(),
+                provider: "github".into(),
+                nonce: "n".into(),
+                exp: now - 120,
+                iat: now - 180,
+                typ: "oauth_state".into(),
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+
+        let err = verify_oauth_state(secret, &token).unwrap_err();
+        match err {
+            AppError::Unauthorized(msg) => {
+                assert!(
+                    msg.contains("invalid") || msg.contains("expired"),
+                    "expected invalid or expired, got {msg}"
+                );
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
 }

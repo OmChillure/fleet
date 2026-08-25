@@ -9,7 +9,8 @@ pub use host_pool::{
     AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
     host_at_capacity, pick_assignable_host, pick_assignable_host_for, pick_assignable_runner,
-    select_assignable_host, select_assignable_runner, workspace_has_updating_host,
+    select_assignable_host, select_assignable_runner, select_assignable_runner_preferring,
+    workspace_has_updating_host,
 };
 pub use models::*;
 pub use pool::*;
