@@ -72,7 +72,10 @@ pub enum ShutdownMode {
     Immediate,
 }
 
-/// Sandbox hosting backend kind.
+/// How compute is *placed* (k8s cluster, a VM host, podman, …).
+///
+/// This is **not** isolation. Isolation is [`crate::IsolationClass`]
+/// (`process` < `container` < `vm`). A k8s pod is still a container.
 ///
 /// Serializes as a plain JSON string (`"k8s"`, `"vm"`, …). Unknown values
 /// round-trip as [`SandboxBackend::Other`] without rewriting.

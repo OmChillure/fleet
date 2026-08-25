@@ -80,13 +80,13 @@ export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
 cargo test -p fleet-orchestrator --test e2e_matrix --locked
 
 # Scripted demo against a running orch (ADMIN_TOKEN + /v1)
-cargo run -p fleet-orchestrator   # HTTP_ADDR=127.0.0.1:8081
+cargo run -p fleet-server         # /v1 is on the unified API
 ADMIN_TOKEN=dev-admin-token-change-me SCENARIO=all ./scripts/demo-orch.sh
 ```
 
 ## HTTP API (PR6)
 
-Standalone control plane (default bind from `HTTP_ADDR`, often `:8080` — avoid clashing with `fleet-server`).
+Control plane HTTP is `fleet-server` (`/v1` fallback). There is no standalone `fleet-orchestrator` binary.
 
 OpenAPI: [`api/openapi.yaml`](api/openapi.yaml) — also served at `GET /openapi.yaml`.
 
@@ -107,7 +107,7 @@ export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
 export ADMIN_TOKEN=dev-admin-token-change-me
 export DATA_DIR=/tmp/fleet-data
 export HTTP_ADDR=127.0.0.1:8081
-cargo run -p fleet-orchestrator
+cargo run -p fleet-server
 ```
 
 ## External board sync (PR10)
@@ -122,26 +122,23 @@ UPDATE project_configs SET auto_sync_external = true WHERE project_id = $1;
 
 ## Process sandbox (PR7)
 
-Uses a **real worker** binary (`fleet-worker`, or `fleet-driver` for ACP) that:
+Uses a **real guest** binary (`fleet-driver`) that:
 
 1. Authenticates with the session `FLEET_WORKER_TOKEN`
 2. POSTs `running` / heartbeats / terminal `success|failed|blocked` to `/v1/.../workers/{session}/…`
-3. Executes work (first match wins):
-   - `FLEET_WORK_CMD` — shell command in the session work dir
-   - `$FLEET_WORK_DIR/run.sh` — if present
-   - default — write `artifacts/result.json` + `SUMMARY.md` from the plan task context
+3. Runs ACP (`FLEET_HARNESS=mock|grok`) and writes `artifacts/result.json` + `artifacts/transcript.md`
 
 ```bash
-cargo build -p fleet-orchestrator --bin fleet-worker
+cargo build -p fleet-driver --bins
 export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-worker"   # or put fleet-worker on PATH
-# optional: FLEET_WORK_CMD='pytest -q'  (also injected into worker env per spawn)
-cargo run -p fleet-orchestrator
+export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
+export FLEET_HARNESS=mock
+cargo run -p fleet-server
 ```
 
 Work dir: `$DATA_DIR/projects/{project}/sessions/{session}/` with `pid` file for reaping.
 
-To drive a coding agent over ACP instead of `fleet-worker`, set `PROCESS_WORKER_BIN` to `fleet-driver` (`FLEET_HARNESS=mock` for CI, `grok` for Grok Build). See [`crates/fleet-driver/README.md`](../fleet-driver/README.md).
+See [`crates/fleet-driver/README.md`](../fleet-driver/README.md).
 
 | Env | Role |
 |-----|------|

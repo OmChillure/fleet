@@ -8,6 +8,8 @@ resources:
   - ui.yaml
   - rbac.yaml
   - operator.yaml
+  - zenohd.yaml
+  - host.yaml
   - networkpolicy-control-plane.yaml
 labels:
   - pairs:

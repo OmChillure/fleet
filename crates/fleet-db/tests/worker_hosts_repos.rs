@@ -801,6 +801,30 @@ async fn list_assignable_excludes_paused_disabled_stale() {
 }
 
 #[tokio::test]
+async fn list_assignable_includes_cluster_host_from_other_workspace() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "cluster-box", expires).await;
+    pair_host(&pool, &token, "cluster-box").await;
+    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("label cluster");
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().any(|h| h.id == host.id),
+        "cluster host home={ws_a} must be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn list_assignable_excludes_sandboxed_isolation() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -1087,6 +1111,26 @@ async fn complete_owned_rejects_wrong_host() {
         .await
         .expect("complete_owned owner");
     assert!(ok, "owning host must complete the lease");
+}
+
+#[tokio::test]
+async fn complete_owned_uses_claim_workspace_not_host_home() {
+    let pool = connect_and_migrate().await;
+    let job_ws = seed_user_with_workspace(&pool).await.1;
+    let host_id = Uuid::now_v7();
+    let claim = spawn_claim(job_ws, host_id, "spawn_session");
+    work_claims::enqueue(&pool, &claim).await.expect("enqueue");
+    let leased =
+        work_claims::claim_next_spawn_for_host(&pool, Uuid::now_v7(), host_id, Duration::minutes(2))
+            .await
+            .expect("claim")
+            .expect("cluster host leases by host_id");
+    assert_eq!(leased.workspace_id, job_ws);
+    let token = leased.lease_token.expect("lease_token");
+    let ok = work_claims::complete_owned(&pool, leased.id, token, host_id, leased.workspace_id)
+        .await
+        .expect("complete");
+    assert!(ok, "complete with claim.workspace_id must succeed");
 }
 
 #[tokio::test]

@@ -9,12 +9,14 @@
 #   ./scripts/fleet-dev.sh stop       # stop API + UI (postgres left running)
 #   ./scripts/fleet-dev.sh restart    # stop + start
 #   ./scripts/fleet-dev.sh status     # PIDs, ports, health
-#   ./scripts/fleet-dev.sh logs [all|server|ui]   # tail logs (default: all)
+#   ./scripts/fleet-dev.sh logs [all|server|ui|host]   # tail logs (default: all)
 #   ./scripts/fleet-dev.sh down       # stop processes + docker compose down
 #
 # Env overrides:
 #   FLEET_SKIP_BUILD=1   skip cargo build on start
 #   FLEET_SKIP_UI=1      do not start the UI
+#   FLEET_SKIP_HOST=1    do not start fleet-host (bootstrap pair + lease)
+# Does not start sandbox-lab (OpenCode compose). That is a separate test harness.
 #   FLEET_UI_PORT=3030
 #   FLEET_API_PORT=8080  (must match .env PORT if set)
 #   COMPOSE_FILE=...     docker compose file (default: docker-compose.yml)
@@ -28,8 +30,10 @@ RUN_DIR="${FLEET_RUN_DIR:-$ROOT/.run}"
 LOG_DIR="$RUN_DIR/logs"
 PID_SERVER="$RUN_DIR/fleet-server.pid"
 PID_UI="$RUN_DIR/fleet-ui.pid"
+PID_HOST="$RUN_DIR/fleet-host.pid"
 LOG_SERVER="$LOG_DIR/fleet-server.log"
 LOG_UI="$LOG_DIR/fleet-ui.log"
+LOG_HOST="$LOG_DIR/fleet-host.log"
 
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/docker-compose.yml}"
 UI_PORT="${FLEET_UI_PORT:-3030}"
@@ -203,6 +207,11 @@ ensure_env() {
     return 1
   fi
 
+  if ! grep -qE '^FLEET_BOOTSTRAP_SECRET=' "$ROOT/.env"; then
+    echo "FLEET_BOOTSTRAP_SECRET=dev-bootstrap-secret-change-me" >>"$ROOT/.env"
+    warn "Appended FLEET_BOOTSTRAP_SECRET for local fleet-host bootstrap"
+  fi
+
   # Optional ADMIN_TOKEN for demo-orch.sh — leave commented unless present.
   load_dotenv
   export PORT="${PORT:-$API_PORT}"
@@ -272,9 +281,9 @@ cmd_setup() {
 
   if [[ "${FLEET_SKIP_BUILD:-0}" != "1" ]]; then
     export_git_sha
-    log "Building fleet-server (FLEET_GIT_SHA=${FLEET_GIT_SHA}; first time can take a while)…"
-    cargo build -p fleet-server
-    ok "  fleet-server built"
+    log "Building fleet-server + fleet-host (FLEET_GIT_SHA=${FLEET_GIT_SHA}; first time can take a while)…"
+    cargo build -p fleet-server -p fleet-host
+    ok "  fleet-server + fleet-host built"
   else
     warn "Skipping cargo build (FLEET_SKIP_BUILD=1)"
   fi
@@ -366,6 +375,33 @@ start_ui() {
   ok "  fleet-ui pid $(read_pid "$PID_UI")  log → $LOG_UI"
 }
 
+start_host() {
+  if [[ "${FLEET_SKIP_HOST:-0}" == "1" ]]; then
+    warn "Skipping fleet-host (FLEET_SKIP_HOST=1)"
+    return 0
+  fi
+  load_dotenv
+  local pid
+  pid="$(read_pid "$PID_HOST")"
+  if is_pid_alive "$pid"; then
+    warn "fleet-host already running (pid $pid)"
+    return 0
+  fi
+  local port="${PORT:-$API_PORT}"
+  mkdir -p "$RUN_DIR/host"
+  log "Starting fleet-host (bootstrap pair + lease)…"
+  nohup env \
+    CARGO_TERM_COLOR=never \
+    FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
+    FLEET_HOST_CONFIG_DIR="$RUN_DIR/host" \
+    FLEET_CONTROL_PLANE_URL="http://127.0.0.1:${port}" \
+    FLEET_BOOTSTRAP_SECRET="${FLEET_BOOTSTRAP_SECRET:-}" \
+    cargo run -p fleet-host -- run \
+    >>"$LOG_HOST" 2>&1 &
+  echo $! >"$PID_HOST"
+  ok "  fleet-host pid $(read_pid "$PID_HOST")  log → $LOG_HOST"
+}
+
 cmd_start() {
   log "=== Fleet start ==="
   ensure_env
@@ -384,8 +420,8 @@ cmd_start() {
 
   if [[ "${FLEET_SKIP_BUILD:-0}" != "1" ]]; then
     export_git_sha
-    log "Ensuring fleet-server is built (FLEET_GIT_SHA=${FLEET_GIT_SHA})…"
-    cargo build -p fleet-server
+    log "Ensuring fleet-server + fleet-host are built (FLEET_GIT_SHA=${FLEET_GIT_SHA})…"
+    cargo build -p fleet-server -p fleet-host
   fi
 
   start_server
@@ -417,15 +453,19 @@ cmd_start() {
     }
   fi
 
+  start_host
+
   ok "Started."
   echo "  API  http://localhost:${port}   (health: /health)"
   echo "  UI   http://localhost:${UI_PORT}"
+  echo "  host fleet-host (pairs after the first workspace exists)"
   echo "  logs ./scripts/fleet-dev.sh logs"
   echo "  stop ./scripts/fleet-dev.sh stop"
 }
 
 cmd_stop() {
   log "=== Fleet stop ==="
+  stop_pid_file "fleet-host" "$PID_HOST"
   stop_pid_file "fleet-server" "$PID_SERVER"
   stop_pid_file "fleet-ui" "$PID_UI"
   load_dotenv
@@ -455,9 +495,10 @@ cmd_status() {
   echo "Run dir: $RUN_DIR"
   echo
 
-  local spid upid
+  local spid upid hpid
   spid="$(read_pid "$PID_SERVER")"
   upid="$(read_pid "$PID_UI")"
+  hpid="$(read_pid "$PID_HOST")"
 
   if is_pid_alive "$spid"; then
     ok "fleet-server  running  pid=$spid  port=$port"
@@ -468,6 +509,11 @@ cmd_status() {
     ok "fleet-ui      running  pid=$upid  port=$UI_PORT"
   else
     warn "fleet-ui      not running  (pidfile=${upid:-none})"
+  fi
+  if is_pid_alive "$hpid"; then
+    ok "fleet-host    running  pid=$hpid"
+  else
+    warn "fleet-host    not running  (pidfile=${hpid:-none})"
   fi
 
   echo
@@ -494,6 +540,7 @@ cmd_status() {
   echo
   echo "Logs: $LOG_SERVER"
   echo "      $LOG_UI"
+  echo "      $LOG_HOST"
 }
 
 cmd_logs() {
@@ -508,17 +555,21 @@ cmd_logs() {
       [[ -f "$LOG_UI" ]] || { warn "no ui log yet"; exit 0; }
       tail -n 100 -f "$LOG_UI"
       ;;
+    host|fleet-host)
+      [[ -f "$LOG_HOST" ]] || { warn "no fleet-host log yet"; exit 0; }
+      tail -n 100 -f "$LOG_HOST"
+      ;;
     all|*)
-      if [[ ! -f "$LOG_SERVER" && ! -f "$LOG_UI" ]]; then
+      if [[ ! -f "$LOG_SERVER" && ! -f "$LOG_UI" && ! -f "$LOG_HOST" ]]; then
         warn "no logs yet — start services first"
         exit 0
       fi
       # Prefer multitail if present; else interleaved tail -F
       if command -v multitail >/dev/null 2>&1 && [[ -f "$LOG_SERVER" && -f "$LOG_UI" ]]; then
-        multitail "$LOG_SERVER" "$LOG_UI"
+        multitail "$LOG_SERVER" "$LOG_UI" "$LOG_HOST"
       else
-        touch "$LOG_SERVER" "$LOG_UI"
-        tail -n 80 -F "$LOG_SERVER" "$LOG_UI"
+        touch "$LOG_SERVER" "$LOG_UI" "$LOG_HOST"
+        tail -n 80 -F "$LOG_SERVER" "$LOG_UI" "$LOG_HOST"
       fi
       ;;
   esac

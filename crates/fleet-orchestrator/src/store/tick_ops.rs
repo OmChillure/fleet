@@ -268,12 +268,15 @@ impl Store {
                     block_reason = $2,
                     last_report_seq = GREATEST(last_report_seq, $3),
                     updated_at = now()
-                WHERE id = $1 AND status IN ('assigned', 'in_progress', 'blocked')
+                WHERE id = $1
+                  AND status IN ('assigned', 'in_progress', 'blocked')
+                  AND claimed_session_id = $4
                 "#,
             )
             .bind(task_id)
             .bind(failure_or_block)
             .bind(seq)
+            .bind(session_id)
             .execute(&mut *tx)
             .await?;
         } else {
@@ -286,13 +289,16 @@ impl Store {
                     terminal_at = now(),
                     claimed_session_id = NULL,
                     updated_at = now()
-                WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled')
+                WHERE id = $1
+                  AND status IN ('assigned', 'in_progress')
+                  AND claimed_session_id = $5
                 "#,
             )
             .bind(task_id)
             .bind(status)
             .bind(failure_or_block)
             .bind(seq)
+            .bind(session_id)
             .execute(&mut *tx)
             .await?;
 

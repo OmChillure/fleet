@@ -80,6 +80,8 @@ def pair_host(
     *,
     hostname: str,
     platform: str = "linux-x86_64",
+    advertised_host: bool = True,
+    advertised_container: bool = False,
 ) -> dict[str, Any]:
     return _json(
         page.request.post(
@@ -89,8 +91,8 @@ def pair_host(
                     "token": pair_token,
                     "hostname": hostname,
                     "platform": platform,
-                    "advertised_host": True,
-                    "advertised_container": False,
+                    "advertised_host": advertised_host,
+                    "advertised_container": advertised_container,
                 }
             ),
             headers={"Content-Type": "application/json"},

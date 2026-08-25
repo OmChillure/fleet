@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layer 2 e2e: plane runtime is SANDBOX_BACKEND (catalog:e2e-plane-runtime).
+"""Layer 2 e2e: plane is not a runner (catalog:e2e-plane-runtime).
 
 No Native/Sandboxed isolation checkboxes. The plane card shows the workspace
 SANDBOX_BACKEND. Fail closed — no skip.
@@ -184,7 +184,7 @@ class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_toggle_sandboxed_on_the_plane_card(self) -> None:
-        # catalog:e2e-plane-runtime — plane uses SANDBOX_BACKEND, no isolation UI.
+        # catalog:e2e-plane-runtime — plane is not a runner, no isolation UI.
         page = self.page
         _ws, workspace_url = _signup_api(page)
 
@@ -192,8 +192,7 @@ class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
         card = _plane_card(page)
         text = card.inner_text()
         self.assertIn("this process", text.lower())
-        self.assertIn("Runtime:", text)
-        self.assertIn("SANDBOX_BACKEND", text)
+        self.assertIn("does not run sandboxes", text)
         self.assertNotIn("not implemented yet", text.lower())
         self.assertNotIn(
             "pending apply",

@@ -685,14 +685,13 @@ pub fn draft_holding_new_jobs(accepting: bool) -> bool {
     !accepting
 }
 
-/// How this runner executes. Isolation is SANDBOX_BACKEND, not a second pair of checkboxes.
+/// How this runner executes. Isolation is process < container < vm, not SANDBOX_BACKEND.
 pub fn runtime_line(host: &HostPublic, sandbox_backend: &str) -> String {
     if is_control_plane(host) {
-        let backend = sandbox_backend.trim();
-        let name = if backend.is_empty() { "stub" } else { backend };
-        format!("Runtime: {name} (SANDBOX_BACKEND)")
+        let _ = sandbox_backend;
+        "Control plane does not run sandboxes".into()
     } else {
-        "Runtime: process on this machine".into()
+        "Runtime: fleet-host".into()
     }
 }
 
@@ -1814,11 +1813,17 @@ mod tests {
         let mut host = sample_host();
         assert_eq!(
             runtime_line(&host, "docker"),
-            "Runtime: process on this machine"
+            "Runtime: fleet-host"
         );
         host.kind = "control_plane".into();
-        assert_eq!(runtime_line(&host, "process"), "Runtime: process (SANDBOX_BACKEND)");
-        assert_eq!(runtime_line(&host, ""), "Runtime: stub (SANDBOX_BACKEND)");
+        assert_eq!(
+            runtime_line(&host, "process"),
+            "Control plane does not run sandboxes"
+        );
+        assert_eq!(
+            runtime_line(&host, ""),
+            "Control plane does not run sandboxes"
+        );
         assert_eq!(BEHAVIOR_LABEL, "Behavior");
     }
 

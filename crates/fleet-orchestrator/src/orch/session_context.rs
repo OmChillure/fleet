@@ -225,7 +225,6 @@ pub fn write_session_context(
 /// Copy selected process env into the worker env map (so k8s/process both see them).
 pub fn pass_through_driver_env(env: &mut std::collections::HashMap<String, String>) {
     for key in [
-        "FLEET_HARNESS",
         "FLEET_MODEL",
         "FLEET_AUTO_APPROVE",
         "FLEET_HARNESS_CMD",
@@ -315,6 +314,19 @@ mod tests {
         assert!(p.contains("Tiny change"));
         assert!(p.contains("Write hello.txt."));
         assert!(p.contains("- file exists"));
+    }
+
+    #[test]
+    fn pass_through_does_not_copy_fleet_harness() {
+        unsafe {
+            std::env::set_var("FLEET_HARNESS", "mock");
+        }
+        let mut env = std::collections::HashMap::new();
+        pass_through_driver_env(&mut env);
+        assert!(
+            !env.contains_key("FLEET_HARNESS"),
+            "plane FLEET_HARNESS must not override spawn LLM choice: {env:?}"
+        );
     }
 
     #[test]

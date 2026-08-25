@@ -65,8 +65,6 @@ pub struct LocalConfig {
     /// This box will apply CP-served updates. Intersected with CP `auto_update`.
     #[serde(default = "default_true")]
     pub auto_update: bool,
-    #[serde(default = "default_worker_bin")]
-    pub fleet_worker_bin: String,
     #[serde(default = "default_driver_bin")]
     pub fleet_driver_bin: String,
     #[serde(default = "default_log_level")]
@@ -83,6 +81,15 @@ pub struct LocalConfig {
     pub control_plane_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<Uuid>,
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn default_true() -> bool {
@@ -102,9 +109,6 @@ fn default_docker_image() -> String {
 }
 fn default_docker_network() -> String {
     "bridge".into()
-}
-fn default_worker_bin() -> String {
-    "fleet-worker".into()
 }
 fn default_driver_bin() -> String {
     "fleet-driver".into()
@@ -135,7 +139,6 @@ impl Default for LocalConfig {
             allow_privileged: false,
             use_host_git_credentials: true,
             auto_update: true,
-            fleet_worker_bin: default_worker_bin(),
             fleet_driver_bin: default_driver_bin(),
             log_level: default_log_level(),
             heartbeat_interval_s: 10,
@@ -155,10 +158,34 @@ impl LocalConfig {
 
     pub fn load_or_default() -> Result<Self> {
         let path = config_path();
-        if path.is_file() {
-            Self::load_path(&path)
+        let mut cfg = if path.is_file() {
+            Self::load_path(&path)?
         } else {
-            Ok(Self::default())
+            Self::default()
+        };
+        cfg.apply_env();
+        Ok(cfg)
+    }
+
+    /// Overlay process env. Used by compose/kind (`FLEET_HOST_*`).
+    pub fn apply_env(&mut self) {
+        if let Ok(v) = std::env::var("FLEET_CONTROL_PLANE_URL") {
+            let t = v.trim();
+            if !t.is_empty() {
+                self.control_plane_url = Some(t.to_string());
+            }
+        }
+        if let Some(v) = env_bool("FLEET_HOST_RUN_HOST") {
+            self.run_host = v;
+        }
+        if let Some(v) = env_bool("FLEET_HOST_RUN_CONTAINER") {
+            self.run_container = v;
+        }
+        if let Ok(v) = std::env::var("K8S_WORKER_IMAGE") {
+            let t = v.trim();
+            if !t.is_empty() {
+                self.docker_image = t.to_string();
+            }
         }
     }
 
@@ -263,8 +290,26 @@ pub fn ensure_dir_mode(dir: &Path, mode: u32) -> Result<()> {
             .with_context(|| format!("stat {}", dir.display()))?
             .permissions();
         perms.set_mode(mode);
-        fs::set_permissions(dir, perms)
-            .with_context(|| format!("chmod {:o} {}", mode, dir.display()))?;
+        if let Err(e) = fs::set_permissions(dir, perms) {
+            // In-cluster PVC is often root-owned (fsGroup is group-only).
+            // Keep going if we can still create files there.
+            let probe = dir.join(".fleet-host-writable");
+            match fs::OpenOptions::new().create(true).write(true).open(&probe) {
+                Ok(_) => {
+                    let _ = fs::remove_file(&probe);
+                    tracing::warn!(
+                        path = %dir.display(),
+                        error = %e,
+                        "could not chmod config dir; directory is writable"
+                    );
+                }
+                Err(w) => {
+                    return Err(e).with_context(|| {
+                        format!("chmod {:o} {} (also not writable: {w})", mode, dir.display())
+                    });
+                }
+            }
+        }
     }
     #[cfg(not(unix))]
     {

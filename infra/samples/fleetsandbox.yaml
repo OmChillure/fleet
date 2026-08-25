@@ -2,7 +2,7 @@
 #   kubectl apply -f infra/samples/fleetsandbox.yaml
 #
 # The operator creates Pod `fsb-demo-t1` with default-deny egress except
-# kube-dns + fleet-api:8080. fleet-worker still needs FLEET_WORKER_TOKEN from
+# kube-dns + fleet-api:8080. fleet-driver still needs FLEET_WORKER_TOKEN from
 # a real orchestrator spawn — this sample is for exercising the operator.
 apiVersion: fleet.agentfleet.io/v1alpha1
 kind: FleetSandbox
@@ -20,7 +20,7 @@ spec:
   planTaskId: t1
   workerProfile: coding
   image: agent-fleet-api:local
-  command: ["fleet-worker"]
+  command: ["fleet-driver"]
   env:
     FLEET_WORKER_TOKEN: "replace-with-orchestrator-session-token"
     FLEET_HEARTBEAT_INTERVAL_S: "2"

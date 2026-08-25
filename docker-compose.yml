@@ -1,4 +1,4 @@
-# Agent Fleet — full stack (Postgres + API + UI)
+# Agent Fleet — full stack (Postgres + API + UI + zenohd + fleet-host)
 #
 #   docker compose up -d postgres          # DB only — does not need FLEET_GIT_SHA
 #   FLEET_GIT_SHA=$(git rev-parse HEAD) docker compose up -d --build
@@ -56,7 +56,9 @@ services:
       SANDBOX_BACKEND: stub
       # process backend (worker is in the API image):
       # SANDBOX_BACKEND: process
-      # PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
+      # PROCESS_WORKER_BIN: /usr/local/bin/fleet-driver
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-dev-bootstrap-secret-change-me}
+      ZENOH_LOCATOR: tcp/zenohd:7447
       RUST_LOG: info,sqlx=warn,tower_http=info
       # ADMIN_TOKEN: dev-admin-token-change-me
     volumes:
@@ -88,6 +90,40 @@ services:
       retries: 5
       start_period: 10s
 
+  zenohd:
+    image: eclipse/zenoh:1.2.1
+    command: ["--listen", "tcp/0.0.0.0:7447"]
+    ports:
+      - "7447:7447"
+
+  host:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FLEET_GIT_SHA: ${FLEET_GIT_SHA:-}
+    image: agent-fleet-api:local
+    depends_on:
+      api:
+        condition: service_healthy
+      zenohd:
+        condition: service_started
+    command: ["fleet-host", "run"]
+    environment:
+      FLEET_CONTROL_PLANE_URL: http://api:8080
+      FLEET_HOST_CONFIG_DIR: /data/host
+      FLEET_HOST_RUN_HOST: "true"
+      FLEET_HOST_RUN_CONTAINER: "false"
+      FLEET_HARNESS: mock
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-dev-bootstrap-secret-change-me}
+      ZENOH_LOCATOR: tcp/zenohd:7447
+      RUST_LOG: info
+    volumes:
+      - fleet_host:/data/host
+    healthcheck:
+      disable: true
+
 volumes:
   fleet_pg:
   fleet_data:
+  fleet_host:

@@ -1,11 +1,16 @@
 //! Paired worker-host pool for tick spawn.
 //!
 //! Uses `fleet_db::repos::worker_hosts::list_assignable`. Missing table /
-//! query error → no host (local `SANDBOX_BACKEND` still works).
+//! query error → no host (task stays ready unless a test enables local spawn).
 //! Cloud / Partners / public-cloud are not assignable and are not a
 //! second spawn path.
+//!
+//! Isolation (`process` < `container` < `vm`) is not placement. A
+//! container-only in-cluster host is assignable when it meets workspace
+//! `min_isolation`.
 
 use super::Store;
+use crate::domain::{IsolationClass, pick_isolation};
 use crate::sandbox::{SpawnRequest, remote};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -62,6 +67,10 @@ pub struct AssignableHost {
     pub advertised_max_concurrent: Option<i32>,
     pub max_job_timeout_s: i32,
     pub isolation: RunnerIsolation,
+    /// Oldest heartbeat wins when load/cap is tied. List order is newest-first.
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Home workspace. On a load tie, a home host beats a cluster host.
+    pub workspace_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,14 +100,35 @@ impl ChosenHost {
     }
 }
 
-/// v1 is host-only. Container / k3d is not a working executor — do not
-/// assign `runtime=container` even when the plane and the box advertise it.
-pub fn effective_runtime(host: &AssignableHost) -> Option<HostRuntime> {
+/// Isolation classes this host can run (advertised ∩ plane allow).
+pub fn offered_classes(host: &AssignableHost) -> Vec<IsolationClass> {
+    let mut offer = Vec::new();
     if host.allow_host && host.advertised_host {
-        Some(HostRuntime::Host)
-    } else {
-        None
+        offer.push(IsolationClass::Process);
     }
+    if host.allow_container && host.advertised_container {
+        offer.push(IsolationClass::Container);
+    }
+    offer
+}
+
+pub fn runtime_for_class(class: IsolationClass) -> Option<HostRuntime> {
+    match class {
+        IsolationClass::Process => Some(HostRuntime::Host),
+        IsolationClass::Container => Some(HostRuntime::Container),
+        IsolationClass::Vm => None,
+    }
+}
+
+/// Weakest offered class that still meets `need` (default `process`).
+pub fn effective_runtime_for(host: &AssignableHost, need: IsolationClass) -> Option<HostRuntime> {
+    let class = pick_isolation(need, &offered_classes(host))?;
+    runtime_for_class(class)
+}
+
+/// Default need is `process` (workspace `min_isolation` default).
+pub fn effective_runtime(host: &AssignableHost) -> Option<HostRuntime> {
+    effective_runtime_for(host, IsolationClass::Process)
 }
 
 fn cap(host: &AssignableHost) -> i32 {
@@ -118,53 +148,149 @@ pub fn job_timeout_s(task_timeout_s: u64, max_job_timeout_s: i32) -> i32 {
     task.min(max_job_timeout_s.max(60))
 }
 
-pub fn pick_assignable_host(
+pub fn pick_assignable_host_for(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,
+    need: IsolationClass,
 ) -> Option<ChosenHost> {
-    for host in hosts {
-        let Some(runtime) = effective_runtime(host) else {
+    pick_assignable_host_in(hosts, in_flight, need, None)
+}
+
+fn pick_assignable_host_in(
+    hosts: &[AssignableHost],
+    in_flight: &HashMap<Uuid, i64>,
+    need: IsolationClass,
+    prefer_workspace: Option<Uuid>,
+) -> Option<ChosenHost> {
+    let mut best: Option<(
+        ChosenHost,
+        i64,
+        i32,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+        usize,
+    )> = None;
+    for (idx, host) in hosts.iter().enumerate() {
+        let Some(runtime) = effective_runtime_for(host, need) else {
             continue;
         };
         let n = in_flight.get(&host.id).copied().unwrap_or(0);
         if host_at_capacity(n, host) {
             continue;
         }
-        return Some(ChosenHost {
-            host: host.clone(),
-            runtime,
-        });
+        let cap = cap(host);
+        let home = prefer_workspace == Some(host.workspace_id);
+        let better = match &best {
+            None => true,
+            Some((_, bn, bcap, bhome, bseen, bidx)) => load_then_home_then_oldest(
+                n,
+                cap,
+                home,
+                host.last_seen_at,
+                idx,
+                *bn,
+                *bcap,
+                *bhome,
+                *bseen,
+                *bidx,
+            ),
+        };
+        if better {
+            best = Some((
+                ChosenHost {
+                    host: host.clone(),
+                    runtime,
+                },
+                n,
+                cap,
+                home,
+                host.last_seen_at,
+                idx,
+            ));
+        }
     }
-    None
+    best.map(|(chosen, _, _, _, _, _)| chosen)
 }
 
-/// Before `begin_spawn_assignment`: first host that is online, effective,
-/// and under `min(max_concurrent, advertised_max_concurrent, 256)`.
+/// Lower load/cap, then home workspace, then older last_seen, then last in newest-first list.
+fn load_then_home_then_oldest(
+    n: i64,
+    cap: i32,
+    home: bool,
+    seen: Option<chrono::DateTime<chrono::Utc>>,
+    idx: usize,
+    other_n: i64,
+    other_cap: i32,
+    other_home: bool,
+    other_seen: Option<chrono::DateTime<chrono::Utc>>,
+    other_idx: usize,
+) -> bool {
+    let left = n.saturating_mul(i64::from(other_cap.max(1)));
+    let right = other_n.saturating_mul(i64::from(cap.max(1)));
+    if left != right {
+        return left < right;
+    }
+    match (home, other_home) {
+        (true, false) => return true,
+        (false, true) => return false,
+        _ => {}
+    }
+    match (seen, other_seen) {
+        (Some(a), Some(b)) if a != b => return a < b,
+        (Some(_), None) => return true,
+        (None, Some(_)) => return false,
+        _ => {}
+    }
+    idx > other_idx
+}
+
+pub fn pick_assignable_host(
+    hosts: &[AssignableHost],
+    in_flight: &HashMap<Uuid, i64>,
+) -> Option<ChosenHost> {
+    pick_assignable_host_for(hosts, in_flight, IsolationClass::Process)
+}
+
+async fn workspace_need(store: &Store, project_id: Uuid) -> IsolationClass {
+    match fleet_db::repos::workspaces::min_isolation(store.pool(), project_id).await {
+        Ok(raw) => IsolationClass::parse(&raw).unwrap_or(IsolationClass::Process),
+        Err(_) => IsolationClass::Process,
+    }
+}
+
+/// Before `begin_spawn_assignment`: lowest load/cap, then oldest heartbeat,
+/// among hosts that meet isolation and are under cap.
 pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
     let hosts = list_assignable_hosts(store, project_id).await?;
     if hosts.is_empty() {
         return None;
     }
-    let in_flight = count_remote_in_flight(store, project_id).await?;
-    pick_assignable_host(&hosts, &in_flight)
+    let in_flight = count_remote_in_flight(store).await?;
+    let need = workspace_need(store, project_id).await;
+    pick_assignable_host_in(&hosts, &in_flight, need, Some(project_id))
 }
 
 /// Today's host picker, then Native-only. No second list/query.
 /// Cloud / Partners / public-cloud cannot be chosen.
-///
-/// TODO: the workspace control-plane runner is not in this list (no lease /
-/// machine token). Local `SANDBOX_BACKEND` is that runner; `schedule_and_spawn`
-/// skips it when `plane_runners::taking_native_jobs` is false.
-pub fn pick_assignable_runner(
+/// Production tick does not fall back to a local SANDBOX_BACKEND.
+pub fn pick_assignable_runner_for(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,
+    need: IsolationClass,
 ) -> Option<ChosenHost> {
     let native: Vec<AssignableHost> = hosts
         .iter()
         .filter(|h| h.isolation.is_assignable())
         .cloned()
         .collect();
-    pick_assignable_host(&native, in_flight)
+    pick_assignable_host_for(&native, in_flight, need)
+}
+
+pub fn pick_assignable_runner(
+    hosts: &[AssignableHost],
+    in_flight: &HashMap<Uuid, i64>,
+) -> Option<ChosenHost> {
+    pick_assignable_runner_for(hosts, in_flight, IsolationClass::Process)
 }
 
 /// Wraps [`select_assignable_host`]. Tick fallback is unchanged.
@@ -199,9 +325,9 @@ pub async fn workspace_has_updating_host(store: &Store, project_id: Uuid) -> boo
     }
 }
 
-/// No assignable host + a recent updating host → leave the task ready.
-pub fn hold_ready_for_host_update(has_assignable: bool, updating_recent: bool) -> bool {
-    !has_assignable && updating_recent
+/// A home host is mid-restart: do not fail over to cluster or local stub.
+pub fn hold_ready_for_host_update(_has_assignable: bool, updating_recent: bool) -> bool {
+    updating_recent
 }
 
 pub async fn enqueue_remote_spawn(
@@ -232,6 +358,33 @@ pub async fn enqueue_remote_spawn(
         .map_err(|e| e.to_string())
 }
 
+/// Ask the assigned `fleet-host` to stop a session (TERM/KILL/delete CR).
+pub async fn enqueue_signal_session(
+    store: &Store,
+    workspace_id: Uuid,
+    session_id: Uuid,
+    host_id: Uuid,
+    signal: &str,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "kind": "signal_session",
+        "session_id": session_id,
+        "host_id": host_id,
+        "signal": signal,
+    });
+    let claim = fleet_db::NewWorkClaim {
+        id: Uuid::now_v7(),
+        workspace_id,
+        kind: "signal_session".into(),
+        payload,
+        max_attempts: 3,
+        available_at: chrono::Utc::now(),
+    };
+    fleet_db::repos::work_claims::enqueue(store.pool(), &claim)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 impl From<&fleet_db::WorkerHost> for AssignableHost {
     fn from(h: &fleet_db::WorkerHost) -> Self {
         Self {
@@ -247,6 +400,8 @@ impl From<&fleet_db::WorkerHost> for AssignableHost {
                 fleet_db::WORKER_HOST_ISOLATION_SANDBOXED => RunnerIsolation::Sandboxed,
                 _ => RunnerIsolation::Native,
             },
+            last_seen_at: h.last_seen_at,
+            workspace_id: h.workspace_id,
         }
     }
 }
@@ -264,25 +419,23 @@ async fn list_assignable_hosts(store: &Store, project_id: Uuid) -> Option<Vec<As
             tracing::debug!(
                 error = %e,
                 project_id = %project_id,
-                "worker_hosts unavailable; using local sandbox"
+                "no assignable host"
             );
             None
         }
     }
 }
 
-async fn count_remote_in_flight(store: &Store, project_id: Uuid) -> Option<HashMap<Uuid, i64>> {
+async fn count_remote_in_flight(store: &Store) -> Option<HashMap<Uuid, i64>> {
     let rows = sqlx::query_as::<_, (Option<String>, i64)>(
         r#"
         SELECT runtime_handle, COUNT(*)::bigint
         FROM worker_sessions
-        WHERE project_id = $1
-          AND runtime_backend = 'remote'
+        WHERE runtime_backend = 'remote'
           AND status IN ('spawning', 'healthy')
         GROUP BY runtime_handle
         "#,
     )
-    .bind(project_id)
     .fetch_all(store.pool())
     .await
     .ok()?;
@@ -320,6 +473,8 @@ mod tests {
             advertised_max_concurrent: None,
             max_job_timeout_s: 3600,
             isolation: RunnerIsolation::Native,
+            last_seen_at: None,
+            workspace_id: Uuid::nil(),
         }
     }
 
@@ -330,10 +485,34 @@ mod tests {
     }
 
     #[test]
-    fn v1_skips_container_only_host() {
+    fn container_only_host_is_assignable() {
         let h = host(Uuid::new_v4(), true, true, false, true, 4);
-        assert_eq!(effective_runtime(&h), None);
-        assert!(pick_assignable_host(&[h], &HashMap::new()).is_none());
+        assert_eq!(effective_runtime(&h), Some(HostRuntime::Container));
+        let chosen = pick_assignable_host(&[h.clone()], &HashMap::new()).unwrap();
+        assert_eq!(chosen.runtime, HostRuntime::Container);
+        assert_eq!(
+            pick_assignable_host_for(&[h], &HashMap::new(), IsolationClass::Container)
+                .unwrap()
+                .runtime,
+            HostRuntime::Container
+        );
+    }
+
+    #[test]
+    fn container_need_does_not_fall_back_to_process() {
+        let process_only = host(Uuid::new_v4(), true, true, true, false, 4);
+        assert!(
+            pick_assignable_host_for(&[process_only], &HashMap::new(), IsolationClass::Container)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn container_need_picks_container_when_both_offered() {
+        let h = host(Uuid::new_v4(), true, true, true, true, 4);
+        let chosen =
+            pick_assignable_host_for(&[h], &HashMap::new(), IsolationClass::Container).unwrap();
+        assert_eq!(chosen.runtime, HostRuntime::Container);
     }
 
     #[test]
@@ -394,6 +573,41 @@ mod tests {
     }
 
     #[test]
+    fn pick_lowest_utilization_not_first_under_capacity() {
+        let busy = host(Uuid::new_v4(), true, false, true, false, 4);
+        let idle = host(Uuid::new_v4(), true, false, true, false, 4);
+        let mut inflight = HashMap::new();
+        inflight.insert(busy.id, 3);
+        let chosen = pick_assignable_host(&[busy.clone(), idle.clone()], &inflight).unwrap();
+        assert_eq!(
+            chosen.id(),
+            idle.id,
+            "3/4 must lose to 0/4 even when the busy host is listed first"
+        );
+    }
+
+    #[test]
+    fn pick_equal_load_prefers_oldest_not_newest_first() {
+        let newer = host(Uuid::new_v4(), true, false, true, false, 4);
+        let older = host(Uuid::new_v4(), true, false, true, false, 4);
+        let chosen = pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new()).unwrap();
+        assert_eq!(
+            chosen.id(),
+            older.id,
+            "tie-break is oldest heartbeat, not SQL last_seen DESC list order"
+        );
+    }
+
+    #[test]
+    fn vm_need_is_unassigned_when_no_host_offers_vm() {
+        let container = host(Uuid::new_v4(), true, true, true, true, 4);
+        assert!(
+            pick_assignable_host_for(&[container], &HashMap::new(), IsolationClass::Vm).is_none(),
+            "min_isolation=vm must not fall back to container"
+        );
+    }
+
+    #[test]
     fn pick_none_when_all_full() {
         let id = Uuid::new_v4();
         let hosts = vec![host(id, true, true, true, true, 2)];
@@ -410,9 +624,12 @@ mod tests {
     }
 
     #[test]
-    fn hold_ready_only_when_no_assignable_and_updating() {
+    fn hold_ready_when_home_host_is_updating() {
         assert!(hold_ready_for_host_update(false, true));
-        assert!(!hold_ready_for_host_update(true, true));
+        assert!(
+            hold_ready_for_host_update(true, true),
+            "do not fail over to cluster while a home host restarts"
+        );
         assert!(!hold_ready_for_host_update(false, false));
         assert!(!hold_ready_for_host_update(true, false));
     }

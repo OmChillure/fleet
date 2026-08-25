@@ -44,7 +44,7 @@ async fn app() -> axum::Router {
         auto_sync_external: false,
         sandbox_backend: "stub".into(),
         stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-worker".into()],
+        process_worker_argv: vec!["fleet-driver".into()],
         k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),

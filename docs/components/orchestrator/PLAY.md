@@ -34,9 +34,10 @@ Fleet shows the active sandbox backend, worker sessions, and task progress.
 ### Process sandbox (real worker)
 
 ```bash
-cargo build -p fleet-orchestrator --bin fleet-worker
+cargo build -p fleet-driver --bins
 export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-worker"
+export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
+export FLEET_HARNESS=mock
 # workers call back on this URL (must not be 0.0.0.0)
 export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
@@ -46,7 +47,7 @@ Each spawned session writes `spec.md` plus `artifacts/result.json` under `DATA_D
 
 ### ACP driver (mock / Grok Build)
 
-`fleet-worker` does not speak ACP. Point the process backend at `fleet-driver` to run a coding agent (mock in CI, Grok Build on a laptop):
+`fleet-driver` speaks ACP. Default harness is mock; set `FLEET_HARNESS=grok` for Grok Build:
 
 ```bash
 cargo build -p fleet-driver --bins
@@ -66,18 +67,23 @@ Sessions write `spec.md`, `task.json`, `prompt.md`, optional `workspace.json`, p
 
 ### Kubernetes (`FleetSandbox` CRs)
 
-Tick creates CRs; [`fleet-operator`](../../../crates/fleet-operator/) turns each into a pod. Cluster from [`infra/README.md`](../../../infra/README.md) (k3d or kind). Do **not** point workers at `http://127.0.0.1:8080` — the pod cannot reach host loopback.
+Tick enqueues a `work_claims` row; in-cluster [`fleet-host`](../../../crates/fleet-host/) creates the CR. [`fleet-operator`](../../../crates/fleet-operator/) turns each into a pod. Cluster from [`infra/README.md`](../../../infra/README.md) (k3d or kind). Do **not** point workers at `http://127.0.0.1:8080` — the pod cannot reach host loopback.
+
+In-cluster (kind/k3d): the API Deployment is stub; `fleet-host` bootstrap-pairs
+and creates/deletes CRs. Start a Fleet run after a workspace exists;
+`kubectl -n agent-fleet get fsb` should show a CR. SessionDetail stays empty
+(no pod artifact pull yet).
+
+Host API against a cluster (optional):
 
 ```bash
 export SANDBOX_BACKEND=k8s
 export K8S_NAMESPACE=agent-fleet
 export K8S_WORKER_IMAGE=agent-fleet-api:local
-export K8S_WORKER_COMMAND=fleet-worker
-# In-cluster API (the API ServiceAccount also needs FleetSandbox create/delete):
-export K8S_WORKER_API_URL=http://api.agent-fleet.svc.cluster.local:8080
-# Host API + cluster (ports 8080/3030 must stay on the host, not kind extraPortMappings).
+export K8S_WORKER_COMMAND=fleet-driver
+# Ports 8080/3030 must stay on the host, not kind extraPortMappings.
 # Use a host IPv4/IPv6 literal — allowlisted /32 or /128. DNS names are not CIDRs.
-# export K8S_WORKER_API_URL=http://172.18.0.1:8080
+export K8S_WORKER_API_URL=http://172.18.0.1:8080
 cargo run -p fleet-server
 ```
 

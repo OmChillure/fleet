@@ -2,6 +2,22 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+/// Canonical IsolationClass wire strings stored on `workspaces.min_isolation`.
+/// Not a second enum — keep these as `&str` and parse in contracts.
+pub const MIN_ISOLATION_PROCESS: &str = "process";
+pub const MIN_ISOLATION_CONTAINER: &str = "container";
+pub const MIN_ISOLATION_VM: &str = "vm";
+
+/// `process` | `container` | `vm`. Other values are rejected.
+pub fn parse_min_isolation(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        MIN_ISOLATION_PROCESS => Some(MIN_ISOLATION_PROCESS),
+        MIN_ISOLATION_CONTAINER => Some(MIN_ISOLATION_CONTAINER),
+        MIN_ISOLATION_VM => Some(MIN_ISOLATION_VM),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct Workspace {
     pub id: Uuid,
@@ -109,6 +125,25 @@ mod partners_disclaimer_tests {
         assert!(!obj.contains_key("borrowing"));
         assert!(!obj.contains_key("enqueue"));
         assert!(!obj.contains_key("assignable"));
+    }
+}
+
+#[cfg(test)]
+mod min_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_canonical_strings_only() {
+        assert_eq!(parse_min_isolation("process"), Some(MIN_ISOLATION_PROCESS));
+        assert_eq!(
+            parse_min_isolation(" container "),
+            Some(MIN_ISOLATION_CONTAINER)
+        );
+        assert_eq!(parse_min_isolation("vm"), Some(MIN_ISOLATION_VM));
+        assert_eq!(parse_min_isolation("native"), None);
+        assert_eq!(parse_min_isolation("host"), None);
+        assert_eq!(parse_min_isolation("k8s"), None);
+        assert_eq!(parse_min_isolation(""), None);
     }
 }
 

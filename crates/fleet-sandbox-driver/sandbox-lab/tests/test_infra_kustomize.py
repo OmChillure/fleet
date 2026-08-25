@@ -12,6 +12,19 @@ REPO = LAB.parents[2]
 INFRA = REPO / "infra"
 
 
+def _role_named(built: str, name: str) -> str | None:
+    """Return the YAML document for `kind: Role` with this metadata.name."""
+    for doc in built.split("\n---\n"):
+        # RoleBinding roleRef also says `kind: Role` — skip those documents.
+        if "kind: RoleBinding" in doc:
+            continue
+        if "\nkind: Role\n" not in f"\n{doc}\n":
+            continue
+        if f"name: {name}" in doc:
+            return doc
+    return None
+
+
 def _kustomize(path: Path) -> subprocess.CompletedProcess[str]:
     if shutil.which("kubectl"):
         return subprocess.run(
@@ -75,6 +88,7 @@ class InfraKustomizeTests(unittest.TestCase):
         self.assertIn("name: api-ingress-nodeport", out)
         self.assertIn("nodePort: 30080", out)
         self.assertIn("nodePort: 30303", out)
+        self._assert_in_cluster_k8s_path(out)
 
     def test_base_infra_builds(self):
         r = _kustomize(INFRA)
@@ -85,6 +99,45 @@ class InfraKustomizeTests(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("kind: CustomResourceDefinition", r.stdout)
+        self._assert_in_cluster_k8s_path(r.stdout)
+
+    def test_k3d_overlay_has_in_cluster_k8s_path(self):
+        r = _kustomize(INFRA / "overlays" / "k3d")
+        self.assertNotEqual(
+            r.returncode,
+            127,
+            "kubectl/kustomize not on PATH (run install-full-suite-deps.sh)",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self._assert_in_cluster_k8s_path(r.stdout)
+
+    def _assert_in_cluster_k8s_path(self, out: str) -> None:
+        self.assertIn("name: fleet-api", out)
+        self.assertIn("serviceAccountName: fleet-api", out)
+        self.assertIn("SANDBOX_BACKEND", out)
+        self.assertIn("value: stub", out)
+        self.assertNotRegex(out, r"SANDBOX_BACKEND\n\s+value: k8s")
+        self.assertIn(
+            "http://api.agent-fleet.svc.cluster.local:8080",
+            out,
+        )
+        api_role = _role_named(out, "fleet-api")
+        self.assertIsNotNone(api_role, "fleet-api Role missing from built YAML")
+        self.assertNotIn("fleetsandboxes", api_role)
+        self.assertNotIn("pods", api_role)
+        self.assertNotIn("networkpolicies", api_role)
+        self.assertIn("name: fleet-host", out)
+        self.assertIn("serviceAccountName: fleet-host", out)
+        self.assertIn("name: zenohd", out)
+        self.assertIn("FLEET_HARNESS", out)
+        self.assertRegex(out, r"FLEET_HARNESS\n\s+value: mock")
+        self.assertIn("/usr/local/bin/fleet-driver", out)
+        self.assertIn("FLEET_BOOTSTRAP_SECRET", out)
+        host_role = _role_named(out, "fleet-host")
+        self.assertIsNotNone(host_role, "fleet-host Role missing from built YAML")
+        self.assertIn("fleetsandboxes", host_role)
+        self.assertNotIn("pods", host_role)
+        self.assertNotIn("networkpolicies", host_role)
 
     def test_api_nodeport_netpol_allows_port_8080_without_from(self):
         p = INFRA / "overlays" / "kind" / "api-nodeport-netpol.yaml"

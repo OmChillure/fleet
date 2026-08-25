@@ -116,7 +116,6 @@ def _behind_software(manifest: dict[str, Any] | None) -> dict[str, Any]:
         "git_sha": bake,
         "bins": {
             "fleet-host": host_sha,
-            "fleet-worker": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "fleet-driver": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         },
     }

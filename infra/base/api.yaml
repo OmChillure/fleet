@@ -31,6 +31,7 @@ spec:
         app.kubernetes.io/part-of: agent-fleet
         app.kubernetes.io/name: fleet-api
     spec:
+      serviceAccountName: fleet-api
       containers:
         - name: api
           image: agent-fleet-api:local
@@ -45,10 +46,13 @@ spec:
               value: "8080"
             - name: DATA_DIR
               value: /data
+            # Tick enqueues work_claims only. fleet-host creates FleetSandbox CRs.
+            # Guest binary is fleet-driver. Harness comes from the spawn claim
+            # (plane LLM → mock|grok), not from this process env.
             - name: SANDBOX_BACKEND
-              value: process
+              value: stub
             - name: PROCESS_WORKER_BIN
-              value: /usr/local/bin/fleet-worker
+              value: /usr/local/bin/fleet-driver
             - name: API_PUBLIC_BASE
               value: http://localhost:8080
             - name: UI_PUBLIC_BASE
@@ -74,6 +78,13 @@ spec:
                 secretKeyRef:
                   name: fleet-secrets
                   key: JWT_SECRET
+            - name: FLEET_BOOTSTRAP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: FLEET_BOOTSTRAP_SECRET
+            - name: ZENOH_LOCATOR
+              value: tcp/zenohd.agent-fleet.svc.cluster.local:7447
           volumeMounts:
             - name: data
               mountPath: /data

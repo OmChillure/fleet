@@ -32,6 +32,7 @@ pub async fn schedule_and_spawn(
     fleet_llm: &str,
     fleet_llm_model: &str,
     integrations: crate::sandbox::io::IntegrationHandle,
+    allow_local_spawn: bool,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -87,8 +88,15 @@ pub async fn schedule_and_spawn(
             );
             continue;
         }
-        // Control plane is runner #1. Local SANDBOX_BACKEND is that runner.
-        // Missing row / query error keeps today's fallback (take jobs).
+        // Production: control plane is not a runner. No host → leave ready.
+        if remote_host.is_none() && !allow_local_spawn {
+            tracing::info!(
+                task_id = %task.id,
+                "no assignable host; leaving task ready"
+            );
+            continue;
+        }
+        // Test-only: allow_local_spawn uses the in-process sandbox runtime.
         if remote_host.is_none() {
             match fleet_db::repos::plane_runners::get_or_default(store.pool(), project_id).await {
                 Ok(plane) if !plane.taking_native_jobs() => {
@@ -114,7 +122,7 @@ pub async fn schedule_and_spawn(
                     tracing::debug!(
                         error = %e,
                         project_id = %project_id,
-                        "plane runner settings unavailable; using local sandbox"
+                        "plane runner settings unavailable; no local spawn"
                     );
                 }
             }
@@ -191,18 +199,36 @@ pub async fn schedule_and_spawn(
             task_spec: Some(task.spec_md.clone()),
             persona_name: Some(persona.name.clone()),
             persona_md: Some(persona.body.clone()),
-            agent_backend: llm.backend,
-            agent_model: llm.model,
+            agent_backend: llm.backend.clone(),
+            agent_model: llm.model.clone(),
             io: integrations.clone(),
         };
         req.env = fleet_worker_env(&req, orchestrator_url);
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
+        // Guest is fleet-driver (ACP). Harness from the plane, else mock.
+        if req
+            .env
+            .get("FLEET_HARNESS")
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            let harness = match req.agent_backend.as_deref() {
+                Some("grok") => "grok",
+                _ => "mock",
+            };
+            req.env.insert("FLEET_HARNESS".into(), harness.into());
+        }
+        if let Some(model) = req.agent_model.as_deref().filter(|s| !s.is_empty()) {
+            req.env
+                .entry("FLEET_MODEL".into())
+                .or_insert_with(|| model.to_string());
+        }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
         }
-        // Optional real work payload for fleet-worker (shell command).
+        // Optional shell override (legacy; fleet-driver ignores this).
         if let Ok(cmd) = std::env::var("FLEET_WORK_CMD")
             && !cmd.trim().is_empty()
         {
@@ -220,6 +246,27 @@ pub async fn schedule_and_spawn(
 
         let work_dir_str = req.work_dir.to_string_lossy().into_owned();
         if let Some(chosen) = remote_host {
+            if worker_url_is_loopback(orchestrator_url)
+                && chosen.runtime == crate::store::HostRuntime::Container
+            {
+                tracing::warn!(
+                    url = %orchestrator_url,
+                    host_id = %chosen.id(),
+                    "refusing container assign: orchestrator URL is loopback"
+                );
+                store.complete_spawn_failure(assignment.session_id).await?;
+                apply_retry_after_failure(
+                    store,
+                    task.id,
+                    assignment.attempt,
+                    task.max_retries,
+                    false,
+                    crate::domain::ExitReason::SpawnFailed,
+                )
+                .await?;
+                outcome.spawn_failed += 1;
+                continue;
+            }
             if worker_url_is_loopback(orchestrator_url) {
                 tracing::warn!(
                     url = %orchestrator_url,
@@ -297,14 +344,30 @@ pub async fn schedule_and_spawn(
 }
 
 fn worker_url_is_loopback(url: &str) -> bool {
-    let rest = url.split("://").nth(1).unwrap_or(url);
-    let hostport = rest.split('/').next().unwrap_or(rest);
-    let host = hostport
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(hostport)
-        .trim_matches(|c| c == '[' || c == ']');
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    agent_fleet_contracts::url_is_loopback(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_detects_ipv4_ipv6_and_localhost() {
+        assert!(worker_url_is_loopback("http://127.0.0.1:8080"));
+        assert!(worker_url_is_loopback("http://localhost:8080/v1"));
+        assert!(
+            worker_url_is_loopback("http://[::1]:8080"),
+            "container guests cannot reach IPv6 loopback of the plane"
+        );
+        assert!(!worker_url_is_loopback(
+            "http://api.agent-fleet.svc.cluster.local:8080"
+        ));
+        assert!(!worker_url_is_loopback("http://10.0.0.8:8080"));
+        assert!(
+            worker_url_is_loopback("http://127.1.2.3:8080"),
+            "127.0.0.0/8 is loopback; container guests cannot reach it"
+        );
+    }
 }
 
 pub async fn apply_retry_after_failure(

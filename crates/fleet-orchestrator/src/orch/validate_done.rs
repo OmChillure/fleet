@@ -1,9 +1,8 @@
 //! Gate: a task is not `done_success` until the workspace proves it.
 //!
-//! Stub and k8s skip host file checks. k8s work lives in a pod emptyDir
-//! until artifact pull exists; HTTP status + CR phase complete the task.
-//! Process / local / docker must produce host `result.md` and meet
-//! `exists:` / `contains:` acceptance lines.
+//! Only `stub` skips file checks (in-process timer, no workspace). k8s/remote
+//! guests must still leave `result.md` (and acceptance) on the session work
+//! dir the plane can read. HTTP ok / CR phase is not proof.
 
 use std::path::Path;
 
@@ -68,7 +67,7 @@ pub fn validate_task_done(
     runtime_backend: &str,
 ) -> DoneCheck {
     let backend = runtime_backend.trim().to_ascii_lowercase();
-    if backend == "stub" || backend == "k8s" || backend == "kubernetes" || backend.is_empty() {
+    if backend == "stub" {
         return DoneCheck::pass();
     }
     if !work_dir.exists() {
@@ -274,16 +273,27 @@ mod tests {
     }
 
     #[test]
-    fn k8s_skips_host_result_md() {
+    fn k8s_and_remote_still_require_proof_of_work() {
+        // Product gate: a task is not done_success until the workspace proves it.
+        // HTTP ok / CR phase alone is not proof. Missing result.md must fail
+        // even when the guest ran off-box (remote / k8s).
         let dir = tempdir().unwrap();
-        let c = validate_task_done(&task(json!([])), dir.path(), "k8s");
-        assert!(c.ok, "{c:?}");
-        let missing = validate_task_done(
-            &task(json!([])),
-            &dir.path().join("no-such-session"),
-            "kubernetes",
-        );
-        assert!(missing.ok, "{missing:?}");
+        for backend in ["k8s", "kubernetes", "remote"] {
+            let missing_dir = validate_task_done(
+                &task(json!([])),
+                &dir.path().join("no-such-session"),
+                backend,
+            );
+            assert!(
+                !missing_dir.ok,
+                "{backend} must not pass when the session dir is gone: {missing_dir:?}"
+            );
+            let empty = validate_task_done(&task(json!([])), dir.path(), backend);
+            assert!(
+                !empty.ok,
+                "{backend} must not pass without result.md: {empty:?}"
+            );
+        }
     }
 
     #[test]

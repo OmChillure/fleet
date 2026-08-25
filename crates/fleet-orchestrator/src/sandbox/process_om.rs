@@ -51,33 +51,6 @@ impl SandboxRuntime for ProcessRuntime {
     async fn spawn(&self, req: SpawnRequest) -> Result<RuntimeHandle, SandboxError> {
         materialize_workspace(&req).await?;
 
-        if req.agent_backend.is_some() {
-            let handle = RuntimeHandle {
-                backend: "process".into(),
-                id: req.session_id.to_string(),
-            };
-            let job = super::agent_loop::AgentJob::start(&req);
-            let mut g = self.inner.lock().await;
-            g.insert(
-                handle.id.clone(),
-                ProcessEntry {
-                    project_id: req.project_id,
-                    handle: handle.clone(),
-                    child: None,
-                    agent: Some(job),
-                    exit_code: None,
-                    destroyed: false,
-                },
-            );
-            tracing::info!(
-                session_id = %req.session_id,
-                profile = %req.worker_profile,
-                persona = ?req.persona_name,
-                "process sandbox spawned (LLM agent loop)"
-            );
-            return Ok(handle);
-        }
-
         let script = req.work_dir.join("fleet_worker.sh");
         let mut cmd = Command::new("bash");
         cmd.arg(&script)
@@ -359,5 +332,58 @@ echo hello-from-sandbox > out.txt
             rt.state(&h).await.unwrap(),
             SandboxState::Exited { code: Some(0) }
         ));
+    }
+
+    #[tokio::test]
+    async fn llm_backend_must_still_run_the_guest_script() {
+        // Product: local sandbox guest is a process (fleet_worker.sh / fleet-driver),
+        // not an in-process AgentJob. agent_backend must not skip the child.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().to_path_buf();
+        let rt = ProcessRuntime::new();
+        let req = SpawnRequest {
+            session_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            board_task_id: Uuid::new_v4(),
+            plan_task_id: "t1".into(),
+            worker_profile: "coding".into(),
+            worker_token: "tok".into(),
+            work_dir: work.clone(),
+            env: HashMap::new(),
+            timeout: Duration::from_secs(30),
+            task_title: Some("demo".into()),
+            task_summary: Some("s".into()),
+            task_spec: Some(
+                r#"
+Do it.
+
+```bash
+echo hello-from-guest > out.txt
+```
+"#
+                .into(),
+            ),
+            persona_name: None,
+            persona_md: None,
+            agent_backend: Some("grok".into()),
+            agent_model: None,
+            io: crate::sandbox::io::IntegrationHandle::none(),
+        };
+        let h = rt.spawn(req).await.unwrap();
+        for _ in 0..80 {
+            if matches!(rt.state(&h).await.unwrap(), SandboxState::Exited { .. }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let out = tokio::fs::read_to_string(work.join("out.txt"))
+            .await
+            .unwrap_or_default();
+        let _ = rt.destroy(&h).await;
+        assert!(
+            out.contains("hello-from-guest"),
+            "agent_backend must not skip the guest script (got out={out:?})"
+        );
     }
 }

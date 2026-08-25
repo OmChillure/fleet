@@ -48,6 +48,8 @@ EXPECTED_SCENES = (
     "dashboard",
     "lab",
     "kind",
+    "k8s",
+    "unify",
 )
 
 # Human walkthrough pause titles (scripts/human-test.sh cmd_guide).
@@ -68,10 +70,12 @@ EXPECTED_PAUSE_TITLES = (
     "Chat",
     "Fleet",
     "Sandboxes",
+    "Kubernetes sandboxes",
     "Cases",
     "Inbox",
     "Chat history",
     "User menu",
+    "Unify runners",
     "This merge request",
 )
 

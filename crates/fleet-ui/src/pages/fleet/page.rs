@@ -241,7 +241,10 @@ pub fn Fleet(workspace_id: String) -> Element {
                         }
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
-                        "workspace {workspace_id} · sandbox {sandbox_backend}"
+                        "workspace {workspace_id} · jobs run on paired hosts · plane is not a runner"
+                    }
+                    p { class: "mt-0.5 text-xs text-[var(--app-muted)]",
+                        "SANDBOX_BACKEND={sandbox_backend} is display-only."
                     }
                 }
                 div { class: "flex flex-wrap gap-2",
@@ -464,9 +467,8 @@ pub fn Fleet(workspace_id: String) -> Element {
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Sandboxes / sessions" }
                 if sessions().is_empty() {
                     p { class: "text-sm text-[var(--app-muted)]",
-                        "No worker sessions yet. Tick a run to spawn a "
-                        "{sandbox_backend}"
-                        " sandbox."
+                        "No worker sessions yet. Pair a host under Runners, then tick. "
+                        "The control plane does not spawn a local stub guest."
                     }
                 } else {
                     div { class: "flex flex-col gap-2",
@@ -642,11 +644,11 @@ pub fn Fleet(workspace_id: String) -> Element {
                 "Uses your login session (cookies). Project id = workspace id. "
                 "After starting a run, press "
                 strong { "Run until done" }
-                " (or tick manually). Process sandbox: set "
-                span { class: "font-mono", "SANDBOX_BACKEND=process" }
-                " and "
-                span { class: "font-mono", "PROCESS_WORKER_BIN" }
-                " to the fleet-worker binary."
+                " (or tick manually). Guests are "
+                span { class: "font-mono", "fleet-driver" }
+                " on a paired "
+                span { class: "font-mono", "fleet-host" }
+                " (process, container, or kube pod)."
             }
         }
     }

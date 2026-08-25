@@ -11,6 +11,8 @@ pub struct FleetSettings {
     pub max_agents_cap: i32,
     #[serde(default)]
     pub sandbox_backend: String,
+    #[serde(default = "default_process")]
+    pub min_isolation: String,
     #[serde(default = "default_off")]
     pub fleet_llm: String,
     #[serde(default)]
@@ -31,11 +33,16 @@ fn default_off() -> String {
     "off".into()
 }
 
+fn default_process() -> String {
+    "process".into()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FleetSettingsPatch {
     pub max_agents: i32,
     pub fleet_llm: String,
     pub fleet_llm_model: String,
+    pub min_isolation: String,
 }
 
 fn client() -> reqwest::Client {

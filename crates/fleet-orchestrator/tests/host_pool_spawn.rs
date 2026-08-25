@@ -29,6 +29,8 @@ fn host(
         advertised_max_concurrent: None,
         max_job_timeout_s: 3600,
         isolation: RunnerIsolation::Native,
+        last_seen_at: None,
+        workspace_id: Uuid::nil(),
     }
 }
 
@@ -60,17 +62,19 @@ fn sample_req(token: &str) -> SpawnRequest {
 }
 
 #[test]
-fn pick_uses_host_in_v1_even_when_container_advertised() {
+fn pick_uses_weakest_isolation_that_meets_process_need() {
     let both = host(true, true, true, true, 4);
     let chosen = pick_assignable_host(&[both.clone()], &HashMap::new()).unwrap();
-    assert_eq!(chosen.runtime, HostRuntime::Host);
-    assert_eq!(chosen.runtime.as_str(), "host");
+    assert_eq!(
+        chosen.runtime,
+        HostRuntime::Host,
+        "need=process → cheapest offer is process, not container"
+    );
 
     let container_only = host(true, true, false, true, 4);
-    assert!(
-        pick_assignable_host(&[container_only], &HashMap::new()).is_none(),
-        "container/k3d is not a v1 executor"
-    );
+    let chosen = pick_assignable_host(&[container_only], &HashMap::new())
+        .expect("container-only host must be assignable when it meets process need");
+    assert_eq!(chosen.runtime, HostRuntime::Container);
 
     let host_only = host(true, true, true, false, 4);
     let chosen = pick_assignable_host(&[host_only], &HashMap::new()).unwrap();
@@ -96,6 +100,40 @@ fn pick_skips_full_host_and_disallowed() {
     assert_eq!(chosen.runtime, HostRuntime::Host);
     let over = host(true, true, true, true, 1024);
     assert!(host_at_capacity(256, &over));
+}
+
+#[test]
+fn pick_lowest_utilization_not_list_order() {
+    // Product: among hosts that meet isolation, pick lowest load/cap.
+    // A is 3/4 and listed first; B is 0/4. Must pick B.
+    let busy = host(true, false, true, false, 4);
+    let idle = host(true, false, true, false, 4);
+    let mut inflight = HashMap::new();
+    inflight.insert(busy.id, 3);
+    let chosen = pick_assignable_host(&[busy.clone(), idle.clone()], &inflight)
+        .expect("idle host is under capacity");
+    assert_eq!(
+        chosen.id(),
+        idle.id,
+        "must pick lowest load/cap, not the first under-capacity host in list order"
+    );
+    let chosen_rev = pick_assignable_host(&[idle.clone(), busy], &inflight).unwrap();
+    assert_eq!(chosen_rev.id(), idle.id, "order must not change the winner");
+}
+
+#[test]
+fn pick_equal_load_prefers_oldest_heartbeat_not_newest_first() {
+    // SQL list_assignable is last_seen DESC (newest first). Product tie-break
+    // is oldest heartbeat (least recently used), not "whoever is first in that list".
+    let newer = host(true, false, true, false, 4);
+    let older = host(true, false, true, false, 4);
+    let chosen = pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new())
+        .expect("both under capacity");
+    assert_eq!(
+        chosen.id(),
+        older.id,
+        "equal load: pick the older heartbeat (last in newest-first list), not the newest"
+    );
 }
 
 #[test]

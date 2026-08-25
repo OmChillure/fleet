@@ -1,0 +1,51 @@
+# Control-plane Zenoh router. Hosts and the API connect as clients.
+# Do not put a locator in untrusted sandbox pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zenohd
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: zenohd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zenohd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-fleet
+        app.kubernetes.io/name: zenohd
+    spec:
+      containers:
+        - name: zenohd
+          image: eclipse/zenoh:1.2.1
+          imagePullPolicy: IfNotPresent
+          args: ["--listen", "tcp/0.0.0.0:7447"]
+          ports:
+            - containerPort: 7447
+              name: zenoh
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zenohd
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: zenohd
+spec:
+  selector:
+    app.kubernetes.io/name: zenohd
+  ports:
+    - name: zenoh
+      port: 7447
+      targetPort: zenoh

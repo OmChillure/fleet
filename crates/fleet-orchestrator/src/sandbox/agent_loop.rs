@@ -1474,6 +1474,19 @@ mod tests {
     }
 
     #[test]
+    fn plan_grok_wins_over_workspace_ollama_and_off() {
+        let w = resolve_worker_llm(Some("grok"), Some("grok-4.5"), "ollama", "llama3.2");
+        assert_eq!(
+            w.backend.as_deref(),
+            Some("grok"),
+            "plan LLM is the product source of truth, not Settings / API env"
+        );
+        assert_eq!(w.model.as_deref(), Some("grok-4.5"));
+        let off = resolve_worker_llm(Some("grok"), Some("grok-4.5"), "off", "");
+        assert_eq!(off.backend.as_deref(), Some("grok"));
+    }
+
+    #[test]
     fn normalize_provider_maps_aliases_and_off() {
         assert_eq!(normalize_provider(""), None);
         assert_eq!(normalize_provider("off"), None);

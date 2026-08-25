@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::config::LocalConfig;
 
 /// Logical package names (no `.exe`). On-disk Windows names add the suffix.
-pub const PACKAGE_BINS: [&str; 3] = ["fleet-host", "fleet-worker", "fleet-driver"];
+pub const PACKAGE_BINS: [&str; 2] = ["fleet-host", "fleet-driver"];
 
 /// Compile-time tree-id (`FLEET_GIT_SHA`), same bake as fleet-server.
 /// `build.rs` reruns rustc when the env changes so a cached object without
@@ -31,9 +31,6 @@ fn bin_shas(cfg: &LocalConfig) -> Value {
     let host = std::env::current_exe().ok();
     json!({
         "fleet-host": host.as_deref().and_then(file_sha256),
-        "fleet-worker": resolve_bin(&cfg.fleet_worker_bin, host.as_deref())
-            .as_deref()
-            .and_then(file_sha256),
         "fleet-driver": resolve_bin(&cfg.fleet_driver_bin, host.as_deref())
             .as_deref()
             .and_then(file_sha256),

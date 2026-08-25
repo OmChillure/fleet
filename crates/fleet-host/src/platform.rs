@@ -182,9 +182,51 @@ pub fn advertised_host(cfg: &LocalConfig) -> bool {
     cfg.run_host
 }
 
-/// `run_container` and the configured backend binary (`k3d` or `docker`) on PATH.
+/// Token + `KUBERNETES_SERVICE_HOST` — the in-cluster kube client path.
+pub fn in_cluster() -> bool {
+    std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
+        && Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").is_file()
+}
+
+/// `KUBECONFIG` paths, else `~/.kube/config`.
+pub fn kubeconfig_present() -> bool {
+    if let Ok(raw) = std::env::var("KUBECONFIG") {
+        let split = if cfg!(windows) { ';' } else { ':' };
+        if raw.split(split).any(|p| {
+            let p = p.trim();
+            !p.is_empty() && Path::new(p).is_file()
+        }) {
+            return true;
+        }
+    }
+    crate::paths::home_dir()
+        .join(".kube")
+        .join("config")
+        .is_file()
+}
+
+pub fn hypervisor_bins() -> &'static [&'static str] {
+    &[
+        "firecracker",
+        "qemu-system-x86_64",
+        "qemu-system-aarch64",
+        "qemu-system-arm",
+        "qemu",
+    ]
+}
+
+pub fn hypervisor_on_path() -> bool {
+    hypervisor_bins().iter().any(|b| command_exists(b))
+}
+
+/// Docker CLI or kube (in-cluster / kubeconfig) can run container isolation.
+pub fn container_tools_available() -> bool {
+    in_cluster() || command_exists("docker") || kubeconfig_present()
+}
+
+/// `run_container` and a container executor (docker or kube) is available.
 pub fn advertised_container(cfg: &LocalConfig) -> bool {
-    cfg.run_container && command_exists(cfg.container_backend.required_binary())
+    cfg.run_container && container_tools_available()
 }
 
 pub fn backend_ready(backend: ContainerBackend) -> bool {

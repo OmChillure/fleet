@@ -160,7 +160,7 @@ Do this on each id in the matrix
 3. **Pair.** Owner **Add worker** (or `POST /api/workspaces/{id}/worker-hosts`).
    Copy the Unix or Windows command for this OS.
 4. **Install.** Paste the command on the guest. It must install
-   `fleet-host`, `fleet-worker`, `fleet-driver`, pair, and start the
+   `fleet-host`, `fleet-driver`, pair, and start the
    daemon with no second command.
 5. **Ping.** `GET …/worker-hosts` shows the box **online**, last seen
    recent, hostname/platform match, 8-hex id set, specs if the OS can

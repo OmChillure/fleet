@@ -185,6 +185,8 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!("background ticket inbox poller started");
     }
 
+    fleet_server::bus::start_bus_tasks(state.db.clone());
+
     let app = build_http_app(state, orch, &config)?;
 
     let addr: SocketAddr = config.bind;

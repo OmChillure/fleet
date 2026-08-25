@@ -39,7 +39,6 @@ TOAST = "Update requested. The worker applies it on the next heartbeat if it can
 BEHIND_SHA = "0000000000000000000000000000000000000000"
 BEHIND_BINS = {
     "fleet-host": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-    "fleet-worker": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
     "fleet-driver": "0123456701234567012345670123456701234567012345670123456701234567",
 }
 

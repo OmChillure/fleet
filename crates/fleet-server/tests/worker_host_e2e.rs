@@ -100,7 +100,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         auto_sync_external: false,
         sandbox_backend: "stub".into(),
         stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-worker".into()],
+        process_worker_argv: vec!["fleet-driver".into()],
         k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
@@ -802,9 +802,10 @@ async fn tick_assigns_remote_host_instead_of_local_stub() {
 }
 
 #[tokio::test]
-async fn tick_without_host_uses_local_sandbox() {
-    let app = app_with_state().await.0;
+async fn tick_without_host_leaves_ready() {
+    let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
 
     let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
@@ -819,29 +820,911 @@ async fn tick_without_host_uses_local_sandbox() {
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
 
+    let assignable = fleet_db::repos::worker_hosts::list_assignable(
+        &state.db,
+        workspace_id,
+        chrono::Duration::seconds(90),
+    )
+    .await
+    .expect("list_assignable");
+
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
-    assert!(
-        tick.body["spawned"].as_u64().unwrap_or(0) >= 1,
-        "tick must spawn locally: {}",
-        tick.body
-    );
 
     let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
     assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
-    let sess = sessions.body["sessions"]
-        .as_array()
-        .expect("sessions")
-        .first()
-        .unwrap_or_else(|| panic!("expected a session: {}", sessions.body));
+    let list = sessions.body["sessions"].as_array().cloned().unwrap_or_default();
+
+    if assignable.is_empty() {
+        assert_eq!(
+            tick.body["spawned"].as_u64().unwrap_or(0),
+            0,
+            "no assignable host → production must not local-spawn: {}",
+            tick.body
+        );
+        assert!(
+            list.is_empty(),
+            "no assignable host → no session: {}",
+            sessions.body
+        );
+    } else {
+        // A cluster host from another workspace is assignable by product.
+        // That is not a license to local-spawn stub.
+        for s in &list {
+            assert_eq!(
+                s["runtime_backend"], "remote",
+                "hostless workspace must not fall back to stub/process: {}",
+                sessions.body
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn complete_ok_false_is_spawn_failure_not_success() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "fail-box").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    let plan_id =
+        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(workspace_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    let assignment = state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            workspace_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    let session_id = assignment.session_id;
+    state
+        .orch
+        .store
+        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
+        .await
+        .expect("enq");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "spawn_session".into(),
+            payload: json!({
+                "session_id": session_id,
+                "board_task_id": root.id,
+                "host_id": host_id,
+            }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine,
+        Some(json!({ "lease_token": token, "ok": false, "error": "exec failed" })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    let task = state
+        .orch
+        .store
+        .get_task(workspace_id, root.id)
+        .await
+        .expect("get")
+        .expect("task");
     assert_ne!(
-        sess["runtime_backend"], "remote",
-        "no paired host → local SANDBOX_BACKEND, not remote: {}",
-        sessions.body
+        task.status, "done_success",
+        "ok=false must not succeed: {}",
+        task.status
     );
+    assert_ne!(
+        task.status, "in_progress",
+        "ok=false must not look like a live job: {}",
+        task.status
+    );
+    assert!(
+        matches!(
+            task.status.as_str(),
+            "retry_wait" | "done_failed" | "failed" | "queued" | "ready"
+        ),
+        "ok=false must apply spawn-failure policy, got {}",
+        task.status
+    );
+}
+
+#[tokio::test]
+async fn signal_session_complete_does_not_spawn_fail() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "sig-box").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    let plan_id =
+        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(workspace_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    let assignment = state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            workspace_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    let session_id = assignment.session_id;
+    let before = state
+        .orch
+        .store
+        .get_task(workspace_id, root.id)
+        .await
+        .expect("get")
+        .expect("task");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "signal_session".into(),
+            payload: json!({
+                "kind": "signal_session",
+                "session_id": session_id,
+                "board_task_id": root.id,
+                "host_id": host_id,
+            }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "{}", lease.body);
     assert_eq!(
-        sess["runtime_backend"], "stub",
-        "this fixture's local backend is stub: {}",
-        sessions.body
+        lease.body["claim"]["payload"]["kind"].as_str(),
+        Some("signal_session")
+    );
+    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine,
+        Some(json!({ "lease_token": token, "ok": false, "error": "no live child" })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    let after = state
+        .orch
+        .store
+        .get_task(workspace_id, root.id)
+        .await
+        .expect("get")
+        .expect("task");
+    assert_eq!(
+        after.status, before.status,
+        "signal complete must not apply spawn failure"
+    );
+}
+
+#[tokio::test]
+async fn cluster_host_completes_claim_in_other_workspace() {
+    let (app, state) = app_with_state().await;
+    let (_a, jar_a, ws_a) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar_a, &ws_a, "cluster").await;
+    fleet_db::repos::worker_hosts::patch_cp_settings(
+        &state.db,
+        host_id,
+        &fleet_db::models::HostCpSettings {
+            name: None,
+            enabled: None,
+            paused: None,
+            drain: None,
+            isolation: None,
+            allow_host: None,
+            allow_container: None,
+            max_concurrent: None,
+            max_job_timeout_s: None,
+            labels: Some(vec!["cluster".into()]),
+            auto_update: None,
+            request_update: None,
+        },
+    )
+    .await
+    .expect("label cluster");
+    let (_b, jar_b, ws_b) = signup_and_login(&app).await;
+    let ws_b_id = Uuid::parse_str(&ws_b).expect("ws b");
+    call(&app, "GET", &fleet(&ws_b, ""), Some(&jar_b), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws_b, "/runs/fixture"),
+        Some(&jar_b),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    let plan_id =
+        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(ws_b_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(ws_b_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    let assignment = state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            ws_b_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    let session_id = assignment.session_id;
+    state
+        .orch
+        .store
+        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
+        .await
+        .expect("enq");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id: ws_b_id,
+            kind: "spawn_session".into(),
+            payload: json!({
+                "session_id": session_id,
+                "board_task_id": root.id,
+                "host_id": host_id,
+            }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+    assert_eq!(
+        lease.body["claim"]["id"].as_str(),
+        Some(claim_id.to_string().as_str()),
+        "{}",
+        lease.body
+    );
+    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine,
+        Some(json!({ "lease_token": token, "ok": true })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "complete cross-ws: {}", done.body);
+    let home_task = state
+        .orch
+        .store
+        .get_task(Uuid::parse_str(&ws_a).expect("ws a"), root.id)
+        .await
+        .expect("get home");
+    assert!(
+        home_task.is_none(),
+        "cluster complete must not write the host's home workspace: {home_task:?}"
+    );
+    let foreign = state
+        .orch
+        .store
+        .get_task(ws_b_id, root.id)
+        .await
+        .expect("get foreign")
+        .expect("task lives in the claim workspace");
+    assert_ne!(
+        foreign.status, "done_success",
+        "lease complete is not proof of work; inbox/validate_done is: {}",
+        foreign.status
+    );
+
+    let job_token = assignment.worker_token.clone();
+    let worker_base = format!("/v1/projects/{ws_b}/workers/{session_id}");
+    let status = call_bearer(
+        &app,
+        "POST",
+        &format!("{worker_base}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 1,
+            "status": "success",
+            "reason": Value::Null
+        })),
+    )
+    .await;
+    assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
+    let tick = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    let after = state
+        .orch
+        .store
+        .get_task(ws_b_id, root.id)
+        .await
+        .expect("get after")
+        .expect("task");
+    assert_ne!(
+        after.status, "done_success",
+        "remote guest success without result.md / artifacts is not done: {}",
+        after.status
+    );
+
+    let stale = call_bearer(
+        &app,
+        "POST",
+        &format!("{worker_base}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 2,
+            "status": "success",
+            "result_md": "# Result\n\nACP end_turn. hello from mock agent.\nWork is in work/.\n",
+            "files": { "work/.keep": "ok" }
+        })),
+    )
+    .await;
+    assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
+    let tick2 = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
+    assert_eq!(tick2.status, StatusCode::OK, "tick2: {}", tick2.body);
+    let after_stale = state
+        .orch
+        .store
+        .get_task(ws_b_id, root.id)
+        .await
+        .expect("get after stale")
+        .expect("task");
+    assert_ne!(
+        after_stale.status, "done_success",
+        "success from a session that no longer holds the claim must not complete: {}",
+        after_stale.status
+    );
+}
+
+#[tokio::test]
+async fn remote_success_with_result_md_is_done() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "proof-box").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(workspace_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    let assignment = state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            workspace_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    let session_id = assignment.session_id;
+    state
+        .orch
+        .store
+        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
+        .await
+        .expect("enq");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "spawn_session".into(),
+            payload: json!({
+                "session_id": session_id,
+                "board_task_id": root.id,
+                "host_id": host_id,
+            }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "{}", lease.body);
+    let job_token = assignment.worker_token.clone();
+    let status = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{session_id}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 1,
+            "status": "success",
+            "result_md": "# Result\n\nACP end_turn. hello from mock agent.\n",
+            "files": { "work/.keep": "ok" }
+        })),
+    )
+    .await;
+    assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    let proven = state
+        .orch
+        .store
+        .get_task(workspace_id, root.id)
+        .await
+        .expect("get")
+        .expect("task");
+    assert_eq!(
+        proven.status, "done_success",
+        "guest result.md + work/ on the claiming session must pass validate_done: {}",
+        proven.status
+    );
+}
+
+#[tokio::test]
+async fn complete_rejects_bad_machine_token() {
+    let (app, _) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (_host_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "tok-box").await;
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{}/complete", Uuid::new_v4()),
+        "flm_not-a-real-token",
+        Some(json!({
+            "lease_token": Uuid::new_v4().to_string(),
+            "ok": true
+        })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::UNAUTHORIZED, "{}", done.body);
+}
+
+#[tokio::test]
+async fn complete_rejects_wrong_lease_token() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "lease-box").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(workspace_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            workspace_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "spawn_session".into(),
+            payload: json!({ "session_id": Uuid::new_v4(), "host_id": host_id }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "{}", lease.body);
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine,
+        Some(json!({
+            "lease_token": Uuid::new_v4().to_string(),
+            "ok": true
+        })),
+    )
+    .await;
+    assert_eq!(
+        done.status,
+        StatusCode::CONFLICT,
+        "wrong lease token must not complete: {}",
+        done.body
+    );
+}
+
+#[tokio::test]
+async fn complete_rejects_another_hosts_claim() {
+    let (app, state) = app_with_state().await;
+    let (_a, jar, ws) = signup_and_login(&app).await;
+    let (host_a, machine_a) = create_pair_and_heartbeat(&app, &jar, &ws, "box-a").await;
+    let (_host_b, machine_b) = create_pair_and_heartbeat(&app, &jar, &ws, "box-b").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "spawn_session".into(),
+            payload: json!({ "session_id": Uuid::new_v4(), "host_id": host_a }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine_a,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(lease.status, StatusCode::OK, "{}", lease.body);
+    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    let stolen = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine_b,
+        Some(json!({ "lease_token": token, "ok": true })),
+    )
+    .await;
+    assert!(
+        stolen.status == StatusCode::CONFLICT
+            || stolen.status == StatusCode::FORBIDDEN
+            || stolen.status == StatusCode::UNAUTHORIZED
+            || stolen.status == StatusCode::NOT_FOUND,
+        "host B must not complete host A's lease: {} {}",
+        stolen.status,
+        stolen.body
+    );
+}
+
+#[tokio::test]
+async fn signal_after_done_success_does_not_revert() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "sig-done").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(workspace_id, plan_id)
+        .await
+        .expect("materialize");
+    let tasks = state
+        .orch
+        .store
+        .list_tasks_slim(workspace_id, None)
+        .await
+        .expect("tasks");
+    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
+    state
+        .orch
+        .store
+        .update_task_status(root.id, "queued", "ready", None)
+        .await
+        .expect("ready");
+    let assignment = state
+        .orch
+        .store
+        .begin_spawn_assignment(
+            root.id,
+            workspace_id,
+            root.run_id,
+            &root.worker_profile,
+            "remote",
+            None,
+        )
+        .await
+        .expect("assign")
+        .expect("cas");
+    state
+        .orch
+        .store
+        .apply_task_terminal(root.id, assignment.session_id, "done_success", None, 1)
+        .await
+        .expect("done");
+    let claim_id = Uuid::new_v4();
+    fleet_db::repos::work_claims::enqueue(
+        &state.db,
+        &fleet_db::NewWorkClaim {
+            id: claim_id,
+            workspace_id,
+            kind: "signal_session".into(),
+            payload: json!({
+                "kind": "signal_session",
+                "session_id": assignment.session_id,
+                "board_task_id": root.id,
+                "host_id": host_id,
+            }),
+            max_attempts: 3,
+            available_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("claim");
+    let lease = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/lease",
+        &machine,
+        Some(json!({})),
+    )
+    .await;
+    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
+        &machine,
+        Some(json!({ "lease_token": token, "ok": false, "error": "already gone" })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+    let after = state
+        .orch
+        .store
+        .get_task(workspace_id, root.id)
+        .await
+        .expect("get")
+        .expect("task");
+    assert_eq!(
+        after.status, "done_success",
+        "signal after done_success must not reopen or fail the task"
+    );
+}
+
+#[tokio::test]
+async fn min_isolation_container_does_not_assign_process_only_host() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (host_id, _) = create_pair_and_heartbeat(&app, &jar, &ws, "proc-only").await;
+    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let patched = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        Some(&jar),
+        Some(json!({ "min_isolation": "container" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(patched.body["min_isolation"], "container");
+    let fx = call(
+        &app,
+        "POST",
+        &fleet(&ws, "/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
+    assert_eq!(
+        tick.body["spawned"].as_u64().unwrap_or(0),
+        0,
+        "process-only host must not take a container workspace: {}",
+        tick.body
+    );
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    let sessions = state
+        .orch
+        .store
+        .load_board_snapshot(workspace_id)
+        .await
+        .expect("snap");
+    let handle = format!("host:{host_id}");
+    assert!(
+        sessions
+            .sessions
+            .iter()
+            .all(|s| s.runtime_handle.as_deref() != Some(handle.as_str())),
+        "process-only host must not be chosen for container need: {:?}",
+        sessions.sessions
     );
 }

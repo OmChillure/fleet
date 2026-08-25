@@ -113,9 +113,8 @@ server: _require-env
 ui:
     dx serve --package fleet-ui --port {{ ui_port }}
 
-# Standalone orchestrator only (HTTP_ADDR from .env.local, default :8081).
-orch: _require-env
-    cargo run -p fleet-orchestrator
+# Orchestrator is a library inside fleet-server (no standalone binary).
+orch: server
 
 # Scripted orch demo (ADMIN_TOKEN + running orch/server with /v1).
 demo scenario="happy":

@@ -93,11 +93,10 @@ norm_sha() {
 install_bins_from_cp() {
     info "this machine is a self-hosted worker"
     info "  fleet-host   stays up; pairs and takes jobs"
-    info "  fleet-worker runs each job"
-    info "  fleet-driver runs jobs that use an agent harness (Grok)"
+    info "  fleet-driver runs each job"
     base="$ORIGIN/install/worker/bin/$PLATFORM"
     ok=0
-    for bin in fleet-host fleet-worker fleet-driver; do
+    for bin in fleet-host fleet-driver; do
         dest="$BIN_DIR/$bin"
         want=""
         info "checking $bin"
@@ -154,17 +153,12 @@ install_bins_from_source() {
         fi
     fi
     [ -n "$src" ] || die "set FLEET_REPO to the agent-fleet checkout to build from source"
-    info "building fleet-host + fleet-worker + fleet-driver from $src"
-    (cd "$src" && cargo build --release -p fleet-host -p fleet-orchestrator -p fleet-driver)
+    info "building fleet-host + fleet-driver from $src"
+    (cd "$src" && cargo build --release -p fleet-host -p fleet-driver)
     # mv over a running dest works; cp does not (ETXTBSY).
     cp "$src/target/release/fleet-host" "$BIN_DIR/fleet-host.tmp"
     chmod 755 "$BIN_DIR/fleet-host.tmp"
     mv "$BIN_DIR/fleet-host.tmp" "$BIN_DIR/fleet-host"
-    if [ -f "$src/target/release/fleet-worker" ]; then
-        cp "$src/target/release/fleet-worker" "$BIN_DIR/fleet-worker.tmp"
-        chmod 755 "$BIN_DIR/fleet-worker.tmp"
-        mv "$BIN_DIR/fleet-worker.tmp" "$BIN_DIR/fleet-worker"
-    fi
     if [ -f "$src/target/release/fleet-driver" ]; then
         cp "$src/target/release/fleet-driver" "$BIN_DIR/fleet-driver.tmp"
         chmod 755 "$BIN_DIR/fleet-driver.tmp"

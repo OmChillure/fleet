@@ -19,8 +19,7 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 | **Chat tools (control plane)** | Server-side functions the model invokes | Read fleet state, launch plans/tasks, query integrations, commit/PR on GitHub. Tokens never leave the control plane. |
 | **Orchestrator tick** | Background loop + on-demand `POST …/tick` | Lock project → inbox → cancel → HITL resume → materialize → deps → spawn → stuck/kill → rollup → reap → optional external sync → wipe old workdirs. |
 | **Sandbox runtime** | `stub` / `process` / `local\|shell` / `docker` / `k8s` | Spawn, signal (TERM/KILL), destroy, report state, list live handles. |
-| **Process worker** | `fleet-worker` binary (`SANDBOX_BACKEND=process`) | Heartbeat + status to `/v1`, run `FLEET_WORK_CMD` / `run.sh` / write artifacts from spec. |
-| **Process driver** | `fleet-driver` (`FLEET_HARNESS=mock\|grok`) | Same `FLEET_*` contract as `fleet-worker`, plus ACP harness (mock or Grok Build). Clones `FLEET_REPO_URL` when set. |
+| **Process driver** | `fleet-driver` (`FLEET_HARNESS=mock\|grok`) | Heartbeat + status to `/v1`, ACP harness (mock or Grok Build). Clones `FLEET_REPO_URL` when set. |
 | **Sandbox-lab driver** | `fleet-sandbox-driver` in Compose | HMAC handshake, provision volume, drive OpenCode / Pi / Codex / Grok over ACP, report on Redis. |
 | **Workspace agent** | Python in the lab workspace container | Signed `provision` (git clone) and named allowlisted tools. No free shell unless `FLEET_ALLOW_RAW_EXEC`. |
 | **Harness LLM** | OpenCode, Pi, Codex, Grok inside the lab image | Talk ACP to the driver; only see the job volume and allowlisted tools. |
@@ -56,10 +55,10 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 
  Tick → SandboxRuntime
     ├── stub      in-process timer
-    ├── process   spawn fleet-worker (or PROCESS_WORKER_BIN)
+    ├── process   spawn fleet-driver (or PROCESS_WORKER_BIN)
     ├── local     bash commands.sh / fleet_worker.sh (Om path)
     ├── docker    docker run (no --rm; exit file)
-    └── k8s       create FleetSandbox CR (operator → pod)
+    └── k8s       work_claims → fleet-host → FleetSandbox CR (operator → pod)
 
  Process worker/driver ──HTTP──▶ /v1/.../heartbeat|status
 
@@ -69,7 +68,7 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 
  Kind cluster
     UI + API + Postgres + operator
-    FleetSandbox CR → Pod (fleet-worker) + NetworkPolicy
+    FleetSandbox CR → Pod (fleet-driver + mock-acp-agent) + NetworkPolicy
 ```
 
 Secrets rule: OAuth tokens and integration credentials stay on `fleet-server`. Sandboxes receive only `FLEET_*` env, task files, and (lab) HMAC-signed tool maps.
@@ -434,7 +433,7 @@ Wrong worker token → 401. Session in another project → 404.
 6. **Materialize** accepted, non-cancelled, not-yet-materialized plans into board tasks.
 7. **Deps** — `queued` tasks whose deps are all `done_success` → `ready`; failed dep → `done_failed`.
 8. **Promote** `retry_wait` whose backoff elapsed → `ready`.
-9. **Spawn** — among `ready` tasks, fill capacity (`max_agents`; sessions in `spawning|healthy|stuck|killing` hold a slot). For each: create session, materialize workdir (prompt, spec, optional git isolate / clone), `runtime.spawn`. Failure → `failed_spawn`, task failed/retry.
+9. **Spawn** — among `ready` tasks, fill capacity (`max_agents`; sessions in `spawning|healthy|stuck|killing` hold a slot). For each assignable host: create session, materialize payload, enqueue `work_claims.spawn_session`. No host → leave ready. Failure → `failed_spawn`, task failed/retry.
 10. **Stuck / completion** — stale heartbeat → `stuck` then kill; spawn timeout; task timeout; runtime `Exited` → complete or fail; retries → `retry_wait`.
 11. **Rollup** — if cancel requested or (policy `fail_run` and a task failed) or all terminal: set run `completed|failed|cancelled`.
 12. **Orphan reap** — destroy runtime handles with no live session.
@@ -518,10 +517,10 @@ Set `SANDBOX_BACKEND` on the server (not per user).
 | Value | Runtime name | What spawn does | What “done” means |
 | --- | --- | --- | --- |
 | `stub` (default) | stub | In-memory entry; no process. | After ~3s (configurable) state is Exited 0. Tick marks task success. |
-| `process` | process | `fleet-worker` (or `PROCESS_WORKER_BIN`) as a process group. Workdir + `FLEET_*`. Optional git clone via isolate. | Process exit + last worker status. |
+| `process` | process | `fleet-driver` (or `PROCESS_WORKER_BIN`) as a process group. Workdir + `FLEET_*`. Optional git clone via isolate. | Process exit + last worker status. |
 | `local` / `shell` | process (Om) | Writes `commands.sh` from bash fences, runs `fleet_worker.sh` / bash. | Script exit. |
 | `docker` / `container` | docker | `docker run` **without** `--rm`; wait on `.fleet_exit`. | Exit file / container state. |
-| `k8s` / `kubernetes` | k8s | Create a `FleetSandbox` CR. Operator makes a pod + NetworkPolicy. Worker is `fleet-worker` (image `K8S_WORKER_IMAGE`). Spec rides in `FLEET_SPEC_MD`. Callback URL must not be loopback. | Worker HTTP status + CR phase (`Succeeded`/`Failed`). Host `DATA_DIR` has prompt/spec; pod writes stay in `emptyDir` (no live.jsonl pull yet). |
+| `k8s` / `kubernetes` | k8s | Tick enqueues a claim; `fleet-host` creates a `FleetSandbox` CR. Operator makes a pod + NetworkPolicy. Guest is `fleet-driver` (image `K8S_WORKER_IMAGE`, `FLEET_HARNESS=mock\|grok`). Spec rides in `FLEET_SPEC_MD`. Callback URL must not be loopback. | Driver HTTP status + CR phase (`Succeeded`/`Failed`). Host `DATA_DIR` has prompt/spec; pod writes stay in `emptyDir` (no live.jsonl pull yet). |
 | anything else | — | Server fails to start runtime. | |
 
 **Git isolate (process/docker):** if Settings has `repo_url`, spawn clones (or worktree) into the session dir before the worker starts. No OAuth token is passed; clone uses whatever the host/container git can see (deploy key, public HTTPS, etc.).
@@ -532,16 +531,7 @@ Set `SANDBOX_BACKEND` on the server (not per user).
 
 ## 12. Workers and drivers
 
-### 12.1 `fleet-worker` (`SANDBOX_BACKEND=process`)
-
-1. `POST status running`.
-2. Heartbeat loop (`FLEET_HEARTBEAT_INTERVAL_S`, default 2s), progress 10→90.
-3. Work: `FLEET_WORK_CMD` else `run.sh` else write artifacts from `spec.md` / notes.
-4. Heartbeat 100 + status success, or status failed + non-zero exit.
-
-Env contract (injected by tick): `FLEET_SESSION_ID`, `FLEET_PROJECT_ID`, `FLEET_RUN_ID`, `FLEET_BOARD_TASK_ID` / `FLEET_TASK_ID`, `FLEET_PLAN_TASK_ID`, `FLEET_WORKER_TOKEN`, `FLEET_WORKER_PROFILE`, `FLEET_ORCHESTRATOR_URL` / `FLEET_API_BASE`, `FLEET_WORK_DIR`, optional `FLEET_HITL_NOTES`, `FLEET_WORK_CMD`.
-
-### 12.2 `fleet-driver`
+### 12.1 `fleet-driver` (`SANDBOX_BACKEND=process` / guest of `fleet-host`)
 
 Same HTTP contract. Extra: provision clone from `FLEET_REPO_URL` + ref; ACP session with `FLEET_HARNESS=mock` (`mock-acp-agent`) or `grok`. Writes `prompt.md`, `live.jsonl`, `artifacts/transcript.md`, `artifacts/result.json` (what SessionDetail reads).
 
@@ -589,7 +579,7 @@ Independent of `SANDBOX_BACKEND`. Used on kind / in-cluster.
 
 Labels: `fleet.agentfleet.io/sandbox`, `session-id`, `workspace-id`, `project-id`.
 
-With `SANDBOX_BACKEND=k8s`, the tick creates/deletes CRs. Otherwise Kind smoke deploys the control plane and creating a CR is a cluster-admin / sample-YAML action (`infra/samples/fleetsandbox.yaml`).
+In-cluster API is `SANDBOX_BACKEND=stub`. Tick enqueues claims; `fleet-host` creates/deletes CRs. Host `.env` stays `stub`/`process`. Sample YAML (`infra/samples/fleetsandbox.yaml`) is still valid for a cluster-admin CR without a Fleet run.
 
 ---
 
@@ -709,7 +699,7 @@ These look like product features in vision docs or UI chrome but are **not** imp
 - OpenAI chat provider (coming-soon placeholder).
 - Approvals before merge (landing copy; no approval object).
 - Zenoh/NATS event bus in the running server (contracts crate + docs only).
-- Operator CR creation from the orchestrator tick unless `SANDBOX_BACKEND=k8s`.
+- Operator CR creation from a **host** tick unless that host is a paired `fleet-host` with KubePod.
 - VM sandboxes.
 - Sharing a chat or making conversations workspace-wide.
 
@@ -764,7 +754,7 @@ Chat “fan out a 5-task plan to scaffold X” → `launch_agent_plan` → first
 
 ### D. Process worker
 
-Operator sets `SANDBOX_BACKEND=process`, `PROCESS_WORKER_BIN=fleet-worker` (or `fleet-driver`). Same UI. Sessions have workdirs; SessionDetail tails `live.jsonl` until 15-minute wipe.
+Operator sets `SANDBOX_BACKEND=process`, `PROCESS_WORKER_BIN=fleet-driver`. Same UI. Sessions have workdirs; SessionDetail tails `live.jsonl` until 15-minute wipe.
 
 ### E. Lab invoices (not the web app)
 
@@ -772,7 +762,7 @@ Operator sets `SANDBOX_BACKEND=process`, `PROCESS_WORKER_BIN=fleet-worker` (or `
 
 ### F. Kind control plane
 
-`run-full-suite.sh` / kind overlay → UI `:3030`, API `:8080`, operator watching `FleetSandbox`. Browser e2e clicks through marketing + auth + sidebar. Creating a CR is extra (sample YAML).
+`run-full-suite.sh` / kind overlay → UI `:3030`, API `:8080` (stub, not a runner), `fleet-host` + operator watching `FleetSandbox`. A Fleet “Start 2-task run” + tick enqueues a claim; the host creates a CR. Browser e2e clicks through marketing + auth + sidebar (does not start fixture runs today).
 
 ---
 

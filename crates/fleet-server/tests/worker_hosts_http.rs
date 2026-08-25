@@ -23,6 +23,7 @@ use uuid::Uuid;
 const TEST_PASSWORD: &str = "correct-horse";
 const TEST_ADMIN_TOKEN: &str = "test-admin";
 const TEST_JWT_SECRET: &str = "dev-change-me-to-a-long-random-secret-at-least-32-chars";
+const TEST_BOOTSTRAP_SECRET: &str = "test-bootstrap-secret";
 
 fn require_database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -77,6 +78,16 @@ async fn app_with_state() -> (axum::Router, AppState) {
 }
 
 async fn app_with_state_dist(worker_dist_dir: Option<PathBuf>) -> (axum::Router, AppState) {
+    if std::env::var("FLEET_BOOTSTRAP_SECRET")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        // SAFETY: this integration binary is the only writer; tests share one secret.
+        unsafe {
+            std::env::set_var("FLEET_BOOTSTRAP_SECRET", TEST_BOOTSTRAP_SECRET);
+        }
+    }
     let database_url = require_database_url();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -102,7 +113,7 @@ async fn app_with_state_dist(worker_dist_dir: Option<PathBuf>) -> (axum::Router,
         auto_sync_external: false,
         sandbox_backend: "stub".into(),
         stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-worker".into()],
+        process_worker_argv: vec!["fleet-driver".into()],
         k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
@@ -580,8 +591,7 @@ async fn owner_can_rename_host() {
     .await;
     assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
     assert_eq!(
-        patched.body["name"],
-        "renamed-studio",
+        patched.body["name"], "renamed-studio",
         "PATCH name trims: {}",
         patched.body
     );
@@ -610,8 +620,7 @@ async fn owner_can_rename_host() {
     .await;
     assert_eq!(blank.status, StatusCode::OK, "blank: {}", blank.body);
     assert_eq!(
-        blank.body["name"],
-        "renamed-studio",
+        blank.body["name"], "renamed-studio",
         "blank PATCH name must not wipe: {}",
         blank.body
     );
@@ -1185,8 +1194,7 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     assert_eq!(
-        listed.body["hosts"][0]["kind"],
-        "control_plane",
+        listed.body["hosts"][0]["kind"], "control_plane",
         "plane is always first: {}",
         listed.body
     );
@@ -1643,7 +1651,6 @@ fn write_platform_manifest(dir: &std::path::Path, platform: &str, host_sha: &str
         "platform": platform,
         "bins": {
             "fleet-host": { "sha256": host_sha, "size": 12 },
-            "fleet-worker": { "sha256": "worker-sha", "size": 13 },
             "fleet-driver": { "sha256": "driver-sha", "size": 14 }
         }
     });
@@ -1716,7 +1723,6 @@ async fn heartbeat_includes_desired_when_staged() {
                 "git_sha": "old-tree",
                 "bins": {
                     "fleet-host": "bbb222",
-                    "fleet-worker": "worker-sha",
                     "fleet-driver": "driver-sha"
                 }
             }
@@ -1793,7 +1799,6 @@ async fn public_host_software_status_current_behind_unknown() {
                 "git_sha": "other",
                 "bins": {
                     "fleet-host": "aaa111",
-                    "fleet-worker": "worker-sha",
                     "fleet-driver": "driver-sha"
                 }
             }
@@ -2051,8 +2056,7 @@ async fn new_pair_token_only_while_pending_and_old_token_dies() {
 async fn request_update_marks_host() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (host_id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
+    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
 
     let denied = call(
         &app,
@@ -2118,8 +2122,7 @@ async fn request_update_marks_host() {
     assert_eq!(off.status, StatusCode::OK, "auto off: {}", off.body);
     assert_eq!(off.body["auto_update"], false, "{}", off.body);
     assert!(
-        off.body.get("update_requested_at").is_none()
-            || off.body["update_requested_at"].is_null(),
+        off.body.get("update_requested_at").is_none() || off.body["update_requested_at"].is_null(),
         "turning auto-update off must not request: {}",
         off.body
     );
@@ -2214,4 +2217,167 @@ async fn request_update_marks_host() {
         "control plane has no Update now: {}",
         plane.body
     );
+}
+
+#[tokio::test]
+async fn bootstrap_conflict_without_workspace() {
+    let app = app().await;
+    let out = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/bootstrap",
+        TEST_BOOTSTRAP_SECRET,
+        Some(json!({
+            "hostname": "cluster-host",
+            "platform": "linux-x86_64",
+            "advertised_host": false,
+            "advertised_container": true
+        })),
+    )
+    .await;
+    // Shared DB may already have a workspace from a parallel test.
+    assert!(
+        out.status == StatusCode::CONFLICT || out.status == StatusCode::OK,
+        "bootstrap empty-db: {} {}",
+        out.status,
+        out.body
+    );
+    if out.status == StatusCode::CONFLICT {
+        assert!(
+            out.body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no_workspace"),
+            "{}",
+            out.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_bad_secret() {
+    let app = app().await;
+    let missing = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/bootstrap",
+        None,
+        Some(json!({
+            "hostname": "x",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false
+        })),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::UNAUTHORIZED, "{}", missing.body);
+
+    let bad = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/bootstrap",
+        "wrong-secret",
+        Some(json!({
+            "hostname": "x",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false
+        })),
+    )
+    .await;
+    assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
+}
+
+#[tokio::test]
+async fn bootstrap_pairs_and_rotates_same_machine() {
+    let app = app().await;
+    let (_email, _jar, ws) = signup_and_login(&app).await;
+    let machine_id = Uuid::new_v4();
+    let first = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/bootstrap",
+        TEST_BOOTSTRAP_SECRET,
+        Some(json!({
+            "hostname": "cluster-host",
+            "platform": "linux-x86_64",
+            "advertised_host": false,
+            "advertised_container": true,
+            "machine_id": machine_id,
+            "workspace_id": ws
+        })),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "bootstrap: {}", first.body);
+    let token1 = first.body["machine_token"].as_str().unwrap();
+    assert!(token1.starts_with("flm_"), "{token1}");
+    assert_eq!(first.body["workspace_id"].as_str(), Some(ws.as_str()));
+    let host_id = first.body["host_id"].as_str().unwrap();
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        token1,
+        Some(json!({
+            "advertised_host": false,
+            "advertised_container": true,
+            "current_jobs": 0
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "heartbeat: {}", hb.body);
+
+    let again = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/bootstrap",
+        TEST_BOOTSTRAP_SECRET,
+        Some(json!({
+            "hostname": "cluster-host",
+            "platform": "linux-x86_64",
+            "advertised_host": false,
+            "advertised_container": true,
+            "machine_id": machine_id,
+            "workspace_id": ws
+        })),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "rotate: {}", again.body);
+    let token2 = again.body["machine_token"].as_str().unwrap();
+    assert_ne!(token1, token2);
+    assert_eq!(again.body["host_id"].as_str(), Some(host_id));
+
+    let old = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        token1,
+        Some(json!({
+            "advertised_host": false,
+            "advertised_container": true,
+            "current_jobs": 0
+        })),
+    )
+    .await;
+    assert_eq!(
+        old.status,
+        StatusCode::UNAUTHORIZED,
+        "old token: {}",
+        old.body
+    );
+
+    let fresh = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        token2,
+        Some(json!({
+            "advertised_host": false,
+            "advertised_container": true,
+            "current_jobs": 0
+        })),
+    )
+    .await;
+    assert_eq!(fresh.status, StatusCode::OK, "new token: {}", fresh.body);
 }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-fleet-contracts",
+    "crates/fleet-bus",
     "crates/fleet-chat-md",
     "crates/fleet-runners-view",
     "crates/fleet-db",
@@ -64,3 +65,7 @@ fleet-integrations = { path = "crates/fleet-integrations" }
 fleet-server = { path = "crates/fleet-server" }
 fleet-orchestrator = { path = "crates/fleet-orchestrator" }
 fleet-host = { path = "crates/fleet-host" }
+fleet-bus = { path = "crates/fleet-bus" }
+# 1.10 rust-version is 1.75; compiles on workspace rustc 1.88. TCP-only to keep
+# the default feature set (QUIC/TLS/WS) off the unit-test critical path.
+zenoh = { version = "1.10", default-features = false, features = ["transport_tcp"] }

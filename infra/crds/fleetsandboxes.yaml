@@ -50,7 +50,7 @@ spec:
                 description: Extra env (FLEET_* worker contract). Secrets should be refs, not raw values.
                 type: object
               image:
-                description: Container image (typically `agent-fleet-api` which includes `fleet-worker`).
+                description: Container image (typically `agent-fleet-api` which includes `fleet-driver`).
                 type: string
               network:
                 nullable: true

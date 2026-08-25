@@ -3,12 +3,24 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
-use crate::models::{Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole};
+use crate::models::{
+    Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole, parse_min_isolation,
+};
 use crate::pool::map_query_err;
 
 const WORKSPACE_COLS: &str = r#"
     id, slug, name, created_at, updated_at, version
 "#;
+
+/// Oldest workspace (kind/compose cluster-host bootstrap).
+pub async fn first_id(pool: &PgPool) -> DbResult<Option<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workspaces ORDER BY created_at ASC, id ASC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)
+}
 
 #[derive(Debug, Clone)]
 pub struct NewWorkspace {
@@ -18,10 +30,7 @@ pub struct NewWorkspace {
     pub created_at: DateTime<Utc>,
 }
 
-pub async fn insert_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    new: &NewWorkspace,
-) -> DbResult<()> {
+pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewWorkspace) -> DbResult<()> {
     sqlx::query(
         r#"
         INSERT INTO workspaces (id, slug, name, created_at, updated_at)
@@ -142,7 +151,6 @@ pub async fn create_owned(
     Ok(ws)
 }
 
-
 /// Role for user in workspace, if a member.
 pub async fn user_role(
     pool: &PgPool,
@@ -182,6 +190,51 @@ pub async fn partners_disclaimer_accepted_at(
     .await
     .map_err(map_query_err)?;
     row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+/// Workspace minimum isolation (`process` | `container` | `vm`).
+///
+/// Missing workspace → [`DbError::NotFound`]. New rows default to `process`.
+pub async fn min_isolation(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT min_isolation
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+/// Set workspace minimum isolation. Rejects unknown strings in-process.
+pub async fn set_min_isolation(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    isolation: &str,
+) -> DbResult<String> {
+    let isolation = parse_min_isolation(isolation).ok_or_else(|| {
+        DbError::Conflict("min_isolation must be process, container, or vm".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET min_isolation = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING min_isolation
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(isolation)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
 /// Record the partners disclaimer ack. First write wins.
@@ -326,10 +379,7 @@ const INVITE_COLS: &str = r#"
     created_at, expires_at, accepted_at, accepted_user_id, revoked_at
 "#;
 
-pub async fn insert_invite(
-    pool: &PgPool,
-    invite: &WorkspaceInvite,
-) -> DbResult<WorkspaceInvite> {
+pub async fn insert_invite(pool: &PgPool, invite: &WorkspaceInvite) -> DbResult<WorkspaceInvite> {
     let q = format!(
         r#"
         INSERT INTO workspace_invites (

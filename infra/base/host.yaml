@@ -1,0 +1,81 @@
+# In-cluster runner. Same binary as a self-hosted box. Creates FleetSandbox
+# CRs (KubePod) after bootstrap-pair. Control plane does not run this process.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-host-data
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-host
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-host
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+    app.kubernetes.io/name: fleet-host
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fleet-host
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-fleet
+        app.kubernetes.io/name: fleet-host
+    spec:
+      serviceAccountName: fleet-host
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: fleet-host
+          image: agent-fleet-api:local
+          imagePullPolicy: IfNotPresent
+          command: ["fleet-host", "run"]
+          env:
+            - name: FLEET_CONTROL_PLANE_URL
+              value: http://api.agent-fleet.svc.cluster.local:8080
+            - name: FLEET_HOST_CONFIG_DIR
+              value: /data/host
+            - name: FLEET_HOST_RUN_HOST
+              value: "false"
+            - name: FLEET_HOST_RUN_CONTAINER
+              value: "true"
+            - name: ZENOH_LOCATOR
+              value: tcp/zenohd.agent-fleet.svc.cluster.local:7447
+            - name: K8S_NAMESPACE
+              value: agent-fleet
+            - name: K8S_WORKER_IMAGE
+              value: agent-fleet-api:local
+            # Guest in each FleetSandbox is fleet-driver (same image).
+            - name: FLEET_HARNESS
+              value: mock
+            - name: RUST_LOG
+              value: info
+            - name: FLEET_BOOTSTRAP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: FLEET_BOOTSTRAP_SECRET
+          volumeMounts:
+            - name: data
+              mountPath: /data/host
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fleet-host-data

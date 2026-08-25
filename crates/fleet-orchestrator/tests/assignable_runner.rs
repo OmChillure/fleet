@@ -26,6 +26,8 @@ fn host(
         advertised_max_concurrent: None,
         max_job_timeout_s: 3600,
         isolation: RunnerIsolation::Native,
+        last_seen_at: None,
+        workspace_id: Uuid::nil(),
     }
 }
 

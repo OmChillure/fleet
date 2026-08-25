@@ -173,9 +173,7 @@ async fn session_insert_and_find_by_refresh_hash() {
         absolute_expires_at: now + Duration::days(7),
     };
 
-    sessions::insert(&pool, &new)
-        .await
-        .expect("insert session");
+    sessions::insert(&pool, &new).await.expect("insert session");
 
     let found = sessions::find_by_refresh_hash(&pool, &hash)
         .await
@@ -422,15 +420,9 @@ async fn case_create_claim_and_complete() {
     assert_eq!(case.status, "open");
     assert_eq!(case.stage, "start");
 
-    let _ = cases::append_event(
-        &pool,
-        id,
-        workspace_id,
-        "created",
-        json!({ "ok": true }),
-    )
-    .await
-    .expect("event");
+    let _ = cases::append_event(&pool, id, workspace_id, "created", json!({ "ok": true }))
+        .await
+        .expect("event");
 
     let claimed = cases::claim_due(&pool, 10).await.expect("claim");
     assert!(
@@ -626,4 +618,63 @@ async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable()
             .is_some(),
         "disclaimer must still have been recorded"
     );
+}
+
+// ---------------------------------------------------------------------------
+// workspace min_isolation: default process, store wire strings only
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn workspace_min_isolation_defaults_process_and_stores_wire_strings() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let raw: String = sqlx::query_scalar("SELECT min_isolation FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await
+        .expect("raw min_isolation");
+    assert_eq!(raw, "process", "new workspace must default to process");
+
+    let via_repo = workspaces::min_isolation(&pool, workspace_id)
+        .await
+        .expect("repo default");
+    assert_eq!(via_repo, "process");
+
+    let container = workspaces::set_min_isolation(&pool, workspace_id, "container")
+        .await
+        .expect("set container");
+    assert_eq!(container, "container");
+    assert_eq!(
+        workspaces::min_isolation(&pool, workspace_id)
+            .await
+            .expect("read container"),
+        "container"
+    );
+
+    let vm = workspaces::set_min_isolation(&pool, workspace_id, " vm ")
+        .await
+        .expect("set vm");
+    assert_eq!(vm, "vm");
+
+    let err = workspaces::set_min_isolation(&pool, workspace_id, "native")
+        .await
+        .expect_err("native is not a stored IsolationClass string");
+    match &err {
+        DbError::Conflict(msg) => {
+            assert_eq!(msg, "min_isolation must be process, container, or vm");
+        }
+        other => panic!("expected Conflict for unknown min_isolation, got {other:?}"),
+    }
+    assert_eq!(
+        workspaces::min_isolation(&pool, workspace_id)
+            .await
+            .expect("unchanged after reject"),
+        "vm"
+    );
+
+    let missing = workspaces::min_isolation(&pool, Uuid::now_v7())
+        .await
+        .expect_err("missing workspace");
+    assert!(matches!(missing, DbError::NotFound(_)));
 }

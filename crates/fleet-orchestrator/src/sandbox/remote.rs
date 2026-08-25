@@ -49,6 +49,9 @@ pub struct SpawnPayload {
     pub worker_token: String,
     pub orchestrator_url: String,
     pub runtime: String,
+    /// Isolation class: process | container | vm. Not "k8s".
+    #[serde(default)]
+    pub isolation: String,
     pub task_title: String,
     pub task_spec: String,
     pub timeout_s: i32,
@@ -58,6 +61,14 @@ pub struct SpawnPayload {
     #[serde(default)]
     pub persona_md: Option<String>,
     pub env: HashMap<String, String>,
+}
+
+fn isolation_for_runtime(runtime: &str) -> &'static str {
+    match runtime {
+        "container" | "docker" | "k8s" | "kubernetes" => "container",
+        "vm" | "firecracker" | "qemu" => "vm",
+        _ => "process",
+    }
 }
 
 pub fn spawn_payload(
@@ -71,6 +82,10 @@ pub fn spawn_payload(
     env.remove("FLEET_WORK_DIR");
     env.insert("FLEET_WORKER_TOKEN".into(), req.worker_token.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
+    let isolation = isolation_for_runtime(runtime);
+    if isolation == "container" || isolation == "vm" {
+        agent_fleet_contracts::strip_isolated_guest_env(&mut env);
+    }
     SpawnPayload {
         kind: "spawn_session".into(),
         session_id: req.session_id,
@@ -82,6 +97,7 @@ pub fn spawn_payload(
         worker_token: req.worker_token.clone(),
         orchestrator_url: orchestrator_url.into(),
         runtime: runtime.into(),
+        isolation: isolation.into(),
         task_title: req.task_title.clone().unwrap_or_default(),
         task_spec: req.task_spec.clone().unwrap_or_default(),
         timeout_s,
@@ -148,12 +164,22 @@ mod tests {
 
     #[test]
     fn payload_includes_plaintext_token_and_env() {
-        let req = sample_req();
+        let mut req = sample_req();
+        req.env.insert(
+            "FLEET_MOCK_ACP_BIN".into(),
+            "/home/viny/.local/bin/mock-acp-agent".into(),
+        );
         let host_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
         let p = spawn_payload(&req, "http://127.0.0.1:8080", "container", 3600, host_id);
+        assert!(
+            !p.env.contains_key("FLEET_MOCK_ACP_BIN"),
+            "container claims must not carry host-absolute bins: {:?}",
+            p.env
+        );
         assert_eq!(p.kind, "spawn_session");
         assert_eq!(p.worker_token, "tok-plain");
         assert_eq!(p.runtime, "container");
+        assert_eq!(p.isolation, "container");
         assert_eq!(p.orchestrator_url, "http://127.0.0.1:8080");
         assert_eq!(p.timeout_s, 3600);
         assert_eq!(p.host_id, host_id);

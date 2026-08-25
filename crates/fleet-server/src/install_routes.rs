@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn script_body_names_worker_and_three_bins() {
+    fn script_body_names_host_and_driver() {
         let common = script_body("_unix_common.sh").expect("wired");
         assert!(
             common.contains("this machine is a self-hosted worker"),
@@ -484,8 +484,8 @@ mod tests {
             "fleet-host is the machine daemon"
         );
         assert!(
-            common.contains("fleet-worker runs each job"),
-            "fleet-worker is the per-job process"
+            common.contains("fleet-driver runs each job"),
+            "fleet-driver is the per-job process"
         );
         assert!(common.contains("worker install:"), "{common:.80}");
         assert!(

@@ -81,7 +81,11 @@ async fn run() -> Result<()> {
             let s = seq.fetch_add(1, Ordering::Relaxed);
             let _ = client.post_heartbeat(s, Some(100)).await;
             let s = seq.fetch_add(1, Ordering::Relaxed);
-            client.post_status(s, "success", Some(&summary)).await?;
+            let proof = std::fs::read_to_string(cfg.work_dir.join("result.md")).ok();
+            let files = guest_files(&cfg.work_dir);
+            client
+                .post_status_proof(s, "success", Some(&summary), proof.as_deref(), files)
+                .await?;
             info!(%summary, "fleet-driver success");
             Ok(())
         }
@@ -99,6 +103,18 @@ async fn run() -> Result<()> {
             error!(%reason, "fleet-driver failed");
             anyhow::bail!("{reason}")
         }
+    }
+}
+
+fn guest_files(work_dir: &std::path::Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut files = serde_json::Map::new();
+    if work_dir.join("work").is_dir() {
+        files.insert("work/.keep".into(), serde_json::Value::String("ok".into()));
+    }
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
     }
 }
 

@@ -3,9 +3,8 @@
 //! WorkDir = DATA_DIR/projects/{project}/sessions/{session}
 //! Pidfile  = WorkDir/pid
 //!
-//! Unix only. Spawns `PROCESS_WORKER_BIN` (default `fleet-worker`) with the
-//! FLEET_* env contract. `fleet-worker` speaks the control-plane protocol
-//! (heartbeat + status) and runs real work (`FLEET_WORK_CMD` / `run.sh` / artifacts).
+//! Unix only. Spawns `PROCESS_WORKER_BIN` (default `fleet-driver`) with the
+//! FLEET_* env contract. The guest is `fleet-driver` (ACP + heartbeat/status).
 
 use super::{
     RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest,
@@ -13,9 +12,7 @@ use super::{
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const PIDFILE: &str = "pid";
@@ -25,8 +22,6 @@ pub struct ProcessRuntime {
     data_dir: PathBuf,
     /// argv[0] = program; remaining args are prefixed before spawn.
     worker_argv: Vec<String>,
-    /// Control-plane LLM loops (no child process / pidfile).
-    agent_jobs: Mutex<HashMap<String, super::agent_loop::AgentJob>>,
 }
 
 impl ProcessRuntime {
@@ -39,7 +34,6 @@ impl ProcessRuntime {
         Ok(Self {
             data_dir: data_dir.into(),
             worker_argv,
-            agent_jobs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -174,21 +168,6 @@ impl SandboxRuntime for ProcessRuntime {
     }
 
     async fn spawn(&self, req: SpawnRequest) -> Result<RuntimeHandle, SandboxError> {
-        if req.agent_backend.is_some() {
-            let _ = super::worker_script::materialize_workspace(&req).await;
-            let handle = RuntimeHandle {
-                backend: "process".into(),
-                id: req.session_id.to_string(),
-            };
-            let job = super::agent_loop::AgentJob::start(&req);
-            self.agent_jobs.lock().await.insert(handle.id.clone(), job);
-            tracing::info!(
-                session_id = %req.session_id,
-                profile = %req.worker_profile,
-                "process sandbox spawned (LLM agent loop)"
-            );
-            return Ok(handle);
-        }
         #[cfg(not(unix))]
         {
             let _ = req;
@@ -265,12 +244,6 @@ impl SandboxRuntime for ProcessRuntime {
     }
 
     async fn signal(&self, handle: &RuntimeHandle, signal: Signal) -> Result<(), SandboxError> {
-        if let Some(job) = self.agent_jobs.lock().await.get(&handle.id) {
-            if matches!(signal, Signal::Kill | Signal::Term) {
-                job.abort();
-            }
-            return Ok(());
-        }
         let session_id = Self::session_id_from_handle(handle)?;
         let work_dir = self
             .find_work_dir(session_id)
@@ -283,10 +256,6 @@ impl SandboxRuntime for ProcessRuntime {
     }
 
     async fn destroy(&self, handle: &RuntimeHandle) -> Result<(), SandboxError> {
-        if let Some(job) = self.agent_jobs.lock().await.remove(&handle.id) {
-            job.abort();
-            return Ok(());
-        }
         let session_id = match Self::session_id_from_handle(handle) {
             Ok(id) => id,
             Err(_) => return Ok(()), // unknown handle = success
@@ -308,16 +277,6 @@ impl SandboxRuntime for ProcessRuntime {
     }
 
     async fn state(&self, handle: &RuntimeHandle) -> Result<SandboxState, SandboxError> {
-        {
-            let mut jobs = self.agent_jobs.lock().await;
-            if let Some(job) = jobs.get(&handle.id) {
-                if let Some(code) = job.poll_exit() {
-                    jobs.remove(&handle.id);
-                    return Ok(SandboxState::Exited { code: Some(code) });
-                }
-                return Ok(SandboxState::Running);
-            }
-        }
         let session_id = Self::session_id_from_handle(handle)?;
         let Some(work_dir) = self.find_work_dir(session_id).await else {
             return Ok(SandboxState::Unknown);
@@ -343,15 +302,6 @@ impl SandboxRuntime for ProcessRuntime {
             .join(project_id.to_string())
             .join("sessions");
         let mut out = Vec::new();
-        {
-            let jobs = self.agent_jobs.lock().await;
-            for id in jobs.keys() {
-                out.push(RuntimeHandle {
-                    backend: "process".into(),
-                    id: id.clone(),
-                });
-            }
-        }
         let mut dirs = match tokio::fs::read_dir(&sessions_root).await {
             Ok(d) => d,
             Err(_) => return Ok(out),
@@ -391,14 +341,14 @@ impl SandboxRuntime for ProcessRuntime {
 }
 
 /// Parse `PROCESS_WORKER_BIN` env: either a single path or shell-ish argv joined
-/// by whitespace (no quotes). Default: `fleet-worker` on PATH.
+/// by whitespace (no quotes). Default: `fleet-driver` on PATH.
 pub fn worker_argv_from_env() -> Vec<String> {
     match std::env::var("PROCESS_WORKER_BIN") {
         Ok(s) if !s.trim().is_empty() => s
             .split_whitespace()
             .map(|p| p.to_string())
             .collect(),
-        _ => vec!["fleet-worker".into()],
+        _ => vec!["fleet-driver".into()],
     }
 }
 
@@ -512,5 +462,28 @@ mod tests {
             }
             other => panic!("expected exited, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_spawn_with_agent_backend_still_execs_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = ProcessRuntime::new(dir.path(), true_argv()).unwrap();
+        let project = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let work = dir
+            .path()
+            .join("projects")
+            .join(project.to_string())
+            .join("sessions")
+            .join(session.to_string());
+        tokio::fs::create_dir_all(&work).await.unwrap();
+        let mut req = sample_req(session, project, work.clone());
+        req.agent_backend = Some("grok".into());
+        let h = rt.spawn(req).await.unwrap();
+        assert_eq!(h.backend, "process");
+        assert!(
+            work.join("pid").exists(),
+            "agent_backend must not skip the child (no AgentJob)"
+        );
     }
 }

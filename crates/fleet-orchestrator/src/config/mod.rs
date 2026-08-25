@@ -191,7 +191,7 @@ impl Config {
 fn process_worker_argv_from_env() -> Vec<String> {
     match env::var("PROCESS_WORKER_BIN") {
         Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|p| p.to_string()).collect(),
-        _ => vec!["fleet-worker".into()],
+        _ => vec!["fleet-driver".into()],
     }
 }
 

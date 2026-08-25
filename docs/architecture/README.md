@@ -26,9 +26,14 @@ Related component folders (stubs for deeper specs):
 **Implemented today (HTTP):** `fleet-server` on `:8080` mounts `fleet-auth`
 (auth + workspaces) and `fleet-integrations` (catalog) over `fleet-db`
 (Postgres). UI on `:3030` talks to the API with cookie credentials.
-Orchestrator tick + process sandbox (`fleet-worker`) and the Kubernetes
-`FleetSandbox` operator are on `main`. `SANDBOX_BACKEND=k8s` creates CRs
-(the operator still makes the pods). OAuth connect is live.
+Orchestrator tick + process sandbox (`fleet-driver`) and the Kubernetes
+`FleetSandbox` operator are on `main`. In-cluster API defaults to
+`SANDBOX_BACKEND=stub` (API is not a runner). Kind/compose start
+`fleet-host` + `zenohd`. The host bootstrap-pairs
+(`FLEET_BOOTSTRAP_SECRET`) to the first workspace and leases jobs
+(container isolation → KubePod CRs whose guest is `fleet-driver`). Tick enqueues `work_claims` only;
+no host → task stays ready. Host `.env` stays `stub`/`process`.
+OAuth connect is live.
 **Cases (general durable workflows):** workspace-scoped `cases` + `case_events`
 with backend wake loop and free-form stages — see
 [`docs/components/cases/`](../components/cases/). Agent fleets remain the
@@ -39,8 +44,8 @@ runs OpenCode/Pi over ACP in a per-task compose sandbox (see
 (that is [`crates/fleet-driver`](../../crates/fleet-driver/)).
 **Worker hosts:** workspace owners create a host and copy a one-time pair
 token. The machine installs `fleet-host` and pairs outbound (HTTPS); no
-inbound port on the worker. Tick prefers an online matching host, else
-today's local `SANDBOX_BACKEND`. See
+inbound port on the worker. Tick enqueues a claim for an online matching
+host; otherwise the task stays ready. See
 [`docs/components/worker-host/`](../components/worker-host/).
 
 Diagram sources live in [`diagrams/`](./diagrams/).
