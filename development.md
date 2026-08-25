@@ -90,7 +90,7 @@ Images:
 
 | Dockerfile | Image | Role |
 |------------|-------|------|
-| `Dockerfile` | `agent-fleet-api:local` | fleet-server + fleet-worker |
+| `Dockerfile` | `agent-fleet-api:local` | fleet-server + fleet-host + fleet-driver |
 | `Dockerfile.ui` | `agent-fleet-ui:local` | nginx + static UI |
 
 ---
@@ -156,7 +156,7 @@ SANDBOX_BACKEND=stub
 | `API_PUBLIC_BASE` | OAuth callbacks, absolute API links |
 | `UI_PUBLIC_BASE` | OAuth return / UI links |
 | `SANDBOX_BACKEND` | `stub` (default), `process`, `docker`, or `k8s` |
-| `PROCESS_WORKER_BIN` | e.g. `/usr/local/bin/fleet-worker` in the API image |
+| `PROCESS_WORKER_BIN` | e.g. `/usr/local/bin/fleet-driver` in the API image |
 | `K8S_*` | Only when `SANDBOX_BACKEND=k8s`. See [`docs/components/orchestrator/PLAY.md`](docs/components/orchestrator/PLAY.md). Worker callback must not be loopback. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
 
@@ -176,9 +176,10 @@ No LLM is called yet; personas store role prompts and model preferences for a fu
 
 ```bash
 # Host
-cargo build -p fleet-orchestrator --bin fleet-worker
+cargo build -p fleet-driver --bins
 export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-worker"
+export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
+export FLEET_HARNESS=mock
 export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
 ```
@@ -189,12 +190,16 @@ In Compose, set on `api`:
 
 ```yaml
 SANDBOX_BACKEND: process
-PROCESS_WORKER_BIN: /usr/local/bin/fleet-worker
+PROCESS_WORKER_BIN: /usr/local/bin/fleet-driver
 ```
 
-### Kubernetes sandboxes (optional)
+### Kubernetes sandboxes
 
-Tick creates `FleetSandbox` CRs. The operator must be running (k3d/kind from [`infra/README.md`](infra/README.md)).
+In-cluster API is `SANDBOX_BACKEND=stub` (not a runner). `fleet-host`
+creates `FleetSandbox` CRs; the operator must be running
+([`infra/README.md`](infra/README.md)). Host `.env` is unchanged. Optional
+host API against a cluster is no longer the spawn path — pair `fleet-host`
+instead.
 
 ```bash
 export SANDBOX_BACKEND=k8s
@@ -238,7 +243,7 @@ cargo run -p fleet-server
 
 | Path | Role |
 |------|------|
-| `docker-compose.yml` | postgres + api + **ui** |
+| `docker-compose.yml` | postgres + api + **ui** + zenohd + fleet-host |
 | `Dockerfile` | API image |
 | `Dockerfile.ui` | UI image (dx build + nginx) |
 | `Dockerfile.operator` | Kubernetes sandbox operator |

@@ -15,7 +15,8 @@ ARG FLEET_GIT_SHA
 RUN test -n "${FLEET_GIT_SHA}" || (echo "ERROR: --build-arg FLEET_GIT_SHA=\$(git rev-parse HEAD) is required" && exit 1)
 ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
 RUN cargo build --release -p fleet-server --locked \
-    && cargo build --release -p fleet-orchestrator --bin fleet-worker --locked
+    && cargo build --release -p fleet-host --locked \
+    && cargo build --release -p fleet-driver --locked --bins
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
@@ -25,7 +26,9 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/fleet-server /usr/local/bin/fleet-server
-COPY --from=builder /app/target/release/fleet-worker /usr/local/bin/fleet-worker
+COPY --from=builder /app/target/release/fleet-host /usr/local/bin/fleet-host
+COPY --from=builder /app/target/release/fleet-driver /usr/local/bin/fleet-driver
+COPY --from=builder /app/target/release/mock-acp-agent /usr/local/bin/mock-acp-agent
 
 # Session work dirs for process sandbox
 RUN mkdir -p /data && chown fleet:fleet /data

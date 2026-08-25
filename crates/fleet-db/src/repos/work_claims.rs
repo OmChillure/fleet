@@ -86,7 +86,7 @@ pub async fn claim_next(
         .map_err(map_query_err)
 }
 
-/// Claim the next ready `spawn_session` whose payload is addressed to `host_id`.
+/// Claim the next ready spawn or signal whose payload is addressed to `host_id`.
 pub async fn claim_next_spawn_for_host(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -102,18 +102,18 @@ pub async fn claim_next_spawn_for_host(
             SELECT id FROM work_claims
             WHERE status = 'ready'
               AND available_at <= now()
-              AND workspace_id = $1
-              AND kind = 'spawn_session'
-              AND payload->>'host_id' = $5
-            ORDER BY available_at, created_at
+              AND kind IN ('spawn_session', 'signal_session')
+              AND payload->>'host_id' = $4
+            ORDER BY CASE WHEN kind = 'signal_session' THEN 0 ELSE 1 END,
+                     available_at, created_at
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
         UPDATE work_claims w
         SET status = 'leased',
-            lease_owner = $2,
-            lease_token = $3,
-            lease_expires_at = $4,
+            lease_owner = $1,
+            lease_token = $2,
+            lease_expires_at = $3,
             attempts = attempts + 1,
             version = version + 1,
             updated_at = now()
@@ -123,8 +123,8 @@ pub async fn claim_next_spawn_for_host(
         "#
     );
 
+    let _ = workspace_id;
     sqlx::query_as::<_, WorkClaim>(&q)
-        .bind(workspace_id)
         .bind(host_id)
         .bind(lease_token)
         .bind(lease_expires)
@@ -193,7 +193,9 @@ pub async fn complete(pool: &PgPool, claim_id: Uuid, lease_token: Uuid) -> DbRes
     Ok(res.rows_affected() == 1)
 }
 
-/// Complete only if this host still holds the lease in this workspace.
+/// Complete only if this host still holds the lease.
+/// `workspace_id` is the **claim's** workspace (cluster hosts complete jobs
+/// they leased in other workspaces).
 pub async fn complete_owned(
     pool: &PgPool,
     claim_id: Uuid,

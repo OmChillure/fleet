@@ -98,7 +98,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         auto_sync_external: false,
         sandbox_backend: "stub".into(),
         stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-worker".into()],
+        process_worker_argv: vec!["fleet-driver".into()],
         k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
@@ -361,6 +361,16 @@ async fn call(
     call_inner(app, method, uri, cookies, None, body).await
 }
 
+async fn call_bearer(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    bearer: &str,
+    body: Option<Value>,
+) -> HttpOut {
+    call_inner(app, method, uri, None, Some(bearer), body).await
+}
+
 async fn signup(app: &axum::Router, email: &str, password: &str) -> HttpOut {
     call(
         app,
@@ -440,16 +450,105 @@ fn partners_disclaimer(ws: &str) -> String {
     format!("/api/workspaces/{ws}/partners/disclaimer")
 }
 
+async fn pair_test_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String {
+    let created = call(
+        app,
+        "POST",
+        &format!("/api/workspaces/{ws}/worker-hosts"),
+        Some(jar),
+        Some(json!({ "name": "test-host" })),
+    )
+    .await;
+    assert!(
+        created.status == StatusCode::OK || created.status == StatusCode::CREATED,
+        "create host: {} {}",
+        created.status,
+        created.body
+    );
+    let token = created.body["pair_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("pair_token: {}", created.body))
+        .to_string();
+    let paired = call(
+        app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": token,
+            "hostname": "test-box",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false
+        })),
+    )
+    .await;
+    assert_eq!(paired.status, StatusCode::OK, "pair: {}", paired.body);
+    let machine = paired.body["machine_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("machine_token: {}", paired.body))
+        .to_string();
+    let hb = call_bearer(
+        app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "heartbeat: {}", hb.body);
+    machine
+}
+
+async fn drain_leases(app: &axum::Router, machine: &str) {
+    for _ in 0..8 {
+        let lease = call_bearer(
+            app,
+            "POST",
+            "/api/worker-hosts/me/lease",
+            machine,
+            Some(json!({})),
+        )
+        .await;
+        if lease.status != StatusCode::OK {
+            return;
+        }
+        let claim = &lease.body["claim"];
+        if claim.is_null() {
+            return;
+        }
+        let id = claim["id"].as_str().unwrap_or("");
+        let tok = claim["lease_token"].as_str().unwrap_or("");
+        if id.is_empty() {
+            return;
+        }
+        let _ = call_bearer(
+            app,
+            "POST",
+            &format!("/api/worker-hosts/me/lease/{id}/complete"),
+            machine,
+            Some(json!({ "lease_token": tok, "ok": true })),
+        )
+        .await;
+    }
+}
+
 async fn tick_until_tasks_done(
     app: &axum::Router,
     jar: &CookieJar,
     ws: &str,
     want: &[&str],
 ) -> Value {
+    let machine = pair_test_host(app, jar, ws).await;
     let mut last_tasks = json!({});
     for i in 0..24 {
         let tick = call(app, "POST", &fleet(ws, "/tick"), Some(jar), None).await;
         assert_eq!(tick.status, StatusCode::OK, "tick {i}: {}", tick.body);
+        drain_leases(app, &machine).await;
         tokio::time::sleep(Duration::from_millis(75)).await;
         let tasks = call(app, "GET", &fleet(ws, "/tasks"), Some(jar), None).await;
         assert_eq!(tasks.status, StatusCode::OK, "tasks {i}: {}", tasks.body);

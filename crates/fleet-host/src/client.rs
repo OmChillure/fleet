@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 
+use agent_fleet_contracts::IsolationClass;
+
 use crate::config::LocalConfig;
 use crate::platform::{advertised_container, advertised_host, detect_platform, hostname};
 
@@ -70,11 +72,7 @@ impl HostClient {
 
     fn take_settings_ack(&self) -> Option<i32> {
         let n = self.settings_ack.load(Ordering::SeqCst);
-        if n > 0 {
-            Some(n)
-        } else {
-            None
-        }
+        if n > 0 { Some(n) } else { None }
     }
 
     fn note_settings_gen(&self, n: i32) {
@@ -117,6 +115,44 @@ impl HostClient {
             .await
             .context("POST /api/worker-hosts/pair")?;
         read_json(resp).await
+    }
+
+    /// Cluster / compose bootstrap. Same response as pair. 409 `no_workspace`
+    /// means retry after a user creates a workspace.
+    pub async fn bootstrap(&self, cfg: &LocalConfig, secret: &str) -> Result<PairResponse> {
+        let body = BootstrapRequest {
+            hostname: hostname(),
+            platform: detect_platform(),
+            advertised_host: advertised_host(cfg),
+            advertised_container: advertised_container(cfg),
+            machine_id: crate::paths::load_or_create_machine_id().ok(),
+        };
+        let resp = self
+            .http
+            .post(self.url("/api/worker-hosts/bootstrap"))
+            .bearer_auth(secret.trim())
+            .json(&body)
+            .send()
+            .await
+            .context("POST /api/worker-hosts/bootstrap")?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.context("read bootstrap body")?;
+        if status.as_u16() == 409 {
+            let body = String::from_utf8_lossy(&bytes);
+            if body.contains("no_workspace") {
+                return Err(BootstrapPending.into());
+            }
+        }
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
+            bail!("HTTP {status}: {}", body.trim());
+        }
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "decode bootstrap JSON ({status}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
     }
 
     pub async fn heartbeat(
@@ -284,9 +320,23 @@ async fn read_json<T: DeserializeOwned>(resp: Response) -> Result<T> {
     })
 }
 
+#[derive(Debug, Error)]
+#[error("no_workspace")]
+pub struct BootstrapPending;
+
 #[derive(Debug, Serialize)]
 struct PairRequest {
     token: String,
+    hostname: String,
+    platform: String,
+    advertised_host: bool,
+    advertised_container: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct BootstrapRequest {
     hostname: String,
     platform: String,
     advertised_host: bool,
@@ -445,11 +495,15 @@ pub struct LeaseClaim {
     pub payload: SpawnPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum JobRuntime {
+    #[default]
     Host,
     Container,
+    /// Guest kernel. Host maps this to Firecracker / QEMU / KubeVirt.
+    /// Missing hypervisor → do not advertise; never silently run as Host.
+    Vm,
 }
 
 impl JobRuntime {
@@ -457,6 +511,38 @@ impl JobRuntime {
         match self {
             Self::Host => "host",
             Self::Container => "container",
+            Self::Vm => "vm",
+        }
+    }
+
+    pub fn from_isolation(class: IsolationClass) -> Self {
+        match class {
+            IsolationClass::Process => Self::Host,
+            IsolationClass::Container => Self::Container,
+            IsolationClass::Vm => Self::Vm,
+        }
+    }
+
+    pub fn isolation(self) -> IsolationClass {
+        match self {
+            Self::Host => IsolationClass::Process,
+            Self::Container => IsolationClass::Container,
+            Self::Vm => IsolationClass::Vm,
+        }
+    }
+
+    /// Parse an isolation class string. `k8s` / `kubernetes` are placement, not isolation.
+    pub fn parse_isolation(s: &str) -> Result<Self> {
+        let trimmed = s.trim();
+        match IsolationClass::parse(trimmed) {
+            Some(class) => Ok(Self::from_isolation(class)),
+            None => {
+                if trimmed.eq_ignore_ascii_case("k8s") || trimmed.eq_ignore_ascii_case("kubernetes")
+                {
+                    bail!("k8s is placement, not isolation (use container)");
+                }
+                bail!("unknown isolation {trimmed:?}");
+            }
         }
     }
 }
@@ -481,7 +567,12 @@ pub struct SpawnPayload {
     pub worker_token: String,
     #[serde(default)]
     pub orchestrator_url: String,
+    #[serde(default)]
     pub runtime: JobRuntime,
+    /// Isolation class (`process` | `container` | `vm`). When set, maps onto `runtime`.
+    /// Placement words (`k8s`) are rejected — a pod is still container isolation.
+    #[serde(default)]
+    pub isolation: Option<String>,
     #[serde(default)]
     pub task_title: String,
     #[serde(default)]
@@ -496,6 +587,22 @@ pub struct SpawnPayload {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub privileged: bool,
+}
+
+impl SpawnPayload {
+    /// Isolation string wins when present; otherwise `runtime`.
+    pub fn resolved_runtime(&self) -> Result<JobRuntime> {
+        if let Some(raw) = self
+            .isolation
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            JobRuntime::parse_isolation(raw)
+        } else {
+            Ok(self.runtime)
+        }
+    }
 }
 
 fn default_timeout_s() -> u64 {
@@ -524,7 +631,6 @@ mod tests {
                 "platform": "windows-x86_64",
                 "bins": {
                     "fleet-host.exe": { "sha256": "aa", "size": 1 },
-                    "fleet-worker.exe": { "sha256": "bb", "size": 2 },
                     "fleet-driver.exe": { "sha256": "cc", "size": 3 }
                 }
             }
@@ -544,6 +650,85 @@ mod tests {
         assert!(resp.desired.is_none());
         assert!(resp.host.auto_update_or_default());
         assert!(resp.host.update_requested_at.is_none());
+    }
+
+    #[test]
+    fn isolation_parse_maps_to_runtime() {
+        assert_eq!(
+            JobRuntime::parse_isolation("process").unwrap(),
+            JobRuntime::Host
+        );
+        assert_eq!(
+            JobRuntime::parse_isolation("host").unwrap(),
+            JobRuntime::Host
+        );
+        assert_eq!(
+            JobRuntime::parse_isolation("native").unwrap(),
+            JobRuntime::Host
+        );
+        assert_eq!(
+            JobRuntime::parse_isolation("container").unwrap(),
+            JobRuntime::Container
+        );
+        assert_eq!(
+            JobRuntime::parse_isolation("docker").unwrap(),
+            JobRuntime::Container
+        );
+        assert_eq!(
+            JobRuntime::parse_isolation("pod").unwrap(),
+            JobRuntime::Container
+        );
+        assert_eq!(JobRuntime::parse_isolation("vm").unwrap(), JobRuntime::Vm);
+        assert_eq!(
+            JobRuntime::parse_isolation("firecracker").unwrap(),
+            JobRuntime::Vm
+        );
+        assert_eq!(JobRuntime::parse_isolation("qemu").unwrap(), JobRuntime::Vm);
+        assert_eq!(
+            JobRuntime::from_isolation(IsolationClass::Process),
+            JobRuntime::Host
+        );
+        assert_eq!(
+            JobRuntime::from_isolation(IsolationClass::Container),
+            JobRuntime::Container
+        );
+        assert_eq!(
+            JobRuntime::from_isolation(IsolationClass::Vm),
+            JobRuntime::Vm
+        );
+        assert_eq!(JobRuntime::Host.isolation(), IsolationClass::Process);
+        assert_eq!(JobRuntime::Container.isolation(), IsolationClass::Container);
+        assert_eq!(JobRuntime::Vm.isolation(), IsolationClass::Vm);
+    }
+
+    #[test]
+    fn isolation_parse_rejects_k8s_placement() {
+        let k8s = JobRuntime::parse_isolation("k8s").unwrap_err().to_string();
+        assert!(k8s.contains("placement"), "{k8s}");
+        assert!(JobRuntime::parse_isolation("kubernetes").is_err());
+        assert!(JobRuntime::parse_isolation("nonsense").is_err());
+        assert!(JobRuntime::parse_isolation("").is_err());
+    }
+
+    #[test]
+    fn payload_isolation_overrides_runtime() {
+        let raw = r#"{"runtime":"host","isolation":"vm"}"#;
+        let p: SpawnPayload = serde_json::from_str(raw).expect("parse");
+        assert_eq!(p.runtime, JobRuntime::Host);
+        assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Vm);
+        let container: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"host","isolation":"container"}"#).unwrap();
+        assert_eq!(container.resolved_runtime().unwrap(), JobRuntime::Container);
+        let process: SpawnPayload = serde_json::from_str(r#"{"isolation":"process"}"#).unwrap();
+        assert_eq!(process.resolved_runtime().unwrap(), JobRuntime::Host);
+        let k8s: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"container","isolation":"k8s"}"#).unwrap();
+        assert!(
+            k8s.resolved_runtime()
+                .unwrap_err()
+                .to_string()
+                .contains("placement")
+        );
     }
 
     #[test]

@@ -12,6 +12,8 @@ name = "fleet-host"
 path = "src/main.rs"
 
 [dependencies]
+agent-fleet-contracts = { path = "../agent-fleet-contracts" }
+fleet-bus = { path = "../fleet-bus" }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
@@ -24,7 +26,16 @@ tokio = { workspace = true, features = ["process", "io-util", "fs", "signal"] }
 toml = "0.8"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+zenoh = { workspace = true }
 uuid = { workspace = true }
+fleet-operator = { path = "../fleet-operator" }
+k8s-openapi = { version = "0.24", features = ["v1_31"] }
+kube = { version = "0.98", default-features = true, features = ["client", "derive"] }
+# kube→educe→enum-ordinalize 4.4+ needs rustc 1.89; stay on 1.88 with the operator.
+enum-ordinalize = "=4.3.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

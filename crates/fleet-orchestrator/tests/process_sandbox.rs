@@ -1,6 +1,6 @@
-//! Process sandbox + `fleet-worker` e2e (PR7).
+//! Process sandbox + `fleet-driver` e2e.
 //!
-//! Spawns a real worker binary that heartbeats/status via `/v1` and writes
+//! Spawns the guest binary that heartbeats/status via `/v1` and writes
 //! artifacts under the session work dir. Requires `DATABASE_URL`. Unix only.
 
 #![cfg(unix)]
@@ -27,18 +27,40 @@ fn require_database_url() -> String {
         })
 }
 
-fn worker_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fleet-worker"))
+fn driver_bin() -> PathBuf {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("target")
+        });
+    let driver = target.join(profile).join("fleet-driver");
+    {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut cmd = std::process::Command::new(cargo);
+        cmd.args(["build", "-p", "fleet-driver", "--bins", "--quiet"]);
+        if !cfg!(debug_assertions) {
+            cmd.arg("--release");
+        }
+        let status = cmd.status().expect("cargo build -p fleet-driver");
+        assert!(status.success(), "failed to build fleet-driver");
+    }
+    assert!(
+        driver.is_file(),
+        "fleet-driver binary missing at {}",
+        driver.display()
+    );
+    driver
 }
 
 #[tokio::test]
 async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
     let database_url = require_database_url();
-    assert!(
-        worker_bin().is_file(),
-        "fleet-worker binary missing at {}",
-        worker_bin().display()
-    );
+    let driver = driver_bin();
 
     let data_dir = tempfile::tempdir().expect("tempdir");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -65,7 +87,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         auto_sync_external: false,
         sandbox_backend: "process".into(),
         stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec![worker_bin().to_string_lossy().into_owned()],
+        process_worker_argv: vec![driver.to_string_lossy().into_owned()],
         k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
@@ -81,6 +103,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
     }
 
     let state = build_app_state(&cfg).await.expect("state");
+    state.tick.enable_local_spawn();
     assert_eq!(state.tick.runtime_backend(), "process");
     let store = state.store.clone();
     let tick = state.tick.clone();
@@ -223,8 +246,8 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         if artifact.is_file() {
             let body: Value =
                 serde_json::from_str(&std::fs::read_to_string(&artifact).unwrap()).unwrap();
-            assert_eq!(body["worker"], "fleet-worker");
-            assert!(body["spec_md_present"].as_bool().unwrap_or(false));
+            assert_eq!(body["worker"], "fleet-driver");
+            assert_eq!(body["harness"], "mock");
             found_artifact = true;
         }
         let task_json = root.join("task.json");
@@ -247,7 +270,7 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
     }
     assert!(
         found_artifact,
-        "fleet-worker did not write artifacts/result.json\n{}",
+        "fleet-driver did not write artifacts/result.json\n{}",
         diag.join("\n")
     );
 }

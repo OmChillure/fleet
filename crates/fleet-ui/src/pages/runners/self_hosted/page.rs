@@ -286,7 +286,7 @@ fn PairPanel(
                 "Pair this worker"
             }
             p { class: "mt-1 text-sm text-[var(--app-fg)]",
-                "On the machine, open a terminal and paste the command. It installs fleet-host, fleet-worker, and fleet-driver, then pairs and starts."
+                "On the machine, open a terminal and paste the command. It installs fleet-host and fleet-driver, then pairs and starts."
             }
             p { class: "mt-1 text-xs text-amber-300/90",
                 "This token is shown once and expires {expires}."

@@ -24,6 +24,7 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut fleet_model = use_signal(String::new);
     let mut grok_env = use_signal(|| false);
     let mut sandbox_backend = use_signal(|| "stub".to_string());
+    let mut min_isolation = use_signal(|| "process".to_string());
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
     let mut ollama_error = use_signal(|| None::<String>);
@@ -47,6 +48,9 @@ pub fn Settings(workspace_id: String) -> Element {
                     grok_env.set(s.grok_env);
                     if !s.sandbox_backend.trim().is_empty() {
                         sandbox_backend.set(s.sandbox_backend);
+                    }
+                    if !s.min_isolation.trim().is_empty() {
+                        min_isolation.set(s.min_isolation);
                     }
                     effective.set(s.effective_backend);
                     error.set(None);
@@ -92,6 +96,7 @@ pub fn Settings(workspace_id: String) -> Element {
         let n = max_agents();
         let llm = fleet_llm();
         let model = fleet_model();
+        let iso = min_isolation();
         spawn(async move {
             let s = match save_settings(
                 &ws,
@@ -99,6 +104,7 @@ pub fn Settings(workspace_id: String) -> Element {
                     max_agents: n,
                     fleet_llm: llm,
                     fleet_llm_model: model,
+                    min_isolation: iso,
                 },
             )
             .await
@@ -114,6 +120,9 @@ pub fn Settings(workspace_id: String) -> Element {
             max_agents.set(s.max_agents);
             fleet_llm.set(s.fleet_llm);
             fleet_model.set(s.fleet_llm_model);
+            if !s.min_isolation.trim().is_empty() {
+                min_isolation.set(s.min_isolation);
+            }
             grok_env.set(s.grok_env);
             effective.set(s.effective_backend);
             show_toast().success("Settings saved.");
@@ -157,13 +166,21 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-6 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Runtime"
+                        "Isolation"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "How jobs isolate on the control plane. Set SANDBOX_BACKEND on the server (stub, process, local, docker). Not a second Native/Sandboxed switch."
+                        "Weakest isolation a host must offer (process < container < vm). k8s is placement, not an isolation class. The control plane does not run sandboxes."
                     }
-                    p { class: "mt-2 font-mono text-sm text-[var(--app-fg)]",
-                        "SANDBOX_BACKEND={sandbox_backend}"
+                    select {
+                        class: field_class(),
+                        value: "{min_isolation}",
+                        onchange: move |e| min_isolation.set(e.value()),
+                        option { value: "process", "Process" }
+                        option { value: "container", "Container" }
+                        option { value: "vm", "VM" }
+                    }
+                    p { class: "mt-3 text-xs text-[var(--app-muted)]",
+                        "SANDBOX_BACKEND={sandbox_backend} is display-only (API is not a runner)."
                     }
                 }
 

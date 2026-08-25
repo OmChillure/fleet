@@ -44,7 +44,7 @@ impl Default for K8sOpts {
         Self {
             namespace: DEFAULT_NAMESPACE.into(),
             image: DEFAULT_IMAGE.into(),
-            command: vec!["fleet-worker".into()],
+            command: vec!["fleet-driver".into()],
             worker_api_url: DEFAULT_WORKER_API_URL.into(),
             kill_grace: Duration::from_secs(15),
         }
@@ -57,7 +57,7 @@ impl K8sOpts {
             Ok(s) if !s.trim().is_empty() => {
                 s.split_whitespace().map(|p| p.to_string()).collect()
             }
-            _ => vec!["fleet-worker".into()],
+            _ => vec!["fleet-driver".into()],
         };
         let kill_grace = std::env::var("KILL_GRACE_S")
             .ok()
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(spec.plan_task_id.as_deref(), Some("t1"));
         assert_eq!(spec.worker_profile.as_deref(), Some("coding"));
         assert_eq!(spec.image, DEFAULT_IMAGE);
-        assert_eq!(spec.command.as_ref().unwrap(), &vec!["fleet-worker".to_string()]);
+        assert_eq!(spec.command.as_ref().unwrap(), &vec!["fleet-driver".to_string()]);
         assert_eq!(spec.ttl_seconds, Some(600));
         assert_eq!(spec.network.as_ref().unwrap().egress_mode, "none");
         assert!(spec.network.as_ref().unwrap().allowlist.is_empty());

@@ -24,7 +24,9 @@ axum-extra = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 dotenvy = { workspace = true }
+agent-fleet-contracts = { path = "../agent-fleet-contracts" }
 fleet-auth = { workspace = true }
+fleet-bus = { path = "../fleet-bus" }
 fleet-db = { workspace = true }
 fleet-integrations = { workspace = true }
 fleet-orchestrator = { workspace = true }
@@ -35,6 +37,7 @@ tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+zenoh = { workspace = true }
 
 [dev-dependencies]
 cookie = { workspace = true }

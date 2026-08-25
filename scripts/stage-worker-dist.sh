@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build fleet-host / fleet-worker / fleet-driver and copy them into
+# Build fleet-host / fleet-driver and copy them into
 # $FLEET_WORKER_DIST_DIR/$PLATFORM (default .tmp/vms/dist/$PLATFORM) so
 # GET /install/worker/bin/{platform}/{bin} can serve them.
 #
@@ -132,10 +132,10 @@ write_manifest() {
 
   local names=()
   if [[ -f "$out/fleet-host.exe" ]]; then
-    names=(fleet-host.exe fleet-worker.exe fleet-driver.exe)
+    names=(fleet-host.exe fleet-driver.exe)
     hostbin="$out/fleet-host.exe"
   elif [[ -f "$out/fleet-host" ]]; then
-    names=(fleet-host fleet-worker fleet-driver)
+    names=(fleet-host fleet-driver)
     hostbin="$out/fleet-host"
   else
     echo "stage-worker-dist: write_manifest: no fleet-host in $out" >&2
@@ -214,7 +214,7 @@ copy_bins() {
   local out="$2"
   mkdir -p "$out"
   local bin
-  for bin in fleet-host fleet-worker fleet-driver; do
+  for bin in fleet-host fleet-driver; do
     if [[ ! -f "$src/$bin" ]]; then
       echo "stage-worker-dist: missing $src/$bin after cargo build" >&2
       exit 1
@@ -232,7 +232,7 @@ copy_exe_bins() {
   local out="$2"
   mkdir -p "$out"
   local bin
-  for bin in fleet-host.exe fleet-worker.exe fleet-driver.exe; do
+  for bin in fleet-host.exe fleet-driver.exe; do
     if [[ ! -f "$src/$bin" ]]; then
       echo "stage-worker-dist: missing $src/$bin after cargo build" >&2
       exit 1
@@ -253,8 +253,8 @@ stage_native() {
     exit 1
   fi
 
-  echo "building fleet-host fleet-worker fleet-driver (debug) for $platform"
-  cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver
+  echo "building fleet-host fleet-driver (debug) for $platform"
+  cargo build -p fleet-host -p fleet-driver
 
   local target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
   copy_bins "$target_dir/debug" "$DEST/$platform"
@@ -277,8 +277,8 @@ stage_musl_host() {
     rustup target add x86_64-unknown-linux-musl || return 1
   fi
 
-  echo "building fleet-host fleet-worker fleet-driver (debug) for linux-x86_64-musl"
-  if ! cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+  echo "building fleet-host fleet-driver (debug) for linux-x86_64-musl"
+  if ! cargo build -p fleet-host -p fleet-driver \
       --target x86_64-unknown-linux-musl; then
     echo "stage-worker-dist: host musl cargo build failed; will try docker" >&2
     return 1
@@ -357,13 +357,13 @@ stage_windows_host() {
 
   local target_dir="${FLEET_WINDOWS_GNU_TARGET_DIR:-$ROOT/target/docker-windows-gnu}"
   mkdir -p "$target_dir"
-  echo "building fleet-host fleet-worker fleet-driver (debug) for windows-x86_64"
+  echo "building fleet-host fleet-driver (debug) for windows-x86_64"
   if ! CARGO_TARGET_DIR="$target_dir" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
       CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
       CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++ \
       AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
-      cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+      cargo build -p fleet-host -p fleet-driver \
         --target x86_64-pc-windows-gnu; then
     echo "stage-worker-dist: host windows-gnu cargo build failed; will try docker" >&2
     return 1
@@ -465,13 +465,13 @@ stage_windows_arm64_host() {
 
   local target_dir="${FLEET_WINDOWS_ARM64_TARGET_DIR:-$ROOT/target/docker-windows-arm64-gnu}"
   mkdir -p "$target_dir"
-  echo "building fleet-host fleet-worker fleet-driver (debug) for windows-arm64"
+  echo "building fleet-host fleet-driver (debug) for windows-arm64"
   if ! CARGO_TARGET_DIR="$target_dir" \
       CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=aarch64-w64-mingw32-clang \
       CC_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-clang \
       CXX_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-clang++ \
       AR_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-ar \
-      cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+      cargo build -p fleet-host -p fleet-driver \
         --target aarch64-pc-windows-gnullvm; then
     echo "stage-worker-dist: host windows-arm64 cargo build failed; will try docker" >&2
     return 1

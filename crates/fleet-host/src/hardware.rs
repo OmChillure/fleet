@@ -988,7 +988,9 @@ fn infer_igpu_from_cpu(cpu: &str) -> Option<String> {
         return Some("Qualcomm Adreno".into());
     }
     if n.contains("apple") && n.contains('m') {
-        for tag in ["m4 max", "m4 pro", "m4", "m3 max", "m3 pro", "m3", "m2", "m1"] {
+        for tag in [
+            "m4 max", "m4 pro", "m4", "m3 max", "m3 pro", "m3", "m2", "m1",
+        ] {
             if n.contains(tag) {
                 let pretty = tag
                     .split_whitespace()

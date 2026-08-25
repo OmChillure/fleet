@@ -56,7 +56,22 @@ impl OrchClient {
     }
 
     pub async fn post_status(&self, seq: i32, status: &str, reason: Option<&str>) -> Result<()> {
+        self.post_status_proof(seq, status, reason, None, None).await
+    }
+
+    pub async fn post_status_proof(
+        &self,
+        seq: i32,
+        status: &str,
+        reason: Option<&str>,
+        result_md: Option<&str>,
+        files: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<()> {
         let url = self.worker_url("status");
+        let result_md = result_md
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| truncate_reason(s, 256 * 1024));
         let res = self
             .http
             .post(&url)
@@ -65,6 +80,8 @@ impl OrchClient {
                 "seq": seq,
                 "status": status,
                 "reason": reason,
+                "result_md": result_md,
+                "files": files,
             }))
             .send()
             .await?;

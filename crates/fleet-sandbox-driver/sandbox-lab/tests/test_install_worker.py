@@ -199,7 +199,7 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertNotIn("Install fleet-host from:", boot)
         self.assertIn("this machine is a self-hosted worker", common)
         self.assertIn("fleet-host   stays up", common)
-        self.assertIn("fleet-worker runs each job", common)
+        self.assertIn("fleet-driver runs each job", common)
         self.assertIn("fleet-driver", common)
         for name in PLATFORMS:
             text = (SCRIPT_DIR / name).read_text(encoding="ascii", errors="replace")
@@ -214,7 +214,7 @@ class InstallWorkerTests(unittest.TestCase):
             text = (SCRIPT_DIR / name).read_text(encoding="ascii")
             self.assertIn("this machine is a self-hosted worker", text, name)
             self.assertIn("fleet-host   stays up", text, name)
-            self.assertIn("fleet-worker runs each job", text, name)
+            self.assertIn("fleet-driver runs each job", text, name)
             self.assertIn("Agent Fleet worker installer", text, name)
 
     def test_install_prints_progress_not_silent_downloads(self):
@@ -226,7 +226,7 @@ class InstallWorkerTests(unittest.TestCase):
         common = (SCRIPT_DIR / "_unix_common.sh").read_text()
         self.assertIn("this machine is a self-hosted worker", common)
         self.assertIn("fleet-host   stays up", common)
-        self.assertIn("fleet-worker runs each job", common)
+        self.assertIn("fleet-driver runs each job", common)
         self.assertIn("downloading $bin", common)
         self.assertIn("checking $bin", common)
         self.assertIn("size_note", common)
@@ -266,9 +266,9 @@ class InstallWorkerTests(unittest.TestCase):
             win = root / "windows-x86_64"
             linux.mkdir()
             win.mkdir()
-            for name in ("fleet-host", "fleet-worker", "fleet-driver"):
+            for name in ("fleet-host", "fleet-driver"):
                 (linux / name).write_bytes(name.encode())
-            for name in ("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe"):
+            for name in ("fleet-host.exe", "fleet-driver.exe"):
                 (win / name).write_bytes(name.encode())
             r = subprocess.run(
                 [
@@ -460,7 +460,6 @@ class InstallWorkerTests(unittest.TestCase):
         boot = BOOTSTRAP.read_bytes()
         bins = {
             "fleet-host": b"fake-freebsd-host\n",
-            "fleet-worker": b"fake-freebsd-worker\n",
             "fleet-driver": b"fake-freebsd-driver\n",
         }
 
@@ -471,7 +470,6 @@ class InstallWorkerTests(unittest.TestCase):
                     "/install/worker/_unix_common.sh": common,
                     "/install/worker/freebsd-amd64.sh": plat,
                     "/install/worker/bin/freebsd-amd64/fleet-host": bins["fleet-host"],
-                    "/install/worker/bin/freebsd-amd64/fleet-worker": bins["fleet-worker"],
                     "/install/worker/bin/freebsd-amd64/fleet-driver": bins["fleet-driver"],
                 }
                 body = mapping.get(self.path)
@@ -592,7 +590,7 @@ class InstallWorkerTests(unittest.TestCase):
                 self.assertIn("installed", out)
                 self.assertIn("this machine is a self-hosted worker", out)
                 self.assertIn("fleet-host   stays up", out)
-                self.assertIn("fleet-worker runs each job", out)
+                self.assertIn("fleet-driver runs each job", out)
                 self.assertIn("checking fleet-host", out)
                 self.assertIn("downloading fleet-host", out)
                 self.assertIn("fetching installer", out)
@@ -614,7 +612,6 @@ class InstallWorkerTests(unittest.TestCase):
         plat = (SCRIPT_DIR / "linux-x86_64.sh").read_bytes()
         bins = {
             "fleet-host": b"fake-linux-host\n",
-            "fleet-worker": b"fake-linux-worker\n",
             "fleet-driver": b"fake-linux-driver\n",
         }
 
@@ -624,7 +621,6 @@ class InstallWorkerTests(unittest.TestCase):
                     "/install/worker/_unix_common.sh": common,
                     "/install/worker/linux-x86_64.sh": plat,
                     "/install/worker/bin/linux-x86_64/fleet-host": bins["fleet-host"],
-                    "/install/worker/bin/linux-x86_64/fleet-worker": bins["fleet-worker"],
                     "/install/worker/bin/linux-x86_64/fleet-driver": bins["fleet-driver"],
                 }
                 return mapping.get(self.path)
@@ -682,7 +678,7 @@ class InstallWorkerTests(unittest.TestCase):
                 self.assertIn("fetching installer", out)
                 self.assertIn("this machine is a self-hosted worker", out)
                 self.assertIn("fleet-host   stays up", out)
-                self.assertIn("fleet-worker runs each job", out)
+                self.assertIn("fleet-driver runs each job", out)
                 self.assertIn("checking fleet-host", out)
                 self.assertIn("downloading fleet-host", out)
                 self.assertIn("installed", out)

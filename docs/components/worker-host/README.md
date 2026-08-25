@@ -5,7 +5,7 @@ reachable (IP or domain). Workers only make outbound HTTPS. This is
 **create-then-pair** (GitLab 17 / GitHub Actions style), not a shared
 registration token and not inbound SSH.
 
-Do not replace `fleet-worker`, `fleet-driver`, `fleet-operator`,
+Do not replace `fleet-driver`, `fleet-operator`,
 `FleetSandbox`, `work_claims`, session `FLEET_*` tokens, or the local
 `SANDBOX_BACKEND` path. Those stay. This layer is a durable **machine**
 in front of them.
@@ -29,7 +29,7 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   the URL is loopback and the host is not this machine.
 - Cookie auth for owners who create pair tokens.
 - `FLEET_WORKER_DIST_DIR` (optional): directory of prebuilt
-  `fleet-host` / `fleet-worker` / `fleet-driver` per platform. If unset,
+  `fleet-host` / `fleet-driver` per platform. If unset,
   install endpoints still serve scripts; binary GET returns 404 with a
   build hint. Dev can set `FLEET_WORKER_BUILD_FROM_SOURCE=1` on the
   **machine** (not the CP) so the platform script runs `cargo build`.
@@ -44,7 +44,7 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   local `http://127.0.0.1:8080`).
 - Disk for `work_dir` (default `~/.local/share/fleet-host/work`).
 - Clock within a few minutes (pair token TTL is 1 hour).
-- **Host mode (v1):** `fleet-worker` and/or `fleet-driver` on PATH (installed
+- **Host mode (v1):** `fleet-driver` on PATH (installed
   by the same script). This is the only supported executor.
 - **Container mode:** not supported in v1 (`run_container` / k3d). Do not treat
   Docker/`k3d` on the box as a working job runtime.
@@ -112,8 +112,7 @@ Never accepted from the control plane. Editing requires shell on the box.
 | `docker_network` | string | `bridge` | Docker network for container jobs. `none` blocks heartbeats to the plane |
 | `allow_privileged` | bool | false | Refuse privileged container specs |
 | `use_host_git_credentials` | bool | true | Child sees host `~/.git-credentials` / ssh |
-| `fleet_worker_bin` | path | `fleet-worker` | Host-mode child |
-| `fleet_driver_bin` | path | `fleet-driver` | If `FLEET_HARNESS` set on the job |
+| `fleet_driver_bin` | path | `fleet-driver` | Guest in host / docker / kube_pod |
 | `log_level` | string | `info` | `error` \| `warn` \| `info` \| `debug` |
 | `heartbeat_interval_s` | int | 10 | Host liveness (not the job heartbeat) |
 | `poll_interval_s` | int | 2 | Lease poll |
@@ -452,7 +451,7 @@ token **unchanged**):
 `fleet-orchestrator` may depend on `fleet-db` for `work_claims::enqueue`
 and `worker_hosts` list. Do not invent a second claims table.
 
-Stuck/kill: session still uses job heartbeats from `fleet-worker`.
+Stuck/kill: session still uses job heartbeats from `fleet-driver`.
 If the host goes offline, existing stale-heartbeat logic applies.
 
 ---
@@ -475,9 +474,9 @@ and `~/.config/fleet-host/machine.token` (`0600`).
 `run` loop: heartbeat every `heartbeat_interval_s`; `POST …/lease`;
 on claim, spawn child:
 
-- `runtime=host`: `fleet_worker_bin` or `fleet_driver_bin` if
-  `env.FLEET_HARNESS` is set, cwd = `{work_dir}/{session_id}`, env =
-  payload.env + extra_env. Same contract as `ProcessRuntime`.
+- `runtime=host`: `fleet_driver_bin` (ACP; `FLEET_HARNESS` mock|grok),
+  cwd = `{work_dir}/{session_id}`, env = payload.env + extra_env.
+  Same HTTP contract as `ProcessRuntime`.
 - `runtime=container` + `k3d`: **not supported in v1** (not a working
   executor). Planned: ensure cluster (`k3d cluster list` / `k3d cluster
   create` using the same shape as `infra/k3d.yaml`: 1 server, 0 agents,

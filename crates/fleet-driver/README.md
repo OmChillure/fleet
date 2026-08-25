@@ -99,7 +99,7 @@ Process sandbox uses your user `~/.grok` (including MCP servers in
 | `FLEET_HARNESS_CMD` | unset | Full argv override |
 | `FLEET_MOCK_ACP_BIN` | sibling / PATH | Mock agent binary |
 
-Keep using `fleet-worker` for orchestrator fixture tests that must not speak ACP.
+The guest is always `fleet-driver`. Use `FLEET_HARNESS=mock` when a test must not call a real model.
 
 In-sandbox Compose isolation (OpenCode/Pi/volume handshake) is
 [`crates/fleet-sandbox-driver`](../fleet-sandbox-driver/). Do not point

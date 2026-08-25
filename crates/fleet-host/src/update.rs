@@ -173,11 +173,7 @@ pub fn inventory_in(cfg: &LocalConfig, dest_dir: &Path, platform: &str) -> Local
                 .clone()
                 .unwrap_or_else(|| dest_dir.join(package_bin_file_name(logical, windows)))
         } else {
-            let configured = if logical == "fleet-worker" {
-                cfg.fleet_worker_bin.as_str()
-            } else {
-                cfg.fleet_driver_bin.as_str()
-            };
+            let configured = cfg.fleet_driver_bin.as_str();
             resolve_bin(configured, host_exe.as_deref())
                 .unwrap_or_else(|| dest_dir.join(package_bin_file_name(logical, windows)))
         };
@@ -810,16 +806,13 @@ mod tests {
     fn hash_match_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let host = b"host-v1";
-        let worker = b"worker-v1";
         let driver = b"driver-v1";
         write_bin(dir.path(), "fleet-host", host);
-        write_bin(dir.path(), "fleet-worker", worker);
         write_bin(dir.path(), "fleet-driver", driver);
         let desired = desired_for(
             "linux-x86_64",
             &[
                 ("fleet-host", host.as_slice()),
-                ("fleet-worker", worker.as_slice()),
                 ("fleet-driver", driver.as_slice()),
             ],
         );
@@ -831,18 +824,17 @@ mod tests {
     #[test]
     fn checksum_fail_leaves_old_bins() {
         let dir = tempfile::tempdir().unwrap();
-        let old = b"old-worker";
+        let old = b"old-driver";
         write_bin(dir.path(), "fleet-host", b"host");
-        write_bin(dir.path(), "fleet-worker", old);
-        write_bin(dir.path(), "fleet-driver", b"driver");
-        let dest = dir.path().join("fleet-worker");
+        write_bin(dir.path(), "fleet-driver", old);
+        let dest = dir.path().join("fleet-driver");
         let want = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let bad = b"not-the-bytes-you-wanted";
         let err = verify_bytes(
-            "fleet-worker",
+            "fleet-driver",
             bad,
             want,
-            Some(format!("{want}  fleet-worker\n").as_bytes()),
+            Some(format!("{want}  fleet-driver\n").as_bytes()),
             "linux-x86_64",
         )
         .unwrap_err();
@@ -859,28 +851,21 @@ mod tests {
     fn child_only_apply_does_not_require_jobs_idle() {
         let dir = tempfile::tempdir().unwrap();
         write_bin(dir.path(), "fleet-host", b"host-same");
-        write_bin(dir.path(), "fleet-worker", b"worker-old");
         write_bin(dir.path(), "fleet-driver", b"driver-old");
-        let new_w = b"worker-new";
         let new_d = b"driver-new";
         let desired = desired_for(
             "linux-x86_64",
             &[
                 ("fleet-host", b"host-same".as_slice()),
-                ("fleet-worker", new_w.as_slice()),
                 ("fleet-driver", new_d.as_slice()),
             ],
         );
         let local = local_from_dir(dir.path(), "linux-x86_64");
         assert_eq!(plan_kind(&local, &desired), ApplyKind::ChildrenOnly);
-        let dest_w = dir.path().join("fleet-worker");
         let dest_d = dir.path().join("fleet-driver");
-        stage_new_file(&dest_w, new_w).unwrap();
         stage_new_file(&dest_d, new_d).unwrap();
         // jobs != 0 is fine
-        swap_staged(&dest_w).unwrap();
         swap_staged(&dest_d).unwrap();
-        assert_eq!(fs::read(&dest_w).unwrap(), new_w);
         assert_eq!(fs::read(&dest_d).unwrap(), new_d);
         assert_eq!(
             fs::read(dir.path().join("fleet-host")).unwrap(),
@@ -955,7 +940,7 @@ mod tests {
     fn windows_updater_script_written_running_exe_not_opened() {
         let dir = tempfile::tempdir().unwrap();
         let exe = write_bin(dir.path(), "fleet-host.exe", b"running-pe");
-        let worker = write_bin(dir.path(), "fleet-worker.exe", b"old-w");
+        let _driver = write_bin(dir.path(), "fleet-driver.exe", b"old-d");
         // Hold dest open (simulates a locked PE) — apply must not truncate it.
         let mut held = fs::OpenOptions::new().read(true).open(&exe).unwrap();
         let mut probe = [0u8; 4];
@@ -970,7 +955,7 @@ mod tests {
 
         let script = write_windows_updater(
             dir.path(),
-            &["fleet-host.exe".into(), "fleet-worker.exe".into()],
+            &["fleet-host.exe".into(), "fleet-driver.exe".into()],
         )
         .unwrap();
         assert_eq!(script.file_name().unwrap(), "update.cmd");
@@ -986,7 +971,7 @@ mod tests {
 
         // dest still the original bytes; we never opened it for write.
         assert_eq!(fs::read(&exe).unwrap(), b"running-pe");
-        assert_eq!(fs::read(&worker).unwrap(), b"old-w");
+        assert_eq!(fs::read(&_driver).unwrap(), b"old-d");
         drop(held);
     }
 
@@ -1085,19 +1070,16 @@ mod tests {
     async fn apply_does_not_patch_drain_or_paused() {
         let dir = tempfile::tempdir().unwrap();
         let host = b"host-same";
-        let old_w = b"worker-old";
-        let new_w = b"worker-new";
-        let drv = b"driver-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
         write_bin(dir.path(), "fleet-host", host);
-        write_bin(dir.path(), "fleet-worker", old_w);
-        write_bin(dir.path(), "fleet-driver", drv);
+        write_bin(dir.path(), "fleet-driver", old_d);
         let platform = detect_platform();
         let mock = spawn_mock(files_for(
             &platform,
             &[
                 ("fleet-host", host.as_slice()),
-                ("fleet-worker", new_w.as_slice()),
-                ("fleet-driver", drv.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
             ],
         ));
         let cfg = LocalConfig::default();
@@ -1106,8 +1088,7 @@ mod tests {
             &platform,
             &[
                 ("fleet-host", host.as_slice()),
-                ("fleet-worker", new_w.as_slice()),
-                ("fleet-driver", drv.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
             ],
         );
         let jobs = AsyncMutex::new(HashSet::from([Uuid::now_v7()]));
@@ -1120,7 +1101,7 @@ mod tests {
             .await
             .expect("apply");
         assert_eq!(out, ApplyOutcome::ChildrenSwapped);
-        assert_eq!(fs::read(dir.path().join("fleet-worker")).unwrap(), new_w);
+        assert_eq!(fs::read(dir.path().join("fleet-driver")).unwrap(), new_d);
         assert!(!state.stop_claiming.load(Ordering::SeqCst));
         assert!(!state.is_updating());
         let log = mock.log.lock().unwrap().clone();
@@ -1138,17 +1119,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old_h = b"host-old";
         let new_h = b"host-new";
-        let w = b"worker-same";
         let d = b"driver-same";
         write_bin(dir.path(), "fleet-host", old_h);
-        write_bin(dir.path(), "fleet-worker", w);
         write_bin(dir.path(), "fleet-driver", d);
         let platform = detect_platform();
         let mock = spawn_mock(files_for(
             &platform,
             &[
                 ("fleet-host", new_h.as_slice()),
-                ("fleet-worker", w.as_slice()),
                 ("fleet-driver", d.as_slice()),
             ],
         ));
@@ -1158,7 +1136,6 @@ mod tests {
             &platform,
             &[
                 ("fleet-host", new_h.as_slice()),
-                ("fleet-worker", w.as_slice()),
                 ("fleet-driver", d.as_slice()),
             ],
         );

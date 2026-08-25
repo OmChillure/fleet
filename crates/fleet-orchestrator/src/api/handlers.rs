@@ -449,6 +449,13 @@ pub struct StatusBody {
     pub seq: i32,
     pub status: String,
     pub reason: Option<String>,
+    /// Guest-written `result.md`. Inbox materializes this onto the plane
+    /// session dir before `validate_done`. HTTP status alone is not proof.
+    #[serde(default)]
+    pub result_md: Option<String>,
+    /// Optional extra relative files (`work/foo.txt` → body).
+    #[serde(default)]
+    pub files: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub async fn post_status(
@@ -466,6 +473,13 @@ pub async fn post_status(
     if session.project_id != project_id {
         return Err(err(StatusCode::NOT_FOUND, "session not in project"));
     }
+    let result_md = body
+        .result_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_proof(s, MAX_RESULT_MD_CHARS));
+    let files = body.files.as_ref().and_then(sanitize_proof_files);
     state
         .store
         .append_worker_report(
@@ -474,11 +488,49 @@ pub async fn post_status(
             session.board_task_id,
             body.seq,
             "status",
-            json!({ "status": body.status, "reason": body.reason }),
+            json!({
+                "status": body.status,
+                "reason": body.reason,
+                "result_md": result_md,
+                "files": files,
+            }),
         )
         .await
         .map_err(map_store)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+const MAX_RESULT_MD_CHARS: usize = 256 * 1024;
+const MAX_PROOF_FILES: usize = 32;
+const MAX_PROOF_FILE_CHARS: usize = 64 * 1024;
+
+fn truncate_proof(s: &str, max_chars: usize) -> String {
+    let mut it = s.chars();
+    let mut out: String = it.by_ref().take(max_chars).collect();
+    if it.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn sanitize_proof_files(
+    files: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    for (k, v) in files.iter().take(MAX_PROOF_FILES) {
+        let rel = k.trim().trim_start_matches(['/', '\\']);
+        if rel.is_empty() || rel.split(['/', '\\']).any(|p| p == ".." || p.is_empty()) {
+            continue;
+        }
+        let Some(text) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        out.insert(
+            rel.to_string(),
+            serde_json::Value::String(truncate_proof(text, MAX_PROOF_FILE_CHARS)),
+        );
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 pub async fn admin_tick(

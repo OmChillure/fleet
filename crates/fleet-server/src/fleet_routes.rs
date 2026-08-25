@@ -145,20 +145,28 @@ async fn get_fleet_project(
         "workspace_id": workspace_id,
         "role": role,
         "sandbox_backend": state.orch.tick.runtime_backend(),
-        "config": settings_json(&cfg),
+        "config": settings_json(&state, workspace_id, &cfg).await,
     })))
 }
 
-fn settings_json(cfg: &fleet_orchestrator::store::ProjectConfigRow) -> Value {
+async fn settings_json(
+    state: &AppState,
+    workspace_id: Uuid,
+    cfg: &fleet_orchestrator::store::ProjectConfigRow,
+) -> Value {
     let llm = fleet_orchestrator::sandbox::agent_loop::resolve_workspace_llm(
         &cfg.fleet_llm,
         &cfg.fleet_llm_model,
     );
     let grok_env = fleet_orchestrator::sandbox::agent_loop::grok_env_enabled();
+    let min_isolation = fleet_db::repos::workspaces::min_isolation(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| "process".into());
     json!({
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
         "sandbox_backend": cfg.sandbox_backend,
+        "min_isolation": min_isolation,
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
         "fleet_llm": cfg.fleet_llm,
@@ -182,7 +190,7 @@ async fn get_settings(
         .get_project_config(workspace_id)
         .await
         .map_err(|e| map_orch_err("get_project_config", e))?;
-    Ok(Json(settings_json(&cfg)))
+    Ok(Json(settings_json(&state, workspace_id, &cfg).await))
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +198,7 @@ pub struct PatchSettingsBody {
     pub max_agents: Option<i32>,
     pub fleet_llm: Option<String>,
     pub fleet_llm_model: Option<String>,
+    pub min_isolation: Option<String>,
 }
 
 async fn patch_settings(
@@ -230,13 +239,18 @@ async fn patch_settings(
         .clone()
         .unwrap_or_else(|| current.fleet_llm_model.clone());
 
+    if let Some(raw) = body.min_isolation.as_deref() {
+        workspace_repo::set_min_isolation(&state.db, workspace_id, raw)
+            .await?;
+    }
+
     let cfg = state
         .orch
         .store
         .update_fleet_settings(workspace_id, max, llm, &model)
         .await
         .map_err(|e| map_orch_err("update_fleet_settings", e))?;
-    Ok(Json(settings_json(&cfg)))
+    Ok(Json(settings_json(&state, workspace_id, &cfg).await))
 }
 
 async fn get_personas(

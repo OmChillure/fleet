@@ -49,7 +49,7 @@ impl DockerRuntime {
         let network = std::env::var("SANDBOX_DOCKER_NETWORK")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "none".into()); // default: no network
+            .unwrap_or_else(|| "bridge".into());
         Self::new(image, network)
     }
 }
@@ -65,33 +65,6 @@ impl SandboxRuntime for DockerRuntime {
         ensure_docker().await?;
 
         materialize_workspace(&req).await?;
-
-        if req.agent_backend.is_some() {
-            let handle = RuntimeHandle {
-                backend: "docker".into(),
-                id: req.session_id.to_string(),
-            };
-            let job = super::agent_loop::AgentJob::start(&req);
-            let mut g = self.inner.lock().await;
-            g.insert(
-                handle.id.clone(),
-                DockerEntry {
-                    project_id: req.project_id,
-                    handle: handle.clone(),
-                    container_id: String::new(),
-                    work_dir: req.work_dir.clone(),
-                    agent: Some(job),
-                    last_exit: None,
-                    destroyed: false,
-                },
-            );
-            tracing::info!(
-                session_id = %req.session_id,
-                profile = %req.worker_profile,
-                "docker sandbox spawned (LLM agent loop on host)"
-            );
-            return Ok(handle);
-        }
 
         let work = req.work_dir.canonicalize().unwrap_or(req.work_dir.clone());
         let name = format!("fleet-sbx-{}", req.session_id);
@@ -338,4 +311,87 @@ async fn ensure_docker() -> Result<(), SandboxError> {
 
 pub fn docker_runtime() -> Arc<DockerRuntime> {
     Arc::new(DockerRuntime::from_env())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::io::IntegrationHandle;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn req(work: PathBuf, session: Uuid, backend: Option<&str>) -> SpawnRequest {
+        SpawnRequest {
+            session_id: session,
+            project_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            board_task_id: Uuid::new_v4(),
+            plan_task_id: "t1".into(),
+            worker_profile: "coding".into(),
+            worker_token: "tok".into(),
+            work_dir: work,
+            env: HashMap::new(),
+            timeout: Duration::from_secs(30),
+            task_title: Some("demo".into()),
+            task_summary: None,
+            task_spec: Some("echo hi".into()),
+            persona_name: None,
+            persona_md: None,
+            agent_backend: backend.map(str::to_string),
+            agent_model: None,
+            io: IntegrationHandle::none(),
+        }
+    }
+
+    #[test]
+    fn from_env_defaults_to_bridge_so_guests_can_heartbeat() {
+        let prev = std::env::var("SANDBOX_DOCKER_NETWORK").ok();
+        unsafe {
+            std::env::remove_var("SANDBOX_DOCKER_NETWORK");
+        }
+        let rt = DockerRuntime::from_env();
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("SANDBOX_DOCKER_NETWORK", v);
+            }
+        }
+        assert_ne!(
+            rt.network, "none",
+            "network=none drops /v1 heartbeats; default must be reachable"
+        );
+        assert_eq!(rt.network, "bridge");
+    }
+
+    #[tokio::test]
+    async fn llm_backend_must_not_skip_container_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("w");
+        tokio::fs::create_dir_all(&work).await.unwrap();
+        let session = Uuid::new_v4();
+        let rt = DockerRuntime::new("alpine:3.20", "bridge");
+        match rt.spawn(req(work, session, Some("grok"))).await {
+            Ok(h) => {
+                let name = format!("fleet-sbx-{session}");
+                let inspect = std::process::Command::new("docker")
+                    .args(["inspect", "-f", "{{.Id}}", &name])
+                    .output()
+                    .expect("docker inspect");
+                let _ = rt.destroy(&h).await;
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .status();
+                assert!(
+                    inspect.status.success(),
+                    "agent_backend must not skip the container (AgentJob on the host is not isolation)"
+                );
+            }
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                assert!(
+                    msg.contains("docker"),
+                    "missing docker must fail closed, not fall back to a host AgentJob: {e}"
+                );
+            }
+        }
+    }
 }

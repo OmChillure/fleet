@@ -16,7 +16,7 @@ use tokio::process::Command;
 
 #[derive(Clone, Default)]
 struct Rec {
-    statuses: Vec<(i32, String, Option<String>)>,
+    statuses: Vec<(i32, String, Option<String>, Option<String>)>,
     heartbeats: Vec<i32>,
 }
 
@@ -30,6 +30,8 @@ struct StatusBody {
     seq: i32,
     status: String,
     reason: Option<String>,
+    #[serde(default)]
+    result_md: Option<String>,
 }
 
 async fn heartbeat(
@@ -44,7 +46,7 @@ async fn status(State(rec): State<Arc<Mutex<Rec>>>, Json(body): Json<StatusBody>
     rec.lock()
         .unwrap()
         .statuses
-        .push((body.seq, body.status, body.reason));
+        .push((body.seq, body.status, body.reason, body.result_md));
     StatusCode::ACCEPTED
 }
 
@@ -86,6 +88,7 @@ async fn driver_binary_completes_mock_turn() {
         .env("FLEET_WORKER_TOKEN", "tok")
         .env("FLEET_WORK_DIR", dir.path())
         .env("FLEET_HARNESS", "mock")
+        .env("FLEET_WORK_CMD", format!("touch {}", dir.path().join("from_work_cmd").display()))
         .env("FLEET_MOCK_ACP_BIN", mock)
         .env("FLEET_TASK_TIMEOUT_S", "15")
         .env("FLEET_HEARTBEAT_INTERVAL_S", "30")
@@ -108,16 +111,30 @@ async fn driver_binary_completes_mock_turn() {
     .unwrap();
     assert_eq!(result["ok"], true);
     assert_eq!(result["harness"], "mock");
+    assert!(
+        !dir.path().join("from_work_cmd").exists(),
+        "fleet-driver must ignore FLEET_WORK_CMD"
+    );
 
     let rec = rec.lock().unwrap();
     assert!(
-        rec.statuses.iter().any(|(_, s, _)| s == "running"),
+        rec.statuses.iter().any(|(_, s, _, _)| s == "running"),
         "statuses={:?}",
         rec.statuses
     );
     assert!(
-        rec.statuses.iter().any(|(_, s, _)| s == "success"),
+        rec.statuses.iter().any(|(_, s, _, _)| s == "success"),
         "statuses={:?}",
+        rec.statuses
+    );
+    assert!(
+        rec.statuses.iter().any(|(_, s, _, md)| {
+            s == "success"
+                && md
+                    .as_deref()
+                    .is_some_and(|t| t.contains("hello from mock agent") || t.contains("# Result"))
+        }),
+        "success must ship result.md to the plane: {:?}",
         rec.statuses
     );
 }

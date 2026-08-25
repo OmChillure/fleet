@@ -79,9 +79,12 @@ prepare_kind() {
     -t agent-fleet-operator:local -f "${ROOT}/Dockerfile.operator" "${ROOT}"
   kind load docker-image agent-fleet-api:local agent-fleet-ui:local agent-fleet-operator:local \
     --name agent-fleet
-  kubectl --context kind-agent-fleet -n agent-fleet rollout restart deploy/api deploy/ui deploy/fleet-operator
+  kubectl --context kind-agent-fleet apply -k "${ROOT}/infra/overlays/kind"
+  kubectl --context kind-agent-fleet -n agent-fleet rollout restart \
+    deploy/api deploy/ui deploy/fleet-operator deploy/fleet-host
   kubectl --context kind-agent-fleet -n agent-fleet rollout status deploy/api --timeout=300s
   kubectl --context kind-agent-fleet -n agent-fleet rollout status deploy/ui --timeout=300s
+  kubectl --context kind-agent-fleet -n agent-fleet rollout status deploy/fleet-host --timeout=300s
   local i
   for i in $(seq 1 60); do
     if python3 "${ROOT}/tests/browser/stack_identity.py"; then
@@ -127,6 +130,8 @@ fi
 
 run_step fail-closed-contract \
   python3 -m unittest tests.browser.test_fail_closed_contract -q
+run_step unify-sku-contract \
+  python3 -m unittest tests.browser.test_unify_sku_contract -q
 run_step host-dx-build host_dx_build
 run_step stack-identity python3 "${ROOT}/tests/browser/stack_identity.py"
 run_step cargo-workspace-lib \

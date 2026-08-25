@@ -357,7 +357,7 @@ impl WorkerHostPublic {
     }
 }
 
-const PACKAGE_BIN_STEMS: [&str; 3] = ["fleet-host", "fleet-worker", "fleet-driver"];
+const PACKAGE_BIN_STEMS: [&str; 2] = ["fleet-host", "fleet-driver"];
 
 /// `current` / `behind` / `unknown` from the box report vs the served dist.
 ///
@@ -387,6 +387,10 @@ pub fn compute_software_status(
                     if !sha_eq(&got, &expect) {
                         mismatch = true;
                     }
+                }
+                (None, Some(_)) => {
+                    compared += 1;
+                    mismatch = true;
                 }
                 _ => {}
             }
@@ -673,13 +677,6 @@ mod public_view_tests {
             },
         );
         bins.insert(
-            "fleet-worker".into(),
-            WorkerBinMeta {
-                sha256: "worker-sha".into(),
-                size: 11,
-            },
-        );
-        bins.insert(
             "fleet-driver".into(),
             WorkerBinMeta {
                 sha256: "driver-sha".into(),
@@ -724,7 +721,6 @@ mod public_view_tests {
             Some("stage-tree-id"),
             Some(serde_json::json!({
                 "fleet-host": "bbb",
-                "fleet-worker": "worker-sha",
                 "fleet-driver": "driver-sha"
             })),
         );
@@ -735,13 +731,45 @@ mod public_view_tests {
     }
 
     #[test]
+    fn missing_fleet_driver_is_behind() {
+        let desired = sample_manifest("aaa");
+        let sw = reported(
+            Some("other-git"),
+            Some(serde_json::json!({
+                "fleet-host": "aaa"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "SKU is fleet-host + fleet-driver; a box that does not report the guest is behind"
+        );
+    }
+
+    #[test]
+    fn reporting_only_legacy_fleet_worker_is_not_current() {
+        let desired = sample_manifest("aaa");
+        let sw = reported(
+            Some("other-git"),
+            Some(serde_json::json!({
+                "fleet-host": "aaa",
+                "fleet-worker": "stale-on-disk"
+            })),
+        );
+        assert_ne!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "a leftover fleet-worker guest is the old SKU, not current"
+        );
+    }
+
+    #[test]
     fn software_status_current_when_bins_match() {
         let desired = sample_manifest("AaA");
         let sw = reported(
             Some("other-git"),
             Some(serde_json::json!({
                 "fleet-host": "aaa",
-                "fleet-worker": { "sha256": "worker-sha", "size": 11 },
                 "fleet-driver": "driver-sha"
             })),
         );
@@ -758,7 +786,7 @@ mod public_view_tests {
             None,
             Some(serde_json::json!({
                 "fleet-host": "aaa",
-                "fleet-worker": "wrong"
+                "fleet-driver": "wrong"
             })),
         );
         assert_eq!(
@@ -774,13 +802,6 @@ mod public_view_tests {
             "fleet-host.exe".into(),
             WorkerBinMeta {
                 sha256: "pe-host".into(),
-                size: 1,
-            },
-        );
-        bins.insert(
-            "fleet-worker.exe".into(),
-            WorkerBinMeta {
-                sha256: "pe-worker".into(),
                 size: 1,
             },
         );
@@ -801,7 +822,6 @@ mod public_view_tests {
             None,
             Some(serde_json::json!({
                 "fleet-host": "pe-host",
-                "fleet-worker": "pe-worker",
                 "fleet-driver": "pe-driver"
             })),
         );

@@ -27,6 +27,7 @@ use crate::state::AppState;
 const PAIR_TTL: Duration = Duration::hours(1);
 const LEASE_FOR: Duration = Duration::minutes(2);
 const ROLE_OWNER: &str = "owner";
+pub const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -43,6 +44,7 @@ pub fn router() -> Router<AppState> {
             post(http_new_pair_token),
         )
         .route("/api/worker-hosts/pair", post(http_pair))
+        .route("/api/worker-hosts/bootstrap", post(http_bootstrap))
         .route("/api/worker-hosts/me/heartbeat", post(http_heartbeat))
         .route("/api/worker-hosts/me/lease", post(http_lease))
         .route(
@@ -245,6 +247,19 @@ pub struct PairBody {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BootstrapBody {
+    pub hostname: String,
+    pub platform: String,
+    pub advertised_host: bool,
+    pub advertised_container: bool,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    /// Pin a workspace. Omit → oldest workspace (cluster-host).
+    #[serde(default)]
+    pub workspace_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct HeartbeatBody {
     pub advertised_host: bool,
     pub advertised_container: bool,
@@ -336,10 +351,16 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
+    let cluster = host_repo::list_cluster(&state.db).await?;
     let plane = plane_public(&state, workspace_id).await?;
-    let mut hosts = Vec::with_capacity(rows.len() + 1);
+    let mut hosts = Vec::with_capacity(rows.len() + cluster.len() + 1);
     hosts.push(plane);
-    hosts.extend(rows.iter().map(|h| host_json(&state, h)));
+    let mut seen = std::collections::HashSet::new();
+    for h in rows.iter().chain(cluster.iter()) {
+        if seen.insert(h.id) {
+            hosts.push(host_json(&state, h));
+        }
+    }
     let packages = crate::install_routes::list_dist_packages(&state);
     let sandbox_backend = std::env::var("SANDBOX_BACKEND")
         .ok()
@@ -521,13 +542,91 @@ async fn http_pair(
     )
     .await
     .map_err(map_pair_err)?;
-    Ok(Json(json!({
+    Ok(Json(paired_payload(&state, &host, &machine_token)))
+}
+
+fn bootstrap_secret_from_env() -> Option<String> {
+    std::env::var(BOOTSTRAP_SECRET_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn require_bootstrap_secret(headers: &HeaderMap) -> AppResult<()> {
+    let expected = bootstrap_secret_from_env().ok_or_else(|| AppError::not_found("not found"))?;
+    let got = bearer_token(headers)?;
+    let exp_hash = host_repo::hash_token(&expected);
+    if !host_repo::verify_token(got, &exp_hash) {
+        return Err(AppError::unauthorized("invalid bootstrap secret"));
+    }
+    Ok(())
+}
+
+fn paired_payload(state: &AppState, host: &WorkerHost, machine_token: &str) -> Value {
+    json!({
         "host_id": host.id,
         "machine_token": machine_token,
         "workspace_id": host.workspace_id,
-        "control_plane_url": api_base(&state),
-        "cp_settings": cp_settings_json(&host),
-    })))
+        "control_plane_url": api_base(state),
+        "cp_settings": cp_settings_json(host),
+    })
+}
+
+async fn http_bootstrap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BootstrapBody>,
+) -> AppResult<Json<Value>> {
+    require_bootstrap_secret(&headers)?;
+    let hostname = body.hostname.trim();
+    let platform = body.platform.trim();
+    if hostname.is_empty() {
+        return Err(AppError::bad_request("hostname is required"));
+    }
+    if platform.is_empty() {
+        return Err(AppError::bad_request("platform is required"));
+    }
+    let workspace_id = match body.workspace_id {
+        Some(id) => {
+            workspace_repo::min_isolation(&state.db, id).await?;
+            id
+        }
+        None => workspace_repo::first_id(&state.db)
+            .await?
+            .ok_or_else(|| AppError::conflict("no_workspace"))?,
+    };
+    let machine_id = parse_machine_id(body.machine_id.as_deref());
+    if let Some(mid) = machine_id
+        && let Some(existing) = host_repo::find_by_machine_id(&state.db, workspace_id, mid).await?
+    {
+        let PairedWorkerHost {
+            host,
+            machine_token,
+        } = host_repo::rotate_machine_token(&state.db, existing.id).await?;
+        return Ok(Json(paired_payload(&state, &host, &machine_token)));
+    }
+
+    let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, hostname, None);
+    new.allow_host = body.advertised_host;
+    new.allow_container = body.advertised_container;
+    new.labels = vec!["cluster".into()];
+    let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
+    host_repo::create_pending(&state.db, &new, &pair_token_hash, pair_expires_at).await?;
+    let PairedWorkerHost {
+        host,
+        machine_token,
+    } = host_repo::consume_pair_token(
+        &state.db,
+        &pair_token,
+        hostname,
+        platform,
+        body.advertised_host,
+        body.advertised_container,
+        machine_id,
+    )
+    .await
+    .map_err(map_pair_err)?;
+    Ok(Json(paired_payload(&state, &host, &machine_token)))
 }
 
 fn bearer_token(headers: &HeaderMap) -> AppResult<&str> {
@@ -614,7 +713,7 @@ fn host_accepts_leases(host: &WorkerHost) -> bool {
         && !host.drain
         && host.is_native_isolation()
         && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && host.effective_host()
+        && (host.effective_host() || host.effective_container())
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -651,19 +750,29 @@ async fn http_complete(
         .ok_or_else(|| AppError::not_found("claim not found"))?;
     // Always consume the lease. Re-queueing the same session_id while the
     // worker_sessions row is still live would double-spawn.
+    // Claim workspace, not the host's home workspace — cluster hosts lease
+    // jobs for other workspaces.
     let held =
-        work_claims::complete_owned(&state.db, claim_id, lease_token, host.id, host.workspace_id)
+        work_claims::complete_owned(&state.db, claim_id, lease_token, host.id, claim.workspace_id)
             .await?;
     if !held {
         return Err(AppError::conflict("lease not held or already finished"));
     }
-    if !body.ok {
-        if let Some(sid) = claim
-            .payload
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
-        {
+    let session_id = claim
+        .payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    if claim.kind == "signal_session" {
+        return Ok(Json(json!({ "ok": true })));
+    }
+    if claim.kind == "spawn_session" && body.ok {
+        // Terminal state comes from the guest /v1 status + inbox. Completing
+        // the lease here must not mark done_success (races heartbeat/status).
+        return Ok(Json(json!({ "ok": true })));
+    }
+    if claim.kind == "spawn_session" && !body.ok {
+        if let Some(sid) = session_id {
             let sess = state
                 .orch
                 .store

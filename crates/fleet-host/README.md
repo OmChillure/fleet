@@ -29,6 +29,12 @@ That writes `host_id` + `control_plane_url` into `config.toml` and the
 machine token into `machine.token`. Local run-mode keys are left as-is if
 the file already exists (so `unpair` + re-pair keeps your settings).
 
+Compose / kind start `fleet-host run` with `FLEET_CONTROL_PLANE_URL` and
+`FLEET_BOOTSTRAP_SECRET`. The process calls
+`POST /api/worker-hosts/bootstrap` until a workspace exists, then
+heartbeats. `FLEET_HOST_RUN_HOST` / `FLEET_HOST_RUN_CONTAINER` overlay
+`config.toml`. In-cluster sets `FLEET_HOST_RUN_CONTAINER=true` (KubePod).
+
 ```bash
 fleet-host status    # host_id, url, run_host, run_container, token present
 fleet-host run       # heartbeat + lease loop (systemd / tmux / foreground)
@@ -36,31 +42,34 @@ fleet-host update    # apply CP-served bins (same path as auto-update)
 fleet-host unpair    # delete machine.token only; config stays
 ```
 
-## Host vs container
+## Isolation vs placement
 
-v1 is **host mode only**. `run_container` / k3d is not supported; container
-execution is not validated. Plane `allow_container` may stay true as a
-restriction only.
+Isolation is `process` < `container` < `vm`. k8s is **placement**, not
+isolation. A pod is still a container (`KubePod`). Firecracker / QEMU /
+KubeVirt are `vm`.
 
-Effective run mode is the intersection of plane flags and **this file**.
-The plane can only restrict further.
+| Isolation | Executor | This box will… |
+| --- | --- | --- |
+| `process` (`runtime=host`) | exec | `fleet-driver` on the host (`FLEET_HARNESS=mock\|grok`) |
+| `container` | docker | `docker run` (`--network` default `none`). Same `FLEET_*` as host. Missing docker is an error — never Host. |
+| `container` | kube_pod | In-cluster (or `KUBECONFIG`) creates a `FleetSandbox` CR. Guest is `fleet-driver` (ACP). |
+| `vm` | firecracker / qemu | Allowed only when a hypervisor is on `PATH`. `run_vm` is fail-closed (no Host fallback). |
 
 | Key | Default | This box will… |
 | --- | --- | --- |
-| `run_host` | `true` | Exec `fleet-worker` (or `fleet-driver` when the job has `FLEET_HARNESS`) on the host |
-| `run_container` | `false` | **Not supported in v1.** Would spawn a one-shot container / k3d pod |
-| `container_backend` | `k3d` | **Not supported in v1.** `k3d` or `docker` |
-| `docker_network` | `bridge` | Docker network for `docker run`. Empty omits `--network`. `none` isolates the container. |
+| `run_host` | `true` | Accept process isolation |
+| `run_container` | `false` | Accept container isolation (docker or kube_pod) |
+| `container_backend` | `k3d` | Hint: `docker` requires the docker CLI; `k3d` prefers kube |
+| `docker_network` | `bridge` | Docker network for `docker run`. Empty omits `--network`. `none` blocks heartbeats. |
 
-`advertised_container` is true only when `run_container` is true **and** the
-backend binary (`k3d` or `docker`) is on `PATH`. That advertisement is not
-a working executor in v1.
+`advertised_container` is true when `run_container` is true **and** docker
+or kube (in-cluster / `KUBECONFIG`) is available.
 
 Host-mode children: cwd `{work_dir}/{session_id}`, env = job `env` +
 `extra_env`. `extra_env` cannot override `FLEET_WORKER_TOKEN`.
 
 Need `fleet-worker` / `fleet-driver` on `PATH` for host mode (same install
-script). Do not enable `run_container` expecting k3d or Docker jobs to work.
+script).
 
 ## Commands
 

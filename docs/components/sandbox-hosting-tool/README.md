@@ -12,7 +12,7 @@ The `k8s` backend is a **namespace-scoped operator** plus CRD:
 | Operator | [`crates/fleet-operator`](../../../crates/fleet-operator/) |
 | Install (kustomize) | [`infra/`](../../../infra/) |
 
-Each `FleetSandbox` becomes a non-root Pod running `fleet-worker` with a
+Each `FleetSandbox` becomes a non-root Pod running `fleet-driver` with a
 NetworkPolicy that allows **DNS + control-plane API only** by default (no
 general internet; secrets stay on the API). See [`infra/README.md`](../../../infra/README.md).
 

@@ -111,10 +111,10 @@ write_manifest() {
 
   local names=()
   if [[ -f "$out/fleet-host.exe" ]]; then
-    names=(fleet-host.exe fleet-worker.exe fleet-driver.exe)
+    names=(fleet-host.exe fleet-driver.exe)
     hostbin="$out/fleet-host.exe"
   elif [[ -f "$out/fleet-host" ]]; then
-    names=(fleet-host fleet-worker fleet-driver)
+    names=(fleet-host fleet-driver)
     hostbin="$out/fleet-host"
   else
     echo "stage-worker-dist-docker: write_manifest: no fleet-host in $out" >&2
@@ -172,7 +172,7 @@ copy_bins() {
   local out="$2"
   mkdir -p "$out"
   local bin
-  for bin in fleet-host fleet-worker fleet-driver; do
+  for bin in fleet-host fleet-driver; do
     if [[ ! -f "$src/$bin" ]]; then
       echo "stage-worker-dist-docker: missing $src/$bin after cargo build" >&2
       exit 1
@@ -190,7 +190,7 @@ copy_exe_bins() {
   local out="$2"
   mkdir -p "$out"
   local bin
-  for bin in fleet-host.exe fleet-worker.exe fleet-driver.exe; do
+  for bin in fleet-host.exe fleet-driver.exe; do
     if [[ ! -f "$src/$bin" ]]; then
       echo "stage-worker-dist-docker: missing $src/$bin after cargo build" >&2
       exit 1
@@ -278,9 +278,9 @@ docker_cargo() {
 
 stage_bookworm() {
   need_docker
-  echo "building fleet-host fleet-worker fleet-driver (debug) in $BOOKWORM_IMAGE"
+  echo "building fleet-host fleet-driver (debug) in $BOOKWORM_IMAGE"
   docker_cargo "$BOOKWORM_IMAGE" "$BOOKWORM_TARGET" \
-    cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver
+    cargo build -p fleet-host -p fleet-driver
   copy_bins "$BOOKWORM_TARGET/debug" "$DEST/linux-x86_64-bookworm"
   # Portable linux-x86_64 is the bookworm artifact (glibc 2.36), not Fedora.
   copy_bins "$BOOKWORM_TARGET/debug" "$DEST/linux-x86_64"
@@ -289,7 +289,7 @@ stage_bookworm() {
 # rust:alpine has gcc but not musl-dev headers (ring/cc needs assert.h).
 # apk requires root; dest bins are chowned back to the caller.
 stage_musl_alpine() {
-  echo "building fleet-host fleet-worker fleet-driver (debug) in $ALPINE_IMAGE + musl-dev"
+  echo "building fleet-host fleet-driver (debug) in $ALPINE_IMAGE + musl-dev"
   mkdir -p "$CARGO_DOCKER" "$MUSL_TARGET"
   if ! docker run --rm \
     --user "0:0" \
@@ -309,7 +309,7 @@ stage_musl_alpine() {
       rc=0
       apk add --no-cache musl-dev build-base || rc=$?
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target x86_64-unknown-linux-musl || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -346,7 +346,7 @@ stage_musl_bookworm_tools() {
         rustup target add x86_64-unknown-linux-musl || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target x86_64-unknown-linux-musl || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -370,7 +370,7 @@ stage_musl() {
 # cannot collide with host cargo or the bookworm x86_64 tree.
 stage_aarch64_gnu() {
   need_docker
-  echo "building fleet-host fleet-worker fleet-driver (debug) for linux-aarch64 in $BOOKWORM_IMAGE + gcc-aarch64-linux-gnu"
+  echo "building fleet-host fleet-driver (debug) for linux-aarch64 in $BOOKWORM_IMAGE + gcc-aarch64-linux-gnu"
   mkdir -p "$CARGO_DOCKER" "$AARCH64_GNU_TARGET"
   docker run --rm \
     --user "0:0" \
@@ -398,7 +398,7 @@ stage_aarch64_gnu() {
         rustup target add aarch64-unknown-linux-gnu || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target aarch64-unknown-linux-gnu || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -413,7 +413,7 @@ stage_aarch64_gnu() {
 # -latomic: 32-bit ARM needs it for AtomicU64 used by tokio/sqlx.
 stage_armv7_gnu() {
   need_docker
-  echo "building fleet-host fleet-worker fleet-driver (debug) for linux-armv7 in $BOOKWORM_IMAGE + gcc-arm-linux-gnueabihf"
+  echo "building fleet-host fleet-driver (debug) for linux-armv7 in $BOOKWORM_IMAGE + gcc-arm-linux-gnueabihf"
   mkdir -p "$CARGO_DOCKER" "$ARMV7_GNU_TARGET"
   docker run --rm \
     --user "0:0" \
@@ -442,7 +442,7 @@ stage_armv7_gnu() {
         rustup target add armv7-unknown-linux-gnueabihf || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target armv7-unknown-linux-gnueabihf || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -455,7 +455,7 @@ stage_armv7_gnu() {
 # rust-lld links rustc's self-contained musl (static-pie). Isolated target dir
 # so this cannot collide with x86_64 musl or aarch64 gnu.
 stage_aarch64_musl_alpine() {
-  echo "building fleet-host fleet-worker fleet-driver (debug) for linux-aarch64-musl in $ALPINE_IMAGE"
+  echo "building fleet-host fleet-driver (debug) for linux-aarch64-musl in $ALPINE_IMAGE"
   mkdir -p "$CARGO_DOCKER" "$AARCH64_MUSL_TARGET"
   if ! docker run --rm \
     --user "0:0" \
@@ -485,7 +485,7 @@ stage_aarch64_musl_alpine() {
         host=$(rustc -vV | sed -n "s/^host: //p")
         sysroot=$(rustc --print sysroot)
         export PATH="${sysroot}/lib/rustlib/${host}/bin:${PATH}"
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target aarch64-unknown-linux-musl || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -535,7 +535,7 @@ stage_aarch64_musl_bookworm() {
         rustup target add aarch64-unknown-linux-musl || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target aarch64-unknown-linux-musl || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -559,7 +559,7 @@ stage_aarch64_musl() {
 # Do not pass -latomic here: alpine's libatomic is the host (x86_64). rustc
 # emits ldrexd/strexd for this target. bookworm+musl.cc can add -latomic.
 stage_armv7_musl_alpine() {
-  echo "building fleet-host fleet-worker fleet-driver (debug) for linux-armv7-musl in $ALPINE_IMAGE"
+  echo "building fleet-host fleet-driver (debug) for linux-armv7-musl in $ALPINE_IMAGE"
   mkdir -p "$CARGO_DOCKER" "$ARMV7_MUSL_TARGET"
   if ! docker run --rm \
     --user "0:0" \
@@ -589,7 +589,7 @@ stage_armv7_musl_alpine() {
         host=$(rustc -vV | sed -n "s/^host: //p")
         sysroot=$(rustc --print sysroot)
         export PATH="${sysroot}/lib/rustlib/${host}/bin:${PATH}"
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target armv7-unknown-linux-musleabihf || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -640,7 +640,7 @@ stage_armv7_musl_bookworm() {
         rustup target add armv7-unknown-linux-musleabihf || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target armv7-unknown-linux-musleabihf || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -664,7 +664,7 @@ stage_armv7_musl() {
 # (do not invent a stub .exe).
 stage_windows_gnu() {
   need_docker
-  echo "building fleet-host fleet-worker fleet-driver (debug) for windows-x86_64 in $BOOKWORM_IMAGE + gcc-mingw-w64"
+  echo "building fleet-host fleet-driver (debug) for windows-x86_64 in $BOOKWORM_IMAGE + gcc-mingw-w64"
   mkdir -p "$CARGO_DOCKER" "$WINDOWS_GNU_TARGET"
   docker run --rm \
     --user "0:0" \
@@ -692,7 +692,7 @@ stage_windows_gnu() {
         rustup target add x86_64-pc-windows-gnu || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target x86_64-pc-windows-gnu || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
@@ -707,7 +707,7 @@ stage_windows_gnu() {
 # Fails closed if llvm-mingw cannot be fetched (do not invent a stub .exe).
 stage_windows_arm64_gnullvm() {
   need_docker
-  echo "building fleet-host fleet-worker fleet-driver (debug) for windows-arm64 in $BOOKWORM_IMAGE + llvm-mingw ${LLVM_MINGW_VER}"
+  echo "building fleet-host fleet-driver (debug) for windows-arm64 in $BOOKWORM_IMAGE + llvm-mingw ${LLVM_MINGW_VER}"
   mkdir -p "$CARGO_DOCKER" "$WINDOWS_ARM64_TARGET" "$LLVM_MINGW_CACHE"
   local cache_tarball="$LLVM_MINGW_CACHE/$LLVM_MINGW_TARBALL"
   if [[ ! -f "$cache_tarball" ]]; then
@@ -747,7 +747,7 @@ stage_windows_arm64_gnullvm() {
         rustup target add aarch64-pc-windows-gnullvm || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-orchestrator -p fleet-driver \
+        cargo build -p fleet-host -p fleet-driver \
           --target aarch64-pc-windows-gnullvm || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true

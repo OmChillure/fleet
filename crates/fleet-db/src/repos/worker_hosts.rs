@@ -806,6 +806,74 @@ pub async fn replace_pair_token(
     Ok(host)
 }
 
+/// Host already paired on this workspace with this durable box id.
+pub async fn find_by_machine_id(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    machine_id: Uuid,
+) -> DbResult<Option<WorkerHost>> {
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE workspace_id = $1 AND machine_id = $2
+        ORDER BY paired_at ASC NULLS LAST, created_at ASC, id ASC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(workspace_id)
+        .bind(machine_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Issue a new machine token (cluster-host restart without a persisted token).
+pub async fn rotate_machine_token(pool: &PgPool, host_id: Uuid) -> DbResult<PairedWorkerHost> {
+    let machine_token = generate_machine_token();
+    let machine_token_hash = hash_token(&machine_token);
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET machine_token_hash = $2,
+            status = '{WORKER_HOST_STATUS_ONLINE}',
+            last_seen_at = now(),
+            last_error = NULL,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    let host = sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(&machine_token_hash)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))?;
+    Ok(PairedWorkerHost {
+        host,
+        machine_token,
+    })
+}
+
+/// In-cluster bootstrap boxes (`labels` contains `cluster`), any workspace.
+pub async fn list_cluster(pool: &PgPool) -> DbResult<Vec<WorkerHost>> {
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE 'cluster' = ANY (labels)
+        ORDER BY last_seen_at DESC NULLS LAST, id ASC
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Tick candidate set: enabled, not paused/drain, stored `online`, seen recently, paired.
 pub async fn list_assignable(
     pool: &PgPool,
@@ -817,7 +885,7 @@ pub async fn list_assignable(
         r#"
         SELECT {HOST_COLS}
         FROM worker_hosts
-        WHERE workspace_id = $1
+        WHERE (workspace_id = $1 OR 'cluster' = ANY(labels))
           AND enabled
           AND NOT paused
           AND NOT drain

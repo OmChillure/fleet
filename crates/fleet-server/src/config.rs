@@ -22,7 +22,7 @@ pub struct ServerConfig {
     pub grok: GrokConfig,
     pub openai: OpenaiConfig,
     pub claude: ClaudeConfig,
-    /// Optional prebuilt `fleet-host` / `fleet-worker` / `fleet-driver` tree.
+    /// Optional prebuilt `fleet-host` / `fleet-driver` tree.
     /// First lookup for `/install/worker/bin/{platform}/{bin}`. When unset or
     /// the file is missing, the handler tries current_exe siblings and (native
     /// only) workspace `target/{release,debug}/{bin}`.

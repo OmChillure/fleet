@@ -54,3 +54,27 @@ spec:
     - ports:
         - protocol: TCP
           port: 3030
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zenohd-ingress
+  namespace: agent-fleet
+  labels:
+    app.kubernetes.io/part-of: agent-fleet
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zenohd
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fleet-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fleet-host
+      ports:
+        - protocol: TCP
+          port: 7447

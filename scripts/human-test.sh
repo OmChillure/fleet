@@ -164,15 +164,15 @@ cmd_guide() {
     "Open the name + ▼ control. Create a second workspace. Switch back." || return 0
 
   pause_step "Settings" \
-    "Number of agents + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
+    "Number of agents + min isolation (process / container / vm) + Fleet LLM (Ollama off/on). No git URL — collaboration is the shared workspace." \
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; Runtime: SANDBOX_BACKEND; cannot remove). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). First card is the control plane (always #1; no software line; does not run sandboxes; cannot remove). After signup, a `cluster-host` / local fleet-host may appear (bootstrap pair — no second machine). Add worker — paste the install command. Copy (Unix, Windows, token) must copy, including on HTTP LAN (no navigator.clipboard). Done keeps the pending worker; Cancel discards it." \
     "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
-    "No Native/Sandboxed checkboxes. Isolation is SANDBOX_BACKEND (shown on the plane card). Stop taking jobs is the Behavior button. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Auto-update and Max jobs stay disabled until the runner acks." \
+    "No Native/Sandboxed checkboxes. Isolation is Settings min isolation (process < container < vm). Stop taking jobs is the Behavior button. Changing a setting shows Apply; after Apply it says Pending apply until the box acks. Auto-update and Max jobs stay disabled until the runner acks." \
     "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
@@ -208,7 +208,7 @@ cmd_guide() {
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \
-    "Header shows the live SANDBOX_BACKEND (stub / process / docker / k8s)." \
+    "Tick enqueues work_claims. A paired fleet-host runs the job. Header may still show SANDBOX_BACKEND as display-only." \
     "Default backend is stub — board should move. Ticker may also tick on its own." \
     "With Fleet LLM on, live agents message each other (TEAM_CHAT.md / chat read_team_chat)." || return 0
 
@@ -216,10 +216,11 @@ cmd_guide() {
     "Same worker sessions as Fleet (status, backend, work dir)." || return 0
 
   pause_step "Kubernetes sandboxes" \
-    "SANDBOX_BACKEND=k8s makes a tick create a FleetSandbox CR (operator → pod)." \
-    "Kind in-cluster API stays process unless you set k8s + give the API SA CR verbs." \
-    "Host API: KUBECONFIG + K8S_WORKER_API_URL a pod can reach (not 127.0.0.1)." \
-    "Optional: kubectl -n agent-fleet get fleetsandboxes,pods." || return 0
+    "Kind/k3d API is stub (not a runner). After signup, fleet-host bootstrap-pairs; Start 2-task run + tick enqueues a claim; fleet-host creates the FleetSandbox CR." \
+    "kubectl -n agent-fleet get deploy fleet-host,zenohd — cluster runner + bus." \
+    "kubectl -n agent-fleet get fsb,pods — operator makes the pod. Cancel deletes the CR." \
+    "SessionDetail may be empty (no pod live.jsonl pull yet). Host .env stays stub/process." \
+    "Host API + cluster: KUBECONFIG + K8S_WORKER_API_URL a pod can reach (not 127.0.0.1)." || return 0
 
   pause_step "Cases" \
     "/{ws}/cases — New case form (title + policy) creates a durable workflow." \
@@ -242,6 +243,13 @@ cmd_guide() {
 
   pause_step "User menu" \
     "Theme Black ↔ White (not persisted). Log out → /login." || return 0
+
+  pause_step "Unify runners" \
+    "Settings Isolation: process / container / vm. Save Container." \
+    "Self-hosted: Add worker (token panel is enough). A process-only paired box must not take a container workspace." \
+    "Fleet: Start 2-task run → Run tick. Tasks stay ready until a container-capable host is online. Never stub." \
+    "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." \
+    "Agent drive: python3 -m unittest tests.browser.test_unify_usability (artifacts in .tmp/usability/)." || return 0
 
   pause_step "This merge request" \
     "Do the new thing this change added." \

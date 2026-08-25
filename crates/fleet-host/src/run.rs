@@ -1,31 +1,54 @@
 //! Heartbeat + lease loop.
 
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::client::{EffectiveModes, HostClient};
+use crate::client::{BootstrapPending, EffectiveModes, HostClient, PairResponse};
 use crate::config::{LocalConfig, read_machine_token};
 use crate::spawn;
 use crate::update::{self, ApplyOptions, UpdateState, maybe_queue_auto};
+
+const CONTROL_PLANE_URL_ENV: &str = "FLEET_CONTROL_PLANE_URL";
+const PAIR_TOKEN_ENV: &str = "FLEET_PAIR_TOKEN";
+const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
 pub async fn pair(url: &str, token: &str) -> Result<()> {
     let mut cfg = LocalConfig::load_or_default()?;
     let client = HostClient::for_pair(url, &cfg)?;
     let resp = client.pair(&cfg, token.trim()).await?;
+    persist_pair(&mut cfg, url, &resp)?;
+    start_run_after_pair();
+    Ok(())
+}
+
+fn persist_pair(cfg: &mut LocalConfig, url: &str, resp: &PairResponse) -> Result<()> {
     if resp.machine_token.trim().is_empty() {
         bail!("pair response missing machine_token");
     }
-    let cp = resp
+    let advertised = resp
         .control_plane_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(url);
+    // In-cluster bootstrap: API public base is often localhost. Keep the
+    // locator this process used to reach the plane.
+    let cp = if is_unusable_bind_url(advertised) && !is_unusable_bind_url(url) {
+        url
+    } else if is_loopback_url(advertised) && !is_loopback_url(url) {
+        url
+    } else {
+        advertised
+    };
+    if is_unusable_bind_url(cp) {
+        bail!("control plane URL is not reachable (bind address {cp})");
+    }
     cfg.control_plane_url = Some(normalize_url(cp));
     cfg.host_id = Some(resp.host_id);
     let config_path = cfg.save()?;
@@ -40,7 +63,6 @@ pub async fn pair(url: &str, token: &str) -> Result<()> {
     );
     println!("wrote {}", config_path.display());
     println!("wrote {}", token_path.display());
-    start_run_after_pair();
     Ok(())
 }
 
@@ -107,21 +129,47 @@ pub fn unpair() -> Result<()> {
     Ok(())
 }
 
+fn run_lock_path() -> std::path::PathBuf {
+    crate::paths::config_dir().join("run.lock")
+}
+
+/// One `fleet-host run` per config dir. A second process would share the
+/// machine token and pick docker vs kube nondeterministically.
+pub fn acquire_run_lock() -> Result<File> {
+    let path = run_lock_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            bail!(
+                "fleet-host already running (lock {})",
+                path.display()
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = &file;
+    }
+    Ok(file)
+}
+
 pub async fn run() -> Result<()> {
     let cfg = LocalConfig::load_or_default()?;
-    let token = read_machine_token()?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "not paired: missing {} (run `fleet-host pair --url … --token …`)",
-            crate::paths::token_path().display()
-        )
-    })?;
-    let url = cfg.control_plane_url.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "config missing control_plane_url ({})",
-            crate::paths::config_path().display()
-        )
-    })?;
     init_tracing(&cfg.log_level);
+    let _run_lock = acquire_run_lock()?;
+    let (cfg, url, token) = ensure_paired(cfg).await?;
     info!(
         host_id = ?cfg.host_id,
         url = %url,
@@ -130,6 +178,76 @@ pub async fn run() -> Result<()> {
         "fleet-host run"
     );
     run_loop(cfg, url, token).await
+}
+
+async fn ensure_paired(mut cfg: LocalConfig) -> Result<(LocalConfig, String, String)> {
+    if let (Some(token), Some(url)) = (read_machine_token()?, cfg.control_plane_url.clone()) {
+        return Ok((cfg, url, token));
+    }
+    let url = cfg
+        .control_plane_url
+        .clone()
+        .or_else(|| env_nonempty(CONTROL_PLANE_URL_ENV))
+        .ok_or_else(|| {
+            anyhow!(
+                "not paired: set {CONTROL_PLANE_URL_ENV} or run `fleet-host pair --url … --token …`"
+            )
+        })?;
+    if let Some(pair_token) = env_nonempty(PAIR_TOKEN_ENV) {
+        let client = HostClient::for_pair(&url, &cfg)?;
+        let resp = client.pair(&cfg, pair_token.trim()).await?;
+        persist_pair(&mut cfg, &url, &resp)?;
+        let token = resp.machine_token;
+        let url = cfg.control_plane_url.clone().unwrap_or(url);
+        return Ok((cfg, url, token));
+    }
+    if let Some(secret) = env_nonempty(BOOTSTRAP_SECRET_ENV) {
+        let client = HostClient::for_pair(&url, &cfg)?;
+        let resp = bootstrap_until_workspace(&client, &cfg, &secret).await?;
+        persist_pair(&mut cfg, &url, &resp)?;
+        let token = resp.machine_token;
+        let url = cfg.control_plane_url.clone().unwrap_or(url);
+        return Ok((cfg, url, token));
+    }
+    bail!(
+        "not paired: missing {} (run `fleet-host pair --url … --token …`)",
+        crate::paths::token_path().display()
+    )
+}
+
+async fn bootstrap_until_workspace(
+    client: &HostClient,
+    cfg: &LocalConfig,
+    secret: &str,
+) -> Result<PairResponse> {
+    let mut warned = false;
+    loop {
+        match client.bootstrap(cfg, secret).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if e.downcast_ref::<BootstrapPending>().is_some() || is_no_workspace(&e) => {
+                if !warned {
+                    info!("bootstrap waiting for a workspace");
+                    warned = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "bootstrap failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+fn is_no_workspace(err: &anyhow::Error) -> bool {
+    err.to_string().contains("no_workspace")
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Manual apply. Same path as auto; does not set CP `paused`/`drain`.
@@ -154,6 +272,7 @@ pub fn init_tracing(level: &str) {
 }
 
 async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
+    let bus = crate::bus::BusHandle::from_env().await;
     let client = HostClient::with_machine_token(&url, token, &cfg)?;
     let jobs: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
     let effective = Arc::new(Mutex::new(EffectiveModes::from_local(&cfg)));
@@ -286,23 +405,52 @@ async fn run_loop(cfg: LocalConfig, url: String, token: String) -> Result<()> {
                         let jobs2 = jobs.clone();
                         let client2 = client.clone();
                         let cfg2 = cfg.clone();
+                        let bus2 = bus.clone();
+                        let session_id = claim.payload.session_id;
+                        let signal = claim.payload.kind == "signal_session";
                         let eff_host = eff.host;
                         let eff_ctr = eff.container;
                         tokio::spawn(async move {
-                            let outcome = spawn::run_claim(
-                                &cfg2,
-                                &claim.payload,
-                                eff_host,
-                                eff_ctr,
-                            )
-                            .await;
+                            if !signal {
+                                bus2.session_started(session_id).await;
+                            }
+                            let outcome = if signal {
+                                spawn::kill_session(session_id).await
+                            } else {
+                                spawn::run_claim(
+                                    &cfg2,
+                                    &claim.payload,
+                                    eff_host,
+                                    eff_ctr,
+                                )
+                                .await
+                            };
                             let (ok, err) = match outcome {
-                                Ok(()) => (true, None),
+                                Ok(()) => {
+                                    if !signal {
+                                        let dir = cfg2.session_dir(session_id);
+                                        if let Err(e) =
+                                            spawn::publish_guest_proof(&claim.payload, &dir).await
+                                        {
+                                            warn!(
+                                                claim = %claim_id,
+                                                error = %e,
+                                                "publish guest proof failed"
+                                            );
+                                        }
+                                    }
+                                    (true, None)
+                                }
                                 Err(e) => {
                                     error!(claim = %claim_id, error = %e, "job failed");
                                     (false, Some(e.to_string()))
                                 }
                             };
+                            if signal {
+                                bus2.session_cancelled(session_id).await;
+                            } else {
+                                bus2.session_finished(session_id, ok, err.as_deref()).await;
+                            }
                             if let Err(e) = client2
                                 .complete(claim_id, &claim.lease_token, ok, err.as_deref())
                                 .await
@@ -364,6 +512,30 @@ fn normalize_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
+fn host_from_url(url: &str) -> &str {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    if let Some(inside) = rest.strip_prefix('[') {
+        return inside.split(']').next().unwrap_or("");
+    }
+    if rest.starts_with("::") {
+        return rest.split('%').next().unwrap_or(rest);
+    }
+    rest.rsplit_once(':').map(|(h, _)| h).unwrap_or(rest)
+}
+
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    agent_fleet_contracts::url_is_loopback(url)
+}
+
+fn is_unusable_bind_url(url: &str) -> bool {
+    let host = host_from_url(url).trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "0.0.0.0" | "::" | "")
+}
+
 pub fn print_usage() {
     eprintln!(
         "\
@@ -382,4 +554,166 @@ Token:   {}
         crate::paths::config_path().display(),
         crate::paths::token_path().display()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::PairResponse;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    fn pair_resp(control_plane_url: &str) -> PairResponse {
+        PairResponse {
+            host_id: Uuid::now_v7(),
+            machine_token: "flm_testtoken".into(),
+            workspace_id: None,
+            control_plane_url: Some(control_plane_url.into()),
+            cp_settings: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn persist_pair_keeps_non_loopback_url_when_response_is_localhost() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        persist_pair(
+            &mut cfg,
+            "http://api.agent-fleet.svc.cluster.local:8080",
+            &pair_resp("http://localhost:8080"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.control_plane_url.as_deref(),
+            Some("http://api.agent-fleet.svc.cluster.local:8080")
+        );
+    }
+
+    #[test]
+    fn persist_pair_accepts_non_loopback_response() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        persist_pair(
+            &mut cfg,
+            "http://127.0.0.1:9",
+            &pair_resp("http://api.example.test:8080"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.control_plane_url.as_deref(),
+            Some("http://api.example.test:8080")
+        );
+    }
+
+    #[test]
+    fn acquire_run_lock_refuses_second_process() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let first = acquire_run_lock().expect("first lock");
+        let err = acquire_run_lock().expect_err("second lock");
+        assert!(
+            err.to_string().contains("already running"),
+            "{err}"
+        );
+        drop(first);
+        acquire_run_lock().expect("lock after drop");
+    }
+
+    #[test]
+    fn is_loopback_url_detects_common_forms() {
+        assert!(is_loopback_url("http://localhost:8080"));
+        assert!(is_loopback_url("http://127.0.0.1:8080/"));
+        assert!(is_loopback_url("http://127.1.2.3:1"));
+        assert!(
+            is_loopback_url("http://[::1]:8080"),
+            "IPv6 loopback must be detected so we do not persist [::1] from the API"
+        );
+        assert!(
+            is_loopback_url("http://::1"),
+            "bare IPv6 loopback must be detected"
+        );
+        assert!(!is_loopback_url("http://api.agent-fleet.svc.cluster.local:8080"));
+    }
+
+    #[test]
+    fn persist_pair_rejects_empty_machine_token() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        let mut resp = pair_resp("http://api.example.test:8080");
+        resp.machine_token.clear();
+        let err = persist_pair(&mut cfg, "http://api.example.test:8080", &resp)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("machine_token"),
+            "empty token must fail closed: {err}"
+        );
+        assert!(cfg.host_id.is_none(), "must not persist a host without a token");
+    }
+
+    #[test]
+    fn persist_pair_never_stores_unusable_bind_all_url() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        let err = persist_pair(
+            &mut cfg,
+            "http://0.0.0.0:8080",
+            &pair_resp("http://0.0.0.0:8080"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("not reachable") || err.contains("bind"),
+            "0.0.0.0 / [::] must fail closed: {err}"
+        );
+        assert!(
+            cfg.control_plane_url
+                .as_deref()
+                .is_none_or(|s| !s.contains("0.0.0.0") && !s.contains("[::]")),
+            "must not persist a bind address: {:?}",
+            cfg.control_plane_url
+        );
+    }
+
+    #[test]
+    fn persist_pair_treats_ipv6_loopback_response_as_loopback() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        persist_pair(
+            &mut cfg,
+            "http://api.agent-fleet.svc.cluster.local:8080",
+            &pair_resp("http://[::1]:8080"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.control_plane_url.as_deref(),
+            Some("http://api.agent-fleet.svc.cluster.local:8080"),
+            "API advertising [::1] must not replace the locator the host actually reached"
+        );
+    }
 }

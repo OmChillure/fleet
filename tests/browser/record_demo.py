@@ -294,6 +294,36 @@ class Demo:
             members.first.scroll_into_view_if_needed()
             pause(p, 800)
 
+    def scene_unify(self) -> None:
+        """Isolation + runners + fleet tick — the unify-runners user path."""
+        base = self.ensure_session()
+        p = self.page
+        expand_workspace_nav(p)
+        p.goto(f"{base}/settings", wait_until="networkidle")
+        pause(p, 700)
+        iso = p.locator("select").filter(has=p.locator('option[value="container"]'))
+        if iso.count():
+            iso.first.select_option("container")
+            pause(p, 400)
+            save = p.get_by_role("button", name="Save")
+            if save.count():
+                save.first.click()
+                pause(p, 800)
+        expand_runners_nav(p)
+        self._film_self_hosted("/runners/self-hosted")
+        p.goto(f"{base}/fleet", wait_until="networkidle")
+        pause(p, 600)
+        start = p.get_by_role("button", name="Start 2-task run")
+        if start.count():
+            start.first.click()
+            pause(p, 800)
+        tick = p.get_by_role("button", name="Run tick")
+        if tick.count():
+            tick.first.click()
+            pause(p, 1200)
+        p.goto(f"{base}/sandboxes", wait_until="networkidle")
+        pause(p, 800)
+
     def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
         p = self.page
@@ -464,7 +494,7 @@ class Demo:
         pause(self.page, 2000)
 
     def scene_k8s(self) -> None:
-        """Operator-visible k8s path: CRD + operator, then Fleet backend header."""
+        """Operator-visible k8s path: CRD + operator + fsb list, then Fleet header (k8s in-cluster)."""
         lines: list[str] = []
         kubectl = shutil.which("kubectl")
         if kubectl:
@@ -543,6 +573,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "lab": Demo.scene_lab,
     "kind": Demo.scene_kind,
     "k8s": Demo.scene_k8s,
+    "unify": Demo.scene_unify,
 }
 
 CORE = [
@@ -584,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         print("core:", " ".join(CORE))
-        print("extra: lab kind")
+        print("extra: lab kind unify")
         for name in SCENES:
             print(f"  {name}")
         return 0

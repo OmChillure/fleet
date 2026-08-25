@@ -6,7 +6,8 @@ Installs Agent Fleet on Kubernetes:
 | --- | --- |
 | **CRD** `FleetSandbox` (`fsb`) | Desired worker sandbox (session + image + network + TTL) |
 | **fleet-operator** | Reconciles each CR → Pod + default-deny NetworkPolicy |
-| **Control plane** | Postgres, `fleet-server` (api), `fleet-ui`, operator |
+| **Control plane** | Postgres, `fleet-server` (api), `fleet-ui`, operator, `zenohd` |
+| **fleet-host** | In-cluster runner (same binary as a self-hosted box). Bootstrap-pairs, then leases jobs and creates `FleetSandbox` CRs (`KubePod`). |
 
 This is the **Sandbox Hosting Tool** for the `k8s` backend described in
 [`docs/architecture/README.md`](../docs/architecture/README.md) and
@@ -22,7 +23,7 @@ orchestrator, not long-lived cloud keys.
 ```
 infra/
   crds/fleetsandboxes.yaml     # FleetSandbox CRD
-  base/                        # namespace, postgres, api, ui, operator, RBAC, NPs
+  base/                        # namespace, postgres, api, ui, operator, zenohd, fleet-host, RBAC, NPs
   overlays/k3d/                # NodePorts for k3d loadbalancer
   overlays/kind/               # NodePorts for kind extraPortMappings
   samples/fleetsandbox.yaml    # example CR
@@ -57,8 +58,12 @@ Host ports (see `infra/k3d.yaml`):
 - API http://localhost:8080
 
 ```bash
-kubectl -n agent-fleet apply -f infra/samples/fleetsandbox.yaml
+# Fleet UI :3030 → Start 2-task run + tick enqueues a claim. fleet-host
+# bootstrap-pairs to the first workspace and creates FleetSandbox CRs.
+kubectl -n agent-fleet get deploy,po
 kubectl -n agent-fleet get fsb,pods -l app.kubernetes.io/component=sandbox
+# optional operator-only CR (no Fleet run):
+# kubectl -n agent-fleet apply -f infra/samples/fleetsandbox.yaml
 ```
 
 Tear down:
@@ -76,8 +81,7 @@ make -C infra kind-load
 make -C infra apply-kind
 
 kubectl -n agent-fleet get pods -w
-# then
-kubectl -n agent-fleet apply -f infra/samples/fleetsandbox.yaml
+# Fleet UI :3030 → Start 2-task run + tick creates CRs.
 kubectl -n agent-fleet get fsb,pods -l app.kubernetes.io/component=sandbox
 ```
 
@@ -105,8 +109,8 @@ make -C infra crd                # rewrite infra/crds/fleetsandboxes.yaml
 | Field | Notes |
 | --- | --- |
 | `workspaceId` / `projectId` / `sessionId` | Orchestrator identity |
-| `image` | Usually `agent-fleet-api:local` (includes `fleet-worker`) |
-| `command` | Default `["fleet-worker"]` |
+| `image` | Usually `agent-fleet-api:local` (includes `fleet-driver`) |
+| `command` | Default `["fleet-driver"]` |
 | `env` | `FLEET_*` contract (`FLEET_WORKER_TOKEN`, …) |
 | `resources.cpu/memory/ephemeralStorage` | Pod limits=requests |
 | `network.egressMode` | `none` (default) or `allowlist` |
@@ -127,27 +131,31 @@ Status: `phase` (`Creating` / `Running` / `Succeeded` / `Failed`), `podName`, `n
 
 ## Orchestrator hookup
 
-`SANDBOX_BACKEND=k8s` on `fleet-server` / `fleet-orchestrator` creates and
-deletes `FleetSandbox` CRs. The operator still creates the Pod + NetworkPolicy.
-Worker heartbeats stay `POST /v1/.../heartbeat|status`.
+In-cluster API is `SANDBOX_BACKEND=stub` (display only). Tick enqueues
+`work_claims`; `fleet-host` creates and deletes `FleetSandbox` CRs. The
+`fleet-host` ServiceAccount can create/get/list/delete those CRs; the
+operator still creates the Pod + NetworkPolicy. Worker heartbeats stay
+`POST /v1/.../heartbeat|status`.
+
+Host `.env` is unchanged (`stub` / `process` / …).
 
 | Env | Default | Role |
 | --- | --- | --- |
-| `SANDBOX_BACKEND` | `stub` (in-cluster API Deployment: `process`) | set `k8s`. The API ServiceAccount cannot create CRs until you bind it the same verbs as `fleet-operator`. Host `KUBECONFIG` works without that. |
+| `SANDBOX_BACKEND` | `stub` (API display only; not a runner) | fleet-host creates CRs |
 | `K8S_NAMESPACE` | `agent-fleet` | CR namespace |
-| `K8S_WORKER_IMAGE` | `agent-fleet-api:local` | pod image (`fleet-worker`) |
-| `K8S_WORKER_COMMAND` | `fleet-worker` | container command |
+| `K8S_WORKER_IMAGE` | `agent-fleet-api:local` | pod image (`fleet-driver`) |
+| `K8S_WORKER_COMMAND` | `fleet-driver` | container command |
 | `K8S_WORKER_API_URL` | `http://api.agent-fleet.svc.cluster.local:8080` | heartbeat base — **not** `127.0.0.1` / `localhost` |
 
-In-cluster: patch the API Deployment (it still defaults to `process`) or set
-those env vars and restart. Hybrid (host API + cluster operator): keep host
-`:8080`/`:3030` off the kind/k3d port map and set `K8S_WORKER_API_URL` to a
-host IPv4/IPv6 literal pods can route (allowlisted `/32` or `/128`). DNS
-names such as `host.k3d.internal` are not CIDRs. Missing kube client or
-CRD fails spawn — no stub fallback.
+Hybrid (host API + cluster operator): keep host `:8080`/`:3030` off the
+kind/k3d port map and set `K8S_WORKER_API_URL` to a host IPv4/IPv6 literal
+pods can route (allowlisted `/32` or `/128`). DNS names such as
+`host.k3d.internal` are not CIDRs. Missing kube client or CRD fails spawn —
+no stub fallback.
 
 v1 does not pull pod logs back to host `DATA_DIR`. The board still moves on
-worker HTTP status + CR phase.
+worker HTTP status + CR phase. SessionDetail is empty for k8s jobs until
+artifact pull exists.
 
 ## Uninstall
 

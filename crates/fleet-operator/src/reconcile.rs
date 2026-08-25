@@ -251,7 +251,7 @@ pub fn build_pod(sb: &FleetSandbox, pod_name: &str, cfg: &OperatorConfig) -> Pod
         .spec
         .command
         .clone()
-        .unwrap_or_else(|| vec!["fleet-worker".into()]);
+        .unwrap_or_else(|| vec!["fleet-driver".into()]);
 
     let resources = sb.spec.resources.as_ref().map(|r| {
         let mut limits = BTreeMap::new();
@@ -542,7 +542,7 @@ mod tests {
         let cfg = OperatorConfig::from_env();
         let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
         let c = &pod.spec.as_ref().unwrap().containers[0];
-        assert_eq!(c.command.as_ref().unwrap(), &vec!["fleet-worker".to_string()]);
+        assert_eq!(c.command.as_ref().unwrap(), &vec!["fleet-driver".to_string()]);
         let env: BTreeMap<_, _> = c
             .env
             .as_ref()

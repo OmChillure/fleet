@@ -1,7 +1,7 @@
 //! Sandbox runtime: `stub` | `process` | `docker` | `k8s` (`SANDBOX_BACKEND`).
 //! Only `FLEET_*` env + task files enter sandboxes — no OAuth tokens.
 //!
-//! `process` is main's fleet-worker. `local`/`shell` is Om's `bash fleet_worker.sh`.
+//! `process` is `fleet-driver`. `local`/`shell` is Om's `bash fleet_worker.sh`.
 //! `k8s` creates `FleetSandbox` CRs; the operator turns them into pods.
 
 pub mod agent_loop;

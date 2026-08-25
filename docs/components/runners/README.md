@@ -45,13 +45,13 @@ Children: **Self-hosted** (live), **Cloud** and **Partners**
 
 ## Naming
 
-Do **not** rename `fleet-host`, `fleet-worker`, or the `worker_hosts`
+Do **not** rename `fleet-host`, `fleet-driver`, or the `worker_hosts`
 table. API paths stay `/api/workspaces/{id}/worker-hosts` and
 `/api/worker-hosts/…`.
 
 **Runners** is the product word (a machine that executes someone else’s
 job). **Workers** as a nav section collides with the per-job
-`fleet-worker` process.
+`fleet-driver` process.
 
 ---
 

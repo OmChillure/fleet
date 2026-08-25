@@ -3,6 +3,7 @@
 //! Auth + workspaces + integrations + orchestrator control plane on one process.
 //! The binary (`src/main.rs`) binds a port; tests use [`build_http_app`] without serving.
 
+pub mod bus;
 pub mod cases;
 pub mod chat;
 pub mod chat_tools;

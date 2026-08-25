@@ -45,7 +45,7 @@ pub struct FleetSandboxSpec {
     pub plan_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_profile: Option<String>,
-    /// Container image (typically `agent-fleet-api` which includes `fleet-worker`).
+    /// Container image (typically `agent-fleet-api`, which includes `fleet-driver`).
     pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,

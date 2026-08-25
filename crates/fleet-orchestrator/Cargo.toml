@@ -4,16 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Agent Fleet project orchestration control plane (pure logic)"
-default-run = "fleet-orchestrator"
-
-[[bin]]
-name = "fleet-orchestrator"
-path = "src/main.rs"
-
-[[bin]]
-name = "fleet-worker"
-path = "src/bin/fleet-worker.rs"
+description = "Agent Fleet project orchestration control plane (library; served by fleet-server)"
 
 [dependencies]
 uuid = { workspace = true }
@@ -35,6 +26,7 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 fleet-db = { workspace = true }
+agent-fleet-contracts = { path = "../agent-fleet-contracts" }
 fleet-operator = { path = "../fleet-operator" }
 k8s-openapi = { version = "0.24", features = ["v1_31"] }
 kube = { version = "0.98", default-features = true, features = ["client", "derive"] }

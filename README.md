@@ -89,14 +89,15 @@ dx serve --package fleet-ui --port 3030
    long-running policies (wake loop owns status/stage; integrations optional later).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
    - `SANDBOX_BACKEND=stub` — fake timer (default)
-   - `process` — `fleet-worker` binary (`PROCESS_WORKER_BIN`; `FLEET_WORK_CMD` / `run.sh` / artifacts)
+   - `process` — `fleet-driver` binary (`PROCESS_WORKER_BIN`; ACP via `FLEET_HARNESS=mock|grok`)
    - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
    - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
-   - `k8s` — `FleetSandbox` CR; operator creates a pod. Set `K8S_WORKER_API_URL` to a URL pods can reach (not `127.0.0.1`)
+   - `k8s` — `FleetSandbox` CR; operator creates a pod. In-cluster API (kind/k3d) defaults to this. Host `.env` stays `stub`/`process`. Worker callback must be a URL pods can reach (not `127.0.0.1`)
    Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
 8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
    command and one-time pair token. The machine pairs outbound (no inbound
-   port). Tick uses an online matching host, else the local `SANDBOX_BACKEND`.
+   port). Tick enqueues a claim for an online matching host; otherwise the
+   task stays ready.
    Install: `curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh`
    then `fleet-host pair --url … --token …`. See
    [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md).

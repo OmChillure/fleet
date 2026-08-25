@@ -119,8 +119,7 @@ Write-Host "  origin:   $Origin"
 Write-Host "  prefix:   $Prefix"
 Write-Host "this machine is a self-hosted worker"
 Write-Host "  fleet-host   stays up; pairs and takes jobs"
-Write-Host "  fleet-worker runs each job"
-Write-Host "  fleet-driver runs jobs that use an agent harness (Grok)"
+Write-Host "  fleet-driver runs each job"
 
 # A running fleet-host.exe locks the PE; replace would leave the old process.
 Get-Process -Name fleet-host -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -128,7 +127,7 @@ Start-Sleep -Milliseconds 400
 
 $base = "$Origin/install/worker/bin/windows-arm64"
 $hostReady = $false
-foreach ($bin in @("fleet-host.exe", "fleet-worker.exe", "fleet-driver.exe")) {
+foreach ($bin in @("fleet-host.exe", "fleet-driver.exe")) {
     $dest = Join-Path $BinDir $bin
     $url = "$base/$bin"
     $tmp = "$dest.tmp"

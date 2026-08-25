@@ -37,7 +37,12 @@ async fn setup() -> Store {
 
 fn runner(store: Store) -> TickRunner {
     let rt = Arc::new(StubRuntime::new(Duration::from_secs(60)));
-    TickRunner::with_store_and_runtime(store, rt)
+    TickRunner::new(
+        store,
+        rt,
+        std::env::temp_dir().join("fleet-orch-data"),
+        "http://127.0.0.1:8080",
+    )
 }
 
 fn one_task_plan(project_id: Uuid) -> WorkPlanBody {
@@ -176,7 +181,7 @@ async fn tick_holds_ready_when_only_host_is_restarting() {
 }
 
 #[tokio::test]
-async fn tick_offline_host_without_updating_uses_local_backend() {
+async fn tick_offline_host_without_updating_leaves_ready() {
     let store = setup().await;
     let project = store
         .create_project(&format!("upd-off-{}", Uuid::new_v4()), 3)
@@ -196,25 +201,21 @@ async fn tick_offline_host_without_updating_uses_local_backend() {
         .tick_project(project.id)
         .await
         .unwrap();
-    assert!(
-        r.spawned >= 1,
-        "offline host without updating keeps local fallback: {r:?}"
+    assert_eq!(
+        r.spawned, 0,
+        "offline host without updating must not local-spawn: {r:?}"
     );
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
-    assert_ne!(
-        t1.status, "ready",
-        "task should leave ready via local spawn"
-    );
-    let sess = snap.sessions.first().expect("local session");
-    assert_ne!(
-        sess.runtime_backend, "remote",
-        "offline + updating=false must not enqueue remote"
-    );
     assert_eq!(
-        sess.runtime_backend, "stub",
-        "today's local SANDBOX_BACKEND: {}",
-        sess.runtime_backend
+        t1.status, "ready",
+        "no assignable host → stay ready: {:?}",
+        t1.status
+    );
+    assert!(
+        snap.sessions.is_empty(),
+        "no local session: {:?}",
+        snap.sessions
     );
 }
