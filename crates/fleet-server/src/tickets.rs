@@ -281,6 +281,21 @@ pub struct PreparedFinish {
     pub title: String,
 }
 
+/// Inbox finish/monitor are scoped to the route workspace. Missing membership
+/// is 403 — same error the HTTP handlers return from `require_member`.
+fn require_workspace_role(role: Option<String>) -> AppResult<String> {
+    role.ok_or_else(|| AppError::forbidden("not a member of this workspace"))
+}
+
+/// Knowing a ticket id from workspace A must not finish or monitor it via B.
+/// Wrong workspace is 403 (or 404); never launch or mutate that row.
+fn require_ticket_workspace(item: &TicketInboxItem, workspace_id: Uuid) -> AppResult<()> {
+    if item.workspace_id != workspace_id {
+        return Err(AppError::forbidden("ticket is not in this workspace"));
+    }
+    Ok(())
+}
+
 pub async fn prepare_finish(
     state: &AppState,
     workspace_id: Uuid,
@@ -288,6 +303,7 @@ pub async fn prepare_finish(
     args: FinishTicketArgs,
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
+    require_ticket_workspace(&item, workspace_id)?;
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
     let spec = format!(
         "{}\n\n# I/O\n\
@@ -1598,9 +1614,9 @@ async fn require_member(
         config: state.auth.clone(),
     };
     let user = require_user(&auth, jar).await?;
-    let role = workspace_repo::user_role(&state.db, workspace_id, user.id)
-        .await?
-        .ok_or_else(|| AppError::forbidden("not a member of this workspace"))?;
+    let role = require_workspace_role(
+        workspace_repo::user_role(&state.db, workspace_id, user.id).await?,
+    )?;
     Ok((user, role))
 }
 
