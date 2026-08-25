@@ -301,6 +301,31 @@ pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option
         .filter(|chosen| chosen.host.isolation.is_assignable())
 }
 
+/// Use `preferred` when that host is still assignable; otherwise the usual picker.
+pub async fn select_assignable_runner_preferring(
+    store: &Store,
+    project_id: Uuid,
+    preferred: Option<Uuid>,
+) -> Option<ChosenHost> {
+    if let Some(id) = preferred {
+        if let Some(hosts) = list_assignable_hosts(store, project_id).await {
+            let need = workspace_need(store, project_id).await;
+            if let Some(host) = hosts
+                .iter()
+                .find(|h| h.id == id && h.isolation.is_assignable())
+            {
+                if let Some(runtime) = effective_runtime_for(host, need) {
+                    return Some(ChosenHost {
+                        host: host.clone(),
+                        runtime,
+                    });
+                }
+            }
+        }
+    }
+    select_assignable_runner(store, project_id).await
+}
+
 /// How long after last_seen a `software_updating` host still holds ready tasks.
 pub const HOST_UPDATE_HOLD_SECS: i64 = 120;
 
@@ -692,8 +717,13 @@ mod tests {
             update_requested_at: None,
             machine_id: None,
             hardware: None,
+            agent_runtimes: serde_json::json!([]),
             settings_gen: 0,
             settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: serde_json::json!({}),
+            runtime_reported: serde_json::json!({}),
             created_by: None,
             created_at: now,
             paired_at: Some(now),

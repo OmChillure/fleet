@@ -11,7 +11,11 @@ pub fn AuthSplit(form: Element, right_title: String, right_subtitle: String) -> 
             div { class: "flex flex-col justify-center px-6 py-10 sm:px-10 lg:px-14 xl:px-20",
                 div { class: "mb-8 lg:hidden",
                     Link { class: "inline-flex items-center gap-2 font-bold text-white", to: Route::Home {},
-                        div { class: "h-6 w-6 rounded-md bg-white" }
+                        img {
+                            class: "h-6 w-6 rounded-md",
+                            src: asset!("/assets/app-icon.png"),
+                            alt: "",
+                        }
                         span { "Agent Fleet" }
                     }
                 }

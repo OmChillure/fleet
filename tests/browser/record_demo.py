@@ -198,6 +198,8 @@ class Demo:
         body = p.inner_text("body")
         if "Chat backend not connected yet." in body:
             raise RuntimeError("stub chat UI — not this tree's fleet-ui")
+        if "Pick the runner by hand" not in body and "Select runner" not in body:
+            raise RuntimeError("chat composer missing runner picker")
         # Do not fill a disabled textarea (false-green on stub; fails on new UI offline).
         box = p.locator("textarea")
         if box.count() and box.first.is_enabled():
@@ -342,7 +344,7 @@ class Demo:
             raise RuntimeError(
                 f"self-hosted runners page missing heading or text: {body[:300]}"
             )
-        if "Control plane" not in body and p.locator("article").count() == 0:
+        if "Control plane" not in body and p.locator("button").filter(has_text="online").count() == 0:
             raise RuntimeError("self-hosted page missing control plane or cards")
         add = p.get_by_role("button", name="Add worker")
         if add.count():
@@ -364,6 +366,31 @@ class Demo:
             if done.count() and done.first.is_visible():
                 done.first.click()
                 pause(p, 600)
+        card = p.locator("button").filter(has_text="last seen").or_(
+            p.locator("button").filter(has_text="Control plane")
+        )
+        if card.count() and card.first.is_visible():
+            card.first.click()
+            pause(p, 800)
+        popular = p.get_by_text("Popular models")
+        if popular.count() and popular.first.is_visible():
+            filt = p.get_by_placeholder("Filter the current top 50")
+            if filt.count() and filt.first.is_visible():
+                filt.first.fill("llama")
+                pause(p, 600)
+                filt.first.fill("")
+                pause(p, 400)
+        unlisted = p.get_by_placeholder("name or URL (llama3.2, hf.co/…)")
+        if unlisted.count() and unlisted.first.is_visible():
+            unlisted.first.fill("tinyllama")
+            pause(p, 800)
+            unlisted.first.fill("")
+        models_dir = p.get_by_placeholder("~/.ollama/models")
+        if models_dir.count() and models_dir.first.is_visible():
+            pause(p, 400)
+        sandbox = p.get_by_text("Sandboxing")
+        if sandbox.count() and sandbox.first.is_visible():
+            pause(p, 600)
         hold = p.get_by_role("button", name="Stop taking new jobs")
         if hold.count() and hold.first.is_visible():
             hold.first.click()

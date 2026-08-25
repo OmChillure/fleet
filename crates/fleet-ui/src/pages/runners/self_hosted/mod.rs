@@ -1,6 +1,6 @@
 //! Self-hosted runners page.
 
-mod api;
+pub mod api;
 mod page;
 
 pub use page::SelfHosted;

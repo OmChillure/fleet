@@ -35,6 +35,79 @@ async fn main() {
     }
 }
 
+fn warn_stale_worker_dist() {
+    let dest = std::env::var("FLEET_WORKER_DIST_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".tmp/vms/dist".into());
+    let want_host = fleet_server::package_versions::fleet_host_version();
+    let want_driver = fleet_server::package_versions::fleet_driver_version();
+    let root = std::path::Path::new(&dest);
+    if !root.is_dir() {
+        tracing::warn!(
+            dest,
+            "no staged worker dist; paired runners cannot auto-update. Run scripts/stage-worker-dist.sh"
+        );
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let manifest = ent.path().join("manifest.json");
+        if !manifest.is_file() {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let parsed =
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::Null);
+        let bins = parsed.get("bins");
+        let host_ver = staged_bin_version(bins, "fleet-host");
+        let driver_ver = staged_bin_version(bins, "fleet-driver");
+        let host_ok = !want_host.is_empty() && host_ver.as_deref() == Some(want_host);
+        let driver_ok = !want_driver.is_empty() && driver_ver.as_deref() == Some(want_driver);
+        if host_ok && driver_ok {
+            continue;
+        }
+        let ahead = host_ver
+            .as_deref()
+            .is_some_and(|v| fleet_server::package_versions::version_is_ahead(v, want_host))
+            || driver_ver
+                .as_deref()
+                .is_some_and(|v| fleet_server::package_versions::version_is_ahead(v, want_driver));
+        if ahead {
+            tracing::warn!(
+                platform = %ent.file_name().to_string_lossy(),
+                staged_host = %host_ver.as_deref().unwrap_or(""),
+                staged_driver = %driver_ver.as_deref().unwrap_or(""),
+                want_host,
+                want_driver,
+                "staged package is newer than the verification version — bump [verify] in runner-packages.toml"
+            );
+        } else {
+            tracing::warn!(
+                platform = %ent.file_name().to_string_lossy(),
+                staged_host = %host_ver.as_deref().unwrap_or(""),
+                staged_driver = %driver_ver.as_deref().unwrap_or(""),
+                want_host,
+                want_driver,
+                "outdated worker package — restage with scripts/stage-worker-dist.sh before remote auto-update"
+            );
+        }
+    }
+}
+
+fn staged_bin_version(bins: Option<&serde_json::Value>, stem: &str) -> Option<String> {
+    let obj = bins?.as_object()?;
+    let exe = format!("{stem}.exe");
+    let v = obj.get(stem).or_else(|| obj.get(exe.as_str()))?;
+    let s = v.get("version")?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -50,6 +123,7 @@ fn init_tracing() {
 
 async fn run() -> anyhow::Result<()> {
     tracing::info!("loading configuration…");
+    warn_stale_worker_dist();
     let config = ServerConfig::from_env().map_err(|e| {
         tracing::error!(error = %e, "configuration error");
         e
@@ -107,16 +181,13 @@ async fn run() -> anyhow::Result<()> {
             db: db.clone(),
             key: config.integrations.credentials_key.clone(),
         });
-    let orch = fleet_orchestrator::api::build_app_state_with_pool_io(
-        &orch_cfg,
-        db.clone(),
-        Some(io),
-    )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "orchestrator state init failed");
-            e
-        })?;
+    let orch =
+        fleet_orchestrator::api::build_app_state_with_pool_io(&orch_cfg, db.clone(), Some(io))
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "orchestrator state init failed");
+                e
+            })?;
     tracing::info!("orchestrator state ready");
 
     // Local drain loop: queue thousands of tasks, run FLEET_MAX_AGENTS at a time (no k8s).

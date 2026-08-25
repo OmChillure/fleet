@@ -98,6 +98,12 @@ impl PlaneRunner {
             current_jobs: current_jobs.max(0),
             advertised_max_concurrent: None,
             hardware: None,
+            agents: vec![],
+            is_control_plane_box: true,
+            is_this_machine: false,
+            install_request: None,
+            runtime_settings: None,
+            runtime_reported: None,
         }
     }
 }

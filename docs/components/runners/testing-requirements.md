@@ -33,7 +33,7 @@ Every staged platform this plane serves must have a real-life path:
 `freebsd-amd64`, `darwin-x86_64`, `darwin-arm64`,
 `windows-x86_64`, `windows-arm64`.
 
-A platform listed under **Serving this build** / **Outdated packages**
+A platform listed under **Serving** (fleet-host / fleet-driver hashes)
 without a guest test is a hole.
 
 **Live skipped for now:** `linux-aarch64`, `linux-aarch64-musl`,
@@ -105,7 +105,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 | Hostname · platform | Heartbeat fields | Shown after pair | Guest report matches the OS |
 | Specs: CPU, cores, RAM, GPUs (incl. Intel iGPU), load % | Formatters; GPU normalize | Specs on a live card | Linux / Windows / macOS / FreeBSD inventory |
 | Jobs `n / cap` | Cap = min(plane, advertised) | `jobs 0 / 4` on a new card | Running a job increments current |
-| Software line on **paired boxes only** | `software_line` / `software_flag` vs staged dist, never file hash as bake id | Software line after pair; not on plane | current / behind / updating / old package / unknown on a real box |
+| Package rows on **paired boxes only** | `software_bin_rows` vs `package_versions`; flag is derived from those rows | fleet-host / fleet-driver version · current\|behind; not on plane | Same version cannot be up to date and reported |
 | Not-taking reasons (pair / removed / error / hold) | `not_taking_reason` | Waiting to pair on new card | Error from guest surfaces |
 | Show / hide removed; hide clones + never-paired | `in_removed_list` | Show removed after revoke of a paired box | Re-pair hides the old clone |
 
@@ -153,10 +153,10 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Current runner build = served runner set, 12-char short | `package_report`; ignore plane SHA | “Current runner build” + 12 hex; no `Served packages` mash | Staged dirty vs clean SHA shortens like the card |
-| Serving this build: always shown (blank if none) | empty `serving` still rendered | Line present even when all outdated | After restage, platforms move to Serving |
-| Outdated packages: older / no build id only | Mixed SHA / no bake id | Amber line when mixed | Restage one platform; only that line is current |
-| Plane SHA must not mark packages outdated | dirty plane ≠ clean package | No false “all outdated” after API rebuild | n/a |
+| Header is Current fleet-host version / Current fleet-driver version | `runner-packages.toml` `[verify]` + `package_versions` | No bake SHA / “Current runner build” | After bump `[versions]` + `[verify]` + restage, both OS cards show the same number |
+| Amber banner if any required OS is not on both current versions | `stale_package_warning` | Banner names the OS list | Restage `--all` clears it |
+| Card lists fleet-host and fleet-driver versions | `software_bin_rows` | current/behind/missing per binary | Windows and Linux with the same version compare equal |
+| Plane `/health.git_sha` is not a runner version | plane-bake skip only | No false outdated after API rebuild | n/a |
 
 ### Assignment / tick
 
@@ -176,7 +176,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 | current / behind / unknown vs staged manifest | `compute_software_status` | Software flag on the card | Install old package → behind; restage+update → current |
 | Never treat a file hash as the bake id | `software_build_id` | Card does not show bin SHA as version | n/a |
 | Stage per-platform manifests | Stage script / install routes | Header lists served platforms | Guest for each platform installs that package |
-| `machine.id` survives update + reinstall | Reclaim on pair | Same id after re-pair | Guest update/reinstall keeps id |
+| `machine.id` survives update + reinstall | Reclaim on pair; host file persist (`paths.rs` unit) | Same id after re-pair | Guest update/reinstall keeps id |
 
 ### Cloud (placeholder)
 

@@ -741,6 +741,32 @@ mod tests {
     }
 
     #[test]
+    fn container_runtime_rejected_when_run_container_false() {
+        let cfg = LocalConfig::defaults();
+        assert!(
+            !cfg.run_container,
+            "v1 default must refuse container/k3d jobs"
+        );
+        let tools = ToolProbe {
+            docker: true,
+            in_cluster: false,
+            kubeconfig: true,
+            hypervisor: false,
+        };
+        assert!(
+            !runtime_allowed_with(JobRuntime::Container, &cfg, true, true, &tools),
+            "run_container=false must reject Container even when docker/kube exist"
+        );
+        assert!(!runtime_allowed_with(
+            JobRuntime::Container,
+            &cfg,
+            true,
+            false,
+            &tools
+        ));
+    }
+
+    #[test]
     fn isolation_string_selects_runtime() {
         let mut p = sample_payload();
         p.runtime = JobRuntime::Host;
@@ -964,6 +990,44 @@ mod tests {
             .to_string();
         assert!(err.contains("docker"), "{err}");
         assert!(err.contains("will not fall back"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_claim_container_runtime_rejected_when_run_container_false() {
+        let cfg = LocalConfig::defaults();
+        assert!(!cfg.run_container);
+        assert_eq!(cfg.container_backend, ContainerBackend::K3d);
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Container;
+        p.isolation = Some("container".into());
+        p.session_id = Uuid::now_v7();
+        let tools = ToolProbe {
+            docker: true,
+            in_cluster: false,
+            kubeconfig: true,
+            hypervisor: false,
+        };
+        let err = run_claim_with(&cfg, &p, true, true, &tools)
+            .await
+            .unwrap_err()
+            .to_string();
+        let lower = err.to_ascii_lowercase();
+        assert!(err.contains("not allowed"), "{err}");
+        assert!(err.contains("run_container"), "{err}");
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            !lower.contains("docker run")
+                && !lower.contains("k3d cluster")
+                && !lower.contains("docker not on path"),
+            "must fail on flags before exec docker/k3d: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a docker/k3d child"
+        );
     }
 
     #[tokio::test]

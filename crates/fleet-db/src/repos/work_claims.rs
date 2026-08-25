@@ -4,6 +4,7 @@
 //! on the same ready row (no deadlock chains on the claim hot path).
 
 use chrono::{DateTime, Duration, Utc};
+use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -102,9 +103,13 @@ pub async fn claim_next_spawn_for_host(
             SELECT id FROM work_claims
             WHERE status = 'ready'
               AND available_at <= now()
-              AND kind IN ('spawn_session', 'signal_session')
+              AND kind IN ('spawn_session', 'signal_session', 'chat_turn')
               AND payload->>'host_id' = $4
-            ORDER BY CASE WHEN kind = 'signal_session' THEN 0 ELSE 1 END,
+            ORDER BY CASE
+                       WHEN kind = 'signal_session' THEN 0
+                       WHEN kind = 'chat_turn' THEN 1
+                       ELSE 2
+                     END,
                      available_at, created_at
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -223,6 +228,46 @@ pub async fn complete_owned(
     .bind(lease_token)
     .bind(host_id)
     .bind(workspace_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// Complete a lease and merge `result` into `payload` (chat_turn stdout).
+pub async fn complete_owned_with_result(
+    pool: &PgPool,
+    claim_id: Uuid,
+    lease_token: Uuid,
+    host_id: Uuid,
+    workspace_id: Uuid,
+    result: Option<JsonValue>,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET status = 'done',
+            payload = CASE
+              WHEN $5::jsonb IS NULL THEN payload
+              ELSE payload || jsonb_build_object('result', $5::jsonb)
+            END,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            version = version + 1,
+            updated_at = now()
+        WHERE id = $1
+          AND lease_token = $2
+          AND status = 'leased'
+          AND lease_owner = $3
+          AND workspace_id = $4
+        "#,
+    )
+    .bind(claim_id)
+    .bind(lease_token)
+    .bind(host_id)
+    .bind(workspace_id)
+    .bind(result)
     .execute(pool)
     .await
     .map_err(map_query_err)?;

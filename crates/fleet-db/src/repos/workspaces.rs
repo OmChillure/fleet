@@ -380,6 +380,25 @@ const INVITE_COLS: &str = r#"
 "#;
 
 pub async fn insert_invite(pool: &PgPool, invite: &WorkspaceInvite) -> DbResult<WorkspaceInvite> {
+    // Expired open rows still occupy the partial unique index (it cannot
+    // use now()). Clear them so a re-invite after expiry can succeed.
+    sqlx::query(
+        r#"
+        UPDATE workspace_invites
+        SET revoked_at = $3
+        WHERE workspace_id = $1
+          AND email_normalized = $2
+          AND accepted_at IS NULL AND revoked_at IS NULL
+          AND expires_at <= $3
+        "#,
+    )
+    .bind(invite.workspace_id)
+    .bind(&invite.email_normalized)
+    .bind(invite.created_at)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+
     let q = format!(
         r#"
         INSERT INTO workspace_invites (
@@ -412,6 +431,7 @@ pub async fn list_open_invites(
         r#"
         SELECT {INVITE_COLS} FROM workspace_invites
         WHERE workspace_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+          AND expires_at > now()
         ORDER BY created_at DESC
         "#
     );
@@ -498,6 +518,7 @@ pub async fn accept_invite(
         UPDATE workspace_invites
         SET accepted_at = $3, accepted_user_id = $2
         WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+          AND expires_at > $3
         "#,
     )
     .bind(invite_id)

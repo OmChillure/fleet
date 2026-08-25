@@ -82,6 +82,29 @@ json_quote() {
   printf '"%s"' "${1//\"/\\\"}"
 }
 
+pkg_version_from_toml() {
+  local name="$1"
+  local file="$ROOT/runner-packages.toml"
+  python3 - "$file" versions "$name" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+section, name = sys.argv[2], sys.argv[3]
+header = f"[{section}]"
+in_section = False
+for line in text.splitlines():
+    line = line.strip()
+    if line.startswith("["):
+        in_section = line == header
+        continue
+    if not in_section:
+        continue
+    m = re.match(rf"{re.escape(name)}\s*=\s*\"([^\"]+)\"", line)
+    if m:
+        sys.stdout.write(m.group(1))
+        break
+PY
+}
+
 baked_sha_from_host() {
   local bin="$1"
   python3 - "$bin" <<'PY'
@@ -143,18 +166,27 @@ write_manifest() {
 
   local staged_at
   staged_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local host_ver driver_ver
+  host_ver="$(pkg_version_from_toml fleet-host)"
+  driver_ver="$(pkg_version_from_toml fleet-driver)"
 
   {
     printf '{\n  "git_sha": %s,\n  "platform": %s,\n  "staged_at": %s,\n  "bins": {\n' \
       "$(json_quote "$git_sha")" "$(json_quote "$platform")" "$(json_quote "$staged_at")"
     local i=0
     local n=${#names[@]}
-    local sha size
+    local sha size ver stem
     for bin in "${names[@]}"; do
       sha="$(file_sha256 "$out/$bin")"
       size="$(wc -c <"$out/$bin" | tr -d '[:space:]')"
-      printf '    %s: { "sha256": %s, "size": %s }' \
-        "$(json_quote "$bin")" "$(json_quote "$sha")" "$size"
+      stem="${bin%.exe}"
+      if [[ "$stem" == "fleet-driver" ]]; then
+        ver="$driver_ver"
+      else
+        ver="$host_ver"
+      fi
+      printf '    %s: { "sha256": %s, "size": %s, "version": %s }' \
+        "$(json_quote "$bin")" "$(json_quote "$sha")" "$size" "$(json_quote "$ver")"
       i=$((i + 1))
       if [[ "$i" -lt "$n" ]]; then
         printf ',\n'
@@ -664,7 +696,7 @@ stage_armv7_musl() {
 # (do not invent a stub .exe).
 stage_windows_gnu() {
   need_docker
-  echo "building fleet-host fleet-driver (debug) for windows-x86_64 in $BOOKWORM_IMAGE + gcc-mingw-w64"
+  echo "building fleet-host fleet-driver (release) for windows-x86_64 in $BOOKWORM_IMAGE + gcc-mingw-w64"
   mkdir -p "$CARGO_DOCKER" "$WINDOWS_GNU_TARGET"
   docker run --rm \
     --user "0:0" \
@@ -692,13 +724,13 @@ stage_windows_gnu() {
         rustup target add x86_64-pc-windows-gnu || rc=$?
       fi
       if [ "$rc" -eq 0 ]; then
-        cargo build -p fleet-host -p fleet-driver \
+        cargo build --release -p fleet-host -p fleet-driver \
           --target x86_64-pc-windows-gnu || rc=$?
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /cargo /target || true
       exit "$rc"
     '
-  copy_exe_bins "$WINDOWS_GNU_TARGET/x86_64-pc-windows-gnu/debug" "$DEST/windows-x86_64"
+  copy_exe_bins "$WINDOWS_GNU_TARGET/x86_64-pc-windows-gnu/release" "$DEST/windows-x86_64"
 }
 
 # Cross-compile PE aarch64 via llvm-mingw so WoA / Surface guests can download

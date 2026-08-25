@@ -16,6 +16,8 @@ pub struct HostPublic {
     pub paused: bool,
     #[serde(default)]
     pub drain: bool,
+    #[serde(default)]
+    pub isolation: Option<String>,
     #[serde(default = "default_true")]
     pub allow_host: bool,
     #[serde(default = "default_true")]
@@ -50,6 +52,13 @@ pub struct HostPublic {
     pub software_status: Option<String>,
     #[serde(default)]
     pub outdated: bool,
+    /// Copied from the list payload. Used to tell "matches last restage"
+    /// from "matches this control plane". Not sent by the host.
+    #[serde(default, skip_serializing)]
+    pub plane_git_sha: Option<String>,
+    /// Copied from the list payload. Same number on every OS (see runner-packages.toml).
+    #[serde(default, skip_serializing)]
+    pub current_versions: PackageVersions,
     #[serde(default = "default_true")]
     pub auto_update: bool,
     #[serde(default)]
@@ -68,6 +77,51 @@ pub struct HostPublic {
     pub advertised_max_concurrent: Option<i32>,
     #[serde(default)]
     pub hardware: Option<HostHardware>,
+    /// Official agent CLIs last reported by this box. Never includes tokens.
+    #[serde(default)]
+    pub agents: Vec<AgentRuntime>,
+    #[serde(default)]
+    pub is_control_plane_box: bool,
+    #[serde(default)]
+    pub is_this_machine: bool,
+    #[serde(default)]
+    pub install_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub runtime_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    pub runtime_reported: Option<serde_json::Value>,
+}
+
+/// One official agent CLI on a runner (`grok`, `claude`, `openai`, `ollama`).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
+pub struct AgentRuntime {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub model_details: Vec<AgentModelDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
+pub struct AgentModelDetail {
+    pub name: String,
+    #[serde(default)]
+    pub efforts: Vec<AgentEffort>,
+    #[serde(default)]
+    pub default_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
+pub struct AgentEffort {
+    pub value: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
@@ -92,6 +146,12 @@ pub struct HostHardware {
     pub gpus: Option<Vec<HostGpu>>,
     #[serde(default)]
     pub gpu_used_pct: Option<u8>,
+    #[serde(default)]
+    pub disk_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_free_bytes: Option<u64>,
+    #[serde(default)]
+    pub addrs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
@@ -128,11 +188,21 @@ pub struct HostDesiredSoftware {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+pub struct PackageVersions {
+    #[serde(default, rename = "fleet-host")]
+    pub host: String,
+    #[serde(default, rename = "fleet-driver")]
+    pub driver: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
 pub struct PackageInventory {
     #[serde(default)]
     pub packages: Vec<HostDesiredSoftware>,
     #[serde(default)]
     pub plane_git_sha: Option<String>,
+    #[serde(default)]
+    pub package_versions: PackageVersions,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -163,6 +233,23 @@ pub struct HostPatch {
     pub auto_update: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_update: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_model: Option<InstallModelRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_job_timeout_s: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_settings: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct InstallModelRequest {
+    #[serde(default)]
+    pub provider: String,
+    /// Model name or pull URL as the official CLI accepts it.
+    #[serde(default)]
+    pub spec: String,
 }
 
 fn default_true() -> bool {

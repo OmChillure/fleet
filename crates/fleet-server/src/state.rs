@@ -20,7 +20,7 @@ pub struct AppState {
     pub orch: OrchState,
     /// Local Ollama for workspace chat.
     pub ollama: OllamaConfig,
-    /// Grok via local CLI auth (`~/.grok/auth.json`) — model `grok-4.5`.
+    /// Grok via local CLI auth (`~/.grok/auth.json`) — models from `grok models`.
     pub grok: GrokConfig,
     pub openai: OpenaiConfig,
     pub claude: ClaudeConfig,

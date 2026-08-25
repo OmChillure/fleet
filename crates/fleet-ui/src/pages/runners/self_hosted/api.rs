@@ -7,7 +7,7 @@ use crate::pages::auth::api::{auth_base_url, refresh_session};
 #[allow(unused_imports)] // HostGpu/HostHardware/HostSoftware stay on the api surface
 pub use fleet_runners_view::{
     CreateHostResponse, HostDesiredSoftware, HostGpu, HostHardware, HostPatch, HostPublic,
-    HostSoftware, PackageInventory,
+    HostSoftware, PackageInventory, PackageVersions,
 };
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -24,6 +24,8 @@ struct HostListResponse {
     packages: Vec<HostDesiredSoftware>,
     #[serde(default)]
     plane_git_sha: Option<String>,
+    #[serde(default)]
+    package_versions: Option<PackageVersions>,
     #[serde(default)]
     sandbox_backend: Option<String>,
 }
@@ -160,11 +162,23 @@ pub async fn list_workers_page(
 ) -> Result<(Vec<HostPublic>, PackageInventory, String), String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/worker-hosts")).await?;
     let body: HostListResponse = parse_json(res).await?;
+    let plane = body.plane_git_sha.clone();
+    let versions = body.package_versions.clone().unwrap_or_default();
+    let hosts = body
+        .hosts
+        .into_iter()
+        .map(|mut h| {
+            h.plane_git_sha = plane.clone();
+            h.current_versions = versions.clone();
+            h
+        })
+        .collect();
     Ok((
-        body.hosts,
+        hosts,
         PackageInventory {
             packages: body.packages,
             plane_git_sha: body.plane_git_sha,
+            package_versions: versions,
         },
         body.sandbox_backend.unwrap_or_else(|| "stub".into()),
     ))
@@ -236,4 +250,67 @@ pub fn install_api_url(created: &CreateHostResponse) -> String {
 /// PowerShell one-liner: download, pair, start (Windows).
 pub fn windows_install_command(created: &CreateHostResponse) -> String {
     fleet_runners_view::windows_install_command(created, &auth_base_url())
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModel {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelCatalog {
+    #[serde(default)]
+    pub models: Vec<LocalModel>,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// `GET /api/workspaces/{id}/local-models` — live top-50 Ollama library.
+pub async fn fetch_local_models(workspace_id: &str) -> Result<LocalModelCatalog, String> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/local-models"
+    ))
+    .await?;
+    parse_json(res).await
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelTag {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub spec: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub ram_bytes: Option<u64>,
+    #[serde(default)]
+    pub latest: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelTags {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tags: Vec<LocalModelTag>,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// `GET /api/workspaces/{id}/local-models/{name}/tags`
+pub async fn fetch_local_model_tags(
+    workspace_id: &str,
+    name: &str,
+) -> Result<LocalModelTags, String> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/local-models/{name}/tags"
+    ))
+    .await?;
+    parse_json(res).await
 }

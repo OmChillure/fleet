@@ -128,6 +128,45 @@ pub async fn upsert(pool: &PgPool, new: &UpsertConnection) -> DbResult<Integrati
         .map_err(map_query_err)
 }
 
+/// Merge agent defaults into `config` without touching credentials.
+pub async fn patch_agent_defaults(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    runner_id: Option<&str>,
+    llm_provider: Option<&str>,
+    model: Option<&str>,
+) -> DbResult<IntegrationConnection> {
+    let q = format!(
+        r#"
+        UPDATE integration_connections
+        SET config = (config
+                - 'default_runner_id'
+                - 'default_provider'
+                - 'default_model')
+            || jsonb_strip_nulls(jsonb_build_object(
+                'default_runner_id', $3::text,
+                'default_provider', $4::text,
+                'default_model', $5::text
+            )),
+            updated_at = now(),
+            version = version + 1
+        WHERE workspace_id = $1 AND provider = $2 AND status = 'connected'
+        RETURNING {COLS}
+        "#
+    );
+    sqlx::query_as::<_, IntegrationConnection>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .bind(runner_id)
+        .bind(llm_provider)
+        .bind(model)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("integration not connected".into()))
+}
+
 /// Soft-disconnect: clear secrets, mark disconnected.
 pub async fn disconnect(
     pool: &PgPool,

@@ -2,29 +2,35 @@
 //!
 //! Primary: `~/.grok/auth.json` (from `grok` / `grok login`)
 //! Fallback: `XAI_API_KEY` if no CLI session
-//! Model: `grok-4.5` only
+//! Models come from `grok models` on this box. We do not pin a version.
 
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue,
-    system_prompt_for_workspace, tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
 };
 use crate::state::AppState;
 
 const DEFAULT_API_BASE: &str = "https://api.x.ai/v1";
 const DEFAULT_OIDC_ISSUER: &str = "https://auth.x.ai";
-/// Only model we expose in the UI / chat path.
-pub const GROK_MODEL: &str = "grok-4.5";
+/// First id from `grok models`, or empty when the CLI is missing / logged out.
+pub fn default_model() -> String {
+    grok_cli_model_names()
+        .and_then(|m| m.into_iter().next())
+        .unwrap_or_default()
+}
 /// Refresh a few minutes before expiry (matches CLI early invalidation spirit).
 const REFRESH_SKEW_SECS: i64 = 120;
 
@@ -90,13 +96,15 @@ fn default_auth_path() -> PathBuf {
 fn expand_user_path(raw: &str) -> PathBuf {
     let raw = raw.trim();
     if raw == "~"
-        && let Ok(home) = env::var("HOME") {
-            return PathBuf::from(home);
-        }
+        && let Ok(home) = env::var("HOME")
+    {
+        return PathBuf::from(home);
+    }
     if let Some(rest) = raw.strip_prefix("~/")
-        && let Ok(home) = env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+        && let Ok(home) = env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
     PathBuf::from(raw)
 }
 
@@ -130,10 +138,7 @@ struct AuthEntry {
 #[derive(Debug, Clone)]
 enum AuthSource {
     /// CLI session token from auth.json.
-    Cli {
-        access_token: String,
-        label: String,
-    },
+    Cli { access_token: String, label: String },
     /// Explicit API key env.
     ApiKey(String),
 }
@@ -145,19 +150,15 @@ fn parse_auth_file(path: &Path) -> Result<serde_json::Map<String, Value>, String
             path.display()
         ));
     }
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let v: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
     let obj = v
         .as_object()
         .ok_or_else(|| format!("{} is not a JSON object", path.display()))?
         .clone();
     if obj.is_empty() {
-        return Err(format!(
-            "{} is empty — run `grok login`",
-            path.display()
-        ));
+        return Err(format!("{} is empty — run `grok login`", path.display()));
     }
     Ok(obj)
 }
@@ -176,10 +177,7 @@ fn pick_best_entry(map: &serde_json::Map<String, Value>) -> Result<(String, Auth
         if entry.key.trim().is_empty() {
             continue;
         }
-        let exp = entry
-            .expires_at
-            .as_deref()
-            .and_then(parse_expires_at);
+        let exp = entry.expires_at.as_deref().and_then(parse_expires_at);
         match &best {
             None => best = Some((k.clone(), entry, exp)),
             Some((_, _, best_exp)) => {
@@ -288,11 +286,7 @@ async fn fetch_token_endpoint(issuer: &str) -> Result<String, String> {
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
-    let res = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {
         return Err(format!("openid-configuration {}", res.status()));
     }
@@ -384,12 +378,13 @@ async fn load_cli_auth(cfg: &GrokConfig) -> Result<AuthSource, String> {
             Err(e) => {
                 // If still have a non-expired token somehow, continue; else fail.
                 if is_expired_or_skew(entry.expires_at.as_deref())
-                    && entry.expires_at.as_ref().and_then(|s| parse_expires_at(s))
+                    && entry
+                        .expires_at
+                        .as_ref()
+                        .and_then(|s| parse_expires_at(s))
                         .is_some_and(|exp| exp <= chrono::Utc::now())
                 {
-                    return Err(format!(
-                        "Grok CLI session expired and refresh failed: {e}"
-                    ));
+                    return Err(format!("Grok CLI session expired and refresh failed: {e}"));
                 }
                 tracing::warn!(error = %e, "grok refresh failed; trying existing token");
             }
@@ -418,13 +413,91 @@ fn auth_bearer(src: &AuthSource) -> &str {
 
 // ── provider status ─────────────────────────────────────────────────────────
 
+/// Parse `grok models` stdout. Default first. Never include secrets.
+pub fn parse_grok_models_output(stdout: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let t = line.trim();
+        let t = t.trim_start_matches('*').trim_start_matches('-').trim();
+        let name = t.split_whitespace().next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if !(name.starts_with("grok-") || name.starts_with("sxs-") || name.starts_with("claude-")) {
+            continue;
+        }
+        if !out.iter().any(|m| m == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+const GROK_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn grok_cli_model_names() -> Option<Vec<String>> {
+    let mut child = Command::new("grok")
+        .arg("models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                let models = parse_grok_models_output(&stdout);
+                return if models.is_empty() {
+                    None
+                } else {
+                    Some(models)
+                };
+            }
+            Ok(None) if start.elapsed() >= GROK_MODELS_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 fn grok_models() -> Vec<ChatModelInfo> {
-    vec![ChatModelInfo {
-        name: GROK_MODEL.into(),
-        size: None,
-        parameter_size: None,
-        family: Some("grok".into()),
-    }]
+    grok_cli_model_names()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| ChatModelInfo {
+            name,
+            size: None,
+            parameter_size: None,
+            family: Some("grok".into()),
+        })
+        .collect()
+}
+
+fn put_effort(body: &mut Value, effort: Option<&str>) {
+    if let Some(e) = effort.map(str::trim).filter(|s| {
+        !s.is_empty()
+            && s.len() <= 32
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }) {
+        body["reasoning_effort"] = json!(e);
+    }
 }
 
 /// Probe local CLI auth (and optional API key) for chat status.
@@ -437,7 +510,7 @@ pub async fn provider_status(cfg: &GrokConfig) -> ChatProviderInfo {
             coming_soon: false,
             error: Some("Grok is disabled (GROK_ENABLED=false)".into()),
             models: vec![],
-            default_model: Some(GROK_MODEL.into()),
+            default_model: None,
         };
     }
 
@@ -448,26 +521,30 @@ pub async fn provider_status(cfg: &GrokConfig) -> ChatProviderInfo {
                 %label,
                 "grok provider available (CLI auth)"
             );
+            let models = grok_models();
+            let default_model = models.first().map(|m| m.name.clone());
             ChatProviderInfo {
                 id: "grok".into(),
                 name: format!("Grok ({label})"),
                 available: true,
                 coming_soon: false,
                 error: None,
-                models: grok_models(),
-                default_model: Some(GROK_MODEL.into()),
+                models,
+                default_model,
             }
         }
         Ok(AuthSource::ApiKey(_)) => {
             tracing::info!("grok provider available (XAI_API_KEY)");
+            let models = grok_models();
+            let default_model = models.first().map(|m| m.name.clone());
             ChatProviderInfo {
                 id: "grok".into(),
                 name: "Grok (API key)".into(),
                 available: true,
                 coming_soon: false,
                 error: None,
-                models: grok_models(),
-                default_model: Some(GROK_MODEL.into()),
+                models,
+                default_model,
             }
         }
         Err(e) => {
@@ -479,7 +556,7 @@ pub async fn provider_status(cfg: &GrokConfig) -> ChatProviderInfo {
                 coming_soon: false,
                 error: Some(e),
                 models: vec![],
-                default_model: Some(GROK_MODEL.into()),
+                default_model: None,
             }
         }
     }
@@ -575,12 +652,18 @@ async fn chat_completions(
     messages: &[Value],
     with_tools: bool,
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+    effort: Option<&str>,
 ) -> AppResult<CompletionsResponse> {
     if progress.is_some() {
-        return chat_completions_stream(cfg, bearer, model, messages, with_tools, progress).await;
+        return chat_completions_stream(cfg, bearer, model, messages, with_tools, progress, effort)
+            .await;
     }
-    crate::retry::retry_provider("grok", || {
-        chat_completions_once(cfg, bearer, model, messages, with_tools)
+    let effort = effort.map(|s| s.to_string());
+    crate::retry::retry_provider("grok", move || {
+        let effort = effort.clone();
+        async move {
+            chat_completions_once(cfg, bearer, model, messages, with_tools, effort.as_deref()).await
+        }
     })
     .await
 }
@@ -591,6 +674,7 @@ async fn chat_completions_once(
     model: &str,
     messages: &[Value],
     with_tools: bool,
+    effort: Option<&str>,
 ) -> AppResult<CompletionsResponse> {
     let client = http_client()?;
     let url = format!("{}/chat/completions", cfg.api_base);
@@ -603,6 +687,7 @@ async fn chat_completions_once(
     if with_tools {
         body["tools"] = tool_definitions();
     }
+    put_effort(&mut body, effort);
 
     tracing::info!(
         model = %model,
@@ -649,9 +734,10 @@ async fn chat_completions_once(
             ));
         }
         if let Ok(v) = serde_json::from_str::<Value>(&text)
-            && let Some(msg) = v.pointer("/error/message").and_then(|m| m.as_str()) {
-                return Err(AppError::bad_request(format!("Grok error: {msg}")));
-            }
+            && let Some(msg) = v.pointer("/error/message").and_then(|m| m.as_str())
+        {
+            return Err(AppError::bad_request(format!("Grok error: {msg}")));
+        }
         let preview: String = text.chars().take(400).collect();
         return Err(AppError::bad_request(format!(
             "Grok error ({status}): {preview}"
@@ -665,7 +751,10 @@ async fn chat_completions_once(
     })?;
 
     if let Some(err) = &parsed.error {
-        return Err(AppError::bad_request(format!("Grok error: {}", err.message)));
+        return Err(AppError::bad_request(format!(
+            "Grok error: {}",
+            err.message
+        )));
     }
 
     Ok(parsed)
@@ -724,6 +813,7 @@ async fn chat_completions_stream(
     messages: &[Value],
     with_tools: bool,
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+    effort: Option<&str>,
 ) -> AppResult<CompletionsResponse> {
     let client = http_client()?;
     let url = format!("{}/chat/completions", cfg.api_base);
@@ -735,6 +825,7 @@ async fn chat_completions_stream(
     if with_tools {
         body["tools"] = tool_definitions();
     }
+    put_effort(&mut body, effort);
     let mut res = client
         .post(&url)
         .bearer_auth(bearer)
@@ -759,9 +850,11 @@ async fn chat_completions_stream(
     let mut saw_tools = false;
     let mut emit_text = true;
 
-    while let Some(chunk) = res.chunk().await.map_err(|e| {
-        AppError::internal(format!("grok stream chunk: {e}"))
-    })? {
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|e| AppError::internal(format!("grok stream chunk: {e}")))?
+    {
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(idx) = buf.find('\n') {
             let line = buf[..idx].trim().to_string();
@@ -865,12 +958,16 @@ pub async fn complete_text(
             "Grok is disabled (set GROK_ENABLED=true)".to_string(),
         ));
     }
-    let auth = resolve_auth(cfg)
-        .await
-        .map_err(AppError::bad_request)?;
+    let auth = resolve_auth(cfg).await.map_err(AppError::bad_request)?;
     let bearer = auth_bearer(&auth);
+    let fallback = default_model();
     let model = if model.trim().is_empty() {
-        GROK_MODEL
+        if fallback.is_empty() {
+            return Err(AppError::bad_request(
+                "no Grok model from `grok models` — run `grok login`".to_string(),
+            ));
+        }
+        fallback.as_str()
     } else {
         model.trim()
     };
@@ -878,7 +975,7 @@ pub async fn complete_text(
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": user }),
     ];
-    let parsed = chat_completions(cfg, bearer, model, &messages, false, None).await?;
+    let parsed = chat_completions(cfg, bearer, model, &messages, false, None, None).await?;
     let content = parsed
         .choices
         .first()
@@ -901,6 +998,8 @@ pub async fn chat_with_tools(
     model: &str,
     history: &[(String, String)],
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+    runner_id: Option<Uuid>,
+    effort: Option<String>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
     if !cfg.enabled {
         return Err(AppError::bad_request(
@@ -914,8 +1013,14 @@ pub async fn chat_with_tools(
     })?;
     let bearer = auth_bearer(&auth);
 
+    let fallback = default_model();
     let model = if model.trim().is_empty() {
-        GROK_MODEL
+        if fallback.is_empty() {
+            return Err(AppError::bad_request(
+                "no Grok model from `grok models` — run `grok login`".to_string(),
+            ));
+        }
+        fallback.as_str()
     } else {
         model.trim()
     };
@@ -958,15 +1063,17 @@ pub async fn chat_with_tools(
             &messages,
             true,
             progress.as_ref(),
+            effort.as_deref(),
         )
         .await?;
         if !parsed.model.is_empty() {
             used_model = parsed.model.clone();
         }
 
-        let choice = parsed.choices.first().ok_or_else(|| {
-            AppError::internal("grok returned no choices".to_string())
-        })?;
+        let choice = parsed
+            .choices
+            .first()
+            .ok_or_else(|| AppError::internal("grok returned no choices".to_string()))?;
         let msg = &choice.message;
 
         if msg.tool_calls.is_empty() {
@@ -1011,11 +1118,10 @@ pub async fn chat_with_tools(
             let llm = ChatLlmContext {
                 provider: "grok".into(),
                 model: model.to_string(),
+                runner_id,
+                effort: effort.clone(),
             };
-            let prior: Vec<Value> = actions
-                .iter()
-                .filter_map(|a| a.detail.clone())
-                .collect();
+            let prior: Vec<Value> = actions.iter().filter_map(|a| a.detail.clone()).collect();
             emit(
                 &progress,
                 ChatProgress::Status {
@@ -1023,16 +1129,9 @@ pub async fn chat_with_tools(
                 },
             )
             .await;
-            let (result_json, action) = execute_tool_with_retry(
-                state,
-                workspace_id,
-                user_id,
-                name,
-                &args,
-                &llm,
-                &prior,
-            )
-            .await;
+            let (result_json, action) =
+                execute_tool_with_retry(state, workspace_id, user_id, name, &args, &llm, &prior)
+                    .await;
             emit(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
             let content = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
@@ -1064,6 +1163,7 @@ pub async fn chat_with_tools(
         &messages,
         false,
         progress.as_ref(),
+        effort.as_deref(),
     )
     .await?;
     if !parsed.model.is_empty() {
@@ -1099,10 +1199,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_grok_45() {
-        let m = grok_models();
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].name, "grok-4.5");
+    fn parse_grok_models_lists_46_first() {
+        let raw = "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n  - sxs-claude-opus-4-6\n";
+        assert_eq!(
+            parse_grok_models_output(raw),
+            vec!["grok-4.6", "grok-4.5", "sxs-claude-opus-4-6"]
+        );
+    }
+
+    #[test]
+    fn put_effort_accepts_provider_values() {
+        let mut body = json!({});
+        put_effort(&mut body, Some("xhigh"));
+        assert_eq!(body["reasoning_effort"], "xhigh");
+        let mut skip = json!({});
+        put_effort(&mut skip, Some("not a value"));
+        assert!(skip.get("reasoning_effort").is_none());
     }
 
     #[test]

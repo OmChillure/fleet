@@ -833,7 +833,10 @@ async fn tick_without_host_leaves_ready() {
 
     let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
     assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
-    let list = sessions.body["sessions"].as_array().cloned().unwrap_or_default();
+    let list = sessions.body["sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
 
     if assignable.is_empty() {
         assert_eq!(
@@ -877,8 +880,7 @@ async fn complete_ok_false_is_spawn_failure_not_success() {
     )
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
-    let plan_id =
-        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
     state
         .orch
         .store
@@ -997,8 +999,7 @@ async fn signal_session_complete_does_not_spawn_fail() {
         Some(json!({ "kind": "chain" })),
     )
     .await;
-    let plan_id =
-        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
     state
         .orch
         .store
@@ -1116,6 +1117,8 @@ async fn cluster_host_completes_claim_in_other_workspace() {
             labels: Some(vec!["cluster".into()]),
             auto_update: None,
             request_update: None,
+            install_model: None,
+            runtime_settings: None,
         },
     )
     .await
@@ -1131,8 +1134,7 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         Some(json!({ "kind": "chain" })),
     )
     .await;
-    let plan_id =
-        Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
     state
         .orch
         .store
@@ -1215,7 +1217,12 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         Some(json!({ "lease_token": token, "ok": true })),
     )
     .await;
-    assert_eq!(done.status, StatusCode::OK, "complete cross-ws: {}", done.body);
+    assert_eq!(
+        done.status,
+        StatusCode::OK,
+        "complete cross-ws: {}",
+        done.body
+    );
     let home_task = state
         .orch
         .store

@@ -72,12 +72,28 @@ pub struct WorkerHost {
     pub update_requested_at: Option<DateTime<Utc>>,
     pub machine_id: Option<Uuid>,
     pub hardware: Option<serde_json::Value>,
+    #[serde(default = "default_agent_runtimes")]
+    pub agent_runtimes: serde_json::Value,
     pub settings_gen: i32,
     pub settings_ack_gen: i32,
+    #[serde(default)]
+    pub install_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub install_requested_at: Option<DateTime<Utc>>,
+    /// Desired box-local knobs (work dir, Ollama models dir, k8s). Applied on settings_gen.
+    #[serde(default = "default_json_object")]
+    pub runtime_settings: serde_json::Value,
+    /// Last heartbeat snapshot of LocalConfig (informational).
+    #[serde(default = "default_json_object")]
+    pub runtime_reported: serde_json::Value,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_json_object() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 impl WorkerHost {
@@ -176,6 +192,67 @@ pub struct WorkerHostPublic {
     pub advertised_max_concurrent: Option<i32>,
     #[serde(default)]
     pub hardware: Option<WorkerHardwarePublic>,
+    #[serde(default)]
+    pub agents: Vec<WorkerAgentRuntime>,
+    /// This box is the API process (same hostname as the plane).
+    #[serde(default)]
+    pub is_control_plane_box: bool,
+    /// The browser talking to the API is this box (loopback, or matching IP).
+    #[serde(default)]
+    pub is_this_machine: bool,
+    #[serde(default)]
+    pub install_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub runtime_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    pub runtime_reported: Option<serde_json::Value>,
+}
+
+/// Official CLI on a runner. Never includes tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkerAgentRuntime {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Per-model extras from the official CLI (effort menus, …).
+    #[serde(default)]
+    pub model_details: Vec<WorkerAgentModelDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkerAgentModelDetail {
+    pub name: String,
+    #[serde(default)]
+    pub efforts: Vec<WorkerAgentEffort>,
+    #[serde(default)]
+    pub default_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkerAgentEffort {
+    pub value: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+fn default_agent_runtimes() -> serde_json::Value {
+    serde_json::json!([])
+}
+
+fn parse_agent_runtimes(v: &serde_json::Value) -> Vec<WorkerAgentRuntime> {
+    let Some(arr) = v.as_array() else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|item| serde_json::from_value(item.clone()).ok())
+        .filter(|a: &WorkerAgentRuntime| !a.id.trim().is_empty())
+        .collect()
 }
 
 fn default_auto_update() -> bool {
@@ -211,6 +288,9 @@ pub struct WorkerBinMeta {
     pub sha256: String,
     #[serde(default)]
     pub size: u64,
+    /// Operator-facing package version from runner-packages.toml. Same on every OS.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// Served dist for one platform. Source of truth for “what should be on the box”.
@@ -250,6 +330,13 @@ pub struct WorkerHardwarePublic {
     pub gpus: Option<Vec<WorkerGpuPublic>>,
     #[serde(default)]
     pub gpu_used_pct: Option<u8>,
+    #[serde(default)]
+    pub disk_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_free_bytes: Option<u64>,
+    /// Non-loopback IPs this box advertised (for “this machine” matching).
+    #[serde(default)]
+    pub addrs: Option<Vec<String>>,
 }
 
 /// One GPU the box could name. `vram_bytes` omitted when unknown.
@@ -344,6 +431,14 @@ impl WorkerHostPublic {
                 enrich_reported_gpus(&mut hw);
                 Some(hw)
             }),
+            agents: parse_agent_runtimes(&host.agent_runtimes),
+            is_control_plane_box: false,
+            is_this_machine: false,
+            install_request: host.install_request.clone(),
+            runtime_settings: Some(host.runtime_settings.clone())
+                .filter(|v| v.as_object().is_some_and(|o| !o.is_empty())),
+            runtime_reported: Some(host.runtime_reported.clone())
+                .filter(|v| v.as_object().is_some_and(|o| !o.is_empty())),
         }
     }
 
@@ -379,8 +474,20 @@ pub fn compute_software_status(
     let mut mismatch = false;
     if let Some(bins) = sw.bins.as_ref() {
         for stem in PACKAGE_BIN_STEMS {
+            let reported_ver = reported_bin_version(bins, stem);
+            let want_ver = desired_bin_version(desired, stem);
             let reported = reported_bin_sha(bins, stem);
             let want = desired_bin_sha(desired, stem);
+            if reported_ver.is_some() && want_ver.is_some() {
+                compared += 1;
+                if !sha_eq(
+                    reported_ver.as_deref().unwrap(),
+                    want_ver.as_deref().unwrap(),
+                ) {
+                    mismatch = true;
+                }
+                continue;
+            }
             match (reported, want) {
                 (Some(got), Some(expect)) => {
                     compared += 1;
@@ -402,6 +509,15 @@ pub fn compute_software_status(
         } else {
             WORKER_SOFTWARE_STATUS_CURRENT
         };
+    }
+
+    // Served package lists fleet-host + fleet-driver. Do not call the box
+    // current from bake id alone — both files have to be checked.
+    if PACKAGE_BIN_STEMS
+        .iter()
+        .any(|stem| desired_bin_sha(desired, stem).is_some())
+    {
+        return WORKER_SOFTWARE_STATUS_BEHIND;
     }
 
     let reported_sha = sw
@@ -453,6 +569,30 @@ fn lookup_bin_value<'a>(
 fn reported_bin_sha(bins: &serde_json::Value, stem: &str) -> Option<String> {
     let obj = bins.as_object()?;
     lookup_bin_value(obj, stem).and_then(bin_sha_from_value)
+}
+
+fn reported_bin_version(bins: &serde_json::Value, stem: &str) -> Option<String> {
+    let obj = bins.as_object()?;
+    let exe = format!("{stem}.exe");
+    let v = obj.get(stem).or_else(|| obj.get(exe.as_str()))?;
+    let s = v.get("version")?.as_str()?.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+fn desired_bin_version(desired: &WorkerSoftwareManifest, stem: &str) -> Option<String> {
+    let exe = format!("{stem}.exe");
+    desired
+        .bins
+        .get(stem)
+        .or_else(|| desired.bins.get(exe.as_str()))
+        .and_then(|b| b.version.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 fn desired_bin_sha(desired: &WorkerSoftwareManifest, stem: &str) -> Option<String> {
@@ -517,6 +657,10 @@ pub struct HostCpSettings {
     pub auto_update: Option<bool>,
     /// When true, set `update_requested_at = now()` (host applies once even if auto is off).
     pub request_update: Option<bool>,
+    /// Queue `ollama pull <spec>` (name or URL) on the next heartbeat.
+    pub install_model: Option<serde_json::Value>,
+    /// Merge into `runtime_settings` and bump settings_gen so the box applies it.
+    pub runtime_settings: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -556,8 +700,13 @@ mod public_view_tests {
             update_requested_at: None,
             machine_id: None,
             hardware: None,
+            agent_runtimes: serde_json::json!([]),
             settings_gen: 0,
             settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: serde_json::json!({}),
+            runtime_reported: serde_json::json!({}),
             created_by: None,
             created_at: now,
             paired_at: Some(now),
@@ -674,6 +823,7 @@ mod public_view_tests {
             WorkerBinMeta {
                 sha256: host_sha.into(),
                 size: 10,
+                version: Some("0.0.1".into()),
             },
         );
         bins.insert(
@@ -681,6 +831,7 @@ mod public_view_tests {
             WorkerBinMeta {
                 sha256: "driver-sha".into(),
                 size: 12,
+                version: Some("0.0.1".into()),
             },
         );
         WorkerSoftwareManifest {
@@ -780,6 +931,44 @@ mod public_view_tests {
     }
 
     #[test]
+    fn software_status_uses_package_version_then_hash() {
+        let desired = sample_manifest("aaa");
+        let same_ver = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": { "sha256": "aaa", "version": "0.0.1" },
+                "fleet-driver": { "sha256": "driver-sha", "version": "0.0.1" }
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&same_ver), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT
+        );
+        let old_ver = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": { "sha256": "aaa", "version": "0.0.0" },
+                "fleet-driver": { "sha256": "driver-sha", "version": "0.0.1" }
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&old_ver), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+        let same_ver_wrong_hash = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": { "sha256": "not-aaa", "version": "0.0.1" },
+                "fleet-driver": { "sha256": "driver-sha", "version": "0.0.1" }
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&same_ver_wrong_hash), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT
+        );
+    }
+
+    #[test]
     fn software_status_behind_on_mixed_bins() {
         let desired = sample_manifest("aaa");
         let sw = reported(
@@ -803,6 +992,7 @@ mod public_view_tests {
             WorkerBinMeta {
                 sha256: "pe-host".into(),
                 size: 1,
+                version: None,
             },
         );
         bins.insert(
@@ -810,6 +1000,7 @@ mod public_view_tests {
             WorkerBinMeta {
                 sha256: "pe-driver".into(),
                 size: 1,
+                version: None,
             },
         );
         let desired = WorkerSoftwareManifest {
@@ -832,14 +1023,35 @@ mod public_view_tests {
     }
 
     #[test]
-    fn software_status_falls_back_to_git_sha_when_bins_missing() {
+    fn software_status_requires_both_bins_not_bake_id_alone() {
         let desired = sample_manifest("aaa");
+        let bake_only = reported(Some("stage-tree-id"), None);
+        assert_eq!(
+            compute_software_status(Some(&bake_only), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "git_sha match is not enough when the package lists host + driver"
+        );
+        let empty_bins = reported(Some("old-tree"), Some(serde_json::json!({})));
+        assert_eq!(
+            compute_software_status(Some(&empty_bins), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+    }
+
+    #[test]
+    fn software_status_falls_back_to_git_sha_when_package_has_no_bins() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
         let current = reported(Some("stage-tree-id"), None);
         assert_eq!(
             compute_software_status(Some(&current), Some(&desired)),
             WORKER_SOFTWARE_STATUS_CURRENT
         );
-        let behind = reported(Some("old-tree"), Some(serde_json::json!({})));
+        let behind = reported(Some("old-tree"), None);
         assert_eq!(
             compute_software_status(Some(&behind), Some(&desired)),
             WORKER_SOFTWARE_STATUS_BEHIND

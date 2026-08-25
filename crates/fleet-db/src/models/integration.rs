@@ -34,6 +34,41 @@ pub struct IntegrationConnectionPublic {
     pub last_error: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub defaults: IntegrationAgentDefaults,
+}
+
+/// Runner / provider / model used when this integration launches work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationAgentDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl IntegrationAgentDefaults {
+    pub fn from_config(config: &Value) -> Self {
+        Self {
+            default_runner_id: config
+                .get("default_runner_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            default_provider: config
+                .get("default_provider")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            default_model: config
+                .get("default_model")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        }
+    }
 }
 
 impl From<&IntegrationConnection> for IntegrationConnectionPublic {
@@ -49,6 +84,7 @@ impl From<&IntegrationConnection> for IntegrationConnectionPublic {
             last_error: c.last_error.clone(),
             connected_at: c.connected_at,
             updated_at: c.updated_at,
+            defaults: IntegrationAgentDefaults::from_config(&c.config),
         }
     }
 }

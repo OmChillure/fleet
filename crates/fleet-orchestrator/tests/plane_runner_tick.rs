@@ -104,16 +104,37 @@ async fn tick_holds_ready_when_plane_not_taking_jobs() {
     )
     .await
     .expect("plane off");
+    assert!(
+        !plane_runners::taking_native_jobs(store.pool(), project.id)
+            .await
+            .expect("taking_native_jobs"),
+        "stop taking jobs must set taking_native_jobs=false"
+    );
+    let remote = fleet_db::repos::worker_hosts::list_assignable(
+        store.pool(),
+        project.id,
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+    )
+    .await
+    .expect("list_assignable");
+    assert!(
+        remote.is_empty(),
+        "catalog: no remote host: {remote:?}"
+    );
 
     store
         .insert_accepted_plan(project.id, one_task_plan(project.id))
         .await
         .unwrap();
 
-    let r = runner(store.clone())
-        .tick_project(project.id)
-        .await
-        .unwrap();
+    let rnr = runner(store.clone());
+    assert_ne!(
+        rnr.runtime_backend(),
+        "remote",
+        "in-process SANDBOX_BACKEND is available; plane off must still skip it"
+    );
+
+    let r = rnr.tick_project(project.id).await.unwrap();
     assert_eq!(r.spawned, 0, "plane off must not local-spawn: {r:?}");
     assert_eq!(r.spawn_failed, 0, "{r:?}");
 
@@ -121,6 +142,11 @@ async fn tick_holds_ready_when_plane_not_taking_jobs() {
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
     assert_eq!(t1.status, "ready", "task must stay ready: {:?}", t1.status);
     assert!(snap.sessions.is_empty(), "no local session: {:?}", snap.sessions);
+    assert_eq!(
+        store.count_local_capacity(project.id).await.unwrap(),
+        0,
+        "no local SANDBOX_BACKEND capacity"
+    );
 }
 
 #[tokio::test]

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: software line on paired boxes only (catalog:e2e-software-line).
 
-Software line after pair; not on the plane or a pending card. Bake id is
-software.git_sha (12-char short), never a bin file hash.
+Software line after pair; not on the plane or a pending card. Package
+rows are fleet-host / fleet-driver versions, never a bin file hash.
 """
 from __future__ import annotations
 
@@ -180,22 +180,16 @@ class CatalogSoftwareLineTests(unittest.TestCase):
 
         card = _article(self.page, name)
         self.assertNotIn("Control plane", card.inner_text())
-        card.get_by_text(BAKE_SHORT).wait_for(timeout=15_000)
         text = card.inner_text()
         lowered = text.lower()
-        self.assertIn("software ", lowered)
-        self.assertIn(BAKE_SHORT, text)
-        self.assertIn(PLATFORM, text)
+        self.assertIn("fleet-host", lowered)
+        self.assertIn("fleet-driver", lowered)
         self.assertNotIn(
             BIN_PREFIX,
             text,
             "file hash must not be used as the bake / version id",
         )
-        self.assertRegex(
-            lowered,
-            rf"software\s+{BAKE_SHORT}\s+·\s+{PLATFORM}\s+·\s+"
-            rf"({'|'.join(SOFTWARE_FLAGS)})",
-        )
+        self.assertNotRegex(lowered, r"software\s+\S+\s+·\s+up to date")
 
     def test_pending_card_has_no_software_line(self) -> None:
         name = f"sw-pending-{uuid.uuid4().hex[:8]}"

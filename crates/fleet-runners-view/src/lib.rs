@@ -8,9 +8,203 @@ pub mod routes;
 mod types;
 
 pub use types::{
-    CreateHostResponse, HostDesiredSoftware, HostGpu, HostHardware, HostPatch, HostPublic,
-    HostSoftware, PackageInventory,
+    AgentEffort, AgentModelDetail, AgentRuntime, CreateHostResponse, HostDesiredSoftware, HostGpu,
+    HostHardware, HostPatch, HostPublic, HostSoftware, InstallModelRequest, PackageInventory,
+    PackageVersions,
 };
+
+/// Same phrase on Runners and Chat. `id` is `grok` / `claude` / `openai` / `ollama`.
+pub fn agent_status_phrase(id: &str, installed: bool, logged_in: bool) -> &'static str {
+    let uses_login = id != "ollama";
+    if !installed {
+        "not installed"
+    } else if uses_login && !logged_in {
+        "installed · logged out"
+    } else if uses_login {
+        "installed · logged in"
+    } else {
+        "installed"
+    }
+}
+
+/// Official Claude Code `--model` aliases. Not pinned versions.
+/// `claude models` is not a command — it starts an interactive session and hangs.
+pub fn claude_cli_model_aliases() -> &'static [&'static str] {
+    &["sonnet", "opus", "haiku", "fable"]
+}
+
+/// Official Claude Code `--effort` values (`claude --help`).
+pub fn claude_effort_values() -> &'static [&'static str] {
+    &["low", "medium", "high", "xhigh", "max"]
+}
+
+/// Elapsed send → reply for the Chat timer.
+pub fn format_chat_elapsed(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        let secs = ms as f64 / 1000.0;
+        if secs < 10.0 {
+            format!("{secs:.1}s")
+        } else {
+            format!("{}s", ms / 1000)
+        }
+    } else {
+        format!("{}m {:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+/// Catalog label for the four chat/runner providers.
+/// Ollama is "Private (Ollama)" so it is not read as a cloud login.
+pub fn catalog_provider_display_name(id: &str) -> &str {
+    match id {
+        "grok" => "Grok",
+        "claude" => "Claude",
+        "openai" => "OpenAI",
+        "ollama" => "Private (Ollama)",
+        other => other,
+    }
+}
+
+/// One provider on a runner, used to pick Chat's default composer pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatProviderCandidate {
+    pub id: String,
+    pub available: bool,
+    pub models: Vec<String>,
+    pub default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatProviderPick {
+    pub provider_id: String,
+    pub model: String,
+}
+
+/// Prefer last-used when that provider is ready on this runner; otherwise
+/// the first available (installed + ready) provider and its default model.
+pub fn pick_chat_provider_and_model(
+    providers: &[ChatProviderCandidate],
+    preferred_provider: Option<&str>,
+    preferred_model: Option<&str>,
+) -> Option<ChatProviderPick> {
+    if providers.is_empty() {
+        return None;
+    }
+    let preferred_id = preferred_provider.map(str::trim).filter(|s| !s.is_empty());
+    let preferred = preferred_id.and_then(|id| providers.iter().find(|p| p.id == id));
+
+    let chosen = preferred
+        .filter(|p| p.available)
+        .or_else(|| providers.iter().find(|p| p.available))
+        .or(preferred)
+        .unwrap_or(&providers[0]);
+
+    Some(ChatProviderPick {
+        provider_id: chosen.id.clone(),
+        model: resolve_chat_model(
+            chosen,
+            preferred.filter(|p| p.id == chosen.id).and(preferred_model),
+        ),
+    })
+}
+
+/// Snap the composer only when the user has not picked a pair and the
+/// current one is empty, unknown, or not ready while another provider is.
+pub fn should_apply_chat_defaults(
+    providers: &[ChatProviderCandidate],
+    current_provider: &str,
+    user_picked: bool,
+) -> bool {
+    if user_picked || providers.is_empty() {
+        return false;
+    }
+    if current_provider.trim().is_empty() {
+        return true;
+    }
+    match providers.iter().find(|p| p.id == current_provider) {
+        None => true,
+        Some(p) => !p.available && providers.iter().any(|x| x.available),
+    }
+}
+
+/// Match a model's effort menu. Empty model (CLI default) uses the first
+/// advertised menu so the Effort picker still appears.
+pub fn find_model_detail<'a>(
+    details: &'a [crate::types::AgentModelDetail],
+    model: &str,
+) -> Option<&'a crate::types::AgentModelDetail> {
+    let model = model.trim();
+    if !model.is_empty() {
+        if let Some(d) = details.iter().find(|d| d.name == model) {
+            return Some(d);
+        }
+        if let Some(d) = details.iter().find(|d| {
+            model.starts_with(&d.name)
+                || d.name.starts_with(model)
+                || d.name.starts_with(&format!("{model}:"))
+        }) {
+            return Some(d);
+        }
+    }
+    details
+        .iter()
+        .find(|d| !d.efforts.is_empty())
+        .or_else(|| details.first())
+}
+
+/// Last-used effort if this model still advertises it; otherwise the model's
+/// own default, then the first listed value.
+pub fn pick_effort_value(
+    detail: Option<&crate::types::AgentModelDetail>,
+    preferred: Option<&str>,
+) -> Option<String> {
+    let d = detail?;
+    if d.efforts.is_empty() {
+        return None;
+    }
+    if let Some(p) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
+        if d.efforts.iter().any(|e| e.value == p) {
+            return Some(p.to_string());
+        }
+    }
+    d.default_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| d.efforts.iter().any(|e| e.value == *s))
+        .map(|s| s.to_string())
+        .or_else(|| d.efforts.first().map(|e| e.value.clone()))
+}
+
+fn resolve_chat_model(provider: &ChatProviderCandidate, want: Option<&str>) -> String {
+    let match_listed = |needle: &str| -> Option<String> {
+        if provider.models.iter().any(|m| m == needle) {
+            return Some(needle.to_string());
+        }
+        provider
+            .models
+            .iter()
+            .find(|m| m.starts_with(&format!("{needle}:")) || m.starts_with(needle))
+            .cloned()
+    };
+    if let Some(m) = want.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(hit) = match_listed(m) {
+            return hit;
+        }
+    }
+    if let Some(d) = provider
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(hit) = match_listed(d) {
+            return hit;
+        }
+    }
+    provider.models.first().cloned().unwrap_or_default()
+}
 
 pub fn status_label(status: &str) -> &str {
     match status {
@@ -39,28 +233,18 @@ pub fn extra_status_pills(host: &HostPublic) -> Vec<&'static str> {
     pills
 }
 
-/// Status vs the package this plane serves for that OS. Never mix a git
-/// bake with a file hash on the card — those are not the same id.
+/// Status vs the current package versions. Never a git bake or a forced
+/// "up to date" while the two binaries say something else.
 pub fn software_flag(host: &HostPublic) -> Option<&'static str> {
     if host.software.as_ref().is_some_and(|s| s.updating) {
         return Some("updating");
     }
-    if host.auto_update
-        && needs_software_update(host)
-        && host.current_jobs == 0
-        && software_build_id(host).is_some()
-    {
-        return Some("updating");
-    }
-    if host.outdated || host.software_status.as_deref() == Some("behind") {
+    let rows = software_bin_rows(host);
+    if rows.iter().any(|r| r.status == "behind" || r.status == "missing") {
         return Some("outdated");
     }
-    if host.software_status.as_deref() == Some("current") {
-        if software_build_id(host).is_some() {
-            return Some("up to date");
-        }
-        // Matches served files, but that package has no bake id (never restaged).
-        return Some("old package");
+    if !rows.is_empty() && rows.iter().all(|r| r.status == "current") {
+        return Some("up to date");
     }
     None
 }
@@ -73,8 +257,8 @@ fn software_platform(host: &HostPublic) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Compile-time tree-id baked into fleet-host. Never a file hash, never a
-/// manifest stamp that was written without rebuilding the PE.
+/// Compile-time tree-id baked into fleet-host. Internal only (plane-bake
+/// skip). Not a runner version and not shown on the card.
 pub fn software_build_id(host: &HostPublic) -> Option<&str> {
     host.software
         .as_ref()
@@ -83,61 +267,90 @@ pub fn software_build_id(host: &HostPublic) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Tree-id parts. Dirty suffix (`HEAD-<12 hex>`) is part of the id.
-fn split_build_id(s: &str) -> (&str, Option<&str>) {
-    let s = s.trim();
-    match s.split_once('-') {
-        Some((head, rest)) if !head.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) => {
-            (head, Some(rest))
-        }
-        _ => (s, None),
+/// What this plane will send a runner for one OS. `host`/`driver` are file hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedPlatform {
+    pub platform: String,
+    pub host: String,
+    pub driver: String,
+}
+
+/// Platforms that have at least one of fleet-host / fleet-driver staged.
+/// No git bake id — that stamp is not a runner version.
+pub fn served_platforms(inv: &PackageInventory) -> Vec<ServedPlatform> {
+    let mut out: Vec<ServedPlatform> = inv
+        .packages
+        .iter()
+        .filter_map(|p| {
+            let platform = p
+                .platform
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            let host = p
+                .bins
+                .as_ref()
+                .and_then(|b| lookup_bin_sha(b, "fleet-host"));
+            let driver = p
+                .bins
+                .as_ref()
+                .and_then(|b| lookup_bin_sha(b, "fleet-driver"));
+            if host.is_none() && driver.is_none() {
+                return None;
+            }
+            Some(ServedPlatform {
+                platform,
+                host: host.as_deref().map(short_sha).unwrap_or("—").to_string(),
+                driver: driver.as_deref().map(short_sha).unwrap_or("—").to_string(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.platform.cmp(&b.platform));
+    out
+}
+
+fn short_sha(sha: &str) -> &str {
+    let s = sha.trim();
+    if s.len() > 12 {
+        &s[..12]
+    } else {
+        s
     }
 }
 
-fn head_same(a: &str, b: &str) -> bool {
-    if a.eq_ignore_ascii_case(b) {
-        return true;
-    }
-    if a.len() < 8 || b.len() < 8 {
-        return false;
-    }
-    let a = a.to_ascii_lowercase();
-    let b = b.to_ascii_lowercase();
-    a.starts_with(&b) || b.starts_with(&a)
+/// The two files the plane serves and the box must report. Not `fleet-worker`.
+pub const PACKAGE_BIN_NAMES: [&str; 2] = ["fleet-host", "fleet-driver"];
+
+/// OS packages this plane is expected to serve. Keep in sync with
+/// `scripts/stage-worker-dist.sh --all` and `scripts/check-worker-dist.sh`.
+pub const REQUIRED_PACKAGE_PLATFORMS: &[&str] = &[
+    "linux-x86_64",
+    "linux-x86_64-musl",
+    "linux-aarch64",
+    "linux-aarch64-musl",
+    "linux-armv7",
+    "linux-armv7-musl",
+    "windows-x86_64",
+    "windows-arm64",
+];
+
+/// One served OS whose staged bins are not the current version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalePackagePlatform {
+    pub platform: &'static str,
+    pub host: String,
+    pub driver: String,
 }
 
-fn sha_same(a: &str, b: &str) -> bool {
-    let (a_head, a_dirty) = split_build_id(a);
-    let (b_head, b_dirty) = split_build_id(b);
-    if a_head.is_empty() || b_head.is_empty() || !head_same(a_head, b_head) {
-        return false;
+/// Served platforms (already in `inv.packages`) that are not the current version.
+/// Never-staged OS targets are omitted — they are not stale, they were never built.
+pub fn stale_package_platforms(inv: &PackageInventory) -> Vec<StalePackagePlatform> {
+    let want_host = inv.package_versions.host.trim();
+    let want_driver = inv.package_versions.driver.trim();
+    if want_host.is_empty() && want_driver.is_empty() {
+        return Vec::new();
     }
-    match (a_dirty, b_dirty) {
-        (None, None) => true,
-        (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
-        _ => false,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PackageReport {
-    /// Current *served* runner package id (same 12-char short as the cards).
-    pub current_build: String,
-    /// Platforms whose staged sha is that runner build. Empty still renders
-    /// "Serving this build:" so a blank list is obvious.
-    pub serving: String,
-    /// Each entry is `sha · plat · plat` (or `no build id · …`).
-    pub older: Vec<String>,
-}
-
-#[derive(Clone, Copy)]
-struct PkgRef<'a> {
-    plat: &'a str,
-    sha: Option<&'a str>,
-    staged: Option<&'a str>,
-}
-
-fn collect_pkgs(inv: &PackageInventory) -> Vec<PkgRef<'_>> {
     inv.packages
         .iter()
         .filter_map(|p| {
@@ -146,100 +359,161 @@ fn collect_pkgs(inv: &PackageInventory) -> Vec<PkgRef<'_>> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())?;
-            Some(PkgRef {
-                plat,
-                sha: p
-                    .git_sha
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty()),
-                staged: p
-                    .staged_at
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty()),
+            let platform = REQUIRED_PACKAGE_PLATFORMS
+                .iter()
+                .copied()
+                .find(|req| *req == plat)?;
+            let host = p
+                .bins
+                .as_ref()
+                .and_then(|b| lookup_bin_version(b, "fleet-host"))
+                .unwrap_or_default();
+            let driver = p
+                .bins
+                .as_ref()
+                .and_then(|b| lookup_bin_version(b, "fleet-driver"))
+                .unwrap_or_default();
+            let host_ok = !want_host.is_empty() && host == want_host;
+            let driver_ok = !want_driver.is_empty() && driver == want_driver;
+            if host_ok && driver_ok {
+                return None;
+            }
+            Some(StalePackagePlatform {
+                platform,
+                host,
+                driver,
             })
         })
         .collect()
 }
 
-/// Newest staged runner sha, else the majority sha. Ignores the plane.
-fn pick_current_runner_sha<'a>(pkgs: &[PkgRef<'a>]) -> Option<&'a str> {
-    let stamped: Vec<&str> = pkgs.iter().filter_map(|p| p.sha).collect();
-    if stamped.is_empty() {
+/// Operator banner. `None` when every served OS is on the current versions.
+pub fn stale_package_warning(inv: &PackageInventory) -> Option<String> {
+    let stale = stale_package_platforms(inv);
+    if stale.is_empty() {
         return None;
     }
-    if stamped.iter().all(|s| sha_same(s, stamped[0])) {
-        return stamped.into_iter().max_by_key(|s| s.len());
-    }
-    if pkgs.iter().any(|p| p.sha.is_some() && p.staged.is_some()) {
-        return pkgs
-            .iter()
-            .filter(|p| p.sha.is_some())
-            .max_by(|a, b| {
-                a.staged
-                    .unwrap_or("")
-                    .cmp(b.staged.unwrap_or(""))
-                    .then_with(|| a.sha.unwrap_or("").len().cmp(&b.sha.unwrap_or("").len()))
-            })
-            .and_then(|p| p.sha);
-    }
-    let mut groups: Vec<(&str, usize)> = Vec::new();
-    for s in &stamped {
-        if let Some((_, n)) = groups.iter_mut().find(|(g, _)| sha_same(g, s)) {
-            *n += 1;
-        } else {
-            groups.push((*s, 1));
-        }
-    }
-    groups.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())));
-    Some(groups[0].0)
+    let want_h = inv.package_versions.host.trim();
+    let want_d = inv.package_versions.driver.trim();
+    let plats = stale
+        .iter()
+        .map(|s| s.platform)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "OS builds not on fleet-host {want_h} / fleet-driver {want_d}: {plats}"
+    ))
 }
 
-pub fn package_report(inv: &PackageInventory) -> Option<PackageReport> {
-    let pkgs = collect_pkgs(inv);
-    if pkgs.is_empty() {
-        return None;
-    }
+/// One served binary vs what this box reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoftwareBinRow {
+    pub name: &'static str,
+    /// Package semver the box reported (file hash only if no version yet).
+    pub version: String,
+    pub status: &'static str,
+}
 
-    let current = pick_current_runner_sha(&pkgs);
-    let mut serving = Vec::new();
-    let mut older_groups: Vec<(String, Vec<String>)> = Vec::new();
-    for p in &pkgs {
-        if let (Some(cur), Some(sha)) = (current, p.sha) {
-            if sha_same(cur, sha) {
-                serving.push(p.plat.to_string());
-                continue;
+pub fn software_bin_rows(host: &HostPublic) -> Vec<SoftwareBinRow> {
+    PACKAGE_BIN_NAMES
+        .iter()
+        .map(|name| {
+            let got_ver = reported_bin_version(host, name);
+            let want_ver = desired_bin_version(host, name)
+                .or_else(|| current_pkg_version(host, name));
+            let got = reported_bin_sha(host, name);
+            let want = desired_bin_sha(host, name);
+            let status = match (
+                got_ver.as_deref(),
+                want_ver.as_deref(),
+                got.as_deref(),
+                want.as_deref(),
+            ) {
+                (Some(g), Some(w), _, _) if sha_eq(g, w) => "current",
+                (Some(_), Some(_), _, _) => "behind",
+                (_, _, Some(g), Some(w)) if sha_eq(g, w) => "current",
+                (_, _, Some(_), Some(_)) => "behind",
+                (None, Some(_), None, _) | (_, _, None, Some(_)) => "missing",
+                (Some(_), None, _, None) | (_, _, Some(_), None) => "reported",
+                _ => "unknown",
+            };
+            let version = got_ver
+                .or(want_ver)
+                .or_else(|| got.as_deref().map(short_sha).map(str::to_string))
+                .unwrap_or_else(|| "—".into());
+            SoftwareBinRow {
+                name,
+                version,
+                status,
             }
-        }
-        let key = p.sha.map(short_sha).unwrap_or("no build id").to_string();
-        if let Some((_, plats)) = older_groups.iter_mut().find(|(k, _)| *k == key) {
-            plats.push(p.plat.to_string());
-        } else {
-            older_groups.push((key, vec![p.plat.to_string()]));
-        }
-    }
-
-    Some(PackageReport {
-        current_build: current.map(short_sha).unwrap_or("unknown").to_string(),
-        serving: serving.join(" · "),
-        older: older_groups
-            .into_iter()
-            .map(|(key, plats)| format!("{key} · {}", plats.join(" · ")))
-            .collect(),
-    })
+        })
+        .collect()
 }
 
-fn short_sha(sha: &str) -> &str {
-    let s = sha.trim();
-    if s.len() > 12 { &s[..12] } else { s }
+fn sha_eq(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn lookup_bin_sha(obj: &serde_json::Value, stem: &str) -> Option<String> {
+    let map = obj.as_object()?;
+    let exe = format!("{stem}.exe");
+    let v = map.get(stem).or_else(|| map.get(exe.as_str()))?;
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        return (!s.is_empty()).then(|| s.to_string());
+    }
+    let s = v.get("sha256")?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn lookup_bin_version(obj: &serde_json::Value, stem: &str) -> Option<String> {
+    let map = obj.as_object()?;
+    let exe = format!("{stem}.exe");
+    let v = map.get(stem).or_else(|| map.get(exe.as_str()))?;
+    let s = v.get("version")?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn reported_bin_version(host: &HostPublic, stem: &str) -> Option<String> {
+    host.software
+        .as_ref()
+        .and_then(|s| s.bins.as_ref())
+        .and_then(|b| lookup_bin_version(b, stem))
+}
+
+fn desired_bin_version(host: &HostPublic, stem: &str) -> Option<String> {
+    host.desired
+        .as_ref()
+        .and_then(|d| d.bins.as_ref())
+        .and_then(|b| lookup_bin_version(b, stem))
+}
+
+fn current_pkg_version(host: &HostPublic, stem: &str) -> Option<String> {
+    let v = match stem {
+        "fleet-host" => host.current_versions.host.as_str(),
+        "fleet-driver" => host.current_versions.driver.as_str(),
+        _ => return None,
+    };
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+fn reported_bin_sha(host: &HostPublic, stem: &str) -> Option<String> {
+    host.software
+        .as_ref()
+        .and_then(|s| s.bins.as_ref())
+        .and_then(|b| lookup_bin_sha(b, stem))
+}
+
+fn desired_bin_sha(host: &HostPublic, stem: &str) -> Option<String> {
+    host.desired
+        .as_ref()
+        .and_then(|d| d.bins.as_ref())
+        .and_then(|b| lookup_bin_sha(b, stem))
 }
 
 pub fn software_line(host: &HostPublic) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(sha) = software_build_id(host) {
-        parts.push(short_sha(sha).to_string());
-    }
     if let Some(p) = software_platform(host) {
         parts.push(p.to_string());
     }
@@ -251,27 +525,97 @@ pub fn software_title(host: &HostPublic) -> String {
     let plat = software_platform(host);
     match software_flag(host) {
         Some("up to date") => match plat {
-            Some(p) => format!("Running the {p} package this control plane is serving."),
-            None => "Running the package this control plane is serving for this OS.".into(),
+            Some(p) => format!(
+                "Both fleet-host and fleet-driver versions match the {p} package this plane is serving."
+            ),
+            None => {
+                "Both fleet-host and fleet-driver versions match the package this plane is serving."
+                    .into()
+            }
         },
-        Some("outdated") => match plat {
-            Some(p) => format!("Not running the {p} package this control plane is serving."),
-            None => "Not running the package this control plane is serving for this OS.".into(),
+        Some("outdated") => {
+            "fleet-host and/or fleet-driver versions do not match the package this plane is serving."
+                .into()
         },
-        Some("updating") => "Installing the package this control plane is serving.".into(),
+        Some("updating") => "Installing fleet-host and fleet-driver from this plane.".into(),
         Some("old package") => {
-            "This box matches the files we still serve for this OS, but that package has no build id. Restage this platform.".into()
+            "This box matches the files we still serve for this OS, but that package has no version. Restage this platform.".into()
         }
-        _ => "This box has not reported a version we can compare.".into(),
+        _ => "This box has not reported fleet-host and fleet-driver versions we can compare.".into(),
     }
 }
 
 pub fn display_name(host: &HostPublic) -> String {
     let n = host.name.trim();
-    if n.is_empty() {
-        "Unnamed worker".into()
+    let base = if n.is_empty() {
+        "Unnamed worker".to_string()
     } else {
         n.to_string()
+    };
+    let mut tags: Vec<&str> = Vec::new();
+    if host.is_control_plane_box {
+        tags.push("control plane");
+    }
+    if host.is_this_machine {
+        tags.push("this machine");
+    }
+    if tags.is_empty() {
+        base
+    } else {
+        format!("{base} ({})", tags.join(" · "))
+    }
+}
+
+pub fn format_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    let b = n as f64;
+    if b < K {
+        return format!("{n} B");
+    }
+    let kb = b / K;
+    if kb < K {
+        return format!("{kb:.1} KB");
+    }
+    let mb = kb / K;
+    if mb < K {
+        return format!("{mb:.1} MB");
+    }
+    let gb = mb / K;
+    if gb < K {
+        return format!("{gb:.1} GB");
+    }
+    format!("{:.1} TB", gb / K)
+}
+
+pub fn disk_free_line(host: &HostPublic) -> Option<String> {
+    let hw = host.hardware.as_ref()?;
+    let free = hw.disk_free_bytes?;
+    match hw.disk_total_bytes {
+        Some(total) if total > 0 => Some(format!(
+            "{} free of {}",
+            format_bytes(free),
+            format_bytes(total)
+        )),
+        _ => Some(format!("{} free", format_bytes(free))),
+    }
+}
+
+/// Official install one-liner for the runner's OS. Unix vs Windows only.
+pub fn provider_install_command(provider: &str, platform: Option<&str>) -> String {
+    let windows = platform
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .starts_with("windows");
+    match (provider, windows) {
+        ("grok", false) => "curl -fsSL https://x.ai/cli/install.sh | bash".into(),
+        ("grok", true) => "irm https://x.ai/cli/install.ps1 | iex".into(),
+        ("claude", false) => "curl -fsSL https://claude.ai/install.sh | bash".into(),
+        ("claude", true) => "irm https://claude.ai/install.ps1 | iex".into(),
+        ("ollama", false) => "curl -fsSL https://ollama.com/install.sh | sh".into(),
+        ("ollama", true) => "winget install Ollama.Ollama".into(),
+        ("openai", false) => "npm install -g @openai/codex".into(),
+        ("openai", true) => "npm install -g @openai/codex".into(),
+        (other, _) => format!("Install {other} with the official CLI for this OS"),
     }
 }
 
@@ -298,9 +642,7 @@ pub fn hold_jobs_reason(host: &HostPublic) -> Option<String> {
 }
 
 pub fn needs_software_update(host: &HostPublic) -> bool {
-    host.outdated
-        || host.software_status.as_deref() == Some("behind")
-        || (host.software_status.as_deref() == Some("current") && software_build_id(host).is_none())
+    host.outdated || host.software_status.as_deref() == Some("behind")
 }
 
 /// True after PATCH `request_update` until the host row is replaced.
@@ -313,14 +655,17 @@ pub fn update_requested(host: &HostPublic) -> bool {
 /// One-shot Update now control. `auto_update` is the draft checkbox.
 /// None on the plane, when auto is on, or when software is current.
 pub fn update_now_label(host: &HostPublic, auto_update: bool) -> Option<&'static str> {
-    if is_control_plane(host) || auto_update || !needs_software_update(host) {
+    if is_control_plane(host) {
         return None;
     }
     if update_requested(host) {
-        Some("Update requested")
-    } else {
-        Some("Update now")
+        return Some("Update requested");
     }
+    // Auto-update on: the box pulls by itself. Off: operator uses Update now.
+    if auto_update {
+        return None;
+    }
+    Some("Update now")
 }
 
 pub fn accept_jobs_label(holding: bool) -> &'static str {
@@ -777,6 +1122,18 @@ pub fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
         }
         host.allow_container = v;
     }
+    if let Some(v) = patch.isolation.clone() {
+        host.isolation = Some(v);
+        bump = true;
+    }
+    if let Some(v) = patch.max_job_timeout_s {
+        host.max_job_timeout_s = v;
+        bump = true;
+    }
+    if let Some(v) = patch.runtime_settings.clone() {
+        host.runtime_settings = Some(v);
+        bump = true;
+    }
     if let Some(v) = patch.max_concurrent {
         if v != host.max_concurrent {
             bump = true;
@@ -848,6 +1205,7 @@ mod tests {
             mem_used_pct: Some(32),
             cpu_used_pct: Some(12),
             gpu_used_pct: Some(8),
+            ..HostHardware::default()
         });
         assert_eq!(
             specs_line(&host).as_deref(),
@@ -1000,97 +1358,256 @@ mod tests {
         assert!(in_removed_list(&newer, &all));
     }
 
-    fn sample_pkg(platform: &str, sha: Option<&str>) -> HostDesiredSoftware {
+    fn sample_served(platform: &str, host: &str, driver: &str) -> HostDesiredSoftware {
         HostDesiredSoftware {
             platform: Some(platform.into()),
-            git_sha: sha.map(str::to_string),
+            git_sha: Some("ignored-bake-stamp".into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": host},
+                "fleet-driver": {"sha256": driver}
+            })),
             ..HostDesiredSoftware::default()
         }
     }
 
-    fn sample_pkg_staged(
-        platform: &str,
-        sha: Option<&str>,
-        staged_at: &str,
-    ) -> HostDesiredSoftware {
-        let mut p = sample_pkg(platform, sha);
-        p.staged_at = Some(staged_at.into());
-        p
-    }
-
     #[test]
-    fn package_report_ignores_control_plane_for_runner_outdated() {
+    fn served_platforms_list_file_hashes_not_bake_id() {
         let inv = PackageInventory {
-            plane_git_sha: Some("9fe136dbda7e7621b644edfffd06bf535584b250".into()),
+            plane_git_sha: Some("planeplaneplaneplane".into()),
             packages: vec![
-                sample_pkg("linux-x86_64", Some("db33239c786cabcdef")),
-                sample_pkg("windows-x86_64", Some("db33239c786cabcdef")),
+                sample_served(
+                    "windows-x86_64",
+                    "8c015655431b5287e58eb79e26d29647a8a4488d797d8c436ae4bd8181db3f58",
+                    "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d",
+                ),
+                sample_served("linux-x86_64", "aaaaaaaaaaaa1111", "bbbbbbbbbbbb2222"),
+                HostDesiredSoftware {
+                    platform: Some("linux-armv7".into()),
+                    git_sha: Some("old-stamp-only".into()),
+                    ..HostDesiredSoftware::default()
+                },
             ],
-        };
-        let report = package_report(&inv).expect("report");
-        assert_eq!(report.current_build, "db33239c786c");
-        assert_eq!(report.serving, "linux-x86_64 · windows-x86_64");
-        assert!(report.older.is_empty());
-    }
-
-    #[test]
-    fn package_report_uses_same_short_sha_as_cards() {
-        let inv = PackageInventory {
-            packages: vec![sample_pkg(
-                "linux-x86_64",
-                Some("db33239c786cabcdef0123456789-7db877c8ee4c"),
-            )],
             ..PackageInventory::default()
         };
-        let report = package_report(&inv).expect("report");
-        assert_eq!(report.current_build, "db33239c786c");
-        assert!(!report.current_build.contains('-'));
+        let served = served_platforms(&inv);
+        assert_eq!(served.len(), 2, "no-bin platform is omitted");
+        assert_eq!(served[0].platform, "linux-x86_64");
+        assert_eq!(served[0].host, "aaaaaaaaaaaa");
+        assert_eq!(served[0].driver, "bbbbbbbbbbbb");
+        assert_eq!(served[1].platform, "windows-x86_64");
+        assert_eq!(served[1].host, "8c015655431b");
+        assert_eq!(served[1].driver, "6bec5b00654e");
+        let blob = format!("{served:?}");
+        assert!(!blob.contains("ignored-bake-stamp"));
+        assert!(!blob.contains("planeplane"));
     }
 
     #[test]
-    fn package_report_splits_runner_packages_by_their_own_sha() {
+    fn served_platforms_empty_inventory() {
+        assert!(served_platforms(&PackageInventory::default()).is_empty());
+    }
+
+    #[test]
+    fn stale_package_platforms_flags_missing_and_old_versions() {
         let inv = PackageInventory {
-            plane_git_sha: Some("aaaaaaaaaaaaaaaa".into()),
+            package_versions: PackageVersions {
+                host: "0.0.2".into(),
+                driver: "0.0.2".into(),
+            },
             packages: vec![
-                sample_pkg_staged(
-                    "linux-x86_64",
-                    Some("bbbbbbbbbbbbbbbb"),
-                    "2026-08-20T12:00:00Z",
-                ),
-                sample_pkg_staged("freebsd-amd64", Some("bbbbbbbb"), "2026-08-20T12:00:00Z"),
-                sample_pkg_staged(
-                    "windows-x86_64",
-                    Some("ccccccccccccdddd"),
-                    "2026-08-01T00:00:00Z",
-                ),
-                sample_pkg("linux-armv7", None),
+                HostDesiredSoftware {
+                    platform: Some("linux-x86_64".into()),
+                    bins: Some(serde_json::json!({
+                        "fleet-host": {"sha256": "aaa", "version": "0.0.2"},
+                        "fleet-driver": {"sha256": "bbb", "version": "0.0.2"}
+                    })),
+                    ..HostDesiredSoftware::default()
+                },
+                HostDesiredSoftware {
+                    platform: Some("windows-x86_64".into()),
+                    bins: Some(serde_json::json!({
+                        "fleet-host.exe": {"sha256": "ccc", "version": "0.0.1"},
+                        "fleet-driver.exe": {"sha256": "ddd", "version": "0.0.2"}
+                    })),
+                    ..HostDesiredSoftware::default()
+                },
             ],
+            ..PackageInventory::default()
         };
-        let report = package_report(&inv).expect("report");
-        assert_eq!(report.current_build, "bbbbbbbbbbbb");
-        assert_eq!(report.serving, "linux-x86_64 · freebsd-amd64");
+        let stale = stale_package_platforms(&inv);
+        assert!(stale.iter().any(|s| s.platform == "windows-x86_64"));
+        assert!(
+            !stale.iter().any(|s| s.platform == "linux-aarch64"),
+            "never-staged OS must not warn: {stale:?}"
+        );
+        assert!(!stale.iter().any(|s| s.platform == "linux-x86_64"));
+        let warn = stale_package_warning(&inv).expect("warn");
+        assert!(warn.contains("0.0.2"), "{warn}");
+        assert!(warn.contains("windows-x86_64"), "{warn}");
+        assert!(
+            !warn.contains("linux-aarch64"),
+            "never-staged OS must not warn: {warn}"
+        );
+        assert!(!warn.contains("linux-x86_64,"), "{warn}");
+    }
+
+    #[test]
+    fn stale_package_warning_none_when_every_os_is_current() {
+        let packages = REQUIRED_PACKAGE_PLATFORMS
+            .iter()
+            .map(|plat| HostDesiredSoftware {
+                platform: Some((*plat).into()),
+                bins: Some(serde_json::json!({
+                    "fleet-host": {"sha256": "h", "version": "0.0.2"},
+                    "fleet-driver": {"sha256": "d", "version": "0.0.2"}
+                })),
+                ..HostDesiredSoftware::default()
+            })
+            .collect();
+        let inv = PackageInventory {
+            package_versions: PackageVersions {
+                host: "0.0.2".into(),
+                driver: "0.0.2".into(),
+            },
+            packages,
+            ..PackageInventory::default()
+        };
+        assert!(stale_package_platforms(&inv).is_empty());
+        assert!(stale_package_warning(&inv).is_none());
+    }
+
+    #[test]
+    fn agent_status_phrase_matches_runners_and_chat() {
         assert_eq!(
-            report.older,
-            vec![
-                "cccccccccccc · windows-x86_64".to_string(),
-                "no build id · linux-armv7".to_string(),
-            ]
+            agent_status_phrase("claude", true, true),
+            "installed · logged in"
+        );
+        assert_eq!(
+            agent_status_phrase("claude", true, false),
+            "installed · logged out"
+        );
+        assert_eq!(agent_status_phrase("claude", false, false), "not installed");
+        assert_eq!(agent_status_phrase("ollama", true, false), "installed");
+        assert_eq!(agent_status_phrase("ollama", false, false), "not installed");
+    }
+
+    #[test]
+    fn ollama_catalog_label_is_private() {
+        assert_eq!(catalog_provider_display_name("ollama"), "Private (Ollama)");
+        assert_eq!(catalog_provider_display_name("grok"), "Grok");
+    }
+
+    #[test]
+    fn claude_aliases_are_not_version_pins() {
+        for name in claude_cli_model_aliases() {
+            assert!(!name.chars().any(|c| c.is_ascii_digit()), "{name}");
+        }
+        assert!(claude_effort_values().contains(&"xhigh"));
+    }
+
+    #[test]
+    fn chat_elapsed_formats() {
+        assert_eq!(format_chat_elapsed(240), "240 ms");
+        assert_eq!(format_chat_elapsed(1500), "1.5s");
+        assert_eq!(format_chat_elapsed(12_400), "12s");
+        assert_eq!(format_chat_elapsed(63_000), "1m 03s");
+    }
+
+    fn cand(id: &str, available: bool, models: &[&str]) -> ChatProviderCandidate {
+        ChatProviderCandidate {
+            id: id.into(),
+            available,
+            models: models.iter().map(|s| (*s).to_string()).collect(),
+            default_model: models.first().map(|s| (*s).to_string()),
+        }
+    }
+
+    #[test]
+    fn chat_defaults_prefer_last_used_when_available() {
+        let providers = vec![
+            cand("grok", true, &["grok-4.5"]),
+            cand("ollama", true, &["llama3.2:latest"]),
+        ];
+        let pick =
+            pick_chat_provider_and_model(&providers, Some("ollama"), Some("llama3.2:latest"))
+                .expect("pick");
+        assert_eq!(pick.provider_id, "ollama");
+        assert_eq!(pick.model, "llama3.2:latest");
+    }
+
+    #[test]
+    fn chat_defaults_skip_last_used_when_not_ready() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
+        let pick =
+            pick_chat_provider_and_model(&providers, Some("grok"), Some("grok-4.5")).expect("pick");
+        assert_eq!(pick.provider_id, "ollama");
+        assert_eq!(pick.model, "qwen2.5");
+    }
+
+    #[test]
+    fn chat_defaults_do_not_override_user_pick() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
+        assert!(!should_apply_chat_defaults(&providers, "grok", true));
+        assert!(should_apply_chat_defaults(&providers, "grok", false));
+        assert!(!should_apply_chat_defaults(&providers, "ollama", false));
+        assert!(should_apply_chat_defaults(&providers, "", false));
+    }
+
+    fn detail(name: &str, efforts: &[&str], default: &str) -> crate::types::AgentModelDetail {
+        crate::types::AgentModelDetail {
+            name: name.into(),
+            efforts: efforts
+                .iter()
+                .map(|v| crate::types::AgentEffort {
+                    value: (*v).into(),
+                    label: None,
+                })
+                .collect(),
+            default_effort: Some(default.into()),
+        }
+    }
+
+    #[test]
+    fn effort_picker_uses_last_used_when_model_still_lists_it() {
+        let details = vec![detail(
+            "grok-4.6",
+            &["xhigh", "high", "medium", "low"],
+            "high",
+        )];
+        let d = find_model_detail(&details, "grok-4.6");
+        assert_eq!(
+            pick_effort_value(d, Some("xhigh")).as_deref(),
+            Some("xhigh")
         );
     }
 
     #[test]
-    fn package_report_all_current_omits_outdated() {
-        let inv = PackageInventory {
-            plane_git_sha: Some("planeplaneplane".into()),
-            packages: vec![
-                sample_pkg("linux-x86_64", Some("aaaaaaaa")),
-                sample_pkg("windows-x86_64", Some("aaaaaaaa")),
-            ],
-        };
-        let report = package_report(&inv).expect("report");
-        assert_eq!(report.current_build, "aaaaaaaa");
-        assert_eq!(report.serving, "linux-x86_64 · windows-x86_64");
-        assert!(report.older.is_empty());
+    fn effort_picker_falls_back_to_model_default() {
+        let details = vec![detail(
+            "grok-4.6",
+            &["xhigh", "high", "medium", "low"],
+            "high",
+        )];
+        let d = find_model_detail(&details, "grok-4.6");
+        assert_eq!(
+            pick_effort_value(d, Some("medium")).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(pick_effort_value(d, Some("nope")).as_deref(), Some("high"));
+        assert_eq!(
+            pick_effort_value(find_model_detail(&details, ""), None).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn effort_picker_hidden_when_model_has_no_menu() {
+        let details = vec![detail("sxs-claude-opus-4-6", &[], "high")];
+        assert!(pick_effort_value(
+            find_model_detail(&details, "sxs-claude-opus-4-6"),
+            Some("high")
+        )
+        .is_none());
     }
 
     #[test]
@@ -1106,65 +1623,220 @@ mod tests {
             r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"}}"#,
         )
         .expect("software");
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
         host.software_status = Some("current".into());
-        assert_eq!(
-            software_line(&host),
-            "9d239a509055 · linux-x86_64 · up to date"
-        );
+        // Hash-only report + current versions is not "up to date" — the box
+        // has not named a package version. The two bin rows are the status.
+        assert_ne!(software_flag(&host), Some("up to date"));
         assert!(!software_line(&host).contains("2a971d69"));
+        assert!(!software_line(&host).contains("9d239a509055"));
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":"aaaaaaaaaaaa1111","fleet-driver":"bbbbbbbbbbbb2222"}}"#,
+        )
+        .expect("software");
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"aaaaaaaaaaaa1111","version":"0.0.1"},"fleet-driver":{"sha256":"bbbbbbbbbbbb2222","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            git_sha: Some("9d239a509055abcdef".into()),
+            platform: Some("linux-x86_64".into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "aaaaaaaaaaaa1111", "version": "0.0.1"},
+                "fleet-driver": {"sha256": "bbbbbbbbbbbb2222", "version": "0.0.1"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "fleet-host");
+        assert_eq!(rows[0].version, "0.0.1");
+        assert_eq!(rows[0].status, "current");
+        assert_eq!(rows[1].name, "fleet-driver");
+        assert_eq!(rows[1].version, "0.0.1");
+        assert_eq!(rows[1].status, "current");
     }
 
     #[test]
-    fn software_current_without_bake_is_old_package() {
+    fn software_bin_rows_show_reported_semver_when_behind() {
+        let mut host = sample_host();
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "new", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "new", "version": "0.0.2"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].version, "0.0.1");
+        assert_eq!(rows[0].status, "behind");
+        assert_eq!(rows[1].version, "0.0.1");
+        assert_eq!(rows[1].status, "behind");
+        assert!(!rows[0].version.contains("old"));
+    }
+
+    #[test]
+    fn software_bin_rows_current_from_package_versions_without_desired() {
+        let mut host = sample_host();
+        host.desired = None;
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"cargo-host","version":"0.0.1"},"fleet-driver":{"sha256":"cargo-driver","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].status, "current");
+        assert_eq!(rows[1].status, "current");
+        assert_eq!(software_flag(&host), Some("up to date"));
+    }
+
+    #[test]
+    fn software_bin_rows_same_version_different_hash_is_current() {
+        let mut host = sample_host();
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"cargo","version":"0.0.1"},"fleet-driver":{"sha256":"cargo-d","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "staged", "version": "0.0.1"},
+                "fleet-driver": {"sha256": "staged-d", "version": "0.0.1"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].status, "current");
+        assert_eq!(rows[1].status, "current");
+        assert_eq!(rows[0].version, "0.0.1");
+        assert_eq!(software_flag(&host), Some("up to date"));
+    }
+
+    #[test]
+    fn software_bin_rows_flag_driver_mismatch() {
         let mut host = sample_host();
         host.platform = Some("windows-x86_64".into());
         host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"}}"#,
+            r#"{"git_sha":"bake","bins":{"fleet-host":"aaaaaaaaaaaa1111","fleet-driver":"oldoldoldold9999"}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host.exe": {"sha256": "aaaaaaaaaaaa1111"},
+                "fleet-driver.exe": {"sha256": "bbbbbbbbbbbb2222"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].status, "current");
+        assert_eq!(rows[1].status, "behind");
+        assert_eq!(rows[1].name, "fleet-driver");
+    }
+
+    #[test]
+    fn software_matching_served_windows_package_is_up_to_date() {
+        let mut host = sample_host();
+        host.platform = Some("windows-x86_64".into());
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"18a1be7df0a53136e7a85b741d8b9fc45b4cc351-e8260cd5c443"}"#,
         )
         .expect("software");
         host.software_status = Some("current".into());
-        assert_eq!(software_line(&host), "windows-x86_64 · old package");
-        assert_eq!(software_flag(&host), Some("old package"));
+        // Plane bake can differ (Linux server vs Windows restage). That must
+        // not mark a box that matches the served Windows package as old.
+        host.plane_git_sha = Some("18a1be7df0a53136e7a85b741d8b9fc45b4cc351-9f1c128acf45".into());
+        // Same served-package hashes, different plane bake: still current
+        // only after the box reports the package versions.
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"18a1be7df0a53136e7a85b741d8b9fc45b4cc351-e8260cd5c443","bins":{"fleet-host":{"sha256":"aaaaaaaaaaaa1111","version":"0.0.1"},"fleet-driver":{"sha256":"bbbbbbbbbbbb2222","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "aaaaaaaaaaaa1111", "version": "0.0.1"},
+                "fleet-driver": {"sha256": "bbbbbbbbbbbb2222", "version": "0.0.1"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        assert_eq!(software_flag(&host), Some("up to date"));
+        assert!(software_line(&host).contains("up to date"));
+        assert!(!extra_status_pills(&host).contains(&"old package"));
+    }
+
+    #[test]
+    fn software_current_without_bake_id_is_up_to_date() {
+        let mut host = sample_host();
+        host.platform = Some("windows-x86_64".into());
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e","version":"0.0.1"},"fleet-driver":{"sha256":"bbbb","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(software_line(&host), "windows-x86_64 · up to date");
+        assert_eq!(software_flag(&host), Some("up to date"));
     }
 
     #[test]
     fn software_outdated_keeps_build_sha() {
         let mut host = sample_host();
         host.platform = Some("windows-x86_64".into());
-        host.software =
-            serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef"}"#).expect("software");
-        // Default auto_update is true; an idle behind box then reads as
-        // "updating". This case is auto-update off, so the flag stays outdated
-        // and the bake id stays on the line.
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
         host.auto_update = false;
-        host.outdated = true;
-        host.software_status = Some("behind".into());
         assert_eq!(software_flag(&host), Some("outdated"));
-        assert_eq!(
-            software_line(&host),
-            "9d239a509055 · windows-x86_64 · outdated"
-        );
+        assert_eq!(software_line(&host), "windows-x86_64 · outdated");
+        assert!(!software_line(&host).contains("9d239a509055"));
         assert!(!software_line(&host).contains("updating"));
     }
 
     #[test]
-    fn software_auto_update_idle_behind_is_updating() {
+    fn software_auto_update_does_not_fake_updating() {
         let mut host = sample_host();
         host.platform = Some("linux-x86_64".into());
-        host.software =
-            serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef"}"#).expect("software");
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
         host.auto_update = true;
         host.current_jobs = 0;
-        host.outdated = true;
-        host.software_status = Some("behind".into());
-        assert_eq!(software_flag(&host), Some("updating"));
-        assert_eq!(
-            software_line(&host),
-            "9d239a509055 · linux-x86_64 · updating"
-        );
-
-        host.current_jobs = 1;
         assert_eq!(software_flag(&host), Some("outdated"));
+        assert_eq!(software_line(&host), "linux-x86_64 · outdated");
+
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"9d239a509055abcdef","updating":true,"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(software_flag(&host), Some("updating"));
     }
 
     #[test]
@@ -1255,6 +1927,40 @@ mod tests {
     }
 
     #[test]
+    fn display_name_tags_control_plane_and_this_machine() {
+        let mut host = sample_host();
+        host.is_control_plane_box = true;
+        assert_eq!(display_name(&host), "box (control plane)");
+        host.is_this_machine = true;
+        assert_eq!(display_name(&host), "box (control plane · this machine)");
+        host.is_control_plane_box = false;
+        assert_eq!(display_name(&host), "box (this machine)");
+    }
+
+    #[test]
+    fn format_bytes_and_disk_line() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        let mut host = sample_host();
+        host.hardware = Some(HostHardware {
+            disk_free_bytes: Some(50 * 1024 * 1024 * 1024),
+            disk_total_bytes: Some(100 * 1024 * 1024 * 1024),
+            ..HostHardware::default()
+        });
+        assert_eq!(
+            disk_free_line(&host).as_deref(),
+            Some("50.0 GB free of 100.0 GB")
+        );
+    }
+
+    #[test]
+    fn provider_install_command_picks_os() {
+        assert!(provider_install_command("grok", Some("linux-x86_64")).contains("install.sh"));
+        assert!(provider_install_command("grok", Some("windows-x86_64")).contains("install.ps1"));
+        assert!(provider_install_command("ollama", Some("linux-x86_64")).contains("ollama.com"));
+    }
+
+    #[test]
     fn job_cap_is_min_of_plane_and_advertised() {
         let mut host = sample_host();
         host.max_concurrent = 8;
@@ -1317,20 +2023,27 @@ mod tests {
     fn software_title_matches_flag() {
         let mut host = sample_host();
         host.platform = Some("linux-x86_64".into());
-        host.software =
-            serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef"}"#).expect("software");
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"h","version":"0.0.1"},"fleet-driver":{"sha256":"d","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
         host.auto_update = false;
-        host.software_status = Some("current".into());
         assert!(
             software_title(&host).contains("linux-x86_64"),
             "{}",
             software_title(&host)
         );
 
-        host.software_status = Some("behind".into());
-        host.outdated = true;
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
         assert!(
-            software_title(&host).contains("Not running the linux-x86_64 package"),
+            software_title(&host).contains("fleet-host and/or fleet-driver"),
             "{}",
             software_title(&host)
         );
@@ -1339,26 +2052,28 @@ mod tests {
             .expect("software");
         assert_eq!(
             software_title(&host),
-            "Installing the package this control plane is serving."
+            "Installing fleet-host and fleet-driver from this plane."
         );
     }
 
     #[test]
-    fn package_report_empty_serving_when_all_lack_build_id() {
+    fn served_platforms_omits_bake_only_entries() {
         let inv = PackageInventory {
             packages: vec![
-                sample_pkg("linux-x86_64", None),
-                sample_pkg("windows-x86_64", None),
+                HostDesiredSoftware {
+                    platform: Some("linux-x86_64".into()),
+                    git_sha: Some("only-a-stamp".into()),
+                    ..HostDesiredSoftware::default()
+                },
+                HostDesiredSoftware {
+                    platform: Some("windows-x86_64".into()),
+                    git_sha: Some("only-a-stamp".into()),
+                    ..HostDesiredSoftware::default()
+                },
             ],
             ..PackageInventory::default()
         };
-        let report = package_report(&inv).expect("report");
-        assert_eq!(report.current_build, "unknown");
-        assert!(report.serving.is_empty(), "blank serving must still render");
-        assert_eq!(
-            report.older,
-            vec!["no build id · linux-x86_64 · windows-x86_64".to_string()]
-        );
+        assert!(served_platforms(&inv).is_empty());
     }
 
     #[test]
@@ -1497,6 +2212,60 @@ mod tests {
         });
         assert_eq!(jobs_line(&host), "jobs 2 / 4 · cpu 12% · mem 32%");
         assert!(!jobs_line(&host).contains("gpu"));
+    }
+
+    #[test]
+    fn plane_card_jobs_line_uses_inflight_over_max_concurrent() {
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.advertised_max_concurrent = None;
+        plane.hardware = None;
+        assert!(is_control_plane(&plane));
+
+        // Idle: n is in-flight local sessions, cap is the plane setting.
+        plane.current_jobs = 0;
+        plane.max_concurrent = 4;
+        assert_eq!(job_cap(&plane), 4);
+        assert_eq!(jobs_line(&plane), "jobs 0 / 4");
+
+        // Must show in-flight n — do not lock a missing count as always 0/4.
+        plane.current_jobs = 3;
+        plane.max_concurrent = 8;
+        assert_eq!(job_cap(&plane), 8);
+        assert_eq!(jobs_line(&plane), "jobs 3 / 8");
+        assert!(
+            !jobs_line(&plane).contains("cpu")
+                && !jobs_line(&plane).contains("mem")
+                && !jobs_line(&plane).contains("gpu"),
+            "{}",
+            jobs_line(&plane)
+        );
+
+        plane.current_jobs = 8;
+        assert_eq!(jobs_line(&plane), "jobs 8 / 8");
+
+        plane.current_jobs = 9;
+        assert_eq!(jobs_line(&plane), "jobs 9 / 8");
+
+        plane.current_jobs = 1;
+        plane.max_concurrent = 0;
+        assert_eq!(jobs_line(&plane), "jobs 1 / 1");
+        plane.max_concurrent = 512;
+        assert_eq!(jobs_line(&plane), "jobs 1 / 256");
+
+        plane.max_concurrent = 8;
+        plane.current_jobs = 2;
+        let patched = apply_patch(
+            plane,
+            &HostPatch {
+                max_concurrent: Some(2),
+                ..HostPatch::default()
+            },
+        );
+        assert!(is_control_plane(&patched));
+        assert_eq!(patched.current_jobs, 2);
+        assert_eq!(job_cap(&patched), 2);
+        assert_eq!(jobs_line(&patched), "jobs 2 / 2");
     }
 
     #[test]
@@ -1811,10 +2580,7 @@ mod tests {
     #[test]
     fn runtime_line_is_sandbox_backend_not_isolation_modes() {
         let mut host = sample_host();
-        assert_eq!(
-            runtime_line(&host, "docker"),
-            "Runtime: fleet-host"
-        );
+        assert_eq!(runtime_line(&host, "docker"), "Runtime: fleet-host");
         host.kind = "control_plane".into();
         assert_eq!(
             runtime_line(&host, "process"),
@@ -1888,24 +2654,29 @@ mod tests {
     }
 
     #[test]
-    fn software_title_covers_old_package_and_unknown() {
+    fn software_title_covers_bins_and_unknown() {
         let mut host = sample_host();
         assert_eq!(
             software_title(&host),
-            "This box has not reported a version we can compare."
+            "This box has not reported fleet-host and fleet-driver versions we can compare."
         );
 
-        host.software_status = Some("current".into());
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"h","version":"0.0.1"},"fleet-driver":{"sha256":"d","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
         host.platform = Some("linux-x86_64".into());
-        assert_eq!(
-            software_title(&host),
-            "This box matches the files we still serve for this OS, but that package has no build id. Restage this platform."
-        );
-
-        host.software =
-            serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef"}"#).expect("software");
         assert!(
-            software_title(&host).contains("Running the linux-x86_64 package"),
+            software_title(&host).contains("fleet-host and fleet-driver"),
+            "{}",
+            software_title(&host)
+        );
+        assert!(
+            software_title(&host).contains("linux-x86_64"),
             "{}",
             software_title(&host)
         );
@@ -1932,12 +2703,12 @@ mod tests {
         host.software_status = Some("behind".into());
         assert!(needs_software_update(&host));
         host.software_status = Some("current".into());
-        assert!(needs_software_update(&host), "current without bake is old");
-        host.software =
-            serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef"}"#).expect("software");
-        assert!(!needs_software_update(&host));
+        assert!(
+            !needs_software_update(&host),
+            "current means both binaries match; bake id is not a version"
+        );
 
-        assert!(package_report(&PackageInventory::default()).is_none());
+        assert!(served_platforms(&PackageInventory::default()).is_empty());
     }
 
     #[test]

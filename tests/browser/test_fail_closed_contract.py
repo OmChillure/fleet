@@ -111,6 +111,7 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("dx build", text)
         self.assertIn("FLEET_ALLOW_FOREIGN_STACK", text)
         self.assertIn("exit 1", text)
+        self.assertIn("FLEET_ALLOW_FOREIGN_STACK is not a green path", text)
         self.assertNotIn("FLEET_SKIP_UI", text)
         self.assertIn("fleet-git-sha.txt", text)
 
@@ -131,6 +132,7 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("require_tools", text)
         self.assertIn("--tools", text)
         self.assertIn("--api-only", text)
+        self.assertIn("Do not kubectl set env FLEET_GIT_SHA", text)
 
     def test_orch_worker_url_is_config_not_live_env(self):
         state = (
@@ -155,6 +157,86 @@ class FailClosedContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("rerun-if-env-changed=FLEET_GIT_SHA", build_rs)
+
+    def test_identity_cannot_be_satisfied_by_kubectl_env_or_foreign_allow(self):
+        """Compile-time bake only; kubectl set env / FLEET_ALLOW_FOREIGN_STACK are not green."""
+        lib = SERVER_LIB.read_text(encoding="utf-8")
+        self.assertIn('option_env!("FLEET_GIT_SHA")', lib)
+        self.assertNotIn(
+            'std::env::var("FLEET_GIT_SHA")',
+            lib,
+            "runtime ENV lets `kubectl set env` fake this tree",
+        )
+        self.assertNotIn(
+            'env::var("FLEET_GIT_SHA")',
+            lib,
+            "use std::env; env::var is the same kubectl-env green path",
+        )
+        self.assertIn("kubectl set env", lib)
+
+        host = (REPO / "crates" / "fleet-host" / "src" / "software.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('option_env!("FLEET_GIT_SHA")', host)
+        self.assertNotIn('std::env::var("FLEET_GIT_SHA")', host)
+        self.assertNotIn('env::var("FLEET_GIT_SHA")', host)
+
+        plane = (
+            REPO / "crates" / "fleet-server" / "src" / "worker_hosts.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('option_env!("FLEET_GIT_SHA")', plane)
+        self.assertNotIn('std::env::var("FLEET_GIT_SHA")', plane)
+        self.assertNotIn('env::var("FLEET_GIT_SHA")', plane)
+
+        build_rs = (REPO / "crates" / "fleet-server" / "build.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("rerun-if-env-changed=FLEET_GIT_SHA", build_rs)
+        self.assertIn("compile-time only", build_rs)
+        self.assertIn("kubectl set env", build_rs)
+
+        ident = IDENT.read_text(encoding="utf-8")
+        self.assertIn("Do not kubectl set env FLEET_GIT_SHA", ident)
+        self.assertIn("tree-id.sh", ident)
+        self.assertIn("expected_sha", ident)
+        self.assertNotIn("FLEET_ALLOW_FOREIGN_STACK", ident)
+        self.assertNotIn('os.environ.get("FLEET_GIT_SHA")', ident)
+        self.assertNotIn("os.environ['FLEET_GIT_SHA']", ident)
+        self.assertNotIn('os.getenv("FLEET_GIT_SHA")', ident)
+
+        reject = 'ERROR: FLEET_ALLOW_FOREIGN_STACK is not a green path. Unset it.'
+        for path in (EVERY, FULL_SUITE):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(reject, text, path.name)
+            self.assertIn("unset FLEET_ALLOW_FOREIGN_STACK", text, path.name)
+            self.assertRegex(
+                text,
+                r'FLEET_ALLOW_FOREIGN_STACK:-.*" == "1"[\s\S]{0,250}exit 1',
+                f"{path.name} must exit 1 when FLEET_ALLOW_FOREIGN_STACK=1",
+            )
+            self.assertNotIn("kubectl set env", text, path.name)
+
+        for path in (
+            AGENTS,
+            REPO / "docs" / "testing.md",
+            REPO / "docs" / "testing-standardization.md",
+        ):
+            body = path.read_text(encoding="utf-8")
+            self.assertIn("kubectl set env", body, path.name)
+            self.assertIn("FLEET_ALLOW_FOREIGN_STACK", body, path.name)
+            self.assertIn("green path", body.lower(), path.name)
+
+        human = (REPO / "docs" / "human-testing.md").read_text(encoding="utf-8")
+        self.assertIn("FLEET_ALLOW_FOREIGN_STACK", human)
+        self.assertIn("no green path", human.lower())
+
+        for yml in (REPO / "infra").rglob("*.yaml"):
+            text = yml.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "FLEET_GIT_SHA",
+                text,
+                f"{yml.relative_to(REPO)} must not inject runtime FLEET_GIT_SHA",
+            )
 
     def test_dockerfile_bakes_sha_before_cargo(self):
         text = DOCKERFILE.read_text(encoding="utf-8")
@@ -281,19 +363,20 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertRegex(body.lower(), r"host [`']?dx[`']?")
         self.assertIn("kubectl set env", body)
         self.assertIn("not a substitute", body.lower())
+        self.assertIn("FLEET_ALLOW_FOREIGN_STACK", body)
+        self.assertIn("option_env!", body)
+        self.assertIn("green path", body.lower())
 
-    def test_agents_md_forbids_recurring_test_writer_loop(self):
+    def test_agents_md_test_writer_is_independent_not_full_rerun(self):
         body = AGENTS.read_text(encoding="utf-8")
         testing = (REPO / "docs" / "testing.md").read_text(encoding="utf-8")
-        self.assertIn("recurring test-writer loop", body)
-        self.assertIn("A missing child id is not a relaunch", body)
+        self.assertIn("Treat each test as **independent**", body)
+        self.assertIn("Do **not** re-run the entire suite on every iteration", body)
         self.assertIn("harvest-runner-catalog.sh", body)
-        self.assertIn("recurring", testing.lower())
         self.assertIn("harvest-runner-catalog.sh", testing)
         harvest = REPO / "scripts" / "harvest-runner-catalog.sh"
         self.assertTrue(harvest.is_file(), harvest)
         script = harvest.read_text(encoding="utf-8")
-        self.assertIn("Does not spawn writers", script)
         self.assertIn(".env", script)
 
     def test_tools_gate_fails_when_dx_absent(self):
@@ -324,6 +407,8 @@ class FailClosedContractTests(unittest.TestCase):
         text = FULL_SUITE.read_text(encoding="utf-8")
         self.assertIn("FLEET_ALLOW_FOREIGN_STACK", text)
         self.assertIn("stack_identity.py", text)
+        self.assertIn("FLEET_ALLOW_FOREIGN_STACK is not a green path", text)
+        self.assertIn("exit 1", text)
 
     def test_bootstrap_postgres_wait_is_fail_closed(self):
         text = BOOTSTRAP.read_text(encoding="utf-8")

@@ -125,7 +125,11 @@ pub fn Sidebar() -> Element {
                     Link {
                         class: "flex min-w-0 flex-1 items-center gap-2 font-semibold tracking-tight text-[var(--app-fg)]",
                         to: Route::Home {},
-                        div { class: "h-6 w-6 shrink-0 rounded-md bg-[var(--app-accent)]" }
+                        img {
+                            class: "h-6 w-6 shrink-0 rounded-md",
+                            src: asset!("/assets/app-icon.png"),
+                            alt: "",
+                        }
                         span { class: "truncate text-sm", "Agent Fleet" }
                     }
                 }

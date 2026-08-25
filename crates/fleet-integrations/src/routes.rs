@@ -1,11 +1,11 @@
 //! List / OAuth start / OAuth callback / disconnect.
 
 use axum::Json;
+use axum::Router;
 use axum::extract::{Form, FromRef, Path, Query, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult, require_user};
@@ -58,7 +58,7 @@ where
         )
         .route(
             "/api/workspaces/{workspace_id}/integrations/{provider}",
-            axum::routing::delete(disconnect_integration),
+            axum::routing::delete(disconnect_integration).patch(patch_integration_defaults),
         )
 }
 
@@ -82,7 +82,10 @@ fn enrich_views(
     state: &IntegrationsState,
 ) -> Vec<IntegrationView> {
     let by_provider: std::collections::HashMap<&str, &fleet_db::IntegrationConnection> =
-        connections.iter().map(|c| (c.provider.as_str(), c)).collect();
+        connections
+            .iter()
+            .map(|c| (c.provider.as_str(), c))
+            .collect();
 
     catalog::catalog()
         .into_iter()
@@ -189,7 +192,9 @@ async fn put_oauth_app(
     let client_id = body.client_id.trim().to_string();
     let client_secret = body.client_secret.trim().to_string();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err(AppError::bad_request("client_id and client_secret are required"));
+        return Err(AppError::bad_request(
+            "client_id and client_secret are required",
+        ));
     }
     persist_oauth_app(
         &state,
@@ -227,12 +232,8 @@ async fn oauth_start(
         return redirect_to_provider(&state, &user.id, workspace_id, &provider, &client);
     }
 
-    let oauth_state = issue_oauth_state(
-        &state.config.state_secret,
-        user.id,
-        workspace_id,
-        &provider,
-    )?;
+    let oauth_state =
+        issue_oauth_state(&state.config.state_secret, user.id, workspace_id, &provider)?;
 
     if provider == "github" {
         tracing::info!(%workspace_id, user_id = %user.id, "oauth start github manifest");
@@ -254,9 +255,7 @@ async fn oauth_start(
         &provider,
         oauth_app_create_url(&provider).unwrap_or("#"),
         &state.config.callback_url(&provider),
-        &format!(
-            "/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"
-        ),
+        &format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"),
     )))
 }
 
@@ -280,7 +279,9 @@ async fn oauth_start_with_app(
     let client_id = form.client_id.trim().to_string();
     let client_secret = form.client_secret.trim().to_string();
     if client_id.is_empty() || client_secret.is_empty() {
-        return Err(AppError::bad_request("client_id and client_secret are required"));
+        return Err(AppError::bad_request(
+            "client_id and client_secret are required",
+        ));
     }
 
     persist_oauth_app(
@@ -319,12 +320,8 @@ fn redirect_to_provider(
     provider: &str,
     client: &OAuthClientConfig,
 ) -> AppResult<Response> {
-    let oauth_state = issue_oauth_state(
-        &state.config.state_secret,
-        *user_id,
-        workspace_id,
-        provider,
-    )?;
+    let oauth_state =
+        issue_oauth_state(&state.config.state_secret, *user_id, workspace_id, provider)?;
     let url = authorize_url(provider, &state.config, client, &oauth_state)?;
     tracing::info!(
         %workspace_id,
@@ -412,13 +409,13 @@ async fn github_manifest_callback_inner(
         .state
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "missing OAuth state".to_string())?;
-    let claims = verify_oauth_state(&state.config.state_secret, &state_jwt)
-        .map_err(|e| e.to_string())?;
+    let claims =
+        verify_oauth_state(&state.config.state_secret, &state_jwt).map_err(|e| e.to_string())?;
     if claims.provider != "github" {
         return Err("OAuth state provider mismatch".into());
     }
-    let workspace_id = Uuid::parse_str(&claims.workspace_id)
-        .map_err(|_| "bad workspace in state".to_string())?;
+    let workspace_id =
+        Uuid::parse_str(&claims.workspace_id).map_err(|_| "bad workspace in state".to_string())?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| "bad user in state".to_string())?;
 
     let member = workspace_repo::find_for_user(&state.db, workspace_id, user_id)
@@ -700,12 +697,16 @@ fn provider_bootstrap_html(
     action: &str,
 ) -> String {
     let scopes = match provider {
-        "jira" => "In the Atlassian app, add callback URL below and scopes: \
+        "jira" => {
+            "In the Atlassian app, add callback URL below and scopes: \
              <code>read:jira-work</code> <code>write:jira-work</code> \
-             <code>read:jira-user</code> <code>offline_access</code>.",
+             <code>read:jira-user</code> <code>offline_access</code>."
+        }
         "slack" => "Create a Slack app with OAuth redirect URL below.",
         "linear" => "Create a Linear OAuth app with callback URL below.",
-        _ => "Create an OAuth app at the provider, paste the client id and secret, then continue to sign in.",
+        _ => {
+            "Create an OAuth app at the provider, paste the client id and secret, then continue to sign in."
+        }
     };
     format!(
         r#"<!DOCTYPE html>
@@ -789,10 +790,18 @@ async fn oauth_callback_inner(
         ));
     }
 
-    let workspace_id = Uuid::parse_str(&claims.workspace_id)
-        .map_err(|_| (Some(claims.workspace_id.clone()), "bad workspace in state".into()))?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| (Some(claims.workspace_id.clone()), "bad user in state".into()))?;
+    let workspace_id = Uuid::parse_str(&claims.workspace_id).map_err(|_| {
+        (
+            Some(claims.workspace_id.clone()),
+            "bad workspace in state".into(),
+        )
+    })?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+        (
+            Some(claims.workspace_id.clone()),
+            "bad user in state".into(),
+        )
+    })?;
 
     // Ensure user still a member (state alone is not enough if membership revoked).
     let member = workspace_repo::find_for_user(&state.db, workspace_id, user_id)
@@ -870,6 +879,51 @@ async fn oauth_callback_inner(
     Ok(provider)
 }
 
+#[derive(Debug, Deserialize)]
+struct PatchDefaultsBody {
+    #[serde(default)]
+    default_runner_id: Option<String>,
+    #[serde(default)]
+    default_provider: Option<String>,
+    #[serde(default)]
+    default_model: Option<String>,
+}
+
+/// `PATCH /api/workspaces/:id/integrations/:provider` — agent defaults.
+async fn patch_integration_defaults(
+    State(state): State<IntegrationsState>,
+    jar: CookieJar,
+    Path((workspace_id, provider)): Path<(Uuid, String)>,
+    Json(body): Json<PatchDefaultsBody>,
+) -> AppResult<Json<IntegrationConnectionPublic>> {
+    let _ = require_workspace_member(&state, &jar, workspace_id).await?;
+    let provider = provider.trim().to_lowercase();
+    if !catalog::is_known_provider(&provider) {
+        return Err(AppError::not_found(format!(
+            "unknown integration: {provider}"
+        )));
+    }
+    let runner = body
+        .default_runner_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let llm = body
+        .default_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let model = body
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let row =
+        integ_repo::patch_agent_defaults(&state.db, workspace_id, &provider, runner, llm, model)
+            .await?;
+    Ok(Json(IntegrationConnectionPublic::from(row)))
+}
+
 /// `DELETE /api/workspaces/:id/integrations/:provider`
 async fn disconnect_integration(
     State(state): State<IntegrationsState>,
@@ -880,7 +934,9 @@ async fn disconnect_integration(
     let provider = provider.trim().to_lowercase();
 
     if !catalog::is_known_provider(&provider) {
-        return Err(AppError::not_found(format!("unknown integration: {provider}")));
+        return Err(AppError::not_found(format!(
+            "unknown integration: {provider}"
+        )));
     }
 
     let disconnected = integ_repo::disconnect(&state.db, workspace_id, &provider).await?;
@@ -903,4 +959,72 @@ async fn disconnect_integration(
     }))
 }
 
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use crate::crypto::CredentialsKey;
+    use serde_json::json;
 
+    /// Same extraction the proxy uses before any outbound call.
+    fn proxy_access_token(plain: &serde_json::Value) -> Option<&str> {
+        plain
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    #[test]
+    fn disconnect_unknown_provider_is_rejected_before_repo() {
+        // DELETE handler: !is_known_provider → 404, never touches credentials.
+        assert!(!catalog::is_known_provider("notaprovider"));
+        assert!(!catalog::is_known_provider(""));
+        assert!(catalog::is_known_provider("github"));
+    }
+
+    #[test]
+    fn disconnect_response_does_not_serialize_credentials() {
+        let body = serde_json::to_value(&DisconnectResponse {
+            provider: "github".into(),
+            disconnected: true,
+        })
+        .expect("serialize");
+        assert_eq!(body["provider"], "github");
+        assert_eq!(body["disconnected"], true);
+        let obj = body.as_object().expect("object");
+        assert!(!obj.contains_key("credentials"));
+        assert!(!obj.contains_key("access_token"));
+        assert!(!obj.contains_key("ct"));
+        assert!(!obj.contains_key("_enc"));
+    }
+
+    #[test]
+    fn disconnect_cleared_credentials_fail_closed_for_proxy() {
+        let key =
+            CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").expect("test key");
+        let leftover = key
+            .encrypt(&json!({ "access_token": "tok_must_not_survive_disconnect" }))
+            .expect("seal");
+        assert_eq!(leftover["_enc"], "v1");
+        assert!(leftover.get("ct").is_some());
+        // If DELETE left ciphertext, proxy decrypt would recover the token.
+        let leftover_plain = key.decrypt(&leftover).expect("leftover envelope decrypts");
+        assert_eq!(
+            proxy_access_token(&leftover_plain),
+            Some("tok_must_not_survive_disconnect")
+        );
+
+        // disconnect() writes '{}'::jsonb — not an envelope. Legacy decrypt
+        // passes it through; proxy must see no access_token (fail closed).
+        let wiped = json!({});
+        let opened = key
+            .decrypt(&wiped)
+            .expect("empty object is legacy plaintext");
+        assert!(proxy_access_token(&opened).is_none());
+        assert!(opened.get("_enc").is_none());
+        assert!(opened.get("ct").is_none());
+        assert!(
+            opened.as_object().map(|o| o.is_empty()).unwrap_or(false),
+            "wiped credentials must be empty: {opened}"
+        );
+    }
+}

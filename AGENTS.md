@@ -1,5 +1,33 @@
 # Agent notes
 
+## External connections (do not lock operators out)
+
+Paired runners and live integrations are **external connections**. Treat them
+like a production machine you cannot walk over to.
+
+Anything that can drop a heartbeat, rotate a pair token, change
+`WORKER_PUBLIC_BASE` / `control_plane_url`, serve a new `fleet-host` package,
+or flip OAuth / API public bases **must be done so the remote box can still
+phone home with the token it already has**.
+
+- Do **not** force a re-pair as the fix. Re-pair is a last resort the human
+  runs on that machine. The durable `machine.id` is meant to reclaim the same
+  row; wiping tokens or serving a host binary that never comes back is a
+  lockout.
+- Auto-update of a paired runner is a live code push to someone else's box.
+  If you restage `FLEET_WORKER_DIST_DIR` and `auto_update` is on, that host
+  will download and replace itself. Confirm the package starts **before**
+  another restage. If a runner goes silent mid-update, turn **off** CP
+  `auto_update` for that row so a restart of the last working binary is not
+  immediately overwritten. Do not rotate its machine token.
+- Debug Windows/Linux worker packages are huge and easy to brick a laptop
+  with. Prefer a known-good staged dist over “ship whatever just compiled.”
+- Integration OAuth (`API_PUBLIC_BASE`) and worker pair URL
+  (`WORKER_PUBLIC_BASE`) are different. Changing the wrong one breaks Connect
+  or every runner, not both in a useful way.
+
+If you would not do it to a customer’s only jump host, do not do it to X1.
+
 ## Parallelism
 
 Use parallelism and subagents as much as possible while it is still
@@ -29,14 +57,14 @@ flags, OS/kind/lab behavior) and whether any tests must be added. No
 regressions — run the relevant suite (`run-full-suite.sh` / cargo / lab
 unittests) and do not leave install or tests worse than you found it.
 
-Do **not** create a recurring test-writer loop (scheduler / 5-minute
-fire that implements or relaunches catalog holes). Do not spawn one
-agent per catalog row on a timer. A missing child id is not a relaunch.
-Harvest from suite commands (`just test`, `just test-integration`,
-`scripts/harvest-runner-catalog.sh`, Playwright). One rebuild, then one
-e2e pass. Stop when the suite is green or the hole is an explicit skip
-(`LIVE_SKIPPED`). Editing a file after e2e dirties `tree-id`; that is
-not a reason to start another writer loop.
+A recurring test-writer is allowed. Treat each test as **independent**.
+Do **not** re-run the entire suite on every iteration — only the tests
+that fire added, changed, or that failed last time. After a **new code
+version** (`scripts/tree-id.sh` changed), those tests should be run
+again; a dirty `tree-id` from editing a file is not a reason to re-run
+everything. Harvest from `just test`, `just test-integration`,
+`scripts/harvest-runner-catalog.sh`, Playwright. An explicit skip is
+`LIVE_SKIPPED`.
 
 ## Fail-closed builds and identity
 

@@ -2,7 +2,10 @@
 
 use dioxus::prelude::*;
 
-use super::api::{Integration, disconnect_integration, list_integrations, oauth_start_url};
+use super::api::{
+    Integration, disconnect_integration, list_integrations, oauth_start_url,
+    patch_integration_defaults,
+};
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
 
@@ -428,6 +431,12 @@ pub fn Integrations(workspace_id: String) -> Element {
                                     p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
                                         "{integ.description}"
                                     }
+                                    if connected {
+                                        IntegrationDefaults {
+                                            workspace_id: workspace_id.clone(),
+                                            integ: integ.clone(),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -435,6 +444,114 @@ pub fn Integrations(workspace_id: String) -> Element {
                 }
             }
 
+        }
+    }
+}
+
+#[component]
+fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
+    use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
+    use fleet_runners_view::{display_name, is_removed};
+
+    let mut hosts = use_signal(Vec::<HostPublic>::new);
+    let defaults = integ
+        .connection
+        .as_ref()
+        .map(|c| c.defaults.clone())
+        .unwrap_or_default();
+    let mut runner = use_signal(|| defaults.default_runner_id.clone().unwrap_or_default());
+    let mut provider = use_signal(|| defaults.default_provider.clone().unwrap_or_default());
+    let mut model = use_signal(|| defaults.default_model.clone().unwrap_or_default());
+    let ws = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws.clone();
+        spawn(async move {
+            if let Ok((list, _, _)) = list_workers_page(&ws).await {
+                hosts.set(list.into_iter().filter(|h| !is_removed(h)).collect());
+            }
+        });
+    });
+    let selected = hosts().into_iter().find(|h| h.id == runner());
+    let agents = selected
+        .as_ref()
+        .map(|h| h.agents.iter().filter(|a| a.installed).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let models = agents
+        .iter()
+        .find(|a| a.id == provider())
+        .map(|a| a.models.clone())
+        .unwrap_or_default();
+    rsx! {
+        div { class: "mt-3 space-y-1.5 border-t border-[var(--app-border)] pt-3",
+            p { class: "m-0 text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
+                "Default runner / provider / model"
+            }
+            p { class: "m-0 text-[11px] text-[var(--app-muted)]",
+                "Used when Inbox or Chat launches work from this app."
+            }
+            div { class: "flex flex-wrap gap-1.5",
+                select {
+                    class: "max-w-[8rem] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-1.5 py-1 text-[11px] text-[var(--app-fg)]",
+                    value: "{runner}",
+                    onchange: move |e| runner.set(e.value()),
+                    option { value: "", "Runner" }
+                    for h in hosts() {
+                        option { value: "{h.id}", selected: runner() == h.id, "{display_name(&h)}" }
+                    }
+                }
+                select {
+                    class: "max-w-[7rem] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-1.5 py-1 text-[11px] text-[var(--app-fg)]",
+                    value: "{provider}",
+                    onchange: move |e| provider.set(e.value()),
+                    option { value: "", "Provider" }
+                    for a in agents {
+                        option {
+                            value: "{a.id}",
+                            selected: provider() == a.id,
+                            if a.logged_in { "{a.id}" } else { "{a.id} · logged out" }
+                        }
+                    }
+                }
+                select {
+                    class: "max-w-[8rem] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-1.5 py-1 text-[11px] text-[var(--app-fg)]",
+                    value: "{model}",
+                    onchange: move |e| model.set(e.value()),
+                    option { value: "", "Model" }
+                    for m in models {
+                        option { value: "{m}", selected: model() == m, "{m}" }
+                    }
+                }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] px-2 py-1 text-[11px] font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    onclick: {
+                        let ws = workspace_id.clone();
+                        let pid = integ.id.clone();
+                        move |_| {
+                            let ws = ws.clone();
+                            let pid = pid.clone();
+                            let r = runner();
+                            let p = provider();
+                            let m = model();
+                            spawn(async move {
+                                match patch_integration_defaults(
+                                    &ws,
+                                    &pid,
+                                    if r.is_empty() { None } else { Some(r.as_str()) },
+                                    if p.is_empty() { None } else { Some(p.as_str()) },
+                                    if m.is_empty() { None } else { Some(m.as_str()) },
+                                )
+                                .await
+                                {
+                                    Ok(()) => show_toast().success("Defaults saved."),
+                                    Err(e) => show_toast().error(e.message()),
+                                }
+                            });
+                        }
+                    },
+                    "Save"
+                }
+            }
         }
     }
 }

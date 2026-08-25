@@ -1,0 +1,20 @@
+# Operator-facing versions of the two runner binaries.
+# The same number is baked into every OS build of that source, so Linux and
+# Windows can be compared. File hashes still prove the bytes on one OS.
+#
+#   [versions]  — written into staged packages and reported by the bins
+#   [verify]    — what the control plane uses to decide current vs behind
+#
+# Bump [versions] when you restage. Bump [verify] to match. cargo warns
+# when a package version is higher than [verify] (every OS looks wrong).
+#
+#   fleet-host   — pair / heartbeat / lease / official CLI chat
+#   fleet-driver — process worker (ACP)
+
+[versions]
+fleet-host = "0.0.2"
+fleet-driver = "0.0.2"
+
+[verify]
+fleet-host = "0.0.2"
+fleet-driver = "0.0.2"

@@ -1194,6 +1194,19 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     assert_eq!(
+        listed.body["package_versions"]["fleet-host"],
+        fleet_server::package_versions::fleet_host_version(),
+        "list must publish current package versions: {}",
+        listed.body
+    );
+    assert_eq!(
+        listed.body["package_versions"]["fleet-driver"],
+        fleet_server::package_versions::fleet_driver_version(),
+        "{}",
+        listed.body
+    );
+    assert_ne!(listed.body["package_versions"]["fleet-host"], "0.0.0");
+    assert_eq!(
         listed.body["hosts"][0]["kind"], "control_plane",
         "plane is always first: {}",
         listed.body
@@ -1650,8 +1663,8 @@ fn write_platform_manifest(dir: &std::path::Path, platform: &str, host_sha: &str
         "git_sha": git_sha,
         "platform": platform,
         "bins": {
-            "fleet-host": { "sha256": host_sha, "size": 12 },
-            "fleet-driver": { "sha256": "driver-sha", "size": 14 }
+            "fleet-host": { "sha256": host_sha, "size": 12, "version": "0.0.2" },
+            "fleet-driver": { "sha256": "driver-sha", "size": 14, "version": "0.0.2" }
         }
     });
     std::fs::write(
@@ -2380,4 +2393,15 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     )
     .await;
     assert_eq!(fresh.status, StatusCode::OK, "new token: {}", fresh.body);
+}
+
+#[tokio::test]
+async fn local_models_requires_auth() {
+    let (app, _) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let path = format!("/api/workspaces/{ws}/local-models");
+    let anon = call(&app, "GET", &path, None, None).await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED, "{}", anon.body);
+    // Do not assert the 200 catalog body here: catalog() may hit ollama.com.
+    let _ = jar;
 }

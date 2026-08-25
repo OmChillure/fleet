@@ -83,6 +83,34 @@ async fn pair_host(
         .expect("consume_pair_token")
 }
 
+/// Heartbeat that only varies `machine_id` / `agent_runtimes` (the COALESCE pair).
+async fn heartbeat_with_runtimes(
+    pool: &fleet_db::PgPool,
+    host_id: Uuid,
+    machine_id: Option<Uuid>,
+    agent_runtimes: Option<serde_json::Value>,
+) -> fleet_db::models::WorkerHost {
+    worker_hosts::heartbeat_with_machine(
+        pool,
+        host_id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        machine_id,
+        agent_runtimes,
+    )
+    .await
+    .expect("heartbeat_with_machine")
+}
+
 #[test]
 fn pair_token_has_required_prefix_and_entropy() {
     let token = generate_pair_token();
@@ -719,6 +747,192 @@ async fn heartbeat_updates_last_seen_at() {
 }
 
 #[tokio::test]
+async fn heartbeat_with_machine_persists_agent_runtimes() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("runtimes");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    let mid = Uuid::now_v7();
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        &format!("{name}-box"),
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("pair");
+    assert_eq!(
+        paired.host.agent_runtimes,
+        json!([]),
+        "new host defaults to empty agent_runtimes"
+    );
+
+    let runtimes = json!([
+        {
+            "id": "grok",
+            "name": "Grok",
+            "installed": true,
+            "logged_in": true,
+            "models": ["grok-4"],
+            "model_details": [{
+                "name": "grok-4",
+                "efforts": [{"value": "high", "label": "High"}],
+                "default_effort": "high"
+            }]
+        },
+        {
+            "id": "claude",
+            "name": "Claude",
+            "installed": true,
+            "logged_in": false,
+            "models": [],
+            "model_details": []
+        }
+    ]);
+    let after = heartbeat_with_runtimes(&pool, host.id, Some(mid), Some(runtimes.clone())).await;
+    assert_eq!(after.agent_runtimes, runtimes, "Some(json) must persist");
+    assert_eq!(
+        after.machine_id,
+        Some(mid),
+        "machine_id bind must not be swapped with agent_runtimes"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.agent_runtimes, runtimes);
+    assert_eq!(loaded.machine_id, Some(mid));
+
+    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list");
+    let row = listed
+        .iter()
+        .find(|h| h.id == host.id)
+        .expect("listed host");
+    assert_eq!(row.agent_runtimes, runtimes);
+
+    let pub_h = loaded.as_public(Utc::now());
+    assert_eq!(pub_h.agents.len(), 2);
+    assert_eq!(pub_h.agents[0].id, "grok");
+    assert_eq!(pub_h.agents[0].name.as_deref(), Some("Grok"));
+    assert!(pub_h.agents[0].installed);
+    assert!(pub_h.agents[0].logged_in);
+    assert_eq!(pub_h.agents[0].models, vec!["grok-4"]);
+    assert_eq!(pub_h.agents[0].model_details.len(), 1);
+    assert_eq!(pub_h.agents[0].model_details[0].name, "grok-4");
+    assert_eq!(
+        pub_h.agents[0].model_details[0].default_effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(pub_h.agents[1].id, "claude");
+    assert!(!pub_h.agents[1].logged_in);
+
+    let replaced = json!([{
+        "id": "ollama",
+        "name": "Ollama",
+        "installed": true,
+        "logged_in": false,
+        "models": ["llama3"],
+        "model_details": []
+    }]);
+    let again = heartbeat_with_runtimes(&pool, host.id, None, Some(replaced.clone())).await;
+    assert_eq!(
+        again.agent_runtimes, replaced,
+        "a later Some(json) must replace, not merge"
+    );
+    assert_eq!(
+        again.machine_id,
+        Some(mid),
+        "None machine_id must leave the durable id"
+    );
+    assert_eq!(again.as_public(Utc::now()).agents.len(), 1);
+    assert_eq!(again.as_public(Utc::now()).agents[0].id, "ollama");
+}
+
+#[tokio::test]
+async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("keep-rt");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let other_name = unique_slug("other-rt");
+    let (other, other_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &other_name, expires).await;
+    pair_host(&pool, &other_token, &format!("{other_name}-box")).await;
+    let other_runtimes = json!([{
+        "id": "openai",
+        "name": "OpenAI",
+        "installed": true,
+        "logged_in": true,
+        "models": ["gpt-4"],
+        "model_details": []
+    }]);
+    heartbeat_with_runtimes(&pool, other.id, None, Some(other_runtimes.clone())).await;
+
+    let runtimes = json!([
+        {
+            "id": "grok",
+            "name": "Grok",
+            "installed": true,
+            "logged_in": true,
+            "models": ["grok-4"],
+            "model_details": []
+        }
+    ]);
+    heartbeat_with_runtimes(&pool, host.id, None, Some(runtimes.clone())).await;
+
+    let omitted = heartbeat_with_runtimes(&pool, host.id, None, None).await;
+    assert_eq!(
+        omitted.agent_runtimes, runtimes,
+        "None must COALESCE and leave the last report (not reset to [])"
+    );
+
+    let via_wrapper = worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
+    )
+    .await
+    .expect("legacy heartbeat wrapper");
+    assert_eq!(
+        via_wrapper.agent_runtimes, runtimes,
+        "heartbeat() always passes None and must not wipe agent_runtimes"
+    );
+    assert_eq!(via_wrapper.current_jobs, 1);
+
+    let cleared = heartbeat_with_runtimes(&pool, host.id, None, Some(json!([]))).await;
+    assert_eq!(
+        cleared.agent_runtimes,
+        json!([]),
+        "Some([]) is a real empty report and must persist, unlike omitted None"
+    );
+    let stay_empty = heartbeat_with_runtimes(&pool, host.id, None, None).await;
+    assert_eq!(
+        stay_empty.agent_runtimes,
+        json!([]),
+        "None after an empty report must not restore the previous agents"
+    );
+
+    let other_loaded = worker_hosts::get(&pool, other.id)
+        .await
+        .expect("get other")
+        .expect("other host");
+    assert_eq!(
+        other_loaded.agent_runtimes, other_runtimes,
+        "COALESCE on one host must not touch another host's agent_runtimes"
+    );
+}
+
+#[tokio::test]
 async fn list_assignable_excludes_paused_disabled_stale() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -1240,4 +1454,259 @@ async fn stored_online_with_stale_last_seen_serializes_offline() {
             .is_empty(),
         "stale host must not be scheduled"
     );
+}
+
+/// `install_model` queues `install_request` + `install_requested_at`; get() shows the spec.
+#[tokio::test]
+async fn patch_install_model_persists_install_request_on_paired_host() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("instreq");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let spec = json!({ "provider": "ollama", "spec": "llama3" });
+    let before = Utc::now();
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(spec.clone()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch install_model");
+    assert_eq!(patched.install_request.as_ref(), Some(&spec));
+    let requested_at = patched
+        .install_requested_at
+        .expect("install_requested_at must be set");
+    assert!(
+        requested_at >= before,
+        "install_requested_at must be at or after the patch"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.install_request.as_ref(), Some(&spec));
+    assert_eq!(
+        loaded
+            .install_request
+            .as_ref()
+            .and_then(|v| v.get("spec"))
+            .and_then(|v| v.as_str()),
+        Some("llama3"),
+        "queued spec must be visible on get()"
+    );
+    assert_eq!(loaded.install_requested_at, Some(requested_at));
+}
+
+/// Mismatched ack spec must not clear a queued install (`llama3` vs `other-spec`).
+#[tokio::test]
+async fn clear_install_request_if_other_spec_does_not_clear() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("inst-mismatch");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let spec = json!({ "provider": "ollama", "spec": "llama3" });
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(spec.clone()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("queue install_request");
+
+    let err = worker_hosts::clear_install_request_if(&pool, host.id, Some("other-spec"))
+        .await
+        .expect_err("mismatch must not clear the queued spec");
+    match err {
+        DbError::NotFound(msg) => {
+            assert!(
+                msg.contains("not found"),
+                "mismatch currently returns NotFound: {msg}"
+            );
+        }
+        other => panic!("expected NotFound on spec mismatch, got {other:?}"),
+    }
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        loaded.install_request.as_ref(),
+        Some(&spec),
+        "queued install_request must survive a mismatched ack"
+    );
+    assert!(
+        loaded.install_requested_at.is_some(),
+        "install_requested_at must stay set after a mismatch"
+    );
+}
+
+/// Matching ack spec clears both `install_request` and `install_requested_at`.
+#[tokio::test]
+async fn clear_install_request_if_matching_spec_clears() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("inst-match");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(json!({ "provider": "ollama", "spec": "llama3" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("queue install_request");
+
+    let cleared = worker_hosts::clear_install_request_if(&pool, host.id, Some("llama3"))
+        .await
+        .expect("matching spec must clear");
+    assert!(
+        cleared.install_request.is_none(),
+        "matching ack must drop install_request"
+    );
+    assert!(
+        cleared.install_requested_at.is_none(),
+        "matching ack must drop install_requested_at"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert!(loaded.install_request.is_none());
+    assert!(loaded.install_requested_at.is_none());
+}
+
+/// Null keys drop on merge; settings_gen bumps when runtime_settings change.
+#[tokio::test]
+async fn patch_runtime_settings_merges_and_null_drops_key() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("rt-settings");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let before = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    let gen_before = before.settings_gen;
+    assert_eq!(before.runtime_settings, json!({}));
+
+    let first = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            runtime_settings: Some(json!({ "harness": "grok" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch harness");
+    assert_eq!(first.runtime_settings, json!({ "harness": "grok" }));
+
+    let second = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            runtime_settings: Some(json!({ "effort": "high", "harness": null })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch merge + null");
+    assert_eq!(
+        second.runtime_settings,
+        json!({ "effort": "high" }),
+        "effort stays; harness key must be gone after null merge"
+    );
+    assert!(
+        second.runtime_settings.get("harness").is_none(),
+        "null incoming value must remove the key"
+    );
+    assert!(
+        second.settings_gen > gen_before,
+        "runtime_settings patches must bump settings_gen ({gen} vs {gen_before})",
+        gen = second.settings_gen
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.runtime_settings, json!({ "effort": "high" }));
+    assert_eq!(loaded.settings_gen, second.settings_gen);
+}
+
+/// Heartbeat `runtime_reported` is informational and must not ack pending settings.
+#[tokio::test]
+async fn set_runtime_reported_does_not_change_settings_ack_gen() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("rt-reported");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("bump settings_gen");
+    assert!(patched.settings_gen > 0);
+    let ack_before = patched.settings_ack_gen;
+    assert_eq!(ack_before, 0);
+    assert!(
+        patched.settings_pending(),
+        "settings patch must leave apply pending"
+    );
+    let settings_gen = patched.settings_gen;
+
+    worker_hosts::set_runtime_reported(&pool, host.id, json!({ "ok": true }))
+        .await
+        .expect("set_runtime_reported");
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        loaded.settings_ack_gen, ack_before,
+        "runtime_reported must not change settings_ack_gen"
+    );
+    assert_eq!(loaded.settings_gen, settings_gen);
+    assert!(
+        loaded.settings_pending(),
+        "pending apply must stay pending after runtime_reported"
+    );
+    assert_eq!(loaded.runtime_reported, json!({ "ok": true }));
 }

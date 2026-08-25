@@ -81,6 +81,57 @@ pub async fn list_unpublished(pool: &PgPool, limit: i64) -> DbResult<Vec<Control
         .map_err(map_query_err)
 }
 
+/// Workspace-scoped list (`body.workspace_id` or `body.tenant_id`).
+/// [`list_unpublished`] is the global outbox drain, not a tenant API.
+pub async fn list_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    limit: i64,
+) -> DbResult<Vec<ControlPlaneEvent>> {
+    let limit = limit.clamp(1, 1000);
+    let q = format!(
+        r#"
+        SELECT {EVENT_COLS}
+        FROM control_plane_events
+        WHERE body->>'workspace_id' = $1::text
+           OR body->>'tenant_id' = $1::text
+        ORDER BY created_at ASC, id ASC
+        LIMIT $2
+        "#
+    );
+    sqlx::query_as::<_, ControlPlaneEvent>(&q)
+        .bind(workspace_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Workspace-scoped get by outbox row id. Foreign workspace → `None`.
+pub async fn get_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<ControlPlaneEvent>> {
+    let q = format!(
+        r#"
+        SELECT {EVENT_COLS}
+        FROM control_plane_events
+        WHERE id = $2
+          AND (
+              body->>'workspace_id' = $1::text
+              OR body->>'tenant_id' = $1::text
+          )
+        "#
+    );
+    sqlx::query_as::<_, ControlPlaneEvent>(&q)
+        .bind(workspace_id)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Stamp `published_at` when still unpublished. `id` is the outbox row PK.
 pub async fn mark_published(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     let res = sqlx::query(

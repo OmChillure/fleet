@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::chat::{ChatModelInfo, ChatProviderInfo, ChatProgress};
+use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
 };
 use crate::state::AppState;
 
@@ -19,8 +19,13 @@ const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 const ANTHROPIC_DEFAULT_BASE: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-pub const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-pub const CLAUDE_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+fn openai_default_model(models: &[ChatModelInfo]) -> Option<String> {
+    models.first().map(|m| m.name.clone())
+}
+
+fn claude_default_model(models: &[ChatModelInfo]) -> Option<String> {
+    models.first().map(|m| m.name.clone())
+}
 
 #[derive(Clone, Debug)]
 pub struct OpenaiConfig {
@@ -93,11 +98,7 @@ fn env_opt(name: &str) -> Option<String> {
 }
 
 fn openai_models() -> Vec<ChatModelInfo> {
-    split_models(
-        env::var("OPENAI_MODELS").ok().as_deref(),
-        &[OPENAI_DEFAULT_MODEL, "gpt-4o", "gpt-4.1"],
-        "openai",
-    )
+    split_models(env::var("OPENAI_MODELS").ok().as_deref(), "openai")
 }
 
 fn claude_models() -> Vec<ChatModelInfo> {
@@ -106,12 +107,11 @@ fn claude_models() -> Vec<ChatModelInfo> {
             .ok()
             .or_else(|| env::var("CLAUDE_MODELS").ok())
             .as_deref(),
-        &[CLAUDE_DEFAULT_MODEL, "claude-opus-4-6", "claude-haiku-4-5"],
         "claude",
     )
 }
 
-fn split_models(raw: Option<&str>, defaults: &[&str], family: &str) -> Vec<ChatModelInfo> {
+fn split_models(raw: Option<&str>, family: &str) -> Vec<ChatModelInfo> {
     let names: Vec<String> = raw
         .map(|s| {
             s.split(',')
@@ -119,8 +119,7 @@ fn split_models(raw: Option<&str>, defaults: &[&str], family: &str) -> Vec<ChatM
                 .filter(|p| !p.is_empty())
                 .collect()
         })
-        .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| defaults.iter().map(|s| (*s).to_string()).collect());
+        .unwrap_or_default();
     names
         .into_iter()
         .map(|name| ChatModelInfo {
@@ -141,28 +140,32 @@ pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
             coming_soon: false,
             error: Some("OpenAI is disabled (OPENAI_ENABLED=false)".into()),
             models: vec![],
-            default_model: Some(OPENAI_DEFAULT_MODEL.into()),
+            default_model: None,
         };
     }
     if !cfg.available() {
+        let models = openai_models();
+        let default_model = openai_default_model(&models);
         return ChatProviderInfo {
             id: "openai".into(),
             name: "OpenAI".into(),
             available: false,
             coming_soon: false,
             error: Some("Set OPENAI_API_KEY to enable OpenAI chat.".into()),
-            models: openai_models(),
-            default_model: Some(OPENAI_DEFAULT_MODEL.into()),
+            models,
+            default_model,
         };
     }
+    let models = openai_models();
+    let default_model = openai_default_model(&models);
     ChatProviderInfo {
         id: "openai".into(),
         name: "OpenAI".into(),
         available: true,
         coming_soon: false,
         error: None,
-        models: openai_models(),
-        default_model: Some(OPENAI_DEFAULT_MODEL.into()),
+        models,
+        default_model,
     }
 }
 
@@ -175,28 +178,32 @@ pub fn claude_status(cfg: &ClaudeConfig) -> ChatProviderInfo {
             coming_soon: false,
             error: Some("Claude is disabled".into()),
             models: vec![],
-            default_model: Some(CLAUDE_DEFAULT_MODEL.into()),
+            default_model: None,
         };
     }
     if !cfg.available() {
+        let models = claude_models();
+        let default_model = claude_default_model(&models);
         return ChatProviderInfo {
             id: "claude".into(),
             name: "Claude".into(),
             available: false,
             coming_soon: false,
             error: Some("Set ANTHROPIC_API_KEY to enable Claude chat.".into()),
-            models: claude_models(),
-            default_model: Some(CLAUDE_DEFAULT_MODEL.into()),
+            models,
+            default_model,
         };
     }
+    let models = claude_models();
+    let default_model = claude_default_model(&models);
     ChatProviderInfo {
         id: "claude".into(),
         name: "Claude".into(),
         available: true,
         coming_soon: false,
         error: None,
-        models: claude_models(),
-        default_model: Some(CLAUDE_DEFAULT_MODEL.into()),
+        models,
+        default_model,
     }
 }
 
@@ -338,14 +345,22 @@ pub async fn openai_chat_with_tools(
     model: &str,
     history: &[(String, String)],
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+    runner_id: Option<Uuid>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
     if !cfg.available() {
         return Err(AppError::bad_request(
             "OpenAI is not configured (set OPENAI_API_KEY)".to_string(),
         ));
     }
+    let fallback = openai_default_model(&openai_models()).unwrap_or_default();
     let model = if model.trim().is_empty() {
-        OPENAI_DEFAULT_MODEL
+        if fallback.is_empty() {
+            return Err(AppError::bad_request(
+                "no OpenAI model listed — set OPENAI_MODELS or pick one from the runner"
+                    .to_string(),
+            ));
+        }
+        fallback.as_str()
     } else {
         model.trim()
     };
@@ -426,18 +441,13 @@ pub async fn openai_chat_with_tools(
             let llm = ChatLlmContext {
                 provider: "openai".into(),
                 model: model.to_string(),
+                runner_id,
+                effort: None,
             };
             let prior: Vec<Value> = actions.iter().filter_map(|a| a.detail.clone()).collect();
-            let (result_json, action) = execute_tool_with_retry(
-                state,
-                workspace_id,
-                user_id,
-                name,
-                &args,
-                &llm,
-                &prior,
-            )
-            .await;
+            let (result_json, action) =
+                execute_tool_with_retry(state, workspace_id, user_id, name, &args, &llm, &prior)
+                    .await;
             emit(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
             messages.push(json!({
@@ -594,14 +604,22 @@ pub async fn claude_chat_with_tools(
     model: &str,
     history: &[(String, String)],
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+    runner_id: Option<Uuid>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
     if !cfg.available() {
         return Err(AppError::bad_request(
             "Claude is not configured (set ANTHROPIC_API_KEY)".to_string(),
         ));
     }
+    let fallback = claude_default_model(&claude_models()).unwrap_or_default();
     let model = if model.trim().is_empty() {
-        CLAUDE_DEFAULT_MODEL
+        if fallback.is_empty() {
+            return Err(AppError::bad_request(
+                "no Claude model listed — set CLAUDE_MODELS or pick one from the runner"
+                    .to_string(),
+            ));
+        }
+        fallback.as_str()
     } else {
         model.trim()
     };
@@ -633,8 +651,11 @@ pub async fn claude_chat_with_tools(
         if !parsed.model.is_empty() {
             used_model = parsed.model.clone();
         }
-        let tool_uses: Vec<&AnthropicBlock> =
-            parsed.content.iter().filter(|b| b.kind == "tool_use").collect();
+        let tool_uses: Vec<&AnthropicBlock> = parsed
+            .content
+            .iter()
+            .filter(|b| b.kind == "tool_use")
+            .collect();
         let text = parsed
             .content
             .iter()
@@ -686,7 +707,10 @@ pub async fn claude_chat_with_tools(
         for call in tool_uses {
             let name = call.name.as_deref().unwrap_or("").trim();
             let args = tool_args_value(&call.input);
-            let id = call.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+            let id = call
+                .id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             emit(
                 &progress,
                 ChatProgress::Status {
@@ -697,18 +721,13 @@ pub async fn claude_chat_with_tools(
             let llm = ChatLlmContext {
                 provider: "claude".into(),
                 model: model.to_string(),
+                runner_id,
+                effort: None,
             };
             let prior: Vec<Value> = actions.iter().filter_map(|a| a.detail.clone()).collect();
-            let (result_json, action) = execute_tool_with_retry(
-                state,
-                workspace_id,
-                user_id,
-                name,
-                &args,
-                &llm,
-                &prior,
-            )
-            .await;
+            let (result_json, action) =
+                execute_tool_with_retry(state, workspace_id, user_id, name, &args, &llm, &prior)
+                    .await;
             emit(&progress, ChatProgress::from_action(&action)).await;
             actions.push(action);
             tool_results.push(json!({

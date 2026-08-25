@@ -24,6 +24,86 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+fn sanitize_model_details(v: Option<&Value>) -> Value {
+    let Some(arr) = v.and_then(|x| x.as_array()) else {
+        return json!([]);
+    };
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let name = obj.get("name")?.as_str()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let efforts: Vec<Value> = obj
+                    .get("efforts")
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                let value = e
+                                    .get("value")
+                                    .or_else(|| e.get("id"))
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if value.is_empty() {
+                                    return None;
+                                }
+                                Some(json!({
+                                    "value": value,
+                                    "label": e.get("label").and_then(|l| l.as_str()),
+                                }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(json!({
+                    "name": name,
+                    "efforts": efforts,
+                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+fn sanitize_heartbeat_agents(v: Value) -> Value {
+    let Some(arr) = v.as_array() else {
+        return json!([]);
+    };
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let id = obj.get("id")?.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                let models: Vec<String> = obj
+                    .get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model_details = sanitize_model_details(obj.get("model_details"));
+                Some(json!({
+                    "id": id,
+                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "models": models,
+                    "model_details": model_details,
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
 const PAIR_TTL: Duration = Duration::hours(1);
 const LEASE_FOR: Duration = Duration::minutes(2);
 const ROLE_OWNER: &str = "owner";
@@ -31,6 +111,14 @@ pub const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/workspaces/{workspace_id}/local-models",
+            get(http_local_models),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/local-models/{name}/tags",
+            get(http_local_model_tags),
+        )
         .route(
             "/api/workspaces/{workspace_id}/worker-hosts",
             get(http_list).post(http_create),
@@ -51,6 +139,29 @@ pub fn router() -> Router<AppState> {
             "/api/worker-hosts/me/lease/{claim_id}/complete",
             post(http_complete),
         )
+}
+
+async fn http_local_models(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<crate::local_models::LocalModelCatalog>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    Ok(Json(crate::local_models::catalog().await))
+}
+
+async fn http_local_model_tags(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, name)): Path<(Uuid, String)>,
+) -> AppResult<Json<crate::local_models::LocalModelTags>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    if !crate::local_models::library_slug_ok(&name) {
+        return Err(AppError::bad_request(
+            "model name must be a library slug (no path or punctuation)".to_string(),
+        ));
+    }
+    Ok(Json(crate::local_models::tags_for(&name).await))
 }
 
 fn auth_state(state: &AppState) -> AuthState {
@@ -89,12 +200,161 @@ fn parse_machine_id(raw: Option<&str>) -> Option<Uuid> {
 }
 
 fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSoftwareManifest> {
-    crate::install_routes::load_platform_manifest(state, host.platform.as_deref())
+    let staged = crate::install_routes::load_platform_manifest(state, host.platform.as_deref())?;
+    // Cargo-run plane box already on this package version: do not hand it
+    // the staged tarball (different artifact, same number). When it is
+    // behind, send desired so auto-update can apply — withholding it is
+    // why 5700g stayed behind with auto_update on.
+    if should_withhold_desired(host, &staged, &local_hostname()) {
+        return None;
+    }
+    Some(staged)
+}
+
+/// This-machine skip only when both bins already report the staged versions.
+fn should_withhold_desired(
+    host: &WorkerHost,
+    staged: &fleet_db::WorkerSoftwareManifest,
+    local: &str,
+) -> bool {
+    host_is_this_machine(host, local)
+        && host_on_manifest_versions(host.software_bins.as_ref(), staged)
+}
+
+fn host_on_manifest_versions(
+    bins: Option<&serde_json::Value>,
+    staged: &fleet_db::WorkerSoftwareManifest,
+) -> bool {
+    let Some(bins) = bins else {
+        return false;
+    };
+    for stem in ["fleet-host", "fleet-driver"] {
+        let got = reported_pkg_version(bins, stem).unwrap_or_default();
+        let want = staged_pkg_version(staged, stem).unwrap_or_default();
+        if got.is_empty() || want.is_empty() || !got.eq_ignore_ascii_case(&want) {
+            return false;
+        }
+    }
+    true
+}
+
+fn reported_pkg_version(bins: &serde_json::Value, stem: &str) -> Option<String> {
+    let obj = bins.as_object()?;
+    let exe = format!("{stem}.exe");
+    let v = obj.get(stem).or_else(|| obj.get(exe.as_str()))?;
+    let s = v.get("version")?.as_str()?.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+fn staged_pkg_version(staged: &fleet_db::WorkerSoftwareManifest, stem: &str) -> Option<String> {
+    let exe = format!("{stem}.exe");
+    staged
+        .bins
+        .get(stem)
+        .or_else(|| staged.bins.get(exe.as_str()))
+        .and_then(|b| b.version.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn host_reports_plane_bake(host: &WorkerHost) -> bool {
+    sha_matches_plane(host.software_git_sha.as_deref(), plane_git_sha())
+}
+
+/// True when the host already runs this process's bake. Those boxes are
+/// current and must not be handed the last staged dist (often older).
+fn sha_matches_plane(got: Option<&str>, plane: Option<&str>) -> bool {
+    match (
+        got.map(str::trim).filter(|s| !s.is_empty()),
+        plane.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (Some(got), Some(plane)) => got.eq_ignore_ascii_case(plane),
+        _ => false,
+    }
+}
+
+fn local_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_default()
+}
+
+fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
+    if !local.is_empty()
+        && host
+            .hostname
+            .as_deref()
+            .is_some_and(|h| h.eq_ignore_ascii_case(local))
+    {
+        return true;
+    }
+    let mut advertised = host
+        .hardware
+        .as_ref()
+        .and_then(|h| h.get("addrs"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()));
+    let local_ips = local_nonloopback_ips();
+    advertised.any(|a| local_ips.iter().any(|b| a.eq_ignore_ascii_case(b)))
+}
+
+fn local_nonloopback_ips() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
+        for tok in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+            if tok != "127.0.0.1" && tok != "::1" {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn origin_is_loopback(headers: &HeaderMap) -> bool {
+    for key in [header::ORIGIN, header::REFERER] {
+        let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
+            continue;
+        };
+        let v = raw.to_ascii_lowercase();
+        if v.contains("localhost") || v.contains("127.0.0.1") || v.contains("[::1]") {
+            return true;
+        }
+    }
+    false
 }
 
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
-    host.as_public(Utc::now())
-        .with_desired(desired_for(state, host))
+    host_json_for_viewer(state, host, false)
+}
+
+fn host_json_for_viewer(
+    state: &AppState,
+    host: &WorkerHost,
+    viewer_loopback: bool,
+) -> WorkerHostPublic {
+    let mut public = host
+        .as_public(Utc::now())
+        .with_desired(desired_for(state, host));
+    // This-machine skip only withholds the staged tarball when the box is
+    // already on that package version (`desired_for`). Do not force
+    // "current" here — the card compares package versions.
+    let plane_box = host_is_this_machine(host, &local_hostname());
+    public.is_control_plane_box = plane_box;
+    // Only the browser on the plane box (localhost UI) is "this machine".
+    // Opening the LAN URL from another PC must not tag the plane.
+    public.is_this_machine = plane_box && viewer_loopback;
+    public
 }
 
 fn plane_git_sha() -> Option<&'static str> {
@@ -120,6 +380,15 @@ fn api_base(state: &AppState) -> String {
         .api_public_base
         .trim_end_matches('/')
         .to_string()
+}
+
+/// LAN URL workers should call. OAuth stays on `API_PUBLIC_BASE` (localhost).
+fn worker_api_base(state: &AppState) -> String {
+    std::env::var("WORKER_PUBLIC_BASE")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| api_base(state))
 }
 
 fn install_hint(api: &str, pair_token: &str) -> String {
@@ -163,7 +432,7 @@ fn created_payload(
     pair_token: &str,
     pair_expires_at: chrono::DateTime<Utc>,
 ) -> Value {
-    let api = api_base(state);
+    let api = worker_api_base(state);
     json!({
         "host": host_json(state, host),
         "pair_token": pair_token,
@@ -193,6 +462,84 @@ fn validate_max_job_timeout_s(n: i32) -> AppResult<()> {
 fn validate_isolation(raw: &str) -> AppResult<&'static str> {
     parse_worker_host_isolation(raw)
         .ok_or_else(|| AppError::bad_request("isolation must be native or sandboxed"))
+}
+
+const RUNTIME_KEYS: &[&str] = &[
+    "work_dir",
+    "ollama_models_dir",
+    "run_host",
+    "run_container",
+    "container_backend",
+    "docker_image",
+    "docker_network",
+    "k8s_namespace",
+    "k3d_cluster",
+    "k3d_memory",
+    "k3d_agents",
+    "allow_privileged",
+    "k8s_cpu",
+    "k8s_memory",
+    "k8s_ephemeral",
+    "egress_mode",
+];
+
+fn validate_runtime_path(key: &str, raw: &str) -> AppResult<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(String::new());
+    }
+    if s.len() > 512
+        || s.chars()
+            .any(|c| c.is_control() || c == ';' || c == '|' || c == '&')
+    {
+        return Err(AppError::bad_request(format!(
+            "runtime_settings.{key} looks unsafe"
+        )));
+    }
+    Ok(s.to_string())
+}
+
+fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+    let Some(obj) = v.as_object() else {
+        return Err(AppError::bad_request(
+            "runtime_settings must be an object".to_string(),
+        ));
+    };
+    let mut out = serde_json::Map::new();
+    for (k, val) in obj {
+        if !RUNTIME_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        match k.as_str() {
+            "run_host" | "run_container" | "allow_privileged" => {
+                if let Some(b) = val.as_bool() {
+                    out.insert(k.clone(), json!(b));
+                }
+            }
+            "k3d_agents" => {
+                if let Some(n) = val.as_i64() {
+                    out.insert(k.clone(), json!(n.clamp(0, 16)));
+                }
+            }
+            "container_backend" => {
+                let s = val.as_str().unwrap_or("").trim().to_ascii_lowercase();
+                if s == "k3d" || s == "docker" {
+                    out.insert(k.clone(), json!(s));
+                }
+            }
+            "egress_mode" => {
+                let s = val.as_str().unwrap_or("").trim().to_ascii_lowercase();
+                if s == "none" || s == "dns_only" || s == "allowlist" {
+                    out.insert(k.clone(), json!(s));
+                }
+            }
+            other => {
+                let s = val.as_str().unwrap_or("");
+                out.insert(other.to_string(), json!(validate_runtime_path(other, s)?));
+            }
+        }
+    }
+    Ok(Value::Object(out))
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +580,18 @@ pub struct PatchWorkerHostBody {
     pub auto_update: Option<bool>,
     #[serde(default)]
     pub request_update: Option<bool>,
+    #[serde(default)]
+    pub install_model: Option<InstallModelBody>,
+    #[serde(default)]
+    pub runtime_settings: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct InstallModelBody {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub spec: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,12 +638,31 @@ pub struct HeartbeatBody {
     /// Optional; omitted by hosts built before version reporting.
     #[serde(default)]
     pub software: Option<HeartbeatSoftware>,
+    /// Official agent CLIs. Tokens must never appear here.
+    #[serde(default)]
+    pub agents: Option<serde_json::Value>,
     /// Optional machine snapshot (cores / RAM / OS).
     #[serde(default)]
     pub hardware: Option<serde_json::Value>,
     /// Last `settings_gen` this box applied from a heartbeat response.
     #[serde(default)]
     pub settings_ack_gen: Option<i32>,
+    /// Host finished (or failed) the queued model install.
+    #[serde(default)]
+    pub install_ack: Option<InstallAckBody>,
+    /// Current LocalConfig snapshot (work dir, Ollama models dir, k8s knobs).
+    #[serde(default)]
+    pub runtime: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallAckBody {
+    #[serde(default)]
+    pub spec: Option<String>,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +681,9 @@ pub struct CompleteBody {
     pub ok: bool,
     #[serde(default)]
     pub error: Option<String>,
+    /// chat_turn: `{ text, model }` from the official CLI on the runner.
+    #[serde(default)]
+    pub result: Option<Value>,
 }
 
 async fn http_create(
@@ -347,18 +728,40 @@ async fn http_create(
 async fn http_list(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
+    let viewer_loopback = origin_is_loopback(&headers);
     let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
     let cluster = host_repo::list_cluster(&state.db).await?;
     let plane = plane_public(&state, workspace_id).await?;
-    let mut hosts = Vec::with_capacity(rows.len() + cluster.len() + 1);
-    hosts.push(plane);
+    let now = Utc::now();
+    let cluster_fresh: Vec<_> = cluster
+        .into_iter()
+        .filter(|h| {
+            h.workspace_id == workspace_id
+                || h.last_seen_at
+                    .is_some_and(|t| now.signed_duration_since(t) < chrono::Duration::minutes(30))
+        })
+        .collect();
+    let local = local_hostname();
+    let this_machine_present = rows
+        .iter()
+        .chain(cluster_fresh.iter())
+        .any(|h| host_is_this_machine(h, &local));
+    let mut hosts = Vec::with_capacity(rows.len() + cluster_fresh.len() + 1);
+    // Same box as the API: that fleet-host *is* the control plane runner.
+    // The leftover synthetic card is hidden.
+    if !this_machine_present {
+        let mut plane = plane;
+        plane.is_this_machine = viewer_loopback;
+        hosts.push(plane);
+    }
     let mut seen = std::collections::HashSet::new();
-    for h in rows.iter().chain(cluster.iter()) {
+    for h in rows.iter().chain(cluster_fresh.iter()) {
         if seen.insert(h.id) {
-            hosts.push(host_json(&state, h));
+            hosts.push(host_json_for_viewer(&state, h, viewer_loopback));
         }
     }
     let packages = crate::install_routes::list_dist_packages(&state);
@@ -371,6 +774,10 @@ async fn http_list(
         "hosts": hosts,
         "packages": packages,
         "plane_git_sha": plane_git_sha(),
+        "package_versions": {
+            "fleet-host": crate::package_versions::fleet_host_version(),
+            "fleet-driver": crate::package_versions::fleet_driver_version(),
+        },
         "sandbox_backend": sandbox_backend,
     })))
 }
@@ -380,9 +787,26 @@ async fn load_in_workspace(
     workspace_id: Uuid,
     host_id: Uuid,
 ) -> AppResult<WorkerHost> {
-    host_repo::get_in_workspace(&state.db, workspace_id, host_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("worker host not found"))
+    load_visible_host(state, workspace_id, host_id).await
+}
+
+/// Workspace-owned, or a cluster host listed on every workspace.
+pub(crate) async fn load_visible_host(
+    state: &AppState,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorkerHost> {
+    if let Some(host) = host_repo::get_in_workspace(&state.db, workspace_id, host_id).await? {
+        return Ok(host);
+    }
+    match host_repo::get(&state.db, host_id).await? {
+        Some(host) if host.labels.iter().any(|l| l == "cluster") => Ok(host),
+        Some(host) => Err(AppError::not_found(format!(
+            "worker belongs to another workspace ({})",
+            host.workspace_id
+        ))),
+        None => Err(AppError::not_found("worker host not found")),
+    }
 }
 
 async fn http_get(
@@ -460,6 +884,37 @@ async fn http_patch(
         labels: body.labels,
         auto_update: body.auto_update,
         request_update: body.request_update,
+        runtime_settings: match body.runtime_settings {
+            Some(v) => Some(validate_runtime_settings(v)?),
+            None => None,
+        },
+        install_model: match body.install_model {
+            Some(m) => {
+                let spec = m.spec.trim().to_string();
+                let provider = m.provider.trim().to_ascii_lowercase();
+                if spec.is_empty() {
+                    return Err(AppError::bad_request(
+                        "install_model.spec is required (model name or URL)".to_string(),
+                    ));
+                }
+                if provider != "ollama" {
+                    return Err(AppError::bad_request(
+                        "only ollama model installs are supported from the UI".to_string(),
+                    ));
+                }
+                if spec.len() > 512
+                    || spec
+                        .chars()
+                        .any(|c| c.is_control() || c == ';' || c == '|' || c == '&')
+                {
+                    return Err(AppError::bad_request(
+                        "install_model.spec looks unsafe".to_string(),
+                    ));
+                }
+                Some(json!({ "provider": "ollama", "spec": spec }))
+            }
+            None => None,
+        },
     };
     let host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
     Ok(Json(host_json(&state, &host)))
@@ -476,7 +931,19 @@ async fn http_delete(
             "the control plane runner cannot be removed",
         ));
     }
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    match load_in_workspace(&state, workspace_id, host_id).await {
+        Ok(_) => {}
+        Err(e) => {
+            // Already gone from this workspace.
+            if let Ok(Some(existing)) = host_repo::get(&state.db, host_id).await {
+                return Err(AppError::not_found(format!(
+                    "worker belongs to another workspace ({})",
+                    existing.workspace_id
+                )));
+            }
+            return Err(e);
+        }
+    }
     let host = host_repo::revoke(&state.db, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -567,7 +1034,7 @@ fn paired_payload(state: &AppState, host: &WorkerHost, machine_token: &str) -> V
         "host_id": host.id,
         "machine_token": machine_token,
         "workspace_id": host.workspace_id,
-        "control_plane_url": api_base(state),
+        "control_plane_url": worker_api_base(state),
         "cp_settings": cp_settings_json(host),
     })
 }
@@ -689,6 +1156,7 @@ async fn http_heartbeat(
         sw.and_then(|s| s.updating),
         body.hardware.clone(),
         parse_machine_id(body.machine_id.as_deref()),
+        body.agents.clone().map(sanitize_heartbeat_agents),
     )
     .await?;
     let host = if let Some(n) = body.settings_ack_gen {
@@ -698,12 +1166,27 @@ async fn http_heartbeat(
     } else {
         host
     };
+    let host = if let Some(ack) = body.install_ack.as_ref() {
+        host_repo::clear_install_request_if(
+            &state.db,
+            host.id,
+            ack.spec.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        )
+        .await
+        .unwrap_or(host)
+    } else {
+        host
+    };
+    if let Some(rt) = body.runtime.clone() {
+        let _ = host_repo::set_runtime_reported(&state.db, host.id, rt).await;
+    }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
     Ok(Json(json!({
         "host": public,
         "effective": effective_json(&host),
         "desired": desired,
+        "install": host.install_request,
     })))
 }
 
@@ -752,11 +1235,31 @@ async fn http_complete(
     // worker_sessions row is still live would double-spawn.
     // Claim workspace, not the host's home workspace — cluster hosts lease
     // jobs for other workspaces.
-    let held =
-        work_claims::complete_owned(&state.db, claim_id, lease_token, host.id, claim.workspace_id)
-            .await?;
+    let held = if claim.kind == "chat_turn" {
+        work_claims::complete_owned_with_result(
+            &state.db,
+            claim_id,
+            lease_token,
+            host.id,
+            claim.workspace_id,
+            body.result.clone(),
+        )
+        .await?
+    } else {
+        work_claims::complete_owned(
+            &state.db,
+            claim_id,
+            lease_token,
+            host.id,
+            claim.workspace_id,
+        )
+        .await?
+    };
     if !held {
         return Err(AppError::conflict("lease not held or already finished"));
+    }
+    if claim.kind == "chat_turn" {
+        return Ok(Json(json!({ "ok": body.ok })));
     }
     let session_id = claim
         .payload
@@ -819,4 +1322,152 @@ async fn http_complete(
         }
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod plane_bake_tests {
+    use super::{host_on_manifest_versions, sha_matches_plane, should_withhold_desired};
+    use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn matching_sha_is_plane_bake() {
+        assert!(sha_matches_plane(Some("abc123"), Some("abc123")));
+        assert!(sha_matches_plane(Some("ABC123"), Some("abc123")));
+        assert!(sha_matches_plane(Some("  abc123  "), Some("abc123")));
+    }
+
+    #[test]
+    fn missing_or_different_sha_is_not_plane_bake() {
+        assert!(!sha_matches_plane(None, Some("abc123")));
+        assert!(!sha_matches_plane(Some("abc123"), None));
+        assert!(!sha_matches_plane(Some(""), Some("abc123")));
+        assert!(!sha_matches_plane(Some("abc123"), Some("")));
+        assert!(!sha_matches_plane(Some("old-dist"), Some("abc123")));
+    }
+
+    fn staged(host_ver: &str, driver_ver: &str) -> WorkerSoftwareManifest {
+        let mut bins = BTreeMap::new();
+        bins.insert(
+            "fleet-host".into(),
+            WorkerBinMeta {
+                sha256: "staged-host".into(),
+                size: 10,
+                version: Some(host_ver.into()),
+            },
+        );
+        bins.insert(
+            "fleet-driver".into(),
+            WorkerBinMeta {
+                sha256: "staged-driver".into(),
+                size: 12,
+                version: Some(driver_ver.into()),
+            },
+        );
+        WorkerSoftwareManifest {
+            git_sha: "stage".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins,
+        }
+    }
+
+    fn plane_host(hostname: &str, bins: Option<serde_json::Value>) -> WorkerHost {
+        let now = chrono::Utc::now();
+        WorkerHost {
+            id: uuid::Uuid::now_v7(),
+            workspace_id: uuid::Uuid::now_v7(),
+            name: hostname.into(),
+            status: "online".into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            isolation: "native".into(),
+            allow_host: true,
+            allow_container: false,
+            max_concurrent: 2,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: None,
+            advertised_host: true,
+            advertised_container: false,
+            platform: Some("linux-x86_64".into()),
+            hostname: Some(hostname.into()),
+            last_seen_at: Some(now),
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: bins,
+            software_reported_at: Some(now),
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            agent_runtimes: json!([]),
+            settings_gen: 0,
+            settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: json!({}),
+            runtime_reported: json!({}),
+            created_by: None,
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn this_machine_behind_must_receive_desired() {
+        let staged = staged("0.0.2", "0.0.2");
+        let host = plane_host(
+            "viny-5700g",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        assert!(
+            !should_withhold_desired(&host, &staged, "viny-5700g"),
+            "behind plane box must get desired so auto-update can apply"
+        );
+        assert!(!host_on_manifest_versions(
+            host.software_bins.as_ref(),
+            &staged
+        ));
+    }
+
+    #[test]
+    fn this_machine_on_current_version_withholds_tarball() {
+        let staged = staged("0.0.2", "0.0.2");
+        let host = plane_host(
+            "viny-5700g",
+            Some(json!({
+                "fleet-host": {"sha256": "cargo", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
+            })),
+        );
+        assert!(should_withhold_desired(&host, &staged, "viny-5700g"));
+        let remote = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": "cargo", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
+            })),
+        );
+        assert!(
+            !should_withhold_desired(&remote, &staged, "viny-5700g"),
+            "remote hosts still receive desired"
+        );
+    }
+
+    #[test]
+    fn this_machine_without_report_must_receive_desired() {
+        let staged = staged("0.0.2", "0.0.2");
+        let host = plane_host("viny-5700g", None);
+        assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+    }
 }

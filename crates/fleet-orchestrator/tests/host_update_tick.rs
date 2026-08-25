@@ -1,4 +1,5 @@
 //! Tick must not local-spawn while a paired host is mid host-bin restart.
+//! Kill mid-swap + auto_update on holds ready; no local SANDBOX_BACKEND, no token rotate.
 //! Offline without `software_updating` keeps today's local fallback.
 //! Requires DATABASE_URL.
 
@@ -218,4 +219,74 @@ async fn tick_offline_host_without_updating_leaves_ready() {
         "no local session: {:?}",
         snap.sessions
     );
+}
+
+/// Guest killed mid host-bin swap (`software_updating`, last_seen stale but
+/// inside the 2 min hold). `auto_update` on must not fail over to the test
+/// local SANDBOX_BACKEND (`with_local_spawn`) and must not rotate the token.
+#[tokio::test]
+async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("upd-kill-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    seed_workspace_for_project(&store, project.id).await;
+    let host_id = pair_host(&store, project.id, "mid-swap").await;
+    heartbeat_software(&store, host_id, true).await;
+    // Kill mid-swap: outside the 90s assignable window, inside the 2 min hold.
+    age_last_seen(&store, host_id, 110).await;
+
+    let before = worker_hosts::get(store.pool(), host_id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert!(
+        before.auto_update,
+        "paired host defaults auto-update on (AGENTS.md lockout)"
+    );
+    let token_hash = before
+        .machine_token_hash
+        .clone()
+        .expect("paired machine token");
+
+    store
+        .insert_accepted_plan(project.id, one_task_plan(project.id))
+        .await
+        .unwrap();
+
+    let r = runner(store.clone())
+        .with_local_spawn()
+        .tick_project(project.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.spawned, 0,
+        "must not local-spawn SANDBOX_BACKEND mid-swap: {r:?}"
+    );
+    assert_eq!(r.spawn_failed, 0, "{r:?}");
+
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    assert_eq!(
+        t1.status, "ready",
+        "mid-swap hold_ready must keep the task ready: {:?}",
+        t1.status
+    );
+    assert!(
+        snap.sessions.is_empty(),
+        "no local SANDBOX_BACKEND session: {:?}",
+        snap.sessions
+    );
+
+    let after = worker_hosts::get(store.pool(), host_id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        after.machine_token_hash.as_deref(),
+        Some(token_hash.as_str()),
+        "tick must not rotate machine token mid-swap (AGENTS.md lockout)"
+    );
+    assert!(after.auto_update, "auto_update stays on");
 }

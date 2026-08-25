@@ -7,6 +7,9 @@ use super::types::MAX_PROXY_DATA_BYTES;
 const SECRET_KEYS: &[&str] = &[
     "access_token",
     "refresh_token",
+    "id_token",
+    // camelCase OIDC (`idToken`) lowercases to this, not `id_token`.
+    "idtoken",
     "token",
     "client_secret",
     "password",
@@ -172,6 +175,49 @@ mod tests {
         }
         assert!(clean["items"][0].get("github_access_token").is_none());
         assert!(clean["items"][0].get("secret").is_none());
+    }
+
+    /// OIDC `id_token` is a JWT. Suffix `_id_token` does not match the bare key.
+    #[test]
+    fn strips_bare_oidc_id_token() {
+        let raw = json!({
+            "user": "ok",
+            "id_token": "eyJhbGciOiJIUzI1NiJ9.e30.sig",
+            "Id-Token": "also-a-jwt",
+            "google_id_token": "nested-suffix-jwt"
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["user"], "ok");
+        for key in ["id_token", "Id-Token", "google_id_token"] {
+            assert!(
+                clean.get(key).is_none(),
+                "OIDC id_token `{key}` must not reach chat: {clean}"
+            );
+        }
+        assert!(!contains_secret_keys(&clean));
+    }
+
+    /// Google/OIDC camelCase `idToken` lowercases to `idtoken`, not `id_token`.
+    #[test]
+    fn strips_camelcase_oidc_id_token() {
+        let raw = json!({
+            "user": "ok",
+            "idToken": "eyJhbGciOiJIUzI1NiJ9.e30.sig",
+            "IdToken": "also-a-jwt",
+            "nextPageToken": "abc",
+            "pageToken": "def"
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["user"], "ok");
+        assert_eq!(clean["nextPageToken"], "abc");
+        assert_eq!(clean["pageToken"], "def");
+        for key in ["idToken", "IdToken"] {
+            assert!(
+                clean.get(key).is_none(),
+                "OIDC camelCase idToken `{key}` must not reach chat: {clean}"
+            );
+        }
+        assert!(!contains_secret_keys(&clean));
     }
 
     #[test]

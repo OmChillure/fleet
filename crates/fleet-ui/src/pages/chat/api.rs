@@ -178,6 +178,10 @@ pub struct ChatCompleteBody {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -436,6 +440,8 @@ pub async fn stream_chat(
     provider: String,
     model: Option<String>,
     conversation_id: Option<String>,
+    runner_id: Option<String>,
+    effort: Option<String>,
     mut on_event: impl FnMut(ChatStreamEvent),
 ) -> Result<ChatCompleteResponse, ChatError> {
     #[cfg(target_arch = "wasm32")]
@@ -446,13 +452,24 @@ pub async fn stream_chat(
             provider,
             model,
             conversation_id,
+            runner_id,
+            effort,
             &mut on_event,
         )
         .await;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let res = complete_chat(workspace_id, messages, provider, model, conversation_id).await?;
+        let res = complete_chat(
+            workspace_id,
+            messages,
+            provider,
+            model,
+            conversation_id,
+            runner_id,
+            effort,
+        )
+        .await?;
         on_event(ChatStreamEvent::Delta {
             text: res.message.content.clone(),
         });
@@ -468,6 +485,8 @@ async fn stream_chat_wasm(
     provider: String,
     model: Option<String>,
     conversation_id: Option<String>,
+    runner_id: Option<String>,
+    effort: Option<String>,
     on_event: &mut impl FnMut(ChatStreamEvent),
 ) -> Result<ChatCompleteResponse, ChatError> {
     use wasm_bindgen::JsCast;
@@ -479,6 +498,8 @@ async fn stream_chat_wasm(
         provider,
         model,
         conversation_id,
+        runner_id,
+        effort,
     };
     let payload = serde_json::to_string(&body)
         .map_err(|e| ChatError::Network(format!("encode: {e}")))?;
@@ -579,6 +600,8 @@ pub async fn complete_chat(
     provider: String,
     model: Option<String>,
     conversation_id: Option<String>,
+    runner_id: Option<String>,
+    effort: Option<String>,
 ) -> Result<ChatCompleteResponse, ChatError> {
     let res = authorized_post_json(
         &format!("/api/workspaces/{workspace_id}/chat"),
@@ -587,6 +610,8 @@ pub async fn complete_chat(
             provider,
             model,
             conversation_id,
+            runner_id,
+            effort,
         },
     )
     .await?;

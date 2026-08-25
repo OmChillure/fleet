@@ -289,11 +289,27 @@ class InstallWorkerTests(unittest.TestCase):
             want = hashlib.sha256(b"fleet-host").hexdigest()
             self.assertEqual(linux_man["bins"]["fleet-host"]["sha256"], want)
             self.assertEqual(linux_man["bins"]["fleet-host"]["size"], len(b"fleet-host"))
+            self.assertRegex(
+                linux_man["bins"]["fleet-host"]["version"], r"^\d+\.\d+\.\d+"
+            )
+            self.assertRegex(
+                linux_man["bins"]["fleet-driver"]["version"], r"^\d+\.\d+\.\d+"
+            )
             win_man = json.loads((win / "manifest.json").read_text())
             self.assertEqual(win_man["platform"], "windows-x86_64")
             self.assertIn("fleet-host.exe", win_man["bins"])
             self.assertNotIn("fleet-host", win_man["bins"])
             self.assertEqual(win_man["git_sha"], "")
+            self.assertEqual(
+                linux_man["bins"]["fleet-host"]["version"],
+                win_man["bins"]["fleet-host.exe"]["version"],
+                "package version is the same on every OS",
+            )
+            self.assertEqual(
+                linux_man["bins"]["fleet-driver"]["version"],
+                win_man["bins"]["fleet-driver.exe"]["version"],
+                "package version is the same on every OS",
+            )
 
             stamped = subprocess.run(
                 [

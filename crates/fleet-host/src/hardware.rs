@@ -81,7 +81,81 @@ pub fn heartbeat_hardware() -> Value {
     } else if let Some(pct) = live_gpu_used_pct() {
         map.insert("gpu_used_pct".into(), json!(pct));
     }
+    if let Some((total, free)) = disk_space() {
+        map.insert("disk_total_bytes".into(), json!(total));
+        map.insert("disk_free_bytes".into(), json!(free));
+    }
+    let addrs = local_addrs();
+    if !addrs.is_empty() {
+        map.insert("addrs".into(), json!(addrs));
+    }
     obj
+}
+
+fn disk_space() -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::mem::MaybeUninit;
+        let path = std::ffi::CString::new("/").ok()?;
+        let mut buf = MaybeUninit::<libc::statvfs>::uninit();
+        let rc = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        let st = unsafe { buf.assume_init() };
+        let frsize = st.f_frsize as u64;
+        let total = st.f_blocks.saturating_mul(frsize as _ ) as u64;
+        let free = st.f_bavail.saturating_mul(frsize as _) as u64;
+        if total == 0 {
+            return None;
+        }
+        return Some((total, free));
+    }
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lp_directory_name: *const u16,
+                lp_free_bytes_available_to_caller: *mut u64,
+                lp_total_number_of_bytes: *mut u64,
+                lp_total_number_of_free_bytes: *mut u64,
+            ) -> i32;
+        }
+        let path: Vec<u16> = OsStr::new("C:\\").encode_wide().chain(Some(0)).collect();
+        let mut free = 0u64;
+        let mut total = 0u64;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(path.as_ptr(), &mut free, &mut total, std::ptr::null_mut())
+        };
+        if ok == 0 || total == 0 {
+            None
+        } else {
+            Some((total, free))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+fn local_addrs() -> Vec<String> {
+    let mut out = Vec::new();
+    // Primary outbound IPv4.
+    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("1.1.1.1:80").is_ok() {
+            if let Ok(addr) = s.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() {
+                    out.push(ip.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn gpu_json(g: &Gpu) -> Value {
@@ -1736,6 +1810,126 @@ Memory Device
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "AMD Radeon(TM) Graphics");
         assert_eq!(gpus[0].vram_bytes, Some(536870912));
+    }
+
+    fn heartbeat_gpu_list(gpus: &[Gpu]) -> Vec<Value> {
+        gpus.iter()
+            .filter(|g| !g.name.trim().is_empty())
+            .map(gpu_json)
+            .collect()
+    }
+
+    #[test]
+    fn heartbeat_gpu_list_drops_empty_names_keeps_igpu() {
+        let listed = [
+            Gpu {
+                name: String::new(),
+                vram_bytes: Some(8 * 1024 * 1024 * 1024),
+                used_pct: Some(50),
+            },
+            Gpu {
+                name: "   ".into(),
+                vram_bytes: Some(4 * 1024 * 1024 * 1024),
+                used_pct: None,
+            },
+            Gpu {
+                name: "Intel UHD Graphics".into(),
+                vram_bytes: None,
+                used_pct: Some(4),
+            },
+        ];
+        let json_gpus = heartbeat_gpu_list(&listed);
+        assert_eq!(json_gpus.len(), 1);
+        assert_eq!(json_gpus[0]["name"], "Intel UHD Graphics");
+        assert_eq!(json_gpus[0]["used_pct"], 4);
+        assert!(json_gpus[0].get("vram_bytes").is_none());
+    }
+
+    #[test]
+    fn gpu_json_normalize_does_not_invent_vram() {
+        let named = Gpu {
+            name: tidy_gpu_name("Intel(R) UHD Graphics"),
+            vram_bytes: None,
+            used_pct: None,
+        };
+        assert_eq!(named.name, "Intel UHD Graphics");
+        let v = gpu_json(&named);
+        assert_eq!(v["name"], "Intel UHD Graphics");
+        assert!(v.get("vram_bytes").is_none());
+        assert!(v.get("used_pct").is_none());
+
+        let zeroed = Gpu {
+            name: tidy_gpu_name("Iris Xe Graphics"),
+            vram_bytes: Some(0),
+            used_pct: None,
+        };
+        assert_eq!(zeroed.name, "Intel Iris Xe Graphics");
+        let v = gpu_json(&zeroed);
+        assert_eq!(v["name"], "Intel Iris Xe Graphics");
+        assert!(v.get("vram_bytes").is_none());
+
+        let inferred = infer_igpu_from_cpu("Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz")
+            .expect("catalog Intel iGPU");
+        let v = gpu_json(&Gpu {
+            name: inferred,
+            vram_bytes: None,
+            used_pct: None,
+        });
+        assert_eq!(v["name"], "Intel UHD Graphics");
+        assert!(v.get("vram_bytes").is_none());
+    }
+
+    #[test]
+    fn nvidia_smi_csv_drops_empty_gpu_names_keeps_igpu() {
+        let text = "\
+, 8192
+   , 1024
+Intel UHD Graphics
+NVIDIA GeForce RTX 3080, 10240
+Intel Iris Xe Graphics, 0
+";
+        let gpus = parse_nvidia_smi_csv(text);
+        assert_eq!(gpus.len(), 3);
+        assert_eq!(gpus[0].name, "Intel UHD Graphics");
+        assert_eq!(gpus[0].vram_bytes, None);
+        assert_eq!(gpus[1].name, "NVIDIA GeForce RTX 3080");
+        assert_eq!(gpus[1].vram_bytes, Some(10240 * 1024 * 1024));
+        assert_eq!(gpus[2].name, "Intel Iris Xe Graphics");
+        assert_eq!(gpus[2].vram_bytes, None);
+    }
+
+    #[test]
+    fn lspci_drops_empty_gpu_names_keeps_intel_igpu() {
+        let text = "\
+00:00.0 VGA compatible controller:
+00:01.0 VGA compatible controller [0300]:
+00:02.0 VGA compatible controller [0300]: Intel Corporation CometLake-U GT2 [UHD Graphics] [8086:9b41] (rev 02)
+02:00.0 VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family (rev 41)
+";
+        let gpus = parse_lspci_gpus(text);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(tidy_gpu_name(&gpus[0].name), "Intel UHD Graphics");
+        assert_eq!(gpus[0].vram_bytes, None);
+    }
+
+    #[test]
+    fn wmic_drops_empty_gpu_names_keeps_intel_igpu() {
+        let gpus = parse_wmic_gpus(
+            "Name=\r\nAdapterRAM=1073741824\r\n\r\nName=Intel(R) UHD Graphics\r\nAdapterRAM=0\r\n\r\nName=Microsoft Basic Render Driver\r\nAdapterRAM=0\r\n",
+        );
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(tidy_gpu_name(&gpus[0].name), "Intel UHD Graphics");
+        assert_eq!(gpus[0].vram_bytes, None);
+    }
+
+    #[test]
+    fn macos_displays_drops_empty_gpu_names_keeps_igpu() {
+        let gpus = parse_macos_displays(
+            "      Chipset Model: \n      VRAM (Total): 8 GB\n      Chipset Model: Intel UHD Graphics\n      VRAM (Total): 0 MB\n",
+        );
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Intel UHD Graphics");
+        assert_eq!(gpus[0].vram_bytes, None);
     }
 
     #[test]
