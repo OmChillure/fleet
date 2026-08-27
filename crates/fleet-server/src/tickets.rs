@@ -1,8 +1,9 @@
-//! Inbox ingest: the Inbox page (Start monitor) or chat tool `monitor_tickets`
-//! watches connected sources. Chat `finish_ticket` loads the spec for the model
-//! to plan. Inbox Finish launches one generalist — the worker chooses tools.
+//! Inbox ingest: Start monitor watches connected boards (Jira, Linear, GitHub, …).
+//! The background poller keeps pulling tickets and, when auto-launch is on
+//! (the default), launches a work+review fleet for each open item. Failed runs
+//! go back to open so the next poll works them again.
 //!
-//! Sources: GitHub / GitLab issues, Jira, Linear, Slack, Notion.
+//! Chat `finish_ticket` still only loads the spec so the model can plan.
 //! Tokens stay on the control plane.
 
 use std::time::Duration;
@@ -12,7 +13,7 @@ use fleet_auth::{AppError, AppResult};
 use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
-use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
+use fleet_integrations::proxy::{ProxyCaller, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -150,15 +151,22 @@ pub async fn monitor_tickets(
     user_id: Uuid,
     args: MonitorArgs,
 ) -> AppResult<Value> {
+    let existing = ticket_repo::get_monitor(&state.db, workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
     let enabled = args.enabled.unwrap_or(true);
     let connected = connected_task_providers(state, workspace_id).await?;
-    let mut providers: Vec<String> = args
-        .providers
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| p.trim().to_ascii_lowercase())
-        .filter(|p| TASK_PROVIDERS.contains(&p.as_str()))
-        .collect();
+    let mut providers: Vec<String> = match args.providers {
+        Some(p) => p
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| TASK_PROVIDERS.contains(&s.as_str()))
+            .collect(),
+        None => existing
+            .as_ref()
+            .map(|m| m.providers.clone())
+            .unwrap_or_default(),
+    };
     if providers.is_empty() {
         providers = connected.clone();
     }
@@ -170,32 +178,54 @@ pub async fn monitor_tickets(
     providers.sort();
     providers.dedup();
 
-    let github_repos: Vec<String> = args
-        .github_repos
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| r.trim().to_string())
-        .filter(|r| r.contains('/'))
-        .collect();
-    let jira_jql = args
-        .jira_jql
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let slack_channels: Vec<String> = args
-        .slack_channels
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let notion_databases: Vec<String> = args
-        .notion_databases
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let auto_launch = args.auto_launch.unwrap_or(false);
+    let github_repos: Vec<String> = match args.github_repos {
+        Some(v) => v
+            .into_iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| r.contains('/'))
+            .collect(),
+        None => existing
+            .as_ref()
+            .map(|m| m.github_repos.clone())
+            .unwrap_or_default(),
+    };
+    let jira_jql = match args.jira_jql {
+        Some(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        }
+        None => existing.as_ref().and_then(|m| m.jira_jql.clone()),
+    };
+    let slack_channels: Vec<String> = match args.slack_channels {
+        Some(v) => v
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        None => existing
+            .as_ref()
+            .map(|m| m.slack_channels.clone())
+            .unwrap_or_default(),
+    };
+    let notion_databases: Vec<String> = match args.notion_databases {
+        Some(v) => v
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        None => existing
+            .as_ref()
+            .map(|m| m.notion_databases.clone())
+            .unwrap_or_default(),
+    };
+    // Start monitor without the flag still works the tickets — default on.
+    let auto_launch = args
+        .auto_launch
+        .unwrap_or_else(|| existing.as_ref().map(|m| m.auto_launch).unwrap_or(true));
 
     let monitor = ticket_repo::upsert_monitor(
         &state.db,
@@ -320,20 +350,51 @@ pub async fn prepare_finish(
         provider: item.provider.clone(),
         key: item.external_key.clone(),
     };
-    let tasks = vec![PlanTask {
-        plan_task_id: "work".into(),
-        title: title.clone(),
-        summary: spec.chars().take(280).collect(),
-        spec_md: spec,
-        depends_on: vec![],
-        worker_profile: "generalist".into(),
-        acceptance: vec!["result.md exists and is non-empty".into()],
-        priority: 100,
-        external_ref: Some(ext),
-        timeout_s: Some(3600),
-        max_retries: Some(1),
-    }];
+    let tasks = inbox_plan_tasks(&title, &spec, ext);
     Ok(PreparedFinish { item, tasks, title })
+}
+
+/// Implementer + reviewer. Tools stay free-form; this is not a GitHub-only pipeline.
+pub fn inbox_plan_tasks(title: &str, spec: &str, ext: ExternalRef) -> Vec<PlanTask> {
+    let work_spec = spec.to_string();
+    let review_spec = format!(
+        "Review the work for `{key}` on `{provider}`.\n\
+         Read `handoff/work.md` and `work/`.\n\
+         Use `use_integration` if you need the live ticket or to comment.\n\
+         If it is incomplete, `request_changes`. When it is good, write `result.md`.\n\n\
+         Original spec:\n{spec}",
+        key = ext.key,
+        provider = ext.provider,
+        spec = spec.chars().take(2000).collect::<String>(),
+    );
+    vec![
+        PlanTask {
+            plan_task_id: "work".into(),
+            title: title.to_string(),
+            summary: work_spec.chars().take(280).collect(),
+            spec_md: work_spec,
+            depends_on: vec![],
+            worker_profile: "coding".into(),
+            acceptance: vec!["result.md exists and is non-empty".into()],
+            priority: 100,
+            external_ref: Some(ext.clone()),
+            timeout_s: Some(3600),
+            max_retries: Some(2),
+        },
+        PlanTask {
+            plan_task_id: "review".into(),
+            title: format!("Review {title}"),
+            summary: "Review the implementer's result".into(),
+            spec_md: review_spec,
+            depends_on: vec!["work".into()],
+            worker_profile: "reviewer".into(),
+            acceptance: vec!["result.md exists and is non-empty".into()],
+            priority: 80,
+            external_ref: Some(ext),
+            timeout_s: Some(1800),
+            max_retries: Some(1),
+        },
+    ]
 }
 
 /// Chat tool: return the ticket spec so the model plans. Does not launch a run.
@@ -465,13 +526,122 @@ pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -
     ticket_repo::mark_polled(&state.db, workspace_id, Utc::now(), err_join.as_deref())
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
+    let drive = drive_inbox(state, workspace_id).await;
     Ok(json!({
         "seen": seen,
         "errors": errors,
+        "reopened": drive.reopened,
+        "launched": drive.launched,
+        "launch_errors": drive.errors,
     }))
 }
 
-/// New Slack/Notion (etc.) inbox rows that should start a fleet without a human click.
+struct DriveReport {
+    reopened: usize,
+    launched: usize,
+    errors: Vec<String>,
+}
+
+/// After a poll: retry dead runs, then start work on open tickets.
+async fn drive_inbox(state: &AppState, workspace_id: Uuid) -> DriveReport {
+    let mut out = DriveReport {
+        reopened: 0,
+        launched: 0,
+        errors: Vec::new(),
+    };
+    let Some(monitor) = ticket_repo::get_monitor(&state.db, workspace_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return out;
+    };
+    if !monitor.enabled {
+        return out;
+    }
+
+    let launched_rows = match ticket_repo::list_inbox(&state.db, workspace_id, Some("launched")).await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            out.errors.push(format!("reconcile: {e}"));
+            return out;
+        }
+    };
+    for item in launched_rows {
+        let Some(run_id) = item.run_id else {
+            if ticket_repo::reopen_ticket(
+                &state.db,
+                workspace_id,
+                &item.provider,
+                &item.external_key,
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+            {
+                out.reopened += 1;
+            }
+            continue;
+        };
+        let run = state.orch.store.get_run(workspace_id, run_id).await.ok().flatten();
+        let status = run.as_ref().map(|r| r.status.as_str()).unwrap_or("missing");
+        match status {
+            "failed" | "cancelled" | "missing" => {
+                if ticket_repo::reopen_ticket(
+                    &state.db,
+                    workspace_id,
+                    &item.provider,
+                    &item.external_key,
+                )
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+                {
+                    out.reopened += 1;
+                }
+            }
+            "completed" => {
+                // Board still open: leave launched so we do not spawn a second run.
+            }
+            _ => {}
+        }
+    }
+
+    if !monitor.auto_launch {
+        return out;
+    }
+    let user_id = monitor.started_by.unwrap_or(Uuid::nil());
+    let open = match ticket_repo::list_inbox(&state.db, workspace_id, Some("open")).await {
+        Ok(v) => v,
+        Err(e) => {
+            out.errors.push(format!("list open: {e}"));
+            return out;
+        }
+    };
+    for item in open.into_iter().filter(|i| i.run_id.is_none()).take(8) {
+        match finish_and_launch(
+            state,
+            workspace_id,
+            user_id,
+            FinishTicketArgs {
+                ticket: None,
+                provider: Some(item.provider.clone()),
+                key: Some(item.external_key.clone()),
+            },
+        )
+        .await
+        {
+            Ok(_) => out.launched += 1,
+            Err(e) => out.errors.push(format!("{}: {e}", item.external_key)),
+        }
+    }
+    out
+}
+
+/// Open tickets with no run — used by tests and drive_inbox.
 pub async fn list_auto_launch_items(
     state: &AppState,
     workspace_id: Uuid,
@@ -488,10 +658,9 @@ pub async fn list_auto_launch_items(
     let open = ticket_repo::list_inbox(&state.db, workspace_id, Some("open"))
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
-    let cutoff = Utc::now() - chrono::Duration::minutes(5);
     Ok(open
         .into_iter()
-        .filter(|i| i.run_id.is_none() && i.created_at >= cutoff)
+        .filter(|i| i.run_id.is_none())
         .take(8)
         .collect())
 }
@@ -530,16 +699,13 @@ async fn proxy_op(
     operation: &str,
     args: Value,
 ) -> ProxyResult {
-    proxy::invoke(
-        &state.db,
-        &state.integrations.credentials_key,
-        ProxyRequest {
-            workspace_id,
-            provider: provider.into(),
-            operation: operation.into(),
-            args,
-            caller: caller.clone(),
-        },
+    crate::workforce::gated_invoke(
+        state,
+        workspace_id,
+        caller.clone(),
+        provider,
+        operation,
+        args,
     )
     .await
 }
@@ -1703,6 +1869,15 @@ pub async fn finish_and_launch(
         .insert_accepted_plan(workspace_id, plan)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let _ = crate::workforce::attach_run_to_goal(
+        state,
+        workspace_id,
+        None,
+        &prep.item.title,
+        &prep.item.title,
+        run.id,
+    )
+    .await;
     mark_ticket_launched(
         state,
         workspace_id,
@@ -1764,27 +1939,18 @@ mod tests {
     }
 
     #[test]
-    fn inbox_finish_plan_is_one_generalist() {
+    fn inbox_finish_plan_is_work_then_review() {
         let ext = ExternalRef {
-            provider: "slack".into(),
-            key: "C1:1".into(),
+            provider: "jira".into(),
+            key: "ENG-1".into(),
         };
-        let tasks = vec![PlanTask {
-            plan_task_id: "work".into(),
-            title: "t".into(),
-            summary: String::new(),
-            spec_md: "do what the item needs".into(),
-            depends_on: vec![],
-            worker_profile: "generalist".into(),
-            acceptance: vec!["result.md exists and is non-empty".into()],
-            priority: 100,
-            external_ref: Some(ext),
-            timeout_s: Some(3600),
-            max_retries: Some(1),
-        }];
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].worker_profile, "generalist");
-        assert!(!tasks.iter().any(|t| t.worker_profile.contains("review")));
+        let tasks = inbox_plan_tasks("ENG-1: fix", "do the ticket", ext);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].plan_task_id, "work");
+        assert_eq!(tasks[0].worker_profile, "coding");
+        assert_eq!(tasks[1].plan_task_id, "review");
+        assert_eq!(tasks[1].worker_profile, "reviewer");
+        assert_eq!(tasks[1].depends_on, vec!["work".to_string()]);
     }
 
     #[test]

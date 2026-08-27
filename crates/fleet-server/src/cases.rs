@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest};
+use fleet_integrations::proxy::ProxyCaller;
 use fleet_orchestrator::domain::{PlanTask, WorkRunStatus};
 use fleet_orchestrator::validate;
 
@@ -1270,19 +1270,16 @@ async fn apply_use_tool(
             60i64,
         ),
         Ok((provider, operation, args)) => {
-            let result = proxy::invoke(
-                &state.db,
-                &state.integrations.credentials_key,
-                ProxyRequest {
-                    workspace_id: case.workspace_id,
-                    provider: provider.clone(),
-                    operation: operation.clone(),
-                    args,
-                    caller: match case.created_by {
-                        Some(user_id) => ProxyCaller::Chat { user_id },
-                        None => ProxyCaller::System,
-                    },
+            let result = crate::workforce::gated_invoke(
+                state,
+                case.workspace_id,
+                match case.created_by {
+                    Some(user_id) => ProxyCaller::Chat { user_id },
+                    None => ProxyCaller::System,
                 },
+                &provider,
+                &operation,
+                args,
             )
             .await;
             let stored = json!({
@@ -1527,6 +1524,15 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
         .insert_accepted_plan(case.workspace_id, plan)
         .await
         .map_err(|e| e.to_string())?;
+    let _ = crate::workforce::attach_run_to_goal(
+        state,
+        case.workspace_id,
+        case.created_by,
+        &case.title,
+        &case.policy_md,
+        run.id,
+    )
+    .await;
     Ok(run.id)
 }
 

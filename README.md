@@ -127,9 +127,12 @@ dx serve --package fleet-ui --port 3030
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Inbox → Start monitor) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor watches boards and auto-launches work) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent) |
+| `GET` | `/api/workspaces/{id}/workforce` | Open goals (durable overnight) |
+| `POST` | `/api/workspaces/{id}/workforce/goals` | Set a durable goal (case-backed) |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
@@ -139,7 +142,7 @@ UI app routes (workspace-scoped):
 
 | Path | Page |
 | --- | --- |
-| `/{workspace_id}/dashboard` | Dashboard |
+| `/{workspace_id}/dashboard` | Workforce (goals, approvals, board) |
 | `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
 | `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |

@@ -1,0 +1,99 @@
+//! Fail-closed Postgres tests for workforce goals + policy approvals.
+//! Requires DATABASE_URL — never skips.
+
+mod common;
+
+use fleet_db::repos::users::NewUser;
+use fleet_db::repos::{users, workforce, workspaces};
+use serde_json::json;
+use uuid::Uuid;
+
+use common::{connect_and_migrate, unique_email, unique_slug};
+
+async fn seed_user_with_workspace(pool: &fleet_db::PgPool) -> (Uuid, Uuid) {
+    let email = unique_email();
+    let id = Uuid::now_v7();
+    let now = chrono::Utc::now();
+    let mut tx = pool.begin().await.expect("begin");
+    users::insert_tx(
+        &mut tx,
+        &NewUser {
+            id,
+            email: email.clone(),
+            email_normalized: email.to_lowercase(),
+            display_name: None,
+            password_hash: "test-hash".into(),
+            created_at: now,
+        },
+    )
+    .await
+    .expect("insert user");
+    tx.commit().await.expect("commit user");
+    let workspace_id = Uuid::now_v7();
+    workspaces::create_owned(pool, workspace_id, id, &unique_slug("ws"), "Workforce WS", now)
+        .await
+        .expect("create workspace");
+    (id, workspace_id)
+}
+
+#[tokio::test]
+async fn goal_and_approval_round_trip() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let goal = workforce::insert_goal(
+        &pool,
+        &workforce::NewGoal {
+            id: Uuid::now_v7(),
+            workspace_id,
+            title: "Ship weather app".into(),
+            goal_md: "Done when PR is merged".into(),
+            run_id: None,
+            case_id: None,
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("insert goal");
+    assert_eq!(goal.status, "open");
+
+    let approval = workforce::insert_approval(
+        &pool,
+        &workforce::NewApproval {
+            id: Uuid::now_v7(),
+            workspace_id,
+            goal_id: Some(goal.id),
+            task_id: None,
+            kind: "merge".into(),
+            provider: "github".into(),
+            operation: "merge_pr".into(),
+            args: json!({ "number": 12 }),
+            summary: "Merge PR #12".into(),
+        },
+    )
+    .await
+    .expect("insert approval");
+    assert_eq!(approval.status, "pending");
+
+    let pending = workforce::list_pending_approvals(&pool, workspace_id)
+        .await
+        .expect("list pending");
+    assert_eq!(pending.len(), 1);
+
+    let decided = workforce::decide_approval(&pool, workspace_id, approval.id, "approved", user_id)
+        .await
+        .expect("decide")
+        .expect("row");
+    assert_eq!(decided.status, "approved");
+    assert_eq!(decided.decided_by, Some(user_id));
+
+    let again = workforce::decide_approval(&pool, workspace_id, approval.id, "denied", user_id)
+        .await
+        .expect("second decide");
+    assert!(again.is_none(), "cannot decide a non-pending approval");
+
+    let open = workforce::list_open_goals(&pool, workspace_id)
+        .await
+        .expect("open goals");
+    assert_eq!(open.len(), 1);
+}

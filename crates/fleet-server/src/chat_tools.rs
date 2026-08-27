@@ -5,8 +5,7 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    self, ProxyCaller, ProxyRequest, ProxyResult, format_context_markdown, operations_for,
-    supported_providers,
+    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
 };
 use fleet_integrations::{IntegrationAvailability, catalog};
 use fleet_orchestrator::domain::{
@@ -467,7 +466,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "monitor_tickets",
-                "description": "Start or update the workspace ticket inbox. Polls every connected integration (GitHub, GitLab, Bitbucket, Jira, Linear, Trello, Asana, Slack, Teams, Notion, Confluence). Tokens stay on the control plane.",
+                "description": "Start or update the workspace ticket inbox. Polls connected boards (Jira, Linear, GitHub, …) and by default auto-launches a work+review fleet on each open ticket. The poller keeps watching. Tokens stay on the control plane.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1433,16 +1432,13 @@ async fn prefetch_context(
         let provider = item.provider.trim().to_lowercase();
         let operation = item.operation.trim().to_lowercase();
         let args = item.args.clone().unwrap_or_else(|| json!({}));
-        let result = proxy::invoke(
-            &state.db,
-            &state.integrations.credentials_key,
-            ProxyRequest {
-                workspace_id,
-                provider,
-                operation,
-                args,
-                caller: ProxyCaller::Chat { user_id },
-            },
+        let result = crate::workforce::gated_invoke(
+            state,
+            workspace_id,
+            ProxyCaller::Chat { user_id },
+            &provider,
+            &operation,
+            args,
         )
         .await;
         out.push(result);
@@ -1492,16 +1488,13 @@ async fn proxy_tool_result(
     operation: &str,
     args: Value,
 ) -> AppResult<(Value, ChatAction)> {
-    let result = proxy::invoke(
-        &state.db,
-        &state.integrations.credentials_key,
-        ProxyRequest {
-            workspace_id,
-            provider: provider.to_string(),
-            operation: operation.to_string(),
-            args,
-            caller: ProxyCaller::Chat { user_id },
-        },
+    let result = crate::workforce::gated_invoke(
+        state,
+        workspace_id,
+        ProxyCaller::Chat { user_id },
+        provider,
+        operation,
+        args,
     )
     .await;
 
@@ -1733,13 +1726,25 @@ async fn start_case_tool(
         crate::cases::CreateCaseBody {
             title: title.clone(),
             kind,
-            policy_md: Some(policy_md),
+            policy_md: Some(policy_md.clone()),
             stage,
             context,
             wake_in_s,
         },
     )
     .await?;
+    if let Err(e) = crate::workforce::attach_case_to_goal(
+        state,
+        workspace_id,
+        Some(user_id),
+        &title,
+        &policy_md,
+        case.id,
+    )
+    .await
+    {
+        tracing::warn!(%workspace_id, case_id = %case.id, error = %e, "attach goal to case failed");
+    }
     let content = crate::cases::case_json(&case, None);
     Ok((
         content.clone(),
@@ -2308,6 +2313,7 @@ async fn launch_agent_task(
     accept_and_drive_plan(
         state,
         workspace_id,
+        Some(user_id),
         plan,
         "launch_agent_task",
         &args.title,
@@ -2411,12 +2417,22 @@ async fn launch_agent_plan(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("multi-agent plan");
-    accept_and_drive_plan(state, workspace_id, plan, "launch_agent_plan", label, ctx).await
+    accept_and_drive_plan(
+        state,
+        workspace_id,
+        Some(user_id),
+        plan,
+        "launch_agent_plan",
+        label,
+        ctx,
+    )
+    .await
 }
 
 async fn accept_and_drive_plan(
     state: &AppState,
     workspace_id: Uuid,
+    user_id: Option<Uuid>,
     plan: WorkPlanBody,
     tool_name: &str,
     label: &str,
@@ -2433,6 +2449,18 @@ async fn accept_and_drive_plan(
             tracing::error!(%workspace_id, error = %e, "chat launch insert_accepted_plan failed");
             AppError::bad_request(e.to_string())
         })?;
+    if let Err(e) = crate::workforce::attach_run_to_goal(
+        state,
+        workspace_id,
+        user_id,
+        label,
+        label,
+        run_id,
+    )
+    .await
+    {
+        tracing::warn!(%workspace_id, %run_id, error = %e, "attach goal to run failed");
+    }
 
     // Small plans: wait until terminal in this request.
     // Large plans: start the first wave; background ticker (fleet-server) drains the queue.

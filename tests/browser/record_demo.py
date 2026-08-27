@@ -488,8 +488,9 @@ class Demo:
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/dashboard", wait_until="networkidle")
-        p.get_by_text("Dashboard", exact=True).first.wait_for(timeout=15_000)
+        p.get_by_text("Workforce", exact=True).first.wait_for(timeout=15_000)
         p.get_by_text("Open runs").first.wait_for(timeout=10_000)
+        p.get_by_text("Set a goal").first.wait_for(timeout=10_000)
         pause(p, 1500)
 
     def scene_lab(self) -> None:

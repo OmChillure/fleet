@@ -343,13 +343,23 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_url("**/dashboard", timeout=20_000)
         self.assertRegex(self.page.url, r"/[0-9a-f-]{36}/dashboard")
         self.page.wait_for_selector("h1")
-        self.assertEqual(self.page.inner_text("h1").strip(), "Dashboard")
+        self.assertEqual(self.page.inner_text("h1").strip(), "Workforce")
         type(self).workspace_url = self.page.url.rsplit("/dashboard", 1)[0]
 
     def test_04_sidebar_app_pages(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
+
+        page.get_by_role("link", name="Workforce", exact=True).click()
+        page.wait_for_url("**/dashboard", timeout=10_000)
+        page.wait_for_selector("h1")
+        self.assertEqual(page.inner_text("h1").strip(), "Workforce")
+        self.assertGreater(
+            page.get_by_text("Set a goal").count(),
+            0,
+            "Workforce page missing Set a goal",
+        )
 
         page.get_by_role("link", name="Fleet", exact=True).click()
         page.wait_for_url("**/fleet", timeout=10_000)

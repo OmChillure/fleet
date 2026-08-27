@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::Value;
 
-use super::api::{Overview, fetch_overview};
+use super::api::{Overview, WorkforceSnapshot, create_goal, fetch_overview, fetch_workforce};
 use crate::Route;
 
 fn short(id: &str) -> String {
@@ -100,8 +100,13 @@ fn status_class(status: &str) -> &'static str {
 #[component]
 pub fn Dashboard(workspace_id: String) -> Element {
     let mut data = use_signal(Overview::default);
+    let mut workforce = use_signal(WorkforceSnapshot::default);
     let mut error = use_signal(|| None::<String>);
     let mut loaded = use_signal(|| false);
+    let mut goal_title = use_signal(String::new);
+    let mut goal_md = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut status_line = use_signal(String::new);
     let ws = workspace_id.clone();
 
     use_future(move || {
@@ -115,6 +120,9 @@ pub fn Dashboard(workspace_id: String) -> Element {
                     }
                     Err(e) => error.set(Some(e.message())),
                 }
+                if let Ok(w) = fetch_workforce(&ws).await {
+                    workforce.set(w);
+                }
                 loaded.set(true);
                 TimeoutFuture::new(2000).await;
             }
@@ -122,6 +130,7 @@ pub fn Dashboard(workspace_id: String) -> Element {
     });
 
     let o = data();
+    let wf = workforce();
     let tasks = parse_tasks(&o.tasks);
     let waiting = parse_chat(&o.waiting);
     let chat = parse_chat(&o.chat);
@@ -146,10 +155,61 @@ pub fn Dashboard(workspace_id: String) -> Element {
         div { class: "mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-auto p-4 md:p-5",
             div {
                 h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]",
-                    "Dashboard"
+                    "Workforce"
                 }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Say what you want in Chat — e.g. read Slack, implement it, push to GitHub, write it in Notion."
+                    "Set a goal. Agents do the work — merge, Slack, Notion, GitHub — and the board is still here tomorrow."
+                }
+            }
+
+            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Set a goal" }
+                input {
+                    class: "mt-3 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                    r#type: "text",
+                    placeholder: "Ship the weather app from #eng",
+                    value: "{goal_title}",
+                    oninput: move |e| goal_title.set(e.value()),
+                }
+                textarea {
+                    class: "mt-2 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                    rows: "3",
+                    placeholder: "Done when the ticket is closed and the PR is merged.",
+                    value: "{goal_md}",
+                    oninput: move |e| goal_md.set(e.value()),
+                }
+                button {
+                    class: "mt-2 rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
+                    r#type: "button",
+                    disabled: busy() || goal_title().trim().is_empty(),
+                    onclick: {
+                        let workspace_id = workspace_id.clone();
+                        move |_| {
+                            if busy() { return; }
+                            busy.set(true);
+                            let ws = workspace_id.clone();
+                            let title = goal_title();
+                            let md = goal_md();
+                            spawn(async move {
+                                match create_goal(&ws, title.trim(), md.trim()).await {
+                                    Ok(_) => {
+                                        goal_title.set(String::new());
+                                        goal_md.set(String::new());
+                                        status_line.set("Goal is on the board. It stays until the outcome is done.".into());
+                                    }
+                                    Err(e) => status_line.set(e.message()),
+                                }
+                                if let Ok(w) = fetch_workforce(&ws).await {
+                                    workforce.set(w);
+                                }
+                                busy.set(false);
+                            });
+                        }
+                    },
+                    "Start goal"
+                }
+                if !status_line().is_empty() {
+                    p { class: "mt-2 text-sm text-[var(--app-muted)]", "{status_line}" }
                 }
             }
 
@@ -160,10 +220,48 @@ pub fn Dashboard(workspace_id: String) -> Element {
             }
 
             div { class: "grid gap-3 sm:grid-cols-2 lg:grid-cols-4",
+                Stat { label: "Open goals", value: "{wf.open_goals.len()}" }
                 Stat { label: "Open runs", value: "{o.open_runs}" }
                 Stat { label: "Live agents", value: "{o.live_agents}" }
                 Stat { label: "In progress", value: "{o.tasks_in_progress}" }
-                Stat { label: "Sent back", value: "{o.changes_requested}" }
+            }
+
+            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Goals" }
+                if wf.goals.is_empty() {
+                    p { class: "mt-3 text-sm text-[var(--app-muted)]",
+                        "No goals yet. Set one above or say it in Chat — it stays on this board until the ticket or PR is done."
+                    }
+                } else {
+                    ul { class: "mt-3 m-0 list-none space-y-2 p-0",
+                        for g in wf.goals.clone() {
+                            {
+                                let gid = g.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let title = g.get("title").and_then(|v| v.as_str()).unwrap_or("goal").to_string();
+                                let status = g.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let run_id = g.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let sub = if run_id.is_empty() {
+                                    "case-backed".to_string()
+                                } else {
+                                    format!("run {}", short(&run_id))
+                                };
+                                rsx! {
+                                    li {
+                                        key: "{gid}",
+                                        class: "flex items-start justify-between gap-2",
+                                        div {
+                                            p { class: "m-0 text-sm text-[var(--app-fg)]", "{title}" }
+                                            p { class: "m-0 font-mono text-[11px] text-[var(--app-muted)]",
+                                                "{sub}"
+                                            }
+                                        }
+                                        span { class: "shrink-0 text-xs {status_class(&status)}", "{status}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             div { class: "grid gap-4 lg:grid-cols-2",

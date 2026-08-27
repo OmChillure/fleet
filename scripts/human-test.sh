@@ -145,7 +145,7 @@ cmd_guide() {
 
   pause_step "Login  ${UI_URL}/login" \
     "Same email/password → /{workspace-uuid}/dashboard." \
-    "Dashboard shows Open runs / Live agents / Team board / Tickets (empty is OK)." || return 0
+    "Workforce page: Set a goal, Open goals / Open runs / Live agents / Team board (empty is OK)." || return 0
 
   pause_step "Login wall" \
     "Log out (user menu) or a private window." \
@@ -154,7 +154,7 @@ cmd_guide() {
 
   pause_step "Sidebar" \
     "Chat: New chat, Chat history." \
-    "Monitoring: Dashboard, Fleet, Sandboxes, Cases, Inbox." \
+    "Monitoring: Workforce, Fleet, Sandboxes, Cases, Inbox." \
     "Agents: All agents, Live sessions (same route as Chat history)." \
     "Runners (expand it): Self-hosted, Cloud, Partners." \
     "Workspace (expand it): Integrations, Settings." \
@@ -231,8 +231,8 @@ cmd_guide() {
 
   pause_step "Inbox" \
     "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
-    "Start monitor + Refresh now. Finish launches implement + review." \
-    "Empty is OK until Integrations are connected." || return 0
+    "Start monitor watches the boards and auto-launches work+review on open tickets." \
+    "Refresh now polls. Finish still starts one by hand. Empty is OK until Integrations are connected." || return 0
 
   pause_step "Settings members" \
     "/{ws}/settings — Members: invite by email (member/admin)." \

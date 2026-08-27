@@ -2831,3 +2831,120 @@ async fn inbox_unauthenticated_get_is_401() {
     let out = call(&app, "GET", &inbox_path(&ws, ""), None, None).await;
     assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
 }
+
+#[tokio::test]
+async fn inbox_monitor_defaults_auto_launch_and_preserves_filters() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let first = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(
+        first.body["auto_launch"], true,
+        "Start monitor (no flag) must keep working tickets: {}",
+        first.body
+    );
+
+    let saved = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({
+            "enabled": false,
+            "auto_launch": false,
+            "jira_jql": "project = ENG"
+        })),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.body["auto_launch"], false);
+    assert_eq!(saved.body["jira_jql"], "project = ENG");
+
+    let again = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+    assert_eq!(
+        again.body["auto_launch"], false,
+        "omitted auto_launch must not wipe a saved false: {}",
+        again.body
+    );
+    assert_eq!(
+        again.body["jira_jql"], "project = ENG",
+        "omitted jira_jql must keep the saved filter: {}",
+        again.body
+    );
+}
+
+fn workforce(ws: &str, suffix: &str) -> String {
+    format!("/api/workspaces/{ws}/workforce{suffix}")
+}
+
+#[tokio::test]
+async fn workforce_goal_survives_and_slack_post_runs_directly() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
+
+    let created = call(
+        &app,
+        "POST",
+        &workforce(&ws, "/goals"),
+        Some(&jar),
+        Some(json!({
+            "title": "Ship the weather app",
+            "goal_md": "Done when the PR is merged."
+        })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    assert_eq!(
+        created.body["goal"]["title"].as_str(),
+        Some("Ship the weather app")
+    );
+    assert!(
+        created.body["goal"]["case_id"].as_str().is_some(),
+        "goal must own a case so it wakes tomorrow: {}",
+        created.body
+    );
+
+    let listed = call(&app, "GET", &workforce(&ws, ""), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert!(
+        listed.body["open_goals"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "open goal must persist: {}",
+        listed.body
+    );
+
+    let posted = fleet_server::workforce::gated_invoke(
+        &state,
+        ws_id,
+        fleet_integrations::proxy::ProxyCaller::System,
+        "slack",
+        "post_message",
+        json!({ "channel": "#eng", "text": "shipped" }),
+    )
+    .await;
+    assert_ne!(
+        posted.error_code.as_deref(),
+        Some("needs_approval"),
+        "writes must run immediately, not wait for approve: {:?}",
+        posted
+    );
+}

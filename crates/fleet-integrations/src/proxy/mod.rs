@@ -263,9 +263,11 @@ mod tests {
         assert!(operations_for("github").contains(&"commit_files"));
         assert!(operations_for("github").contains(&"get_file"));
         assert!(operations_for("github").contains(&"update_issue"));
+        assert!(operations_for("github").contains(&"merge_pr"));
         assert!(operations_for("gitlab").contains(&"list_mrs"));
         assert!(operations_for("gitlab").contains(&"commit_files"));
         assert!(operations_for("gitlab").contains(&"create_mr"));
+        assert!(operations_for("gitlab").contains(&"merge_mr"));
         assert!(operations_for("gitlab").contains(&"update_issue"));
         assert!(operations_for("jira").contains(&"get_issue"));
         assert!(operations_for("jira").contains(&"create_issue"));
