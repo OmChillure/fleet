@@ -249,7 +249,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                 }
                 div { class: "flex flex-wrap gap-2",
                     button {
-                        class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
+                        class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-[var(--app-accent-fg)] disabled:opacity-50",
                         disabled: busy() || !ready(),
                         r#type: "button",
                         onclick: {
@@ -699,6 +699,20 @@ mod tests {
         assert!(
             api.contains("fn start_fixture_body"),
             "Start 2-task must post start_fixture_body (kind=chain)"
+        );
+    }
+
+    #[test]
+    fn start_2_task_button_uses_accent_foreground_not_hardcoded_white() {
+        // Dark theme --app-accent is #ffffff; text-white is invisible.
+        let start_btn = button_named(production_page(), "\"Start 2-task run\"");
+        assert!(
+            start_btn.contains("text-[var(--app-accent-fg)]"),
+            "Start 2-task run must use --app-accent-fg so dark theme is readable:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.contains("text-white"),
+            "Start 2-task run must not hardcode text-white (white-on-white in dark):\n{start_btn}"
         );
     }
 }

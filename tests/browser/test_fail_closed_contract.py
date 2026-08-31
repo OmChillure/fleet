@@ -230,6 +230,9 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("13030", text)
         self.assertIn('PORT="$port"', text)
         self.assertIn("FLEET_API_URL", text)
+        self.assertIn("write_dioxus_proxy", text)
+        self.assertIn("restore_dioxus_proxy", text)
+        self.assertIn("Dioxus.toml", text)
         dockerignore = (REPO / ".dockerignore").read_text(encoding="utf-8")
         self.assertIn("crates/fleet-ui/public/fleet-git-sha.txt", dockerignore)
 
@@ -827,6 +830,7 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("__pycache__/", ignore)
         self.assertIn("crates/fleet-ui/public/fleet-git-sha.txt", ignore)
         self.assertIn("tailwind.css", script.read_text(encoding="utf-8"))
+        self.assertIn("Dioxus.toml", script.read_text(encoding="utf-8"))
         ident = IDENT.read_text(encoding="utf-8")
         self.assertIn("tree-id.sh", ident)
         self.assertIn("Verification without that rebuild is not valid", ident)

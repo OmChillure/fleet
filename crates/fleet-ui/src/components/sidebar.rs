@@ -470,10 +470,24 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
             if menu_open() {
                 div {
                     class: "fixed inset-0 z-30",
+                    id: "user-menu-dismiss",
+                    tabindex: "-1",
+                    "aria-hidden": "true",
+                    autofocus: true,
                     onclick: move |_| menu_open.set(false),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            menu_open.set(false);
+                        }
+                    },
                 }
                 div {
                     class: "absolute bottom-full left-2 right-2 z-40 mb-1 overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] py-1 shadow-lg",
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            menu_open.set(false);
+                        }
+                    },
                     div { class: "border-b border-[var(--app-border)] px-3 py-2.5",
                         p { class: "m-0 truncate text-sm font-medium text-[var(--app-fg)]", "{label_primary}" }
                         if let Some(sec) = label_secondary.clone() {
@@ -490,6 +504,11 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                             let next = theme().toggle();
                             next.persist();
                             theme.set(next);
+                        },
+                        onkeydown: move |evt| {
+                            if evt.key() == Key::Escape {
+                                menu_open.set(false);
+                            }
                         },
                         span { "Appearance" }
                         span { class: "text-xs text-[var(--app-muted)]",
@@ -553,7 +572,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
             }
 
             button {
-                class: "flex w-full items-center gap-2 rounded-lg p-1.5 text-left transition hover:bg-[var(--app-bg-hover)]",
+                class: "relative z-50 flex w-full items-center gap-2 rounded-lg p-1.5 text-left transition hover:bg-[var(--app-bg-hover)]",
                 r#type: "button",
                 "aria-expanded": if menu_open() { "true" } else { "false" },
                 "aria-haspopup": "menu",
@@ -737,5 +756,20 @@ fn IconSettings() -> Element {
             path { d: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" }
             path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn user_menu_overlay_dismisses_and_opener_stays_clickable() {
+        let src = include_str!("sidebar.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("prod");
+        assert!(prod.contains("id: \"user-menu-dismiss\""), "overlay needs an id");
+        assert!(prod.contains("Key::Escape"), "Escape must close the menu");
+        assert!(
+            prod.contains("relative z-50"),
+            "opener must sit above the overlay so a second click closes"
+        );
     }
 }

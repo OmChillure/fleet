@@ -207,11 +207,19 @@ def _wait_actions_gone(page, names: tuple[str, ...] = _OPEN_ACTIONS) -> None:
 
 
 def _wait_detail_status_pill(page, title: str, status: str) -> None:
-    """Detail heading is the title; the chip is `{status} · {stage}`."""
+    """Detail heading is the title; status and stage are separate chips."""
     page.get_by_role("heading", name=title).first.wait_for(timeout=15_000)
-    page.locator("span").filter(
-        has_text=re.compile(rf"^{re.escape(status)}\s*·", re.I)
+    panel = page.get_by_role("heading", name=title).first.locator("xpath=../..")
+    panel.locator("span").filter(
+        has_text=re.compile(rf"^{re.escape(status)}$", re.I)
     ).first.wait_for(timeout=15_000)
+    mashed = panel.locator("span").filter(
+        has_text=re.compile(rf"{re.escape(status)}\s*[-·]\s*", re.I)
+    )
+    if mashed.count():
+        raise AssertionError(
+            f"detail pill mashes status and stage: {mashed.first.inner_text()!r}"
+        )
 
 
 def _listed_case(page, workspace_id: str, case_id: str) -> dict:
@@ -344,6 +352,7 @@ class CasesE2ETests(unittest.TestCase):
             page.get_by_text(re.compile(r"cancelled", re.I)).first.wait_for(
                 timeout=15_000
             )
+            _wait_detail_status_pill(page, title, "cancelled")
             hide_deadline = time.time() + 15
             while time.time() < hide_deadline:
                 if page.get_by_role("button", name="Cancel", exact=True).count() == 0:

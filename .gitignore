@@ -34,6 +34,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# crash dumps flip tree-id if left untracked
+core
+core.*
+
 # accidental local ref / temp assets
 *.webp
 !docs/**/*.webp

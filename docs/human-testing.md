@@ -152,9 +152,17 @@ proof — discard it and re-film. Do not film, then change code, then
 attach the old `.webm`.
 
 The video must show **every scene in HUMAN_TEST_SCOPE.md**. It is not a
-random walkthrough. After filming, **review the film** for bugs (each
-frame under `.tmp/demos/<stamp>-frames/` and the `.webm`) and fill the
-Film review section in that file.
+random walkthrough. The recorder must **use** each feature (click the
+primary control, create / cancel / save / tick / invite / pair, then
+assert the outcome) and **cross each click with the matching
+fleet-server log line** (`method=` + `uri=` + `status=` in
+`.run/logs/fleet-server.log`). Opening a page and checking the heading
+is not a review. After filming, **review the film** for bugs: every
+mid-action frame under `.tmp/demos/<stamp>-frames/` plus the `.webm`.
+Fail the review when a control is present but unusable (blank button,
+mashed pill, action toast missing, wrong identity) or when the UI
+claims success but the log never saw the request. Fill the Film review
+section in that file.
 
 ```bash
 python3 tests/browser/surface_scope.py --write   # after every code change

@@ -84,6 +84,13 @@ self_test() {
     return 1
   }
 
+  mkdir -p "${tmp}/crates/fleet-ui"
+  printf 'backend = "http://127.0.0.1:18280/api/"\n' >"${tmp}/crates/fleet-ui/Dioxus.toml"
+  [[ "$(env FLEET_GIT_SHA="${fake}" bash "${script}")" == "${head}" ]] || {
+    echo "FAIL: Dioxus.toml proxy rewrite must not dirty the id" >&2
+    return 1
+  }
+
   printf 'new\n' >"${tmp}/untracked.rs"
   id="$(env FLEET_GIT_SHA="${fake}" bash "${script}")"
   [[ "${id}" =~ ^[0-9a-f]{40}-[0-9a-f]{12}$ ]] || {
@@ -114,6 +121,8 @@ PATHSPEC=(
   ':!crates/fleet-ui/assets/tailwind.css'
   # Generated/reviewed per MR; filling Film review must not invalidate a bake.
   ':!HUMAN_TEST_SCOPE.md'
+  # fleet-dev rewrites the proxy port when Kind owns :8080.
+  ':!crates/fleet-ui/Dioxus.toml'
 )
 untracked="$(
   git ls-files --others --exclude-standard "${PATHSPEC[@]}" \

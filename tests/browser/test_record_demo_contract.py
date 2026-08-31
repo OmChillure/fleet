@@ -211,6 +211,29 @@ class RecordDemoContractTests(unittest.TestCase):
             "main path must call require_stack() so down ports fail closed",
         )
 
+    def test_clicks_are_crossed_with_server_log(self):
+        src = REC.read_text(encoding="utf-8")
+        self.assertIn("def match_http_log", src)
+        self.assertIn("def expect_http", src)
+        self.assertIn(".run/logs/fleet-server.log", src)
+        self.assertIn('method={method}', src)
+        sys.path.insert(0, str(REC.parent))
+        import record_demo as rec  # noqa: E402
+
+        chunk = (
+            "INFO request{method=POST uri=/api/auth/signup version=HTTP/1.1}: "
+            "fleet_server: http response status=201 Created\n"
+            "INFO request{method=GET uri=/health version=HTTP/1.1}: "
+            "fleet_server: http response status=200 OK\n"
+        )
+        self.assertIn(
+            "status=201",
+            rec.match_http_log(chunk, "POST", "/api/auth/signup", ("201",)) or "",
+        )
+        self.assertIsNone(rec.match_http_log(chunk, "POST", "/api/auth/signup", ("200",)))
+        self.assertIsNone(rec.match_http_log(chunk, "GET", "/health", ("500",)))
+        self.assertIn("signup", rec.match_phrase_log(chunk, "signup") or "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

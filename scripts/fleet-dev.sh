@@ -345,9 +345,23 @@ choose_host_ports() {
            FLEET_UI_URL="http://127.0.0.1:${UI_PORT}" \
            python3 "${ROOT}/tests/browser/stack_identity.py" >/dev/null 2>&1; then
         warn ":${API_PORT}/:${UI_PORT} are up but not this tree (${want})."
-        warn "Starting host stack on :${HOST_API_FALLBACK}/:${HOST_UI_FALLBACK} (Kind can keep 8080/3030)."
         API_PORT="$HOST_API_FALLBACK"
         UI_PORT="$HOST_UI_FALLBACK"
+        local n=0
+        while (( n < 6 )); do
+          if ! port_is_open "$API_PORT" && ! port_is_open "$UI_PORT"; then
+            break
+          fi
+          if env FLEET_API_URL="http://127.0.0.1:${API_PORT}" \
+               FLEET_UI_URL="http://127.0.0.1:${UI_PORT}" \
+               python3 "${ROOT}/tests/browser/stack_identity.py" >/dev/null 2>&1; then
+            break
+          fi
+          API_PORT=$((API_PORT + 200))
+          UI_PORT=$((UI_PORT + 200))
+          n=$((n + 1))
+        done
+        warn "Starting host stack on :${API_PORT}/:${UI_PORT} (Kind can keep 8080/3030)."
       fi
     fi
   fi
@@ -370,6 +384,27 @@ write_ui_git_sha() {
   local dest="${ROOT}/crates/fleet-ui/public/fleet-git-sha.txt"
   mkdir -p "$(dirname "${dest}")"
   printf '%s\n' "${FLEET_GIT_SHA}" >"${dest}"
+}
+
+# dx [[web.proxy]] is compiled from Dioxus.toml. A remapped host API
+# (Kind owns :8080) must proxy to FLEET_API_PORT, not leftover :8080.
+DIOXUS_TOML="${ROOT}/crates/fleet-ui/Dioxus.toml"
+
+write_dioxus_proxy() {
+  local port="${FLEET_API_PORT:-${API_PORT:-8080}}"
+  local toml="$DIOXUS_TOML"
+  [[ -f "$toml" ]] || return 0
+  if grep -qE 'backend = "http://127\.0\.0\.1:[0-9]+/api/"' "$toml"; then
+    sed -i -E "s#backend = \"http://127\\.0\\.0\\.1:[0-9]+/api/\"#backend = \"http://127.0.0.1:${port}/api/\"#" "$toml"
+  fi
+}
+
+restore_dioxus_proxy() {
+  local toml="$DIOXUS_TOML"
+  [[ -f "$toml" ]] || return 0
+  if grep -qE 'backend = "http://127\.0\.0\.1:[0-9]+/api/"' "$toml"; then
+    sed -i -E 's#backend = "http://127\.0\.0\.1:[0-9]+/api/"#backend = "http://127.0.0.1:8080/api/"#' "$toml"
+  fi
 }
 
 start_server() {
@@ -414,6 +449,7 @@ start_ui() {
   need_cmd dx || exit 1
   export_git_sha
   write_ui_git_sha
+  write_dioxus_proxy
   if [[ -n "$(port_pids "$UI_PORT")" ]]; then
     if python3 "${ROOT}/tests/browser/stack_identity.py"; then
       warn "Port $UI_PORT already in use and UI/API match this tree — not starting"
@@ -544,6 +580,7 @@ cmd_stop() {
   fi
   free_port "${PORT:-$API_PORT}" "fleet-server"
   free_port "$UI_PORT" "fleet-ui"
+  restore_dioxus_proxy
   ok "Processes stopped (Postgres left running — use './scripts/fleet-dev.sh down' to tear it down)."
 }
 

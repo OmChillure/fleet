@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `792f5157f4e469de1eb18ef796f01c5138903cc5`
-- Tree-id: `792f5157f4e469de1eb18ef796f01c5138903cc5-f15a5422f6d4`
+- Tree-id: `b5d8408cebdfad9396c71e4f2384023c8c451616-c4e78aaba58e`
 
 ## Scenes
 
@@ -310,13 +310,15 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: YES (`792f5157…-f15a5422f6d4` host :18280/:13230; Kind :8080 still old)
-- Frames + webm inspected: YES (`.tmp/demos/20260831T023832Z-frames/` + `20260831T023832Z-auth-shell-workspace-api-chat-fleet-sandboxes-cases.webm`)
-- Bugs found:
-  - Fleet: “Start 2-task run” renders as a blank white rectangle (label missing). Tick still ran; board moved.
-  - Cases: after Cancel, detail shows a mashed `CANCELLED - START` pill. Events + “Case cancelled.” toast are correct.
-  - Inbox: Finish launched a run, but the page shows red `github connection has no access_token — reconnect` (seeded github row, no real token). Inbox Finish `failed_spawn` on stub.
-  - `kind` frame hit Kind `:8080` health (`75f7c227fdb9`), not the host remapped API. Recorder still uses default :8080 for that scene.
-  - API index HTML still advertises `localhost:3030` while this host UI is :13230 (copy, not a crash).
-  - Chat empty composer with Grok “not installed” is expected on this runner.
-  - No leaked secrets / `.env` / tokens in frames.
+- Recorded on final merge tree: YES (`b5d8408…-c4e78aaba58e` host `:8080`/`:3030`; Kind control-plane stopped)
+- Frames + webm inspected: YES (`.tmp/demos/20260831T033601Z-frames/` + `20260831T033601Z-auth-shell-workspace-api-chat-fleet-sandboxes-cases.webm`)
+- Product issues from the last film — re-checked after fixes:
+  - Dark **Start 2-task run** is readable (accent fill + `--app-accent-fg`). Frame `29-fleet-before-start`.
+  - User menu: Appearance toggles Light then Dark; Escape / opener closes the overlay. Frames `15`/`16`.
+  - Cases detail: **CANCELLED** and **start** are separate chips. One success toast. Frame `42-cases-cancelled`.
+  - Inbox Finish: `POST /inbox/finish` 200 + launched run id. Frame `47`.
+  - Settings save/invite/revoke, partners ack, fleet fixture 201 + ticks + cancel all logged.
+- Remaining recorder nits (not product):
+  - Hold/Apply on Self-hosted is a local draft until Apply; film flagged missing `PATCH /worker-hosts/` when Apply did not POST. Page still shows the plane online.
+- Expected: Inbox Start monitor 400 without a connected app. Kind/k8s filmed host health (cluster stopped).
+- No leaked secrets. Tests that lock the fixes: `cargo test -p fleet-ui` (accent-fg, split pills, overlay/Escape, toast merge); `tests/browser/test_shell_theme_e2e.py`; `test_cases_e2e.py::test_create_observe_cancel`.
