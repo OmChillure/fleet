@@ -17,8 +17,9 @@
 #   FLEET_SKIP_UI=1      do not start the UI
 #   FLEET_SKIP_HOST=1    do not start fleet-host (bootstrap pair + lease)
 # Does not start sandbox-lab (OpenCode compose). That is a separate test harness.
-#   FLEET_UI_PORT=3030
-#   FLEET_API_PORT=8080  (must match .env PORT if set)
+#   FLEET_UI_PORT=3030   (falls back to 13030 when Kind owns :3030)
+#   FLEET_API_PORT=8080  (must match .env PORT if set; falls back to 18080
+#                         when Kind owns :8080 and is not this tree)
 #   COMPOSE_FILE=...     docker compose file (default: docker-compose.yml)
 
 set -euo pipefail
@@ -38,6 +39,9 @@ LOG_HOST="$LOG_DIR/fleet-host.log"
 COMPOSE_FILE="${COMPOSE_FILE:-$ROOT/docker-compose.yml}"
 UI_PORT="${FLEET_UI_PORT:-3030}"
 API_PORT="${FLEET_API_PORT:-8080}"
+HOST_API_FALLBACK="${FLEET_HOST_API_FALLBACK:-18080}"
+HOST_UI_FALLBACK="${FLEET_HOST_UI_FALLBACK:-13030}"
+URLS_FILE="${RUN_DIR}/host-urls.env"
 
 # Matches docker-compose.yml (postgres:16 on host 5433).
 COMPOSE_DATABASE_URL="postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable"
@@ -112,6 +116,25 @@ port_pids() {
   else
     return 0
   fi
+}
+
+# Kind extraPortMappings listen on the host but often have no host pid
+# (lsof/fuser empty). ss/curl still see them.
+port_is_open() {
+  local port="$1"
+  if [[ -n "$(port_pids "$port")" ]]; then
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${port}[[:space:]]"; then
+    return 0
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${port}/health" 2>/dev/null \
+      || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${port}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
 }
 
 wait_http() {
@@ -305,6 +328,44 @@ export_git_sha() {
   export FLEET_GIT_SHA
 }
 
+# Kind extraPortMappings often own :8080/:3030. Host human-test then cannot
+# bind. If those ports are up and are not this tree, move the host stack to
+# 18080/13030. Explicit FLEET_API_PORT / FLEET_UI_PORT always win.
+choose_host_ports() {
+  local want api_busy ui_busy
+  want="$(bash "${ROOT}/scripts/tree-id.sh")"
+  mkdir -p "$RUN_DIR"
+
+  if [[ -n "${FLEET_API_PORT:-}" || -n "${FLEET_UI_PORT:-}" ]]; then
+    API_PORT="${FLEET_API_PORT:-$API_PORT}"
+    UI_PORT="${FLEET_UI_PORT:-$UI_PORT}"
+  else
+    if port_is_open "$API_PORT" || port_is_open "$UI_PORT"; then
+      if ! env FLEET_API_URL="http://127.0.0.1:${API_PORT}" \
+           FLEET_UI_URL="http://127.0.0.1:${UI_PORT}" \
+           python3 "${ROOT}/tests/browser/stack_identity.py" >/dev/null 2>&1; then
+        warn ":${API_PORT}/:${UI_PORT} are up but not this tree (${want})."
+        warn "Starting host stack on :${HOST_API_FALLBACK}/:${HOST_UI_FALLBACK} (Kind can keep 8080/3030)."
+        API_PORT="$HOST_API_FALLBACK"
+        UI_PORT="$HOST_UI_FALLBACK"
+      fi
+    fi
+  fi
+
+  export FLEET_API_PORT="$API_PORT"
+  export FLEET_UI_PORT="$UI_PORT"
+  export PORT="$API_PORT"
+  export FLEET_API_URL="http://127.0.0.1:${API_PORT}"
+  export FLEET_UI_URL="http://localhost:${UI_PORT}"
+  {
+    echo "FLEET_API_PORT=${API_PORT}"
+    echo "FLEET_UI_PORT=${UI_PORT}"
+    echo "PORT=${API_PORT}"
+    echo "FLEET_API_URL=${FLEET_API_URL}"
+    echo "FLEET_UI_URL=${FLEET_UI_URL}"
+  } >"$URLS_FILE"
+}
+
 write_ui_git_sha() {
   local dest="${ROOT}/crates/fleet-ui/public/fleet-git-sha.txt"
   mkdir -p "$(dirname "${dest}")"
@@ -314,7 +375,8 @@ write_ui_git_sha() {
 start_server() {
   load_dotenv
   export_git_sha
-  local port="${PORT:-$API_PORT}"
+  # choose_host_ports may have remapped off Kind :8080. .env PORT must not win.
+  local port="${FLEET_API_PORT:-${PORT:-$API_PORT}}"
   if [[ -n "$(port_pids "$port")" ]]; then
     if python3 "${ROOT}/tests/browser/stack_identity.py"; then
       warn "Port $port already in use and /health matches this tree — not starting"
@@ -336,6 +398,8 @@ start_server() {
   nohup env \
     CARGO_TERM_COLOR=never \
     FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
+    PORT="$port" \
+    HOST="${HOST:-0.0.0.0}" \
     cargo run -p fleet-server \
     >>"$LOG_SERVER" 2>&1 &
   echo $! >"$PID_SERVER"
@@ -388,7 +452,7 @@ start_host() {
     warn "fleet-host already running (pid $pid)"
     return 0
   fi
-  local port="${PORT:-$API_PORT}"
+  local port="${FLEET_API_PORT:-${PORT:-$API_PORT}}"
   mkdir -p "$RUN_DIR/host"
   log "Starting fleet-host (bootstrap pair + lease)…"
   nohup env \
@@ -411,6 +475,7 @@ cmd_start() {
   if [[ "${FLEET_SKIP_UI:-0}" != "1" ]]; then
     need_cmd dx || exit 1
   fi
+  choose_host_ports
 
   # Postgres first
   if ! compose ps --status running 2>/dev/null | grep -q postgres; then
@@ -430,7 +495,7 @@ cmd_start() {
   start_ui
 
   load_dotenv
-  local port="${PORT:-$API_PORT}"
+  local port="${FLEET_API_PORT:-${PORT:-$API_PORT}}"
   log "Waiting for services…"
   wait_http "http://127.0.0.1:${port}/health" "fleet-server" 90 || {
     err "fleet-server did not become ready. Logs: ./scripts/fleet-dev.sh logs"
@@ -471,6 +536,12 @@ cmd_stop() {
   stop_pid_file "fleet-server" "$PID_SERVER"
   stop_pid_file "fleet-ui" "$PID_UI"
   load_dotenv
+  if [[ -f "$URLS_FILE" ]]; then
+    # shellcheck disable=SC1090
+    . "$URLS_FILE"
+    API_PORT="${FLEET_API_PORT:-$API_PORT}"
+    UI_PORT="${FLEET_UI_PORT:-$UI_PORT}"
+  fi
   free_port "${PORT:-$API_PORT}" "fleet-server"
   free_port "$UI_PORT" "fleet-ui"
   ok "Processes stopped (Postgres left running — use './scripts/fleet-dev.sh down' to tear it down)."

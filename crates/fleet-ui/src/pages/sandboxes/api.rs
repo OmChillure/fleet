@@ -2,7 +2,10 @@
 
 use serde::Deserialize;
 
+use super::shape::{SandboxesResponse, list_sandboxes_path};
 use crate::pages::auth::api::auth_base_url;
+
+pub use super::shape::SandboxRow;
 
 #[derive(Debug, Clone)]
 pub enum SandboxError {
@@ -16,42 +19,6 @@ impl SandboxError {
             Self::Message(m) | Self::Network(m) => m.clone(),
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct SandboxRow {
-    pub id: String,
-    pub run_id: String,
-    pub board_task_id: String,
-    #[serde(default)]
-    pub attempt: i64,
-    pub status: String,
-    #[serde(default)]
-    pub runtime_backend: String,
-    #[serde(default)]
-    pub runtime_handle: Option<String>,
-    #[serde(default)]
-    pub worker_profile: String,
-    #[serde(default)]
-    pub progress_pct: i64,
-    #[serde(default)]
-    pub work_dir: Option<String>,
-    #[serde(default)]
-    pub started_at: Option<String>,
-    #[serde(default)]
-    pub exited_at: Option<String>,
-    #[serde(default)]
-    pub exit_reason: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SandboxesResponse {
-    #[serde(default)]
-    pub sandbox_backend: String,
-    #[serde(default)]
-    pub sandboxes: Vec<SandboxRow>,
 }
 
 fn client() -> reqwest::Client {
@@ -104,28 +71,11 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(
     }
 }
 
-pub async fn kill_sandbox(workspace_id: &str, session_id: &str) -> Result<(), SandboxError> {
-    let res = with_credentials(
-        client()
-            .post(api_url(&format!(
-                "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill"
-            )))
-            .json(&serde_json::json!({ "reason": "ui_kill" })),
-    )
-    .send()
-    .await
-    .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
-    let _: serde_json::Value = parse_json(res).await?;
-    Ok(())
-}
-
 /// List worker sessions as sandboxes for the workspace.
 pub async fn list_sandboxes(workspace_id: &str) -> Result<SandboxesResponse, SandboxError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/fleet/workers"
-    ))))
-    .send()
-    .await
-    .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
+    let res = with_credentials(client().get(api_url(&list_sandboxes_path(workspace_id))))
+        .send()
+        .await
+        .map_err(|e| SandboxError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }

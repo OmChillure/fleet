@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{SandboxId, SessionId, ToolCallId, TurnId};
-use crate::types::{
-    AgentTurnMode, PermissionDecision, RepoAuthVia, ShutdownMode,
-};
+use crate::types::{AgentTurnMode, PermissionDecision, RepoAuthVia, ShutdownMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSpec {

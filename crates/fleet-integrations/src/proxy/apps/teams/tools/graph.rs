@@ -1,9 +1,9 @@
 //! Microsoft Graph Teams tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn get_me(http: &reqwest::Client, token: &str, _args: &Value) -> ProxyResult {
     let (status, body) = graph_get(http, token, "https://graph.microsoft.com/v1.0/me").await;
@@ -230,9 +230,8 @@ pub(crate) async fn send_channel_message(
     let payload = json!({
         "body": { "contentType": "text", "content": text }
     });
-    let url = format!(
-        "https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages"
-    );
+    let url =
+        format!("https://graph.microsoft.com/v1.0/teams/{team_id}/channels/{channel_id}/messages");
     let (status, body) = graph_post(http, token, &url, &payload).await;
     if !(200..300).contains(&status) {
         return upstream_err("send_channel_message", status, &body);

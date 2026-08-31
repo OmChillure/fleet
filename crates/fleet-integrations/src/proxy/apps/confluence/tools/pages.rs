@@ -1,6 +1,6 @@
 //! Confluence space / page tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -86,7 +86,10 @@ pub(crate) async fn list_pages(
     cloud_id: &str,
     args: &Value,
 ) -> ProxyResult {
-    let space = args.get("space").or_else(|| args.get("spaceKey")).and_then(|v| v.as_str());
+    let space = args
+        .get("space")
+        .or_else(|| args.get("spaceKey"))
+        .and_then(|v| v.as_str());
     let mut url = format!("{}/content?type=page&limit=25", base(cloud_id));
     if let Some(s) = space {
         url.push_str("&spaceKey=");
@@ -188,7 +191,10 @@ pub(crate) async fn update_page(
         Ok(i) => i,
         Err(e) => return ProxyResult::err("confluence", "update_page", "bad_args", e, None),
     };
-    let get_url = format!("{}/content/{id}?expand=version,space,body.storage", base(cloud_id));
+    let get_url = format!(
+        "{}/content/{id}?expand=version,space,body.storage",
+        base(cloud_id)
+    );
     let (gstatus, existing) = cf_get(http, token, &get_url).await;
     if !(200..300).contains(&gstatus) {
         return upstream_err("update_page", gstatus, &existing);
@@ -201,7 +207,12 @@ pub(crate) async fn update_page(
     let title = args
         .get("title")
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| existing.get("title").and_then(|t| t.as_str()).unwrap_or("Untitled"));
+        .unwrap_or_else(|| {
+            existing
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Untitled")
+        });
     let text = args
         .get("text")
         .or_else(|| args.get("body"))
@@ -211,7 +222,11 @@ pub(crate) async fn update_page(
         .pointer("/body/storage/value")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let html = if args.get("replace").and_then(|v| v.as_bool()).unwrap_or(false) {
+    let html = if args
+        .get("replace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         if text.contains('<') {
             text.to_string()
         } else {

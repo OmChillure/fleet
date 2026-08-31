@@ -69,11 +69,15 @@ pub fn authorize_url(
         ),
         "google_drive" => format!(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}&access_type=offline&prompt=consent",
-            scope = urlencoding("https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email"),
+            scope = urlencoding(
+                "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email"
+            ),
         ),
         "teams" => format!(
             "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id={client_id}&response_type=code&redirect_uri={redirect_enc}&response_mode=query&scope={scope}&state={state_enc}",
-            scope = urlencoding("offline_access User.Read Chat.ReadWrite ChannelMessage.Send Team.ReadBasic.All"),
+            scope = urlencoding(
+                "offline_access User.Read Chat.ReadWrite ChannelMessage.Send Team.ReadBasic.All"
+            ),
         ),
         "discord" => format!(
             "https://discord.com/api/oauth2/authorize?client_id={client_id}&redirect_uri={redirect_enc}&response_type=code&scope={scope}&state={state_enc}",
@@ -484,10 +488,7 @@ async fn exchange_jira(
     })
 }
 
-async fn fetch_atlassian_site(
-    http: &reqwest::Client,
-    token: &str,
-) -> Option<(String, String)> {
+async fn fetch_atlassian_site(http: &reqwest::Client, token: &str) -> Option<(String, String)> {
     let res = http
         .get("https://api.atlassian.com/oauth/token/accessible-resources")
         .header("Authorization", format!("Bearer {token}"))
@@ -979,7 +980,11 @@ async fn fetch_trello_username(
 ) -> Option<String> {
     let res = http
         .get("https://api.trello.com/1/members/me")
-        .query(&[("key", api_key), ("token", token), ("fields", "username,fullName")])
+        .query(&[
+            ("key", api_key),
+            ("token", token),
+            ("fields", "username,fullName"),
+        ])
         .send()
         .await
         .ok()?;

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::paths::{self, config_dir, config_path, expand_tilde, token_path};
+use crate::paths::{self, config_dir, config_path, expand_tilde};
 
 const WORKER_TOKEN_KEY: &str = "FLEET_WORKER_TOKEN";
 
@@ -346,9 +346,13 @@ impl LocalConfig {
     }
 
     pub fn save(&self) -> Result<PathBuf> {
-        let dir = config_dir();
-        ensure_dir_mode(&dir, 0o700)?;
-        let path = config_path();
+        self.save_in(&config_dir())
+    }
+
+    /// Same as [`Self::save`] against `dir` (tests; no env mutation).
+    fn save_in(&self, dir: &Path) -> Result<PathBuf> {
+        ensure_dir_mode(dir, 0o700)?;
+        let path = dir.join("config.toml");
         let body = toml::to_string_pretty(self).context("serialize config.toml")?;
         write_file_mode(&path, body.as_bytes(), 0o600)?;
         Ok(path)
@@ -375,40 +379,105 @@ impl LocalConfig {
     }
 }
 
+/// On-box machine token. Stored only in `machine.token` (0600).
+/// Display and Debug never include the secret.
+#[derive(Clone)]
+pub struct MachineToken(String);
+
+impl MachineToken {
+    fn from_raw(raw: &str) -> Self {
+        Self(raw.trim().to_string())
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        let t = raw.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(Self(t.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for MachineToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MachineToken([REDACTED])")
+    }
+}
+
+impl std::fmt::Display for MachineToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 pub fn read_machine_token() -> Result<Option<String>> {
-    let path = token_path();
+    read_machine_token_in(&config_dir())
+}
+
+/// Same as [`read_machine_token`] against `dir` (tests; no env mutation).
+fn read_machine_token_in(dir: &Path) -> Result<Option<String>> {
+    let path = dir.join("machine.token");
     if !path.is_file() {
         return Ok(None);
     }
+    // Repair 0644 leftovers; do not fail the read (lockout) if chmod cannot.
+    let _ = chmod_owner_only(&path);
     let mut s = String::new();
     fs::File::open(&path)
         .with_context(|| format!("read {}", path.display()))?
         .read_to_string(&mut s)?;
-    let t = s.trim();
-    if t.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(t.to_string()))
-    }
+    Ok(MachineToken::parse(&s).map(|t| t.0))
 }
 
 pub fn write_machine_token(token: &str) -> Result<PathBuf> {
-    let dir = config_dir();
-    ensure_dir_mode(&dir, 0o700)?;
-    let path = token_path();
-    let mut body = token.trim().as_bytes().to_vec();
+    write_machine_token_in(&config_dir(), token)
+}
+
+/// Same as [`write_machine_token`] against `dir` (tests; no env mutation).
+fn write_machine_token_in(dir: &Path, token: &str) -> Result<PathBuf> {
+    ensure_dir_mode(dir, 0o700)?;
+    let path = dir.join("machine.token");
+    let secret = MachineToken::from_raw(token);
+    let mut body = secret.as_str().as_bytes().to_vec();
     body.push(b'\n');
     write_file_mode(&path, &body, 0o600)?;
     Ok(path)
 }
 
 pub fn delete_machine_token() -> Result<bool> {
-    let path = token_path();
+    delete_machine_token_in(&config_dir())
+}
+
+fn delete_machine_token_in(dir: &Path) -> Result<bool> {
+    let path = dir.join("machine.token");
     if !path.exists() {
         return Ok(false);
     }
     fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     Ok(true)
+}
+
+fn chmod_owner_only(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)
+            .with_context(|| format!("stat {}", path.display()))?
+            .permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)
+            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Overlay `extra_env` onto `payload_env`. `FLEET_WORKER_TOKEN` in extra is ignored.
@@ -456,7 +525,11 @@ pub fn ensure_dir_mode(dir: &Path, mode: u32) -> Result<()> {
                 }
                 Err(w) => {
                     return Err(e).with_context(|| {
-                        format!("chmod {:o} {} (also not writable: {w})", mode, dir.display())
+                        format!(
+                            "chmod {:o} {} (also not writable: {w})",
+                            mode,
+                            dir.display()
+                        )
                     });
                 }
             }
@@ -509,6 +582,7 @@ fn write_file_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn config_toml_roundtrip() {
@@ -569,5 +643,182 @@ mod tests {
         let merged2 = merge_child_env(&HashMap::new(), &extra);
         assert!(!merged2.contains_key(WORKER_TOKEN_KEY));
         assert_eq!(merged2.get("BAR").map(String::as_str), Some("extra-only"));
+    }
+
+    /// catalog:unit-machine-token-file-mode-0600 — machine.token is owner-only
+    /// on the box. Write/read helpers set 0600; Display/Debug never include
+    /// the secret.
+    const TOKEN_SECRET: &str = "flm_never-log-this-secret-9f3a";
+
+    #[test]
+    fn write_then_read_machine_token_roundtrip_trims() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_machine_token_in(dir.path(), &format!("  {TOKEN_SECRET}\n")).unwrap();
+        assert_eq!(path, dir.path().join("machine.token"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{TOKEN_SECRET}\n")
+        );
+        assert_eq!(
+            read_machine_token_in(dir.path()).unwrap().as_deref(),
+            Some(TOKEN_SECRET)
+        );
+    }
+
+    #[test]
+    fn read_missing_or_blank_machine_token_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_machine_token_in(dir.path()).unwrap(), None);
+        fs::write(dir.path().join("machine.token"), " \n\t").unwrap();
+        assert_eq!(read_machine_token_in(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_machine_token_removes_only_the_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_machine_token_in(dir.path(), TOKEN_SECRET).unwrap();
+        fs::write(dir.path().join("machine.id"), "keep-me\n").unwrap();
+        let mut cfg = LocalConfig::defaults();
+        cfg.host_id = Some(Uuid::nil());
+        cfg.save_in(dir.path()).unwrap();
+        assert!(delete_machine_token_in(dir.path()).unwrap());
+        assert!(!dir.path().join("machine.token").exists());
+        assert!(dir.path().join("machine.id").exists());
+        assert!(dir.path().join("config.toml").exists());
+        assert!(!delete_machine_token_in(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn save_does_not_copy_machine_token_into_config_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        write_machine_token_in(dir.path(), TOKEN_SECRET).unwrap();
+        let mut cfg = LocalConfig::defaults();
+        cfg.host_id = Some(Uuid::nil());
+        cfg.control_plane_url = Some("http://127.0.0.1:8080".into());
+        cfg.save_in(dir.path()).unwrap();
+        let toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(
+            !toml.contains(TOKEN_SECRET),
+            "machine token must stay out of config.toml: {toml}"
+        );
+        assert!(
+            !toml.contains("machine.token") && !toml.contains("machine_token"),
+            "config.toml must not name the token file: {toml}"
+        );
+        assert_eq!(
+            read_machine_token_in(dir.path()).unwrap().as_deref(),
+            Some(TOKEN_SECRET)
+        );
+    }
+
+    #[test]
+    fn local_config_debug_omits_machine_token() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.host_id = Some(Uuid::nil());
+        let dbg = format!("{cfg:?}");
+        let pretty = format!("{cfg:#?}");
+        assert!(!dbg.contains(TOKEN_SECRET), "Debug leaked token: {dbg}");
+        assert!(
+            !pretty.contains(TOKEN_SECRET),
+            "pretty Debug leaked token: {pretty}"
+        );
+        // LocalConfig has no token field — Debug must not grow one.
+        assert!(
+            !dbg.contains("machine_token") && !dbg.contains("machine.token"),
+            "LocalConfig Debug must not mention the token: {dbg}"
+        );
+    }
+
+    #[test]
+    fn machine_token_debug_and_display_omit_secret() {
+        let token = MachineToken::from_raw(TOKEN_SECRET);
+        let dbg = format!("{token:?}");
+        let pretty = format!("{token:#?}");
+        let disp = format!("{token}");
+        for leaked in [&dbg, &pretty, &disp] {
+            assert!(
+                !leaked.contains(TOKEN_SECRET),
+                "Display/Debug must not include the secret: {leaked}"
+            );
+            assert!(
+                !leaked.contains("never-log"),
+                "Display/Debug must not include a secret fragment: {leaked}"
+            );
+        }
+        assert_eq!(dbg, "MachineToken([REDACTED])");
+        assert_eq!(pretty, "MachineToken([REDACTED])");
+        assert_eq!(disp, "[REDACTED]");
+        assert_eq!(token.as_str(), TOKEN_SECRET);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_mode_sets_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe");
+        write_file_mode(&path, b"secret\n", 0o600).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "write_file_mode must set 0600, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_machine_token_creates_file_mode_0600_and_dir_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("cfg");
+        let path = write_machine_token_in(&nested, TOKEN_SECRET).unwrap();
+        let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "machine.token must be owner-only, got {file_mode:o}"
+        );
+        let dir_mode = fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "config dir must be owner-only, got {dir_mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_machine_token_repairs_world_readable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine.token");
+        fs::write(&path, "old\n").unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&path, perms).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        write_machine_token_in(dir.path(), TOKEN_SECRET).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must restore owner-only, got {mode:o}");
+        assert_eq!(
+            read_machine_token_in(dir.path()).unwrap().as_deref(),
+            Some(TOKEN_SECRET)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_machine_token_repairs_world_readable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine.token");
+        fs::write(&path, format!("{TOKEN_SECRET}\n")).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&path, perms).unwrap();
+        assert_eq!(
+            read_machine_token_in(dir.path()).unwrap().as_deref(),
+            Some(TOKEN_SECRET)
+        );
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "read must restore owner-only, got {mode:o}");
     }
 }

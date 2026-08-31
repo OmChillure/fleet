@@ -4,18 +4,20 @@ mod auth;
 mod handlers;
 mod state;
 
-pub use state::{build_app_state, build_app_state_with_pool, build_app_state_with_pool_io, AppState};
+pub use state::{
+    AppState, build_app_state, build_app_state_with_pool, build_app_state_with_pool_io,
+};
 
-use axum::http::{header, HeaderValue, Method};
-use axum::routing::{get, post};
 use axum::Router;
+use axum::http::{HeaderValue, Method, header};
+use axum::routing::{get, post};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use handlers::{
-    admin_tick, cancel_run, create_project, fixture_run, get_config, get_project, get_task, healthz,
-    list_runs, list_tasks, list_workers, openapi_yaml, patch_config, post_heartbeat, post_status,
-    readyz, resume_task, root_index,
+    admin_tick, cancel_run, create_project, fixture_run, get_config, get_project, get_task,
+    healthz, list_runs, list_tasks, list_workers, openapi_yaml, patch_config, post_heartbeat,
+    post_status, readyz, resume_task, root_index,
 };
 
 /// Core routes (no CORS). Safe to nest/fallback into fleet-server.
@@ -80,9 +82,5 @@ fn play_cors() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            header::ACCEPT,
-            header::AUTHORIZATION,
-        ])
+        .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION])
 }

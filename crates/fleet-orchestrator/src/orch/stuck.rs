@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::can_apply_task_terminal;
 use super::review::apply_review_bounce;
 use super::spawn::apply_retry_after_failure;
 use super::tick::TickError;
@@ -146,6 +147,16 @@ pub async fn process_sessions(
                             .matches("Task validation failed")
                             .count();
                         if bounces >= 2 {
+                            if !can_apply_task_terminal(task, session.id, "done_success") {
+                                store
+                                    .free_session_claim(
+                                        session.board_task_id,
+                                        session.id,
+                                        "stale_terminal",
+                                    )
+                                    .await?;
+                                continue;
+                            }
                             store
                                 .set_task_done_failed(
                                     session.board_task_id,
@@ -160,6 +171,16 @@ pub async fn process_sessions(
                                 )
                                 .await?;
                         } else {
+                            if !can_apply_task_terminal(task, session.id, "done_success") {
+                                store
+                                    .free_session_claim(
+                                        session.board_task_id,
+                                        session.id,
+                                        "stale_terminal",
+                                    )
+                                    .await?;
+                                continue;
+                            }
                             store
                                 .reopen_task_for_changes(
                                     session.board_task_id,
@@ -176,6 +197,18 @@ pub async fn process_sessions(
                                 .await?;
                         }
                         out.retried += 1;
+                        continue;
+                    }
+                }
+                if let Some(task) = task {
+                    if !can_apply_task_terminal(task, session.id, "done_success") {
+                        store
+                            .free_session_claim(
+                                session.board_task_id,
+                                session.id,
+                                "stale_terminal",
+                            )
+                            .await?;
                         continue;
                     }
                 }

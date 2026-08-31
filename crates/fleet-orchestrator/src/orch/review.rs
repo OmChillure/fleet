@@ -54,7 +54,9 @@ pub async fn apply_review_bounce(
     );
 
     for id in &targets {
-        store.reopen_task_for_changes(*id, "changes_requested", &note).await?;
+        store
+            .reopen_task_for_changes(*id, "changes_requested", &note)
+            .await?;
     }
 
     // Reviewer waits on those deps again.

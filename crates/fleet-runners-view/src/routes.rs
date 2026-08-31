@@ -160,4 +160,78 @@ mod tests {
         assert_ne!(workers_redirect(ws), format!("/{ws}/{SEGMENT_WORKERS}"));
         assert_ne!(workers_redirect(ws), format!("/{ws}/{SEGMENT_RUNNERS}"));
     }
+
+    // catalog:unit-route-nav-redirects — live Dioxus routes replace onto
+    // Self-hosted (h1 = NAV_LABEL_SELF_HOSTED), not a blank accordion.
+    #[test]
+    fn live_ui_routes_redirect_to_self_hosted_page() {
+        let main = include_str!("../../fleet-ui/src/main.rs");
+        assert!(
+            main.contains("#[route(\"/:workspace_id/runners\")]"),
+            "/{{ws}}/runners must be routed so it can redirect to Self-hosted"
+        );
+        assert!(
+            main.contains("#[route(\"/:workspace_id/workers\")]"),
+            "/{{ws}}/workers must be routed so it can redirect to Self-hosted"
+        );
+        assert!(
+            main.contains("#[route(\"/:workspace_id/runners/self-hosted\")]"),
+            "Self-hosted live page must be the redirect target"
+        );
+        assert!(
+            main.contains("let dest = runners_index_target(&workspace_id)"),
+            "RunnersIndex must use runners_index_target, not a local path"
+        );
+        assert!(
+            main.contains("let dest = workers_redirect(&workspace_id)"),
+            "WorkersRedirect must use workers_redirect, not a local path"
+        );
+        assert!(
+            main.contains("navigator.replace(route.clone())")
+                || main.contains(
+                    "navigator.replace(route_for_runners_path(workspace_id.clone(), &dest))"
+                ),
+            "both redirects must replace onto the typed Self-hosted route"
+        );
+        // Paint Self-hosted immediately so a missed replace is not a blank main.
+        let runners_idx = main
+            .split("fn RunnersIndex")
+            .nth(1)
+            .and_then(|rest| rest.split("fn WorkersRedirect").next())
+            .expect("RunnersIndex component");
+        assert!(
+            runners_idx.contains("rsx! { SelfHosted { workspace_id } }")
+                || runners_idx.contains("SelfHosted { workspace_id }"),
+            "RunnersIndex must paint Self-hosted immediately (blank accordion hole)"
+        );
+        let workers_idx = main
+            .split("fn WorkersRedirect")
+            .nth(1)
+            .and_then(|rest| rest.split("/// Landing").next())
+            .expect("WorkersRedirect component");
+        assert!(
+            workers_idx.contains("rsx! { SelfHosted { workspace_id } }")
+                || workers_idx.contains("SelfHosted { workspace_id }"),
+            "WorkersRedirect must paint Self-hosted immediately (blank accordion hole)"
+        );
+
+        let page = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = page
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        assert!(
+            prod.contains("use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED"),
+            "Self-hosted h1 must be the nav label"
+        );
+        let h1 = prod.split("h1 {").nth(1).expect("Self-hosted h1");
+        assert!(
+            h1.contains("\"{NAV_LABEL_SELF_HOSTED}\""),
+            "h1 must render NAV_LABEL_SELF_HOSTED, not Workers or a blank accordion"
+        );
+        assert!(
+            !h1.contains("\"Workers\""),
+            "Self-hosted heading must not regress to Workers"
+        );
+    }
 }

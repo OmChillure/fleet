@@ -9,8 +9,14 @@ fn base_cookie<'a>(name: &'a str, value: &'a str, cfg: &AuthConfig) -> Cookie<'a
     let mut c = Cookie::new(name, value);
     c.set_http_only(true);
     c.set_path("/");
-    c.set_secure(cfg.cookie_secure);
-    c.set_same_site(cfg.cookie_samesite);
+    // Browsers reject SameSite=None without Secure — never mint that pair.
+    if matches!(cfg.cookie_samesite, SameSite::None) && !cfg.cookie_secure {
+        c.set_secure(false);
+        c.set_same_site(SameSite::Lax);
+    } else {
+        c.set_secure(cfg.cookie_secure);
+        c.set_same_site(cfg.cookie_samesite);
+    }
     c
 }
 
@@ -45,12 +51,8 @@ fn append_set_cookie(headers: &mut HeaderMap, cookie: &Cookie<'_>) {
 }
 
 /// Prefer explicit SameSite::None only when secure (browsers require it).
-pub fn validate_cookie_policy(cfg: &AuthConfig) {
-    if matches!(cfg.cookie_samesite, SameSite::None) && !cfg.cookie_secure {
-        tracing::warn!(
-            "COOKIE_SAMESITE=None requires COOKIE_SECURE=true in modern browsers"
-        );
-    }
+pub fn validate_cookie_policy(cfg: &AuthConfig) -> anyhow::Result<()> {
+    cfg.validate_cookie_policy()
 }
 
 #[cfg(test)]
@@ -70,6 +72,29 @@ mod tests {
         }
     }
 
+    fn test_cfg_samesite(cookie_secure: bool, cookie_samesite: SameSite) -> AuthConfig {
+        AuthConfig {
+            jwt_secret: "test-secret-at-least-32-characters-long!!".into(),
+            access_ttl: Duration::from_secs(900),
+            refresh_ttl: Duration::from_secs(604_800),
+            cookie_secure,
+            cookie_samesite,
+        }
+    }
+
+    fn cookie_attr_eq(raw: &str, name: &str, value: &str) -> bool {
+        raw.split(';').any(|part| {
+            part.trim()
+                .split_once('=')
+                .is_some_and(|(k, v)| k.eq_ignore_ascii_case(name) && v.eq_ignore_ascii_case(value))
+        })
+    }
+
+    fn has_secure(raw: &str) -> bool {
+        raw.split(';')
+            .any(|part| part.trim().eq_ignore_ascii_case("Secure"))
+    }
+
     fn set_cookie_values(headers: &HeaderMap) -> Vec<String> {
         headers
             .get_all(SET_COOKIE)
@@ -80,39 +105,38 @@ mod tests {
 
     #[test]
     fn set_auth_cookies_http_only_path_and_secure_follows_config() {
-        let cfg = test_cfg(false);
-        let mut headers = HeaderMap::new();
-        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+        for cookie_secure in [false, true] {
+            let cfg = test_cfg(cookie_secure);
+            let mut headers = HeaderMap::new();
+            set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
 
-        let cookies = set_cookie_values(&headers);
-        assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+            let cookies = set_cookie_values(&headers);
+            assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
 
-        for raw in &cookies {
-            let lower = raw.to_ascii_lowercase();
+            for raw in &cookies {
+                let lower = raw.to_ascii_lowercase();
+                assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
+                assert!(lower.contains("path=/"), "missing Path=/: {raw}");
+                assert_eq!(
+                    has_secure(raw),
+                    cookie_secure,
+                    "Secure must follow config={cookie_secure}: {raw}"
+                );
+            }
+
             assert!(
-                lower.contains("httponly"),
-                "missing HttpOnly: {raw}"
+                cookies
+                    .iter()
+                    .any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
+                "missing access cookie: {cookies:?}"
             );
             assert!(
-                lower.contains("path=/"),
-                "missing Path=/: {raw}"
-            );
-            assert!(
-                !lower.contains("secure"),
-                "Secure must follow config=false: {raw}"
+                cookies
+                    .iter()
+                    .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}="))),
+                "missing refresh cookie: {cookies:?}"
             );
         }
-
-        assert!(
-            cookies.iter().any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
-            "missing access cookie: {cookies:?}"
-        );
-        assert!(
-            cookies
-                .iter()
-                .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}="))),
-            "missing refresh cookie: {cookies:?}"
-        );
     }
 
     #[test]
@@ -130,13 +154,84 @@ mod tests {
                 lower.contains("max-age=0"),
                 "clear cookie must set Max-Age=0: {raw}"
             );
+            assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
+            assert!(lower.contains("path=/"), "missing Path=/: {raw}");
+        }
+    }
+
+    #[test]
+    fn samesite_none_without_secure_set_cookie_is_never_insecure() {
+        let cfg = test_cfg_samesite(false, SameSite::None);
+        let mut headers = HeaderMap::new();
+        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+        let cookies = set_cookie_values(&headers);
+        assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+        for raw in &cookies {
             assert!(
-                lower.contains("httponly"),
-                "missing HttpOnly: {raw}"
+                !cookie_attr_eq(raw, "SameSite", "None") || has_secure(raw),
+                "Set-Cookie must never be SameSite=None without Secure: {raw}"
+            );
+        }
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
+            "missing access cookie: {cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}="))),
+            "missing refresh cookie: {cookies:?}"
+        );
+    }
+
+    #[test]
+    fn validate_cookie_policy_fails_samesite_none_without_secure() {
+        let cfg = test_cfg_samesite(false, SameSite::None);
+        let err = validate_cookie_policy(&cfg)
+            .expect_err("in-struct None+insecure must fail validate_cookie_policy");
+        let lower = format!("{err:#}").to_ascii_lowercase();
+        assert!(
+            lower.contains("samesite") && lower.contains("secure"),
+            "error must mention SameSite and Secure, got {err:#}"
+        );
+        // Mint-time still coerces so in-struct tests can construct this pair.
+        let mut headers = HeaderMap::new();
+        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+        for raw in set_cookie_values(&headers) {
+            assert!(
+                !cookie_attr_eq(&raw, "SameSite", "None") || has_secure(&raw),
+                "base_cookie must still coerce None+insecure: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_cookie_policy_ok_for_none_with_secure_and_lax_insecure() {
+        validate_cookie_policy(&test_cfg_samesite(true, SameSite::None))
+            .expect("None+Secure must be allowed");
+        validate_cookie_policy(&test_cfg_samesite(false, SameSite::Lax))
+            .expect("Lax+insecure must be allowed");
+    }
+
+    #[test]
+    fn samesite_none_with_secure_set_cookie_includes_none_and_secure() {
+        let cfg = test_cfg_samesite(true, SameSite::None);
+        let mut headers = HeaderMap::new();
+        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+        let cookies = set_cookie_values(&headers);
+        assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+        for raw in &cookies {
+            assert!(
+                cookie_attr_eq(raw, "SameSite", "None"),
+                "COOKIE_SAMESITE=None + Secure must set SameSite=None: {raw}"
             );
             assert!(
-                lower.contains("path=/"),
-                "missing Path=/: {raw}"
+                has_secure(raw),
+                "COOKIE_SAMESITE=None + Secure must set Secure: {raw}"
             );
         }
     }

@@ -7,8 +7,8 @@ Two roles:
 
 | Who | What they do |
 | --- | --- |
-| **Human** (author or reviewer) | Run `./scripts/human-test.sh`. It starts Postgres + API + UI and walks every current surface. Confirm the product still makes sense. |
-| **Agent** (the coding agent on the MR) | Record the demo video. **Do not ask the human to screen-record.** Use `./scripts/human-test.sh record` (Playwright `.webm`). Attach the file to the GitLab MR. Never commit videos. |
+| **Human** (author or reviewer) | Run `./scripts/human-test.sh`. It starts Postgres + API + UI and walks **HUMAN_TEST_SCOPE.md** only. Confirm those surfaces still make sense. |
+| **Agent** (the coding agent on the MR) | Keep `HUMAN_TEST_SCOPE.md` in sync (`surface_scope.py --write`) whenever the diff changes. Record those scenes on the **final merge tree**. **Review the film** (frames + `.webm`) for bugs, fill the Film review section, attach the `.webm`. Never commit videos. |
 
 Install is still one script with no flags
 (`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`)
@@ -20,8 +20,8 @@ and repo-root `.env`. This page does not install packages.
 
 | Change | Human walkthrough | Agent demo video | GitLab MR + peer review |
 | --- | --- | --- | --- |
-| User-visible UI, API behavior, data, install, tests, sandbox/lab | Yes | Yes — scene for the area you touched | **Required** |
-| Operator-only (kind, compose job, workspace agent) | Yes, the relevant step | Yes — `lab` or `kind` scene | **Required** |
+| User-visible UI, API behavior, data, install, tests, sandbox/lab | Yes — **HUMAN_TEST_SCOPE.md** steps only | Yes — those scenes on the final merge tree, then **review the film** | **Required** |
+| Operator-only (kind, compose job, workspace agent) | Yes, the relevant step | Yes — `lab` or `kind` scene on the final merge tree | **Required** |
 | Small tweak: typo, comment nit, one-line docs wording, import order | No | No | Optional (direct to the target branch is OK) |
 
 If it can break a user, a sandbox, or the next install, it is **not** a small
@@ -45,21 +45,33 @@ That command:
 
 1. Refuses to invent a second install. Missing `cargo` / `docker` / `dx` →
    run the install script, then come back.
-2. Starts compose Postgres, `fleet-server` (:8080), and `fleet-ui` (:3030)
-   via `./scripts/fleet-dev.sh start` if they are not already up.
+2. Starts compose Postgres, `fleet-server`, and `fleet-ui` via
+   `./scripts/fleet-dev.sh start` if they are not already up. Default
+   ports are `:8080`/`:3030`. If Kind already owns those and they are
+   not this tree, the host stack binds `:18080`/`:13030` and writes
+   `.run/host-urls.env` (`FLEET_API_URL` / `FLEET_UI_URL`).
 3. Opens the UI when it can (`xdg-open` / `open`).
 4. Pauses on each step below. Press Enter after you have checked the screen.
 
+The list below is the **catalog**. `./scripts/human-test.sh` walks only
+the pause steps in **HUMAN_TEST_SCOPE.md** (regenerate with
+`python3 tests/browser/surface_scope.py --write` after every code
+change — the map follows direct and indirect path hits). `guide-all`
+is a first product tour only. Still do **This merge request**.
+
 Subcommands: `launch`, `guide` (no start), `status`, `stop`, `record` (agents).
 
-Use `http://localhost:3030` (not `127.0.0.1`) so cookies match CORS.
+Use `http://localhost:3030` (or the `FLEET_UI_URL` host port, not
+`127.0.0.1`) so cookies match CORS.
 
 **Port-up is not this tree.** Kind often binds host `:8080`/`:3030` to old
 `agent-fleet-*:local` images. `human-test.sh` / `record` / browser e2e
 require `GET /health` → `git_sha` == `scripts/tree-id.sh`, UI
 `/fleet-git-sha.txt` == that id, and `apis` contains `chat`. After code
-changes, re-run the install script or rebuild before filming. Existing
-`.webm`s filmed without that pair are **not** MR proof — discard them.
+changes, re-run the install script or rebuild before filming. Film only
+the **final tree that will be merged** (identity matches that tree; no
+edits after the clip). Existing `.webm`s filmed without that pair, or
+shot before later edits, are **not** MR proof — discard them.
 There is no green path via `FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx`
 is a fail (Kind UI is not a substitute).
 
@@ -85,6 +97,9 @@ same change. The walkthrough is allowed to go stale only if the product did.
    sections. `/workers` still redirects.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
+    Members: invite by email (member/admin). Existing users join immediately;
+    others join on signup or next login. Owner can change roles / remove;
+    member cannot invite.
 8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
    paste the install command on the machine (Linux/macOS or Windows). Copy
    Unix, Windows, and token (works on HTTP LAN). Token panel is success —
@@ -111,10 +126,12 @@ same change. The walkthrough is allowed to go stale only if the product did.
     tick. With Fleet LLM on, agents talk mid-run (`TEAM_CHAT.md`; chat
     tools `read_team_chat` / `send_team_message`).
 15. **Sandboxes** — same worker sessions as Fleet.
-16. **Cases** — `/{ws}/cases` list (empty is OK). Open a case if chat started one;
-    events + Observe / Cancel. The LLM invents the workflow; this page is the log.
-17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK.
-    Start monitor / Finish launches implement + review (needs an integration).
+16. **Cases** — `/{ws}/cases` New case (title + policy) → Create case. Detail:
+    Observe a fact, then Cancel (status cancelled). Empty list before create is OK.
+17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK
+    before a row exists. Start monitor turns the status to monitor on
+    (Connect an app first). Finish on an open row launches a fleet run
+    (Finish hides; row shows the run id).
 18. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
 19. **User menu** — theme Black/White (not persisted), Log out → `/login`.
 20. **This MR** — do the new thing this change added. If the script has no
@@ -128,11 +145,22 @@ Logs: `./scripts/fleet-dev.sh logs`. Stop: `./scripts/human-test.sh stop`.
 
 You record. The human reviews the MR (and may replay the walkthrough).
 
+Film the **final tree that will be merged**: every edit for this MR is
+already in the worktree, and live identity matches `scripts/tree-id.sh`.
+A clip from an earlier bake, or filmed before later edits, is **not**
+proof — discard it and re-film. Do not film, then change code, then
+attach the old `.webm`.
+
+The video must show **every scene in HUMAN_TEST_SCOPE.md**. It is not a
+random walkthrough. After filming, **review the film** for bugs (each
+frame under `.tmp/demos/<stamp>-frames/` and the `.webm`) and fill the
+Film review section in that file.
+
 ```bash
-# Start the stack if needed, then film.
-./scripts/human-test.sh record
-# Only the areas this MR touches:
-./scripts/human-test.sh record fleet sandboxes
+python3 tests/browser/surface_scope.py --write   # after every code change
+python3 tests/browser/surface_scope.py --check
+./scripts/human-test.sh record                   # films the scope
+# then inspect REVIEW_FRAMES + DEMO_VIDEO; fill HUMAN_TEST_SCOPE.md Film review
 ./scripts/human-test.sh record --list
 ```
 
@@ -141,20 +169,22 @@ must already be installed (`ENABLE_BROWSER_E2E=1` in repo-root `.env`, then
 the one install script). Do not pip/apt around a missing browser.
 
 Attach the `.webm` to the GitLab MR (upload / comment). Write one sentence
-in the MR description: what the clip shows. Do **not** `git add` videos.
+in the MR description: which affected scenes it shows. Do **not** `git add` videos.
 
 Constraints:
 
 - Use `*@example.test` accounts created in the recording.
 - Do not show `.env`, JWT, `ADMIN_TOKEN`, OAuth client secrets, or `~/.grok`.
 - Prefer `localhost` in the address bar.
-- Keep it short: one path, the new result, stop. Usually 30–90 seconds.
+- Keep it short: the affected paths, the new result, stop. Usually 30–90 seconds.
 - If UI and API are down after `launch`, **fail**. Do not ship a silent skip.
 - Several scenes in one command = one continuous video (better for reviewers).
 
 ### Which scene for which code
 
-Pick every scene that your diff can break. When unsure, record `all`.
+Pick **every** scene that your diff can break. Omit scenes the merge
+does not touch. Do not record `all` “to be safe” unless the change
+really spans the product.
 
 | You changed | Scene | The video must show |
 | --- | --- | --- |
@@ -170,11 +200,11 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-driver`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
 | `fleet-host` + operator + CRD | `k8s` then `fleet` | CRD + operator + fleet-host present; Start run + tick → host creates a CR |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
-| `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | list (empty OK) + sidebar Cases; detail if a case exists |
-| `crates/fleet-server` `tickets.rs`, `fleet-ui` inbox | `inbox` | list (empty OK) + sidebar Inbox under Monitoring |
+| `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | New case form; create → Observe → Cancel on detail (empty list OK before create) |
+| `crates/fleet-server` `tickets.rs`, `fleet-ui` inbox | `inbox` | list (empty OK before a row) + Start monitor + Finish on a row (launches; Finish hides) + sidebar Inbox under Monitoring |
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
-| `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL |
+| `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL. Members: invite by email (member/admin); existing user joins; pending invite; owner remove |
 | unify-runners (isolation, picker, single guest, self-hosted) | `unify` | Settings Isolation save; Self-hosted Add worker; Fleet Start 2-task + tick; Sandboxes. Process-only host must not take a container workspace |
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. Private (Ollama): top-50, tags, models directory, disk/RAM/VRAM guards. Sandboxing Native / VMs / Containers. `/{ws}/workers` redirects |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
@@ -210,10 +240,11 @@ is not a second test framework.
 ## Merge request text (copy)
 
 ```
-Human testing: ran ./scripts/human-test.sh (or a peer will).
-Demo: agent-recorded .tmp/demos/<file>.webm attached — shows <scene>.
+Human testing: HUMAN_TEST_SCOPE.md (not the full catalog).
+Demo: agent-recorded .tmp/demos/<file>.webm on the final merge tree;
+film review in HUMAN_TEST_SCOPE.md — bugs: <none / list>.
 Ask for a review on Slack.
 ```
 
-Whoever picks it up: watch the clip, then spot-check the walkthrough on
-the MR branch if the change is auth, fleet, install, or data.
+Whoever picks it up: watch the clip, then spot-check those same affected
+steps on the MR branch if the change is auth, fleet, install, or data.

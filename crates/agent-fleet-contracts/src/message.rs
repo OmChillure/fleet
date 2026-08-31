@@ -259,7 +259,9 @@ impl MessageBody {
             Self::SandboxExec(p) => MessageScope::sandbox(p.sandbox_id),
             Self::SandboxCreating(p) => MessageScope::sandbox(p.sandbox_id),
             Self::SandboxReady(p) => MessageScope::sandbox(p.sandbox_id),
-            Self::SandboxUnhealthy(p) | Self::SandboxFailed(p) => MessageScope::sandbox(p.sandbox_id),
+            Self::SandboxUnhealthy(p) | Self::SandboxFailed(p) => {
+                MessageScope::sandbox(p.sandbox_id)
+            }
             Self::SandboxStopping(p) => MessageScope::sandbox(p.sandbox_id),
             Self::SandboxDestroyed(p) => MessageScope::sandbox(p.sandbox_id),
             Self::SandboxArchived(p) => MessageScope::sandbox(p.sandbox_id),

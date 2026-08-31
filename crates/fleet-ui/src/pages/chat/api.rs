@@ -501,8 +501,8 @@ async fn stream_chat_wasm(
         runner_id,
         effort,
     };
-    let payload = serde_json::to_string(&body)
-        .map_err(|e| ChatError::Network(format!("encode: {e}")))?;
+    let payload =
+        serde_json::to_string(&body).map_err(|e| ChatError::Network(format!("encode: {e}")))?;
     let url = api_url(&format!("/api/workspaces/{workspace_id}/chat/stream"));
 
     let opts = RequestInit::new();
@@ -539,7 +539,11 @@ async fn stream_chat_wasm(
         } else {
             serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or(text)
         }));
     }
@@ -633,10 +637,7 @@ pub struct FleetLiveSnapshot {
 }
 
 pub async fn fetch_fleet_live(workspace_id: &str) -> Result<FleetLiveSnapshot, ChatError> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/fleet/overview"
-    ))
-    .await?;
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/overview")).await?;
     parse_json(res).await
 }
 
@@ -647,9 +648,6 @@ pub struct FleetTasksSnapshot {
 }
 
 pub async fn fetch_fleet_tasks(workspace_id: &str) -> Result<FleetTasksSnapshot, ChatError> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/fleet/tasks"
-    ))
-    .await?;
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/tasks")).await?;
     parse_json(res).await
 }

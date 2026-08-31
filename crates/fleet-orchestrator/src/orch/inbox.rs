@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::can_apply_task_terminal;
 use super::tick::TickError;
 
 pub async fn apply_inbox(
@@ -20,7 +21,11 @@ pub async fn apply_inbox(
     for r in &reports {
         match r.kind.as_str() {
             "heartbeat" => {
-                let pct = r.payload.get("progress_pct").and_then(|v| v.as_i64()).map(|n| n as i32);
+                let pct = r
+                    .payload
+                    .get("progress_pct")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32);
                 store
                     .apply_heartbeat(r.session_id, r.board_task_id, r.seq, pct)
                     .await?;
@@ -49,7 +54,14 @@ pub async fn apply_inbox(
                                 .find(|t| t.id == r.board_task_id)
                                 .cloned()
                             {
-                                if task.claimed_session_id != Some(r.session_id) {
+                                if !can_apply_task_terminal(&task, r.session_id, "done_success") {
+                                    store
+                                        .free_session_claim(
+                                            r.board_task_id,
+                                            r.session_id,
+                                            "stale_terminal",
+                                        )
+                                        .await?;
                                     store.mark_report_applied(r.id).await?;
                                     applied += 1;
                                     continue;
@@ -66,7 +78,8 @@ pub async fn apply_inbox(
                                             .join("sessions")
                                             .join(session.id.to_string())
                                     });
-                                let payload = merge_session_proof(&r.payload, &reports, r.session_id);
+                                let payload =
+                                    merge_session_proof(&r.payload, &reports, r.session_id);
                                 if let Err(e) = materialize_guest_proof(&work, &payload) {
                                     tracing::warn!(
                                         error = %e,
@@ -87,6 +100,22 @@ pub async fn apply_inbox(
                                         .matches("Task validation failed")
                                         .count();
                                     if bounces >= 2 {
+                                        if !can_apply_task_terminal(
+                                            &task,
+                                            r.session_id,
+                                            "done_success",
+                                        ) {
+                                            store
+                                                .free_session_claim(
+                                                    r.board_task_id,
+                                                    r.session_id,
+                                                    "stale_terminal",
+                                                )
+                                                .await?;
+                                            store.mark_report_applied(r.id).await?;
+                                            applied += 1;
+                                            continue;
+                                        }
                                         store
                                             .set_task_done_failed(
                                                 r.board_task_id,
@@ -94,6 +123,22 @@ pub async fn apply_inbox(
                                             )
                                             .await?;
                                     } else {
+                                        if !can_apply_task_terminal(
+                                            &task,
+                                            r.session_id,
+                                            "done_success",
+                                        ) {
+                                            store
+                                                .free_session_claim(
+                                                    r.board_task_id,
+                                                    r.session_id,
+                                                    "stale_terminal",
+                                                )
+                                                .await?;
+                                            store.mark_report_applied(r.id).await?;
+                                            applied += 1;
+                                            continue;
+                                        }
                                         store
                                             .reopen_task_for_changes(
                                                 r.board_task_id,
@@ -102,6 +147,18 @@ pub async fn apply_inbox(
                                             )
                                             .await?;
                                     }
+                                    store.mark_report_applied(r.id).await?;
+                                    applied += 1;
+                                    continue;
+                                }
+                                if !can_apply_task_terminal(&task, r.session_id, "done_success") {
+                                    store
+                                        .free_session_claim(
+                                            r.board_task_id,
+                                            r.session_id,
+                                            "stale_terminal",
+                                        )
+                                        .await?;
                                     store.mark_report_applied(r.id).await?;
                                     applied += 1;
                                     continue;
@@ -142,15 +199,29 @@ pub async fn apply_inbox(
                             .and_then(|v| v.as_str())
                             .unwrap_or("worker_failed");
                         destroy_session_runtime(store, runtime, r.session_id).await?;
-                        store
-                            .apply_task_terminal(
-                                r.board_task_id,
-                                r.session_id,
-                                "done_failed",
-                                Some(reason),
-                                r.seq,
-                            )
-                            .await?;
+                        if let Some(task) = store.get_task(project_id, r.board_task_id).await? {
+                            if !can_apply_task_terminal(&task, r.session_id, "done_failed") {
+                                store
+                                    .free_session_claim(
+                                        r.board_task_id,
+                                        r.session_id,
+                                        "stale_terminal",
+                                    )
+                                    .await?;
+                                store.mark_report_applied(r.id).await?;
+                                applied += 1;
+                                continue;
+                            }
+                            store
+                                .apply_task_terminal(
+                                    r.board_task_id,
+                                    r.session_id,
+                                    "done_failed",
+                                    Some(reason),
+                                    r.seq,
+                                )
+                                .await?;
+                        }
                     }
                     "blocked" => {
                         let reason = r
@@ -158,15 +229,29 @@ pub async fn apply_inbox(
                             .get("reason")
                             .and_then(|v| v.as_str())
                             .unwrap_or("blocked");
-                        store
-                            .apply_task_terminal(
-                                r.board_task_id,
-                                r.session_id,
-                                "blocked",
-                                Some(reason),
-                                r.seq,
-                            )
-                            .await?;
+                        if let Some(task) = store.get_task(project_id, r.board_task_id).await? {
+                            if !can_apply_task_terminal(&task, r.session_id, "blocked") {
+                                store
+                                    .free_session_claim(
+                                        r.board_task_id,
+                                        r.session_id,
+                                        "stale_terminal",
+                                    )
+                                    .await?;
+                                store.mark_report_applied(r.id).await?;
+                                applied += 1;
+                                continue;
+                            }
+                            store
+                                .apply_task_terminal(
+                                    r.board_task_id,
+                                    r.session_id,
+                                    "blocked",
+                                    Some(reason),
+                                    r.seq,
+                                )
+                                .await?;
+                        }
                     }
                     _ => {
                         // unknown status payload — still mark applied to avoid poison
@@ -188,13 +273,14 @@ pub async fn destroy_session_runtime(
     session_id: Uuid,
 ) -> Result<(), TickError> {
     if let Some(s) = store.get_session(session_id).await?
-        && let Some(h) = s.runtime_handle {
-            let handle = RuntimeHandle {
-                backend: s.runtime_backend,
-                id: h,
-            };
-            let _ = runtime.destroy(&handle).await;
-        }
+        && let Some(h) = s.runtime_handle
+    {
+        let handle = RuntimeHandle {
+            backend: s.runtime_backend,
+            id: h,
+        };
+        let _ = runtime.destroy(&handle).await;
+    }
     Ok(())
 }
 
@@ -229,7 +315,11 @@ pub fn materialize_guest_proof(work_dir: &Path, payload: &Value) -> std::io::Res
     Ok(())
 }
 
-fn merge_session_proof(base: &Value, reports: &[crate::store::WorkerReportRow], session_id: Uuid) -> Value {
+fn merge_session_proof(
+    base: &Value,
+    reports: &[crate::store::WorkerReportRow],
+    session_id: Uuid,
+) -> Value {
     let mut out = base.clone();
     let missing_md = out
         .get("result_md")

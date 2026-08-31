@@ -43,10 +43,8 @@ pub fn rollup_run(input: &RunRollupInput) -> RollupAction {
         return RollupAction::Terminal(WorkRunStatus::Cancelled);
     }
 
-    let any_failed = input
-        .task_statuses.contains(&BoardTaskStatus::DoneFailed);
-    let any_cancelled = input
-        .task_statuses.contains(&BoardTaskStatus::Cancelled);
+    let any_failed = input.task_statuses.contains(&BoardTaskStatus::DoneFailed);
+    let any_cancelled = input.task_statuses.contains(&BoardTaskStatus::Cancelled);
     let all_success = input
         .task_statuses
         .iter()
@@ -137,6 +135,84 @@ mod tests {
             OnTaskFailPolicy::Leave,
         ));
         assert_eq!(a, RollupAction::Terminal(WorkRunStatus::Completed));
+    }
+
+    #[test]
+    fn on_task_fail_leave_does_not_fail_run() {
+        // UI fixtures use fail_run. leave must not roll the run to failed
+        // when one task is done_failed — remaining work stays active, and a
+        // fully-terminal board completes instead of failing the run.
+        for &sibling in BoardTaskStatus::all() {
+            if sibling.is_terminal() {
+                continue;
+            }
+            let leave = rollup_run(&input(
+                vec![DoneSuccess, DoneFailed, sibling],
+                false,
+                OnTaskFailPolicy::Leave,
+            ));
+            assert_eq!(
+                leave,
+                RollupAction::KeepActive,
+                "leave keeps the run active while {sibling:?} is still live"
+            );
+            assert_ne!(
+                leave,
+                RollupAction::Terminal(WorkRunStatus::Failed),
+                "leave must not fail the run ({sibling:?} still live)"
+            );
+        }
+
+        for terminal_board in [
+            vec![DoneFailed],
+            vec![DoneSuccess, DoneFailed],
+            vec![DoneFailed, DoneFailed],
+            vec![DoneFailed, Cancelled],
+            vec![DoneSuccess, DoneFailed, Cancelled],
+        ] {
+            let leave = rollup_run(&input(
+                terminal_board.clone(),
+                false,
+                OnTaskFailPolicy::Leave,
+            ));
+            assert_ne!(
+                leave,
+                RollupAction::Terminal(WorkRunStatus::Failed),
+                "leave must not fail the run for {terminal_board:?}"
+            );
+            assert_eq!(
+                leave,
+                RollupAction::Terminal(WorkRunStatus::Completed),
+                "leave completes a fully-terminal board that includes a failure: {terminal_board:?}"
+            );
+
+            let fail_run = rollup_run(&input(
+                terminal_board.clone(),
+                false,
+                OnTaskFailPolicy::FailRun,
+            ));
+            assert_eq!(
+                fail_run,
+                RollupAction::Terminal(WorkRunStatus::Failed),
+                "UI fixture default fail_run fails once every task is terminal: {terminal_board:?}"
+            );
+        }
+
+        let cancelled = rollup_run(&input(
+            vec![DoneSuccess, DoneFailed],
+            true,
+            OnTaskFailPolicy::Leave,
+        ));
+        assert_eq!(
+            cancelled,
+            RollupAction::Terminal(WorkRunStatus::Cancelled),
+            "K27 cancel still wins over leave"
+        );
+        assert_ne!(
+            cancelled,
+            RollupAction::Terminal(WorkRunStatus::Failed),
+            "leave + cancel must not fail the run"
+        );
     }
 
     #[test]

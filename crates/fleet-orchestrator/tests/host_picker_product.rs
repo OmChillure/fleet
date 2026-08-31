@@ -336,6 +336,98 @@ async fn tick_must_not_enqueue_container_work_to_a_loopback_plane() {
     );
 }
 
+async fn spawn_claim_count(store: &Store, workspace_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_claims WHERE workspace_id = $1 AND kind = 'spawn_session'",
+    )
+    .bind(workspace_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap()
+}
+
+/// Documented follow-up: fail-closed assign when the plane URL
+/// (`WORKER_PUBLIC_BASE` / orchestrator URL) is loopback and the paired
+/// host is not this machine. Off-box workers cannot heartbeat to
+/// 127/8, localhost, or [::1]. Local fleet-dev (this-machine + loopback)
+/// may still assign.
+#[tokio::test]
+async fn tick_must_not_assign_offbox_host_when_plane_url_is_loopback() {
+    let store = setup().await;
+    for url in [
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://[::1]:8080",
+        "http://127.1.2.3:8080",
+    ] {
+        let project = store
+            .create_project(&format!("pp-lb-off-{}", Uuid::new_v4()), 4)
+            .await
+            .unwrap();
+        seed_workspace(&store, project.id).await;
+        let off = pair_host(&store, project.id, "off-box-remote", true, false).await;
+        store
+            .insert_accepted_plan(project.id, one_task_plan(project.id))
+            .await
+            .unwrap();
+
+        let r = runner(store.clone(), url)
+            .tick_project(project.id)
+            .await
+            .unwrap();
+        let claims = spawn_claim_count(&store, project.id).await;
+        assert_eq!(
+            r.spawned, 0,
+            "must not assign off-box host {off} while plane URL {url} is loopback: {r:?}"
+        );
+        assert_eq!(
+            claims, 0,
+            "must not enqueue a spawn claim an off-box host cannot heartbeat \
+             ({url}): spawned={:?} claims={claims}",
+            r.spawned
+        );
+    }
+}
+
+/// Same-box loopback is local `fleet-dev`: a host whose hostname is this
+/// machine may still take work when the plane URL is loopback.
+#[tokio::test]
+async fn tick_may_assign_this_machine_host_when_plane_url_is_loopback() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("pp-lb-local-{}", Uuid::new_v4()), 4)
+        .await
+        .unwrap();
+    seed_workspace(&store, project.id).await;
+    let local_name = std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| panic!("this-machine loopback assign needs HOSTNAME or /etc/hostname"));
+    let local = pair_host(&store, project.id, &local_name, true, false).await;
+    store
+        .insert_accepted_plan(project.id, one_task_plan(project.id))
+        .await
+        .unwrap();
+
+    let r = runner(store.clone(), "http://127.0.0.1:8080")
+        .tick_project(project.id)
+        .await
+        .unwrap();
+    let claims = spawn_claim_count(&store, project.id).await;
+    assert!(
+        r.spawned >= 1 || claims >= 1,
+        "this-machine host {local} ({local_name}) must still be assignable \
+         when the plane URL is loopback (local fleet-dev): {r:?} claims={claims}"
+    );
+}
+
 #[tokio::test]
 async fn grok_plan_sets_guest_harness_even_when_plane_env_is_mock() {
     let store = setup().await;

@@ -1,11 +1,11 @@
 //! Workspace members + email invites.
 
 use axum::Json;
+use axum::Router;
+use axum::extract::FromRef;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch};
-use axum::Router;
-use axum::extract::FromRef;
 use axum_extra::extract::CookieJar;
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::repos::{users as user_repo, workspaces as workspace_repo};
@@ -24,10 +24,7 @@ where
     AuthState: FromRef<S>,
 {
     Router::new()
-        .route(
-            "/api/workspaces/{workspace_id}/members",
-            get(list_members),
-        )
+        .route("/api/workspaces/{workspace_id}/members", get(list_members))
         .route(
             "/api/workspaces/{workspace_id}/members/{user_id}",
             patch(patch_member).delete(delete_member),
@@ -46,15 +43,19 @@ fn can_manage(role: &str) -> bool {
     matches!(role, "owner" | "admin")
 }
 
+/// Missing membership is 403 — same error PATCH/DELETE return from `require_member`.
+fn require_workspace_role(role: Option<String>) -> AppResult<String> {
+    role.ok_or_else(|| AppError::forbidden("not a member of this workspace"))
+}
+
 async fn require_member(
     state: &AuthState,
     jar: &CookieJar,
     workspace_id: Uuid,
 ) -> AppResult<(fleet_db::User, String)> {
     let user = require_user(state, jar).await?;
-    let role = workspace_repo::user_role(&state.db, workspace_id, user.id)
-        .await?
-        .ok_or_else(|| AppError::forbidden("not a member of this workspace"))?;
+    let role =
+        require_workspace_role(workspace_repo::user_role(&state.db, workspace_id, user.id).await?)?;
     Ok((user, role))
 }
 
@@ -182,7 +183,9 @@ async fn delete_member(
     if !ok {
         return Err(AppError::not_found("member not found"));
     }
-    Ok(Json(serde_json::json!({ "removed": true, "user_id": user_id })))
+    Ok(Json(
+        serde_json::json!({ "removed": true, "user_id": user_id }),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -328,10 +331,297 @@ async fn revoke_invite(
     if !can_manage(&role) {
         return Err(AppError::forbidden("not allowed to revoke invites"));
     }
-    let ok =
-        workspace_repo::revoke_invite(&state.db, workspace_id, invite_id, Utc::now()).await?;
+    let ok = workspace_repo::revoke_invite(&state.db, workspace_id, invite_id, Utc::now()).await?;
     if !ok {
         return Err(AppError::not_found("invite not found"));
     }
-    Ok(Json(serde_json::json!({ "revoked": true, "id": invite_id })))
+    Ok(Json(
+        serde_json::json!({ "revoked": true, "id": invite_id }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use crate::config::AuthConfig;
+    use crate::state::AuthState;
+
+    const TEST_PASSWORD: &str = "correct-horse";
+
+    #[test]
+    fn can_manage_owner_and_admin_true_member_false() {
+        assert!(can_manage("owner"));
+        assert!(can_manage("admin"));
+        assert!(!can_manage("member"));
+    }
+
+    fn require_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "DATABASE_URL is required for this integration test. \
+                     Start Postgres (just db-up) and export DATABASE_URL."
+                )
+            })
+    }
+
+    async fn app() -> axum::Router {
+        let url = require_database_url();
+        let db = fleet_db::connect_and_migrate_with(
+            &url,
+            &fleet_db::PoolConfig {
+                max_connections: 5,
+                min_connections: 0,
+                acquire_timeout: Duration::from_secs(10),
+                idle_timeout: Some(Duration::from_secs(30)),
+                max_lifetime: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("connect_and_migrate failed: {e}"));
+        crate::router().with_state(AuthState {
+            db,
+            config: AuthConfig {
+                jwt_secret: "dev-change-me-to-a-long-random-secret-at-least-32-chars".into(),
+                access_ttl: Duration::from_secs(900),
+                refresh_ttl: Duration::from_secs(604_800),
+                cookie_secure: false,
+                cookie_samesite: cookie::SameSite::Lax,
+            },
+        })
+    }
+
+    #[derive(Default)]
+    struct CookieJar {
+        values: BTreeMap<String, String>,
+    }
+
+    impl CookieJar {
+        fn absorb(&mut self, headers: &axum::http::HeaderMap) {
+            for raw in headers
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+            {
+                let nv = raw.split(';').next().unwrap_or(raw);
+                if let Some((name, value)) = nv.split_once('=') {
+                    if value.is_empty() {
+                        self.values.remove(name.trim());
+                    } else {
+                        self.values
+                            .insert(name.trim().to_string(), value.trim().to_string());
+                    }
+                }
+            }
+        }
+
+        fn cookie_header(&self) -> Option<String> {
+            if self.values.is_empty() {
+                return None;
+            }
+            Some(
+                self.values
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        }
+    }
+
+    struct HttpOut {
+        status: StatusCode,
+        headers: axum::http::HeaderMap,
+        body: Value,
+    }
+
+    impl HttpOut {
+        fn error(&self) -> &str {
+            self.body["error"].as_str().unwrap_or("")
+        }
+
+        fn user_id(&self) -> &str {
+            self.body["user"]["id"].as_str().expect("user.id")
+        }
+
+        fn workspace_id(&self) -> &str {
+            self.body["default_workspace"]["id"]
+                .as_str()
+                .expect("default_workspace.id")
+        }
+    }
+
+    async fn call(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        cookies: Option<&CookieJar>,
+        body: Option<Value>,
+    ) -> HttpOut {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        if let Some(h) = cookies.and_then(CookieJar::cookie_header) {
+            builder = builder.header(header::COOKIE, h);
+        }
+        let req = builder
+            .body(match body {
+                Some(b) => Body::from(serde_json::to_vec(&b).unwrap()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let res = app.clone().oneshot(req).await.expect("oneshot");
+        let status = res.status();
+        let headers = res.headers().clone();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body = if bytes.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }))
+        };
+        HttpOut {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    async fn signup_and_login(app: &axum::Router) -> (String, CookieJar, HttpOut) {
+        let email = format!("leave.{uuid}@example.test", uuid = Uuid::new_v4());
+        let created = call(
+            app,
+            "POST",
+            "/api/auth/signup",
+            None,
+            Some(json!({ "email": email, "password": TEST_PASSWORD })),
+        )
+        .await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "signup: {}",
+            created.body
+        );
+        let login_out = call(
+            app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(json!({ "email": email, "password": TEST_PASSWORD })),
+        )
+        .await;
+        assert_eq!(
+            login_out.status,
+            StatusCode::OK,
+            "login: {}",
+            login_out.body
+        );
+        let mut jar = CookieJar::default();
+        jar.absorb(&login_out.headers);
+        (email, jar, login_out)
+    }
+
+    async fn member_ids(app: &axum::Router, jar: &CookieJar, ws: &str) -> Vec<String> {
+        let listed = call(
+            app,
+            "GET",
+            &format!("/api/workspaces/{ws}/members"),
+            Some(jar),
+            None,
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        listed.body["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .filter_map(|m| m["user_id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// PATCH/DELETE a member in a workspace the caller is not in is 403.
+    /// Two independent owners: A must not mutate B's membership.
+    #[tokio::test]
+    async fn patch_or_delete_member_in_another_workspace_is_403() {
+        let app = app().await;
+        let (_a_email, a_jar, _a_login) = signup_and_login(&app).await;
+        let (_b_email, b_jar, b_login) = signup_and_login(&app).await;
+        let b_ws = b_login.workspace_id().to_string();
+        let b_id = b_login.user_id().to_string();
+
+        let patched = call(
+            &app,
+            "PATCH",
+            &format!("/api/workspaces/{b_ws}/members/{b_id}"),
+            Some(&a_jar),
+            Some(json!({ "role": "member" })),
+        )
+        .await;
+        assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
+        assert!(
+            patched.error().contains("not a member"),
+            "PATCH expected not-a-member, got {:?}",
+            patched.error()
+        );
+
+        let deleted = call(
+            &app,
+            "DELETE",
+            &format!("/api/workspaces/{b_ws}/members/{b_id}"),
+            Some(&a_jar),
+            None,
+        )
+        .await;
+        assert_eq!(deleted.status, StatusCode::FORBIDDEN, "{}", deleted.body);
+        assert!(
+            deleted.error().contains("not a member"),
+            "DELETE expected not-a-member, got {:?}",
+            deleted.error()
+        );
+
+        let remaining = member_ids(&app, &b_jar, &b_ws).await;
+        assert!(
+            remaining.contains(&b_id),
+            "B must still be a member: {remaining:?}"
+        );
+        assert_eq!(
+            remaining.len(),
+            1,
+            "B workspace membership must be unchanged: {remaining:?}"
+        );
+
+        let listed = call(
+            &app,
+            "GET",
+            &format!("/api/workspaces/{b_ws}/members"),
+            Some(&b_jar),
+            None,
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        assert_eq!(listed.body["you"]["role"].as_str(), Some("owner"));
+        let members = listed.body["members"].as_array().expect("members");
+        assert_eq!(members.len(), 1, "{}", listed.body);
+        assert_eq!(members[0]["user_id"].as_str(), Some(b_id.as_str()));
+        assert_eq!(
+            members[0]["role"].as_str(),
+            Some("owner"),
+            "PATCH must not have demoted B: {}",
+            listed.body
+        );
+    }
 }

@@ -7,17 +7,16 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use fleet_operator::crd::{
-    dns_label, FleetSandbox, FleetSandboxSpec, FleetSandboxStatus, SandboxNetwork,
-    SandboxResources, LABEL_PROJECT, LABEL_SANDBOX, LABEL_SESSION, LABEL_WORKSPACE,
+    FleetSandbox, FleetSandboxSpec, FleetSandboxStatus, LABEL_PROJECT, LABEL_SANDBOX,
+    LABEL_SESSION, LABEL_WORKSPACE, SandboxNetwork, SandboxResources, dns_label,
 };
 use kube::api::{DeleteParams, ListParams, PostParams};
 use kube::{Api, Client, Resource, ResourceExt};
 use uuid::Uuid;
 
-use super::{
-    RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest,
-};
+use super::{RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest};
 
 /// etcd / CR env budget.
 pub const MAX_SPEC_MD_BYTES: usize = 200 * 1024;
@@ -54,9 +53,7 @@ impl Default for K8sOpts {
 impl K8sOpts {
     pub fn from_env() -> Self {
         let command = match std::env::var("K8S_WORKER_COMMAND") {
-            Ok(s) if !s.trim().is_empty() => {
-                s.split_whitespace().map(|p| p.to_string()).collect()
-            }
+            Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|p| p.to_string()).collect(),
             _ => vec!["fleet-driver".into()],
         };
         let kill_grace = std::env::var("KILL_GRACE_S")
@@ -111,9 +108,7 @@ impl K8sRuntime {
 
     async fn api(&self) -> Result<Api<FleetSandbox>, SandboxError> {
         let client = Client::try_default().await.map_err(|e| {
-            SandboxError::Spawn(format!(
-                "k8s client (in-cluster config or KUBECONFIG): {e}"
-            ))
+            SandboxError::Spawn(format!("k8s client (in-cluster config or KUBECONFIG): {e}"))
         })?;
         Ok(Api::namespaced(client, &self.opts.namespace))
     }
@@ -152,16 +147,12 @@ fn url_host(url: &str) -> Option<String> {
     } else {
         hostport.split(':').next().unwrap_or(hostport).to_string()
     };
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    let h = host.trim().trim_matches(|c| c == '[' || c == ']');
-    h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1"
+    // Shared rejector: 127/8, localhost, ::1 — not only 127.0.0.1.
+    agent_fleet_contracts::host_is_loopback(host)
 }
 
 pub fn spec_md_too_large(spec: &str) -> bool {
@@ -206,7 +197,10 @@ fn is_ipv6_literal(host: &str) -> bool {
     host.contains(':') && host.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-pub fn spec_from_request(req: &SpawnRequest, opts: &K8sOpts) -> Result<FleetSandboxSpec, SandboxError> {
+pub fn spec_from_request(
+    req: &SpawnRequest,
+    opts: &K8sOpts,
+) -> Result<FleetSandboxSpec, SandboxError> {
     if let Some(msg) = loopback_worker_url_error(&opts.worker_api_url) {
         return Err(SandboxError::Spawn(msg));
     }
@@ -286,6 +280,36 @@ pub fn phase_to_state(status: Option<&FleetSandboxStatus>) -> SandboxState {
     }
 }
 
+/// CRD rule: hard lifetime from create. Operator deletes the CR when
+/// `age >= ttl_seconds`. `None` / `0` / negative TTL never expire — that
+/// would leave a pod running forever, so spawn must not emit those.
+pub fn sandbox_ttl_exceeded(sb: &FleetSandbox) -> bool {
+    let Some(ttl) = sb.spec.ttl_seconds.filter(|t| *t > 0) else {
+        return false;
+    };
+    let Some(created) = sb.metadata.creation_timestamp.as_ref() else {
+        return false;
+    };
+    Utc::now().signed_duration_since(created.0).num_seconds() >= ttl
+}
+
+/// `Api::get_opt` result → sandbox state.
+///
+/// The operator deletes the FleetSandbox CR when `ttl_seconds` is exceeded.
+/// A missing object is therefore finished (`Exited { code: None }`, same as
+/// a vanished process). A leftover CR still marked Running after TTL is a
+/// timeout, not success — `process_sessions` treats `code.unwrap_or(0) == 0`
+/// as `done_success`.
+pub fn observe_cr(sb: Option<&FleetSandbox>) -> SandboxState {
+    let Some(sb) = sb else {
+        return SandboxState::Exited { code: None };
+    };
+    if sandbox_ttl_exceeded(sb) {
+        return SandboxState::Exited { code: Some(1) };
+    }
+    phase_to_state(sb.status.as_ref())
+}
+
 pub fn parse_exit_code(message: Option<&str>) -> Option<i32> {
     let msg = message?;
     let rest = msg.strip_prefix("exit ")?;
@@ -342,9 +366,10 @@ impl SandboxRuntime for K8sRuntime {
     async fn state(&self, handle: &RuntimeHandle) -> Result<SandboxState, SandboxError> {
         let api = self.api().await?;
         match api.get_opt(&handle.id).await {
-            Ok(None) => Ok(SandboxState::Exited { code: None }),
-            Ok(Some(sb)) => Ok(phase_to_state(sb.status.as_ref())),
-            Err(e) => Err(SandboxError::Other(anyhow::anyhow!("get FleetSandbox: {e}"))),
+            Ok(none_or_sb) => Ok(observe_cr(none_or_sb.as_ref())),
+            Err(e) => Err(SandboxError::Other(anyhow::anyhow!(
+                "get FleetSandbox: {e}"
+            ))),
         }
     }
 
@@ -377,7 +402,9 @@ async fn delete_cr(
     match api.delete(name, &dp).await {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
-        Err(e) => Err(SandboxError::Destroy(format!("delete FleetSandbox {name}: {e}"))),
+        Err(e) => Err(SandboxError::Destroy(format!(
+            "delete FleetSandbox {name}: {e}"
+        ))),
     }
 }
 
@@ -391,7 +418,10 @@ mod tests {
     fn sample_req() -> SpawnRequest {
         let mut env = HashMap::new();
         env.insert("FLEET_WORKER_TOKEN".into(), "tok".into());
-        env.insert("FLEET_ORCHESTRATOR_URL".into(), "http://127.0.0.1:8080".into());
+        env.insert(
+            "FLEET_ORCHESTRATOR_URL".into(),
+            "http://127.0.0.1:8080".into(),
+        );
         env.insert("SECRET_TOKEN".into(), "nope".into());
         SpawnRequest {
             session_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
@@ -418,7 +448,97 @@ mod tests {
     #[test]
     fn cr_name_is_session_dns_label() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        assert_eq!(cr_name_for_session(id), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            cr_name_for_session(id),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    fn spawned_cr(req: &SpawnRequest, age_secs: i64) -> FleetSandbox {
+        let spec = spec_from_request(req, &K8sOpts::default()).unwrap();
+        let name = cr_name_for_session(req.session_id);
+        let mut sb = FleetSandbox::new(&name, spec);
+        sb.meta_mut().namespace = Some(DEFAULT_NAMESPACE.into());
+        sb.meta_mut().labels = Some(cr_labels(req, &name));
+        sb.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                chrono::Utc::now() - chrono::Duration::seconds(age_secs),
+            ));
+        sb.status = Some(FleetSandboxStatus {
+            phase: Some("Running".into()),
+            pod_name: Some(format!("fsb-{name}")),
+            ..Default::default()
+        });
+        sb
+    }
+
+    #[test]
+    fn spawn_must_set_positive_ttl_so_cr_is_expireable() {
+        // Operator apply() deletes the CR only when ttl_seconds > 0. Spawn
+        // must emit a positive hard lifetime so the CR is expireable.
+        // Docs §13 delete-the-CR lock lives in fleet-operator apply_decision.
+        let req = sample_req();
+        let spec = spec_from_request(&req, &K8sOpts::default()).unwrap();
+        let ttl = spec
+            .ttl_seconds
+            .expect("spawn must set ttl_seconds so the operator can expire the CR");
+        assert!(
+            ttl > 0,
+            "ttl_seconds={ttl} is ignored by the operator; pod would run forever"
+        );
+        assert!(
+            ttl >= 1,
+            "ttl_seconds={ttl} is not expireable (operator ignores <= 0)"
+        );
+        assert_eq!(ttl, req.timeout.as_secs() as i64);
+
+        // Zero timeout is not "unlimited" — still a positive hard lifetime.
+        let mut zero_req = sample_req();
+        zero_req.timeout = Duration::from_secs(0);
+        let zero = spec_from_request(&zero_req, &K8sOpts::default()).unwrap();
+        let zero_ttl = zero
+            .ttl_seconds
+            .expect("zero timeout must still set ttl_seconds");
+        assert!(
+            zero_ttl >= 1,
+            "timeout=0 must map to ttl_seconds>=1 so the CR is expireable, got {zero_ttl}"
+        );
+
+        // Orchestrator fallback only: leftover Running after TTL is not live.
+        // This is not the operator DeleteCr lock.
+        let at_boundary = spawned_cr(&req, ttl);
+        assert!(sandbox_ttl_exceeded(&at_boundary));
+        assert_eq!(
+            observe_cr(Some(&at_boundary)),
+            SandboxState::Exited { code: Some(1) }
+        );
+        let past = spawned_cr(&req, ttl + 1);
+        assert!(sandbox_ttl_exceeded(&past));
+        assert_eq!(
+            observe_cr(Some(&past)),
+            SandboxState::Exited { code: Some(1) }
+        );
+        for aged in [&at_boundary, &past] {
+            match observe_cr(Some(aged)) {
+                SandboxState::Exited { code } => {
+                    assert_ne!(
+                        code.unwrap_or(0),
+                        0,
+                        "TTL leftover must not satisfy process_sessions success"
+                    );
+                }
+                other => panic!("TTL leftover must be Exited, got {other:?}"),
+            }
+        }
+
+        let fresh = spawned_cr(&req, 0);
+        assert!(!sandbox_ttl_exceeded(&fresh));
+        assert_eq!(observe_cr(Some(&fresh)), SandboxState::Running);
+        let one_second_left = spawned_cr(&req, ttl - 1);
+        assert!(!sandbox_ttl_exceeded(&one_second_left));
+        assert_eq!(observe_cr(Some(&one_second_left)), SandboxState::Running);
+
+        assert_eq!(observe_cr(None), SandboxState::Exited { code: None });
     }
 
     #[test]
@@ -430,7 +550,10 @@ mod tests {
         assert_eq!(spec.plan_task_id.as_deref(), Some("t1"));
         assert_eq!(spec.worker_profile.as_deref(), Some("coding"));
         assert_eq!(spec.image, DEFAULT_IMAGE);
-        assert_eq!(spec.command.as_ref().unwrap(), &vec!["fleet-driver".to_string()]);
+        assert_eq!(
+            spec.command.as_ref().unwrap(),
+            &vec!["fleet-driver".to_string()]
+        );
         assert_eq!(spec.ttl_seconds, Some(600));
         assert_eq!(spec.network.as_ref().unwrap().egress_mode, "none");
         assert!(spec.network.as_ref().unwrap().allowlist.is_empty());
@@ -482,6 +605,71 @@ mod tests {
         assert!(!err.contains("host.k3d.internal"), "{err}");
     }
 
+    /// Docs §11: k8s guest callback URL must not be loopback.
+    /// Reject the whole `127/8` range (not only `127.0.0.1`), plus
+    /// `localhost` and `::1`. Cluster DNS / LAN / host-gateway stay legal.
+    #[test]
+    fn k8s_guest_callback_url_must_not_be_loopback() {
+        let req = sample_req();
+        for url in [
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1/v1",
+            "http://127.1.2.3:8080",
+            "http://127.42.0.1:6379",
+            "http://127.255.255.255:1",
+            "http://localhost:8080",
+            "http://LOCALHOST:8080",
+            "http://[::1]:8080",
+            "https://127.0.0.1:443",
+        ] {
+            let mut opts = K8sOpts::default();
+            opts.worker_api_url = url.into();
+            let spec_err = spec_from_request(&req, &opts).unwrap_err().to_string();
+            assert!(
+                spec_err.contains("loopback"),
+                "spec_from_request must reject k8s callback {url} as loopback: {spec_err}"
+            );
+            let new_err = match K8sRuntime::new(opts) {
+                Ok(_) => panic!("K8sRuntime::new must reject k8s callback {url} as loopback"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                new_err.contains("loopback"),
+                "K8sRuntime::new must reject k8s callback {url} as loopback: {new_err}"
+            );
+            assert!(
+                loopback_worker_url_error(url).is_some(),
+                "loopback_worker_url_error must reject {url}"
+            );
+            assert!(
+                agent_fleet_contracts::url_is_loopback(url),
+                "url_is_loopback must reject k8s callback {url}"
+            );
+        }
+
+        for url in [
+            DEFAULT_WORKER_API_URL,
+            "http://10.0.0.8:8080",
+            "http://172.18.0.1:8081",
+            "http://192.168.1.1:8080",
+        ] {
+            let mut opts = K8sOpts::default();
+            opts.worker_api_url = url.into();
+            spec_from_request(&req, &opts)
+                .unwrap_or_else(|e| panic!("cluster-reachable callback {url} must spawn: {e}"));
+            K8sRuntime::new(opts)
+                .unwrap_or_else(|e| panic!("cluster-reachable callback {url} must construct: {e}"));
+            assert!(
+                loopback_worker_url_error(url).is_none(),
+                "{url} is not loopback"
+            );
+            assert!(
+                !agent_fleet_contracts::url_is_loopback(url),
+                "{url} is cluster-reachable, not loopback"
+            );
+        }
+    }
+
     #[test]
     fn spec_rejects_oversized_md() {
         let mut req = sample_req();
@@ -501,10 +689,7 @@ mod tests {
 
     #[test]
     fn phase_mapping() {
-        assert_eq!(
-            phase_to_state(None),
-            SandboxState::Running
-        );
+        assert_eq!(phase_to_state(None), SandboxState::Running);
         let running = FleetSandboxStatus {
             phase: Some("Creating".into()),
             ..Default::default()
@@ -533,5 +718,196 @@ mod tests {
     fn parse_exit_from_operator_message() {
         assert_eq!(parse_exit_code(Some("exit 12 Error")), Some(12));
         assert_eq!(parse_exit_code(Some("ImagePullBackOff")), None);
+    }
+
+    fn production_src(src: &str) -> &str {
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let markers = [
+            "\npub async fn ",
+            "\npub(crate) fn ",
+            "\npub fn ",
+            "\nasync fn ",
+            "\n    async fn ",
+            "\n    fn ",
+            "\nfn ",
+        ];
+        let end = markers
+            .iter()
+            .filter_map(|m| src[after..].find(m).map(|i| after + i))
+            .min()
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    fn delete_fails_closed(body: &str, call: &str) -> bool {
+        let Some(at) = body.find(call) else {
+            return false;
+        };
+        let window = &body[at..body.len().min(at + 500)];
+        if window.contains("let _ =") || window.contains(".ok()") || window.contains("unwrap_or") {
+            return false;
+        }
+        window.contains("return Err") || window.contains("await?") || window.contains("?;")
+    }
+
+    fn no_success_return(body: &str) -> bool {
+        !body.contains("return Ok") && !body.contains("Action::await_change")
+    }
+
+    /// Docs §13: CR deleted → finalizer deletes Pod + NetworkPolicy.
+    /// Orchestrator destroy/signal only delete the FleetSandbox CR. The
+    /// operator Cleanup path must then delete the `fsb-*` pod and its
+    /// NetworkPolicy — name-only helpers and ownerRef GC are not this lock.
+    /// A leftover Running remap in observe_cr is also not this lock.
+    #[test]
+    fn cr_delete_finalizer_removes_pod_and_network_policy() {
+        use fleet_operator::crd::{FINALIZER, pod_name_for};
+
+        let k8s = production_src(include_str!("k8s.rs"));
+        let destroy = fn_src(k8s, "async fn destroy(");
+        let signal = fn_src(k8s, "async fn signal(");
+        let delete_cr = fn_src(k8s, "async fn delete_cr(");
+        assert!(
+            destroy.contains("delete_cr("),
+            "destroy must delete the FleetSandbox CR so the operator finalizer runs:\n{destroy}"
+        );
+        assert!(
+            !destroy.contains("async fn state(") && !destroy.contains("async fn list("),
+            "destroy window must be destroy only (not the rest of the impl):\n{destroy}"
+        );
+        assert!(
+            signal.contains("delete_cr("),
+            "signal must delete the FleetSandbox CR so the operator finalizer runs:\n{signal}"
+        );
+        assert!(
+            !signal.contains("async fn destroy(") && !signal.contains("async fn state("),
+            "signal window must be signal only:\n{signal}"
+        );
+        assert!(
+            delete_cr.contains("api.delete"),
+            "delete_cr must delete the FleetSandbox CR (not a no-op):\n{delete_cr}"
+        );
+        assert!(
+            !delete_cr.contains("pods.delete") && !delete_cr.contains("nps.delete"),
+            "orchestrator deletes the CR only; finalizer Cleanup owns pod+NP:\n{delete_cr}"
+        );
+
+        let op = production_src(include_str!("../../../fleet-operator/src/reconcile.rs"));
+        let reconcile = fn_src(op, "pub async fn reconcile(");
+        assert!(
+            reconcile.contains("finalizer(")
+                && (reconcile.contains("FINALIZER")
+                    || reconcile.contains("fleet.agentfleet.io/sandbox-cleanup")),
+            "reconcile must install the sandbox-cleanup finalizer; CR delete without it orphans fsb-*:\n{reconcile}"
+        );
+        let cleanup_evt = reconcile
+            .find("FinalizerEvent::Cleanup")
+            .expect("reconcile must handle finalizer Cleanup (CR delete)");
+        let apply_evt = reconcile
+            .find("FinalizerEvent::Apply")
+            .expect("reconcile must still Apply (create pod+NP) separately from Cleanup");
+        let cleanup_arm_end = reconcile[cleanup_evt..]
+            .find('\n')
+            .map(|i| cleanup_evt + i)
+            .unwrap_or(reconcile.len());
+        let cleanup_arm = &reconcile[cleanup_evt..cleanup_arm_end];
+        assert!(
+            cleanup_arm.contains("cleanup("),
+            "Cleanup must call cleanup() so pod+NP are deleted, not Apply/create:\n{cleanup_arm}"
+        );
+        assert!(
+            !cleanup_arm.contains("apply("),
+            "Cleanup must not apply/create; it deletes pod+NP:\n{cleanup_arm}"
+        );
+        assert_ne!(
+            apply_evt, cleanup_evt,
+            "Apply and Cleanup must be distinct; Cleanup is the delete-pod+NP path"
+        );
+
+        let cleanup = fn_src(op, "async fn cleanup(");
+        assert!(
+            !cleanup.contains("async fn apply_np(") && !cleanup.contains("async fn apply("),
+            "cleanup window must be cleanup only:\n{cleanup}"
+        );
+        assert!(
+            !cleanup.contains("pods.create") && !cleanup.contains("patch_status"),
+            "Cleanup must not create a pod or patch Running:\n{cleanup}"
+        );
+        assert!(
+            cleanup.contains("pod_name_for"),
+            "cleanup must target the fsb-* pod via pod_name_for (not only status.pod_name):\n{cleanup}"
+        );
+        assert!(
+            !cleanup.contains("status") || cleanup.contains("pod_name_for"),
+            "a CR deleted before status is patched still has an fsb-* pod; pod_name_for is required:\n{cleanup}"
+        );
+        assert!(
+            cleanup.contains("network_policy_name"),
+            "cleanup must target the sandbox NetworkPolicy, not skip it:\n{cleanup}"
+        );
+        let pod_del = cleanup.find("pods.delete").expect(
+            "finalizer cleanup must explicitly delete the fsb-* pod; ownerRef GC is not this lock",
+        );
+        let np_del = cleanup
+            .find("nps.delete")
+            .expect("finalizer cleanup must explicitly delete the NetworkPolicy; ownerRef GC is not this lock");
+        assert!(
+            cleanup.contains("&pod_name"),
+            "pod delete must use the fsb-* name from pod_name_for:\n{cleanup}"
+        );
+        assert!(
+            cleanup.contains("&np_name"),
+            "NetworkPolicy delete must use the name from network_policy_name:\n{cleanup}"
+        );
+        assert!(
+            pod_del < np_del,
+            "delete the fsb-* pod, then its NetworkPolicy; skipping NP orphans it:\n{cleanup}"
+        );
+        assert!(
+            no_success_return(&cleanup[..np_del]),
+            "must not return success before deleting the NetworkPolicy (pod already gone still orphans NP):\n{cleanup}"
+        );
+        assert!(
+            delete_fails_closed(cleanup, "pods.delete"),
+            "pod delete failure must fail-closed (keep the finalizer, do not orphan):\n{cleanup}"
+        );
+        assert!(
+            delete_fails_closed(cleanup, "nps.delete"),
+            "NetworkPolicy delete failure must fail-closed (keep the finalizer, do not orphan):\n{cleanup}"
+        );
+
+        let req = sample_req();
+        let cr = cr_name_for_session(req.session_id);
+        let pod = pod_name_for(&cr);
+        assert!(
+            pod.starts_with("fsb-"),
+            "sandbox pod must be fsb-*, got {pod}"
+        );
+        assert_eq!(pod, format!("fsb-{cr}"));
+        let np_fn = fn_src(op, "fn network_policy_name(");
+        assert!(
+            np_fn.contains("pod_name") && np_fn.contains("-net"),
+            "NetworkPolicy name must be derived from the fsb-* pod ({pod}-net):\n{np_fn}"
+        );
+        assert!(
+            np_fn.contains("{pod_name}-net") || np_fn.contains("format!(\"{pod_name}-net\")"),
+            "NetworkPolicy name must be {{pod}}-net (fsb-<cr>-net), not an unrelated name:\n{np_fn}"
+        );
+        assert_eq!(FINALIZER, "fleet.agentfleet.io/sandbox-cleanup");
+
+        let spawned = spawned_cr(&req, 0);
+        assert_eq!(
+            spawned.status.as_ref().and_then(|s| s.pod_name.as_deref()),
+            Some(pod.as_str()),
+            "CR status.pod_name must be the fsb-* pod cleanup deletes"
+        );
     }
 }

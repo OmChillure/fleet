@@ -50,7 +50,33 @@ struct Cache {
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim().to_lowercase();
+            !(v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(default)
+}
+
+/// Public library fetch is only for an enabled local-model runtime.
+/// `OLLAMA_ENABLED` defaults on (chat). Lab `ENABLE_OLLAMA` defaults off.
+/// Both off → empty + "unavailable", no sockets (not ollama.com, not :1234).
+fn local_models_enabled() -> bool {
+    env_flag("OLLAMA_ENABLED", true) || env_flag("ENABLE_OLLAMA", false)
+}
+
+fn unavailable_catalog() -> LocalModelCatalog {
+    LocalModelCatalog {
+        models: Vec::new(),
+        source: "unavailable".into(),
+    }
+}
+
 pub async fn catalog() -> LocalModelCatalog {
+    if !local_models_enabled() {
+        return unavailable_catalog();
+    }
     if let Ok(g) = CACHE.lock() {
         if let Some(c) = g.as_ref() {
             if c.at.elapsed() < CACHE_TTL {
@@ -74,10 +100,7 @@ pub async fn catalog() -> LocalModelCatalog {
                 source: "ollama.com/library".into(),
             }
         }
-        Ok(_) | Err(_) => LocalModelCatalog {
-            models: Vec::new(),
-            source: "unavailable".into(),
-        },
+        Ok(_) | Err(_) => unavailable_catalog(),
     }
 }
 
@@ -118,7 +141,7 @@ struct CacheTags {
 
 pub async fn tags_for(name: &str) -> LocalModelTags {
     let name = name.trim().to_string();
-    if !library_slug_ok(&name) {
+    if !library_slug_ok(&name) || !local_models_enabled() {
         return LocalModelTags {
             name,
             tags: Vec::new(),
@@ -323,7 +346,11 @@ fn extract_summary(window: &str) -> Option<String> {
     let close = window[body_at..].find("</p>")?;
     let raw = window[body_at..body_at + close].trim();
     let text = decode_entities(&strip_tags(raw));
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn decode_entities(s: &str) -> String {
@@ -401,5 +428,312 @@ mod tests {
         assert!(library_slug_ok("llama3.2"));
         assert!(!library_slug_ok("llama3.2/tags"));
         assert!(!library_slug_ok("hi;rm"));
+    }
+
+    fn reset_caches() {
+        if let Ok(mut g) = CACHE.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = TAGS_CACHE.lock() {
+            *g = None;
+        }
+    }
+
+    fn caches_are_empty() -> bool {
+        let cat = CACHE.lock().ok().is_some_and(|g| g.is_none());
+        let tags = TAGS_CACHE.lock().ok().is_some_and(|g| match g.as_ref() {
+            None => true,
+            Some(m) => m.is_empty(),
+        });
+        cat && tags
+    }
+
+    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let mut prev = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                prev.push((*k, std::env::var(k).ok()));
+                unsafe { std::env::set_var(k, v) };
+            }
+            Self(prev)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (k, v) in self.0.drain(..) {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    fn this_process_socket_inodes() -> std::collections::HashSet<u64> {
+        let mut out = std::collections::HashSet::new();
+        let Ok(dir) = std::fs::read_dir("/proc/self/fd") else {
+            return out;
+        };
+        for ent in dir.flatten() {
+            let Ok(target) = std::fs::read_link(ent.path()) else {
+                continue;
+            };
+            let s = target.to_string_lossy();
+            let Some(n) = s.strip_prefix("socket:[") else {
+                continue;
+            };
+            let Some(n) = n.strip_suffix(']') else {
+                continue;
+            };
+            if let Ok(ino) = n.parse() {
+                out.insert(ino);
+            }
+        }
+        out
+    }
+
+    /// Rows in this netns with remote TCP `port` (any state, including TIME_WAIT).
+    /// Key is local-rem-inode so a new connect is visible even after the fd closes.
+    fn tcp_rows_to_port(port: u16) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for path in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in text.lines().skip(1) {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 10 {
+                    continue;
+                }
+                let Some((_, rem_port)) = cols[2].rsplit_once(':') else {
+                    continue;
+                };
+                let Ok(p) = u16::from_str_radix(rem_port, 16) else {
+                    continue;
+                };
+                if p == port {
+                    out.insert(format!("{}-{}-{}", cols[1], cols[2], cols[9]));
+                }
+            }
+        }
+        out
+    }
+
+    /// Remote TCP ports this process currently has an fd for (not LISTEN).
+    fn this_process_remote_tcp_ports() -> std::collections::HashSet<u16> {
+        let mut out = std::collections::HashSet::new();
+        let mine = this_process_socket_inodes();
+        if mine.is_empty() {
+            return out;
+        }
+        for path in ["/proc/self/net/tcp", "/proc/self/net/tcp6"] {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in text.lines().skip(1) {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 10 {
+                    continue;
+                }
+                let inode: u64 = match cols[9].parse() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if !mine.contains(&inode) {
+                    continue;
+                }
+                let Some((_, rem_port)) = cols[2].rsplit_once(':') else {
+                    continue;
+                };
+                let Ok(port) = u16::from_str_radix(rem_port, 16) else {
+                    continue;
+                };
+                if port != 0 {
+                    out.insert(port);
+                }
+            }
+        }
+        out
+    }
+
+    /// ENABLE off must not open :1234 (lab OpenAI-compat) and must not fetch.
+    /// Bind when the port is free (connect → accept is a fail). When the lab
+    /// already owns :1234, spin-poll this process + new netns rows instead.
+    /// No pre-existing listener is required.
+    struct NoOutbound {
+        hits: std::sync::Arc<std::sync::atomic::AtomicU16>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        before_1234: std::collections::HashSet<String>,
+        joins: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl NoOutbound {
+        fn arm() -> Self {
+            use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+            use std::sync::Arc;
+
+            let before_1234 = tcp_rows_to_port(1234);
+            let hits = Arc::new(AtomicU16::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut joins = Vec::new();
+            let mut bound = 0usize;
+
+            for addr in ["127.0.0.1:1234", "[::1]:1234"] {
+                let Ok(listener) = std::net::TcpListener::bind(addr) else {
+                    continue;
+                };
+                bound += 1;
+                let _ = listener.set_nonblocking(true);
+                let hits = hits.clone();
+                let stop = stop.clone();
+                joins.push(std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok(_) => hits.store(1234, Ordering::SeqCst),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::yield_now();
+                            }
+                            Err(_) => std::thread::yield_now(),
+                        }
+                    }
+                }));
+            }
+
+            let proc_ok = std::path::Path::new("/proc/self/net/tcp").is_file();
+            assert!(
+                bound > 0 || proc_ok,
+                "need a :1234 bind or /proc to prove ENABLE-off does not connect"
+            );
+
+            let hits_p = hits.clone();
+            let stop_p = stop.clone();
+            let before_p = before_1234.clone();
+            joins.push(std::thread::spawn(move || {
+                while !stop_p.load(Ordering::Relaxed) {
+                    let ports = this_process_remote_tcp_ports();
+                    // Lab OpenAI-compat, or HTTPS fetch (ollama.com) while disabled.
+                    for p in [1234_u16, 443] {
+                        if ports.contains(&p) {
+                            hits_p.store(p, Ordering::SeqCst);
+                        }
+                    }
+                    if tcp_rows_to_port(1234)
+                        .difference(&before_p)
+                        .next()
+                        .is_some()
+                    {
+                        hits_p.store(1234, Ordering::SeqCst);
+                    }
+                    std::thread::yield_now();
+                }
+            }));
+
+            Self {
+                hits,
+                stop,
+                before_1234,
+                joins,
+            }
+        }
+
+        fn assert_idle(&self) {
+            let port = self.hits.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                port, 0,
+                "ENABLE off must not open the network (connect to :{port} is a fail)"
+            );
+            let new_1234: Vec<_> = tcp_rows_to_port(1234)
+                .difference(&self.before_1234)
+                .cloned()
+                .collect();
+            assert!(
+                new_1234.is_empty(),
+                "ENABLE off must not open :1234 (new tcp rows {new_1234:?})"
+            );
+        }
+    }
+
+    impl Drop for NoOutbound {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            for h in self.joins.drain(..) {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// Drive catalog()/tags_for() with the lab proxy and local Ollama off.
+    /// They must fail closed (empty + "unavailable") without opening :1234.
+    /// Fetch stays https://ollama.com/… — not an OpenAI-compat proxy.
+    #[tokio::test]
+    async fn disabled_does_not_proxy_to_lmstudio_1234() {
+        assert!(
+            LIBRARY_URL.starts_with("https://ollama.com/"),
+            "library fetch must be ollama.com, not a local proxy: {LIBRARY_URL}"
+        );
+        assert!(
+            !LIBRARY_URL.contains("1234") && !LIBRARY_URL.contains("/v1/"),
+            "library URL must not be an OpenAI-compat proxy: {LIBRARY_URL}"
+        );
+
+        // ENABLE off. Bait OLLAMA_BASE_URL so a rewrite that GETs
+        // http://127.0.0.1:1234/v1/models (format!/env) is a fail.
+        let _env = EnvRestore::set(&[
+            ("ENABLE_LMSTUDIO_PROXY", "0"),
+            ("ENABLE_OLLAMA", "0"),
+            ("OLLAMA_ENABLED", "0"),
+            ("OLLAMA_BASE_URL", "http://127.0.0.1:1234/v1"),
+        ]);
+        reset_caches();
+        let guard = NoOutbound::arm();
+
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let started = Instant::now();
+        let cat = tokio::time::timeout(FAIL_CLOSED, catalog())
+            .await
+            .expect("disabled catalog() must return immediately, not open :1234");
+        let tags = tokio::time::timeout(FAIL_CLOSED, tags_for("llama3.2"))
+            .await
+            .expect("disabled tags_for() must return immediately, not open :1234");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "disabled catalog/tags_for must fail closed without a live proxy, took {:?}",
+            started.elapsed()
+        );
+
+        assert!(
+            cat.models.is_empty(),
+            "disabled catalog must be empty, got {} models from {}",
+            cat.models.len(),
+            cat.source
+        );
+        assert_eq!(
+            cat.source, "unavailable",
+            "disabled catalog source must be unavailable, not a proxy: {}",
+            cat.source
+        );
+        assert_eq!(tags.name, "llama3.2");
+        assert!(
+            tags.tags.is_empty(),
+            "disabled tags_for must be empty, got {} tags from {}",
+            tags.tags.len(),
+            tags.source
+        );
+        assert_eq!(
+            tags.source, "unavailable",
+            "disabled tags_for source must be unavailable, not a proxy: {}",
+            tags.source
+        );
+        assert!(!cat.source.contains("1234") && !tags.source.contains("1234"));
+        assert!(!cat.source.contains("/v1") && !tags.source.contains("/v1"));
+        assert!(
+            caches_are_empty(),
+            "disabled catalog/tags_for must not populate the live fetch cache"
+        );
+
+        guard.assert_idle();
     }
 }

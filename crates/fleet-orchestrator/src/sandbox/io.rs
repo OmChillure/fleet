@@ -4,7 +4,7 @@
 //! callback + the mapping from an inbox source → a reply operation.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -97,10 +97,7 @@ pub fn subst_output_args(args: &Value, summary: &str, run_id: &str, status: &str
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, v) in map {
-                out.insert(
-                    k.clone(),
-                    subst_output_args(v, summary, run_id, status),
-                );
+                out.insert(k.clone(), subst_output_args(v, summary, run_id, status));
             }
             Value::Object(out)
         }
@@ -175,7 +172,10 @@ pub fn default_output_for_ref(ext: &ExternalRef, summary: &str) -> Option<PlanIo
             args: json!({ "task_id": key, "text": summary }),
         }),
         "teams" => {
-            let (chat_id, _) = key.split_once(':').map(|(a, b)| (a, Some(b))).unwrap_or((key, None));
+            let (chat_id, _) = key
+                .split_once(':')
+                .map(|(a, b)| (a, Some(b)))
+                .unwrap_or((key, None));
             Some(PlanIo {
                 provider,
                 operation: "send_chat_message".into(),

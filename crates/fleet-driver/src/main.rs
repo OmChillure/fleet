@@ -122,11 +122,7 @@ fn guest_files(work_dir: &std::path::Path) -> Option<serde_json::Map<String, ser
     if work_dir.join("work").is_dir() {
         files.insert("work/.keep".into(), serde_json::Value::String("ok".into()));
     }
-    if files.is_empty() {
-        None
-    } else {
-        Some(files)
-    }
+    if files.is_empty() { None } else { Some(files) }
 }
 
 enum WorkError {
@@ -221,10 +217,7 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
         warn!(error = %e, "failed to write artifacts");
     }
 
-    let blocked = outcome
-        .stop_reason
-        .as_deref()
-        .is_some_and(is_blocked_stop);
+    let blocked = outcome.stop_reason.as_deref().is_some_and(is_blocked_stop);
     if outcome.ok && !blocked {
         Ok(format!(
             "acp ok harness={} stop={} elapsed={:.2}s chars={}",

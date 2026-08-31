@@ -1,14 +1,10 @@
 //! Discord user OAuth helpers (control plane only).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
-pub(crate) async fn discord_get(
-    http: &reqwest::Client,
-    token: &str,
-    url: &str,
-) -> (u16, Value) {
+pub(crate) async fn discord_get(http: &reqwest::Client, token: &str, url: &str) -> (u16, Value) {
     match http
         .get(url)
         .header("Authorization", format!("Bearer {token}"))

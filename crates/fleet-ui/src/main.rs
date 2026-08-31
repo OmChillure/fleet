@@ -147,22 +147,25 @@ fn route_for_runners_path(workspace_id: String, path: &str) -> Route {
 #[component]
 fn RunnersIndex(workspace_id: String) -> Element {
     let navigator = use_navigator();
-    use_effect(move || {
-        let dest = runners_index_target(&workspace_id);
-        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
+    let dest = runners_index_target(&workspace_id);
+    let route = route_for_runners_path(workspace_id.clone(), &dest);
+    use_hook(move || {
+        navigator.replace(route.clone());
     });
-    rsx! {}
+    // Paint Self-hosted immediately so a missed replace is not a blank main.
+    rsx! { SelfHosted { workspace_id } }
 }
 
 /// `/{ws}/workers` → `/{ws}/runners/self-hosted`.
 #[component]
 fn WorkersRedirect(workspace_id: String) -> Element {
     let navigator = use_navigator();
-    use_effect(move || {
-        let dest = workers_redirect(&workspace_id);
-        navigator.replace(route_for_runners_path(workspace_id.clone(), &dest));
+    let dest = workers_redirect(&workspace_id);
+    let route = route_for_runners_path(workspace_id.clone(), &dest);
+    use_hook(move || {
+        navigator.replace(route.clone());
     });
-    rsx! {}
+    rsx! { SelfHosted { workspace_id } }
 }
 
 /// Landing + auth chrome — pure black, no color accents.

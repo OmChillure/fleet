@@ -1,6 +1,6 @@
 //! Jira HTTP helpers.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -78,7 +78,12 @@ pub(crate) async fn jira_get(http: &reqwest::Client, token: &str, url: &str) -> 
     }
 }
 
-pub(crate) async fn jira_post(http: &reqwest::Client, token: &str, url: &str, body: &Value) -> (u16, Value) {
+pub(crate) async fn jira_post(
+    http: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> (u16, Value) {
     match http
         .post(url)
         .header("Authorization", format!("Bearer {token}"))

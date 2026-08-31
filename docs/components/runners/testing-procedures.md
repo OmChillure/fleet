@@ -74,11 +74,11 @@ Catalog → test (layer 2):
 
 | Behavior | Procedure |
 | --- | --- |
-| Nav + Cloud + Partners | `test_07`, `test_10`, `test_11`, `test_12`, `test_13` |
+| Nav + Cloud + Partners | `test_07`, `test_10`, `test_11`, `test_12`, `test_13`; `test_catalog_cloud.test_cloud_page_coming_soon` |
 | Disclaimer ack persists; no lend enablement | `test_14o_partners_ack`; `test_catalog_partners.test_ack_persists_and_does_not_enable_lend` |
 | Redirects | `test_08` (`/workers`), `test_09` (`/runners`) |
 | Add / pair / Done / token once | `test_05_workers_add_shows_pair_token` |
-| Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
+| Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons_http_lan_fallback`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
 | Loopback URL warning | `test_14i_loopback_warning`; `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
 | Cancel discards pending | `test_15_cancel_discards_pending_worker` |
 | Control plane first, no software, runtime is SANDBOX_BACKEND | `test_16_control_plane_card` |

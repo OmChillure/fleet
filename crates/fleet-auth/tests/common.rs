@@ -32,13 +32,17 @@ pub fn unique_email() -> String {
     format!("auth.{uuid}@example.test")
 }
 
-fn test_auth_config() -> AuthConfig {
-    let jwt_secret = std::env::var("JWT_SECRET")
+/// Same secret the in-process test app signs access JWTs with.
+pub fn test_jwt_secret() -> String {
+    std::env::var("JWT_SECRET")
         .ok()
         .filter(|s| s.len() >= 32)
-        .unwrap_or_else(|| "dev-change-me-to-a-long-random-secret-at-least-32-chars".into());
+        .unwrap_or_else(|| "dev-change-me-to-a-long-random-secret-at-least-32-chars".into())
+}
+
+fn test_auth_config() -> AuthConfig {
     AuthConfig {
-        jwt_secret,
+        jwt_secret: test_jwt_secret(),
         access_ttl: Duration::from_secs(900),
         refresh_ttl: Duration::from_secs(604_800),
         cookie_secure: false,
@@ -68,6 +72,20 @@ pub async fn app() -> axum::Router {
         db,
         config: test_auth_config(),
     };
+    fleet_auth::router().with_state(state)
+}
+
+/// Same harness as [`app`], with an explicit cookie policy. Default
+/// [`test_auth_config`] stays Lax + insecure.
+pub async fn app_with_cookie_policy(
+    cookie_secure: bool,
+    cookie_samesite: cookie::SameSite,
+) -> axum::Router {
+    let db = connect_and_migrate().await;
+    let mut config = test_auth_config();
+    config.cookie_secure = cookie_secure;
+    config.cookie_samesite = cookie_samesite;
+    let state = AuthState { db, config };
     fleet_auth::router().with_state(state)
 }
 
@@ -108,6 +126,20 @@ impl ParsedSetCookie {
         self.raw
             .split(';')
             .any(|part| part.trim().eq_ignore_ascii_case("Secure"))
+    }
+
+    pub fn same_site(&self) -> Option<&str> {
+        self.raw.split(';').find_map(|part| {
+            let p = part.trim();
+            p.split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("SameSite"))
+                .map(|(_, v)| v)
+        })
+    }
+
+    pub fn is_samesite_none(&self) -> bool {
+        self.same_site()
+            .is_some_and(|v| v.eq_ignore_ascii_case("None"))
     }
 }
 
@@ -180,6 +212,9 @@ pub struct HttpOut {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Value,
+    /// Oneshot response bytes as UTF-8 (lossy). Drive secret-omission
+    /// checks against this, not a re-serialized `Value`.
+    pub raw: String,
 }
 
 impl HttpOut {
@@ -207,6 +242,19 @@ pub async fn call(
     cookies: Option<&CookieJar>,
     body: Option<Value>,
 ) -> HttpOut {
+    call_with_headers(app, method, uri, cookies, &[], body).await
+}
+
+/// Same oneshot as [`call`], plus extra request headers (`Host`,
+/// `X-Forwarded-Host`, …). Cookie scope must not follow those.
+pub async fn call_with_headers(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    cookies: Option<&CookieJar>,
+    extra_headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> HttpOut {
     let mut builder = Request::builder().method(method).uri(uri);
     if body.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -215,6 +263,9 @@ pub async fn call(
         if let Some(h) = jar.cookie_header() {
             builder = builder.header(header::COOKIE, h);
         }
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
     }
     let req = builder
         .body(match body {
@@ -226,16 +277,17 @@ pub async fn call(
     let status = res.status();
     let headers = res.headers().clone();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
     let body = if bytes.is_empty() {
         json!({})
     } else {
-        serde_json::from_slice(&bytes)
-            .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }))
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({ "raw": raw.clone() }))
     };
     HttpOut {
         status,
         headers,
         body,
+        raw,
     }
 }
 

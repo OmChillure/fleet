@@ -1,9 +1,9 @@
 //! Notion search / page / database tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn search(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let query = args
@@ -64,11 +64,7 @@ pub(crate) async fn get_page(http: &reqwest::Client, token: &str, args: &Value) 
     )
 }
 
-pub(crate) async fn get_database(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn get_database(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let id = match req_str(args, "database_id").or_else(|_| req_str(args, "id")) {
         Ok(i) => i,
         Err(e) => return ProxyResult::err("notion", "get_database", "bad_args", e, None),

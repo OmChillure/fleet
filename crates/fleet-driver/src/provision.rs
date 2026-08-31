@@ -159,12 +159,20 @@ fn tail_utf8(stderr: &[u8], stdout: &[u8], max: usize) -> String {
     if s.trim().is_empty() {
         s = String::from_utf8_lossy(stdout).into_owned();
     }
-    s.chars().rev().take(max).collect::<String>().chars().rev().collect()
+    s.chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 /// Wall-clock bound for clone + checkout.
 pub fn clone_timeout(task_timeout: Duration) -> Duration {
-    task_timeout.min(Duration::from_secs(300)).max(Duration::from_secs(15))
+    task_timeout
+        .min(Duration::from_secs(300))
+        .max(Duration::from_secs(15))
 }
 
 #[cfg(test)]

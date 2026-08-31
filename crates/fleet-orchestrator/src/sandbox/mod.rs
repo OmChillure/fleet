@@ -110,8 +110,14 @@ pub trait SandboxRuntime: Send + Sync {
 }
 
 /// FLEET_* env keys injected for workers (design normative contract).
+/// OAuth / integration secrets stay on the control plane — never copied.
 pub fn fleet_worker_env(req: &SpawnRequest, orchestrator_url: &str) -> HashMap<String, String> {
-    let mut env = req.env.clone();
+    let mut env: HashMap<String, String> = req
+        .env
+        .iter()
+        .filter(|(k, _)| k.starts_with("FLEET_"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     env.insert("FLEET_SESSION_ID".into(), req.session_id.to_string());
     env.insert("FLEET_PROJECT_ID".into(), req.project_id.to_string());
     env.insert("FLEET_RUN_ID".into(), req.run_id.to_string());
@@ -238,13 +244,13 @@ impl SandboxRuntime for StubRuntime {
     }
 }
 
+mod k8s;
 mod process;
 mod process_om;
-mod k8s;
 
+pub use k8s::{K8sOpts, K8sRuntime};
 pub use process::{ProcessRuntime, build_process_runtime, worker_argv_from_env};
 pub use process_om::process_runtime;
-pub use k8s::{K8sOpts, K8sRuntime};
 
 /// Options for [`build_runtime`].
 #[derive(Debug, Clone)]

@@ -120,7 +120,12 @@ pub fn claude_argv(model: &str, effort: Option<&str>) -> Vec<String> {
     args
 }
 
-fn run_claude(prompt: &str, model: &str, effort: Option<&str>, timeout: Duration) -> Result<String> {
+fn run_claude(
+    prompt: &str,
+    model: &str,
+    effort: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     let args = claude_argv(model, effort);
     run_timeout("claude", &args, Some(prompt), timeout)
 }
@@ -129,7 +134,12 @@ fn run_ollama(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
     if model.is_empty() {
         bail!("ollama chat_turn needs a model name");
     }
-    run_timeout("ollama", &["run".into(), model.to_string()], Some(prompt), timeout)
+    run_timeout(
+        "ollama",
+        &["run".into(), model.to_string()],
+        Some(prompt),
+        timeout,
+    )
 }
 
 fn grok_bin() -> String {
@@ -238,9 +248,10 @@ mod tests {
     fn grok_argv_includes_model_and_effort() {
         let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", Some("xhigh"));
         assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "grok-4.6"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--reasoning-effort" && w[1] == "xhigh"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--reasoning-effort" && w[1] == "xhigh")
+        );
         assert!(args.contains(&"--prompt-file".into()));
     }
 
@@ -248,12 +259,22 @@ mod tests {
     fn claude_argv_is_print_mode_without_tools() {
         let args = claude_argv("sonnet", Some("high"));
         assert!(args.contains(&"-p".into()));
-        assert!(args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk"));
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
-        assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--tools" && w[1].is_empty())
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "sonnet")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--effort" && w[1] == "high")
+        );
         assert!(!args.iter().any(|a| a == "hello"));
         assert!(!args.iter().any(|a| a == "models"));
     }

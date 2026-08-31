@@ -1,6 +1,6 @@
 //! Slack Web API helpers (control plane only).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -13,11 +13,7 @@ pub(crate) fn req_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{key} is required"))
 }
 
-pub(crate) async fn slack_get(
-    http: &reqwest::Client,
-    token: &str,
-    url: &str,
-) -> (u16, Value) {
+pub(crate) async fn slack_get(http: &reqwest::Client, token: &str, url: &str) -> (u16, Value) {
     match http
         .get(url)
         .header("Authorization", format!("Bearer {token}"))

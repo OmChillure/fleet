@@ -167,15 +167,135 @@ async fn disconnect_drops_credentials_other_workspace_same_provider_intact() {
         .await
         .expect("second disconnect");
     assert!(!again, "already-disconnected must not report a drop");
-    assert!(
-        integrations::credentials_for(&pool, ws_a, "github")
-            .await
-            .expect("creds a after second")
-            .is_none()
-    );
+    assert!(integrations::credentials_for(&pool, ws_a, "github")
+        .await
+        .expect("creds a after second")
+        .is_none());
     let still_b = integrations::credentials_for(&pool, ws_b, "github")
         .await
         .expect("creds b after second")
         .expect("ws-b still connected after second disconnect");
     assert_eq!(still_b, leftover_b);
+}
+
+async fn count_oauth_nonces(pool: &fleet_db::PgPool, nonce: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM integration_oauth_state_nonces WHERE nonce = $1",
+    )
+    .bind(nonce)
+    .fetch_one(pool)
+    .await
+    .expect("count oauth nonce")
+}
+
+async fn count_workspace_oauth_nonces(pool: &fleet_db::PgPool, workspace_id: Uuid) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM integration_oauth_state_nonces WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("count workspace oauth nonces")
+}
+
+/// Insert-on-conflict is the consume-once lock. Rows survive disconnect;
+/// workspace delete cascades.
+#[tokio::test]
+async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconnect() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let nonce = format!("oauth-nonce-{}", Uuid::now_v7());
+
+    let first = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_a, "github")
+        .await
+        .expect("first consume");
+    assert!(first, "first insert must win");
+    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
+
+    let replay = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_a, "github")
+        .await
+        .expect("replay consume");
+    assert!(!replay, "replay of the same nonce must lose");
+    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
+
+    let cross = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_b, "gitlab")
+        .await
+        .expect("cross workspace/provider consume");
+    assert!(
+        !cross,
+        "same nonce must stay dead across workspace and provider"
+    );
+    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
+
+    let empty = integrations::consume_oauth_state_nonce(&pool, "", ws_a, "github")
+        .await
+        .expect("empty nonce");
+    let whitespace = integrations::consume_oauth_state_nonce(&pool, "   \t", ws_a, "github")
+        .await
+        .expect("whitespace nonce");
+    assert!(!empty, "empty nonce must not consume");
+    assert!(!whitespace, "whitespace nonce must not consume");
+    assert_eq!(
+        count_oauth_nonces(&pool, "").await,
+        0,
+        "empty nonce must not insert a row"
+    );
+    assert_eq!(
+        count_oauth_nonces(&pool, "   \t").await,
+        0,
+        "whitespace nonce must not insert a row"
+    );
+    assert_eq!(
+        count_workspace_oauth_nonces(&pool, ws_a).await,
+        1,
+        "empty/whitespace must not add rows for the workspace"
+    );
+
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("nonce")).await;
+    let dropped = integrations::disconnect(&pool, ws_a, "github")
+        .await
+        .expect("disconnect");
+    assert!(dropped, "connected github must disconnect");
+    assert_eq!(
+        count_oauth_nonces(&pool, &nonce).await,
+        1,
+        "disconnect must not delete the nonce row"
+    );
+    let after_disconnect = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_a, "github")
+        .await
+        .expect("consume after disconnect");
+    assert!(
+        !after_disconnect,
+        "nonce must stay consumed after disconnect"
+    );
+
+    let (_user_c, ws_c) = seed_user_with_workspace(&pool).await;
+    let cascade_nonce = format!("oauth-nonce-cascade-{}", Uuid::now_v7());
+    let cascaded = integrations::consume_oauth_state_nonce(&pool, &cascade_nonce, ws_c, "github")
+        .await
+        .expect("cascade nonce");
+    assert!(cascaded);
+    assert_eq!(count_oauth_nonces(&pool, &cascade_nonce).await, 1);
+
+    sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1")
+        .bind(ws_c)
+        .execute(&pool)
+        .await
+        .expect("delete members");
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(ws_c)
+        .execute(&pool)
+        .await
+        .expect("delete workspace");
+    assert_eq!(
+        count_oauth_nonces(&pool, &cascade_nonce).await,
+        0,
+        "workspace ON DELETE CASCADE must drop the nonce row"
+    );
+    assert_eq!(
+        count_oauth_nonces(&pool, &nonce).await,
+        1,
+        "other workspace nonces must stay"
+    );
 }

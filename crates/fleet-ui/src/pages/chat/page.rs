@@ -3,21 +3,21 @@
 use std::sync::Mutex;
 
 use super::api::{
+    ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, ChatStreamEvent,
     create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
-    stream_chat, ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus,
-    ChatStreamEvent,
+    stream_chat,
 };
-use super::markdown::{highlight, markdown_to_parts, MdPart};
+use super::markdown::{MdPart, highlight, markdown_to_parts};
+use crate::Route;
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
-use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
-use crate::Route;
+use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
 use dioxus::prelude::*;
 use fleet_runners_view::{
-    agent_status_phrase, catalog_provider_display_name, claude_cli_model_aliases,
-    claude_effort_values, display_name, find_model_detail, format_chat_elapsed, is_removed,
-    pick_chat_provider_and_model, pick_effort_value,
-    should_apply_chat_defaults, ChatProviderCandidate, ChatProviderPick,
+    ChatProviderCandidate, ChatProviderPick, agent_status_phrase, catalog_provider_display_name,
+    claude_cli_model_aliases, claude_effort_values, display_name, find_model_detail,
+    format_chat_elapsed, is_removed, pick_chat_provider_and_model, pick_effort_value,
+    should_apply_chat_defaults,
 };
 use gloo_timers::future::TimeoutFuture;
 
@@ -61,11 +61,7 @@ fn read_stored_pref(kind: &str, workspace_id: &str) -> Option<String> {
         let window = web_sys::window()?;
         let storage = window.local_storage().ok().flatten()?;
         let v = storage.get_item(&key).ok().flatten()?;
-        if v.trim().is_empty() {
-            None
-        } else {
-            Some(v)
-        }
+        if v.trim().is_empty() { None } else { Some(v) }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -277,8 +273,7 @@ fn apply_effort_for_model(
         .iter()
         .find(|a| a.id == provider)
         .and_then(|a| find_model_detail(&a.model_details, model));
-    let Some(value) = pick_effort_value(detail, read_stored_effort(workspace_id).as_deref())
-    else {
+    let Some(value) = pick_effort_value(detail, read_stored_effort(workspace_id).as_deref()) else {
         return;
     };
     let cur = selected_effort();
@@ -705,8 +700,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
             .or_else(|| read_stored_runner(&workspace_id))
             .unwrap_or_default()
     });
-    let mut selected_effort =
-        use_signal(|| read_stored_effort(&workspace_id).unwrap_or_default());
+    let mut selected_effort = use_signal(|| read_stored_effort(&workspace_id).unwrap_or_default());
     let mut hosts = use_signal(Vec::<HostPublic>::new);
     let status_loading = use_signal(|| true);
     let mut conversation_id = use_signal(|| initial_conversation_id.clone());
@@ -1190,6 +1184,24 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                         let ws = workspace_id.clone();
                                         move |e| {
                                             let id = e.value();
+                                            if let Some(p) =
+                                                providers.iter().find(|p| p.id == id && p.coming_soon)
+                                            {
+                                                show_toast().error(format!(
+                                                    "{} is coming soon",
+                                                    p.name
+                                                ));
+                                                if let Some(live) = providers
+                                                    .iter()
+                                                    .find(|x| x.available && !x.coming_soon)
+                                                {
+                                                    selected_provider.set(live.id.clone());
+                                                    let model = pick_default_model(live);
+                                                    selected_model.set(model.clone());
+                                                    write_stored_composer(&ws, &live.id, &model);
+                                                }
+                                                return;
+                                            }
                                             selected_provider.set(id.clone());
                                             user_picked_provider.set(true);
                                             let model = if let Some(p) =
@@ -1228,7 +1240,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                 key: "{p.id}",
                                                 value: "{p.id}",
                                                 selected: selected_provider() == p.id,
-                                                disabled: p.coming_soon,
                                                 { provider_option_label(p) }
                                             }
                                         }

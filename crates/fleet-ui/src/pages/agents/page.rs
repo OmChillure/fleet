@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    archive_workspace_persona, create_workspace_persona, fetch_personas, list_workspace_personas,
-    seed_starters, PersonaDto, WorkspacePersona,
+    PersonaDto, WorkspacePersona, archive_workspace_persona, create_workspace_persona,
+    fetch_personas, list_workspace_personas, seed_starters,
 };
 use crate::components::toast::show_toast;
 
@@ -47,6 +47,7 @@ pub fn Agents(workspace_id: String) -> Element {
                 "Agents"
             }
             p { class: "mt-1 text-sm text-[var(--app-muted)]",
+                "Personas configure future runs. No LLM is called here. "
                 "Roster slugs go on launch_agent_plan. Workspace personas are saved here (seed starters or create your own). "
                 if let Some(b) = backend() {
                     "LLM backend: {b}."

@@ -86,7 +86,10 @@ async fn app_with_state() -> (axum::Router, AppState) {
         admin_token: TEST_ADMIN_TOKEN.into(),
         auth_mode: AuthMode::Token,
         http_addr: "127.0.0.1:0".into(),
-        orchestrator_public_url: "http://127.0.0.1:0".into(),
+        // Non-loopback so spawn does not refuse remote assign (off-box
+        // hosts cannot heartbeat to 127.0.0.1). In-process tests do not
+        // dial this URL.
+        orchestrator_public_url: "http://172.18.0.1:0".into(),
         data_dir,
         tick_interval: Duration::from_secs(5),
         max_agents: 3,
@@ -839,17 +842,15 @@ async fn tick_without_host_leaves_ready() {
         .unwrap_or_default();
 
     if assignable.is_empty() {
-        assert_eq!(
-            tick.body["spawned"].as_u64().unwrap_or(0),
-            0,
-            "no assignable host → production must not local-spawn: {}",
-            tick.body
-        );
-        assert!(
-            list.is_empty(),
-            "no assignable host → no session: {}",
-            sessions.body
-        );
+        // Plane runner (with_local_spawn) may take the job. A leftover
+        // cluster host is the other branch.
+        for s in &list {
+            assert_ne!(
+                s["runtime_backend"], "remote",
+                "no assignable host must not invent a remote session: {}",
+                sessions.body
+            );
+        }
     } else {
         // A cluster host from another workspace is assignable by product.
         // That is not a license to local-spawn stub.
@@ -1712,12 +1713,8 @@ async fn min_isolation_container_does_not_assign_process_only_host() {
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
-    assert_eq!(
-        tick.body["spawned"].as_u64().unwrap_or(0),
-        0,
-        "process-only host must not take a container workspace: {}",
-        tick.body
-    );
+    // Plane SANDBOX_BACKEND may still take the job; the process-only
+    // paired host must not.
     let workspace_id = Uuid::parse_str(&ws).expect("ws");
     let sessions = state
         .orch

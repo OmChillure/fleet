@@ -1,6 +1,6 @@
 //! GitLab HTTP helpers (gitlab.com REST v4).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -176,7 +176,10 @@ pub(crate) async fn gitlab_post(
     url: &str,
     body: &Value,
 ) -> (u16, Value) {
-    match gitlab_headers(http.post(url).json(body), token).send().await {
+    match gitlab_headers(http.post(url).json(body), token)
+        .send()
+        .await
+    {
         Ok(res) => {
             let status = res.status().as_u16();
             let body = res.json::<Value>().await.unwrap_or(json!({}));
@@ -214,7 +217,11 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
                 .map(|s| s.to_string())
                 .or_else(|| serde_json::to_string(v).ok())
         })
-        .or_else(|| body.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| {
+            body.get("error")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "upstream error".into());
     let code = if status == 401 || status == 403 {
         "token_expired"

@@ -17,8 +17,8 @@ use crate::routes::workspaces::{
 };
 use crate::state::AuthState;
 use crate::tokens::{
-    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, generate_refresh_token, hash_refresh_token,
-    issue_access_token,
+    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, decode_access_token_for_logout,
+    generate_refresh_token, hash_refresh_token, issue_access_token,
 };
 
 /// Resolve the authenticated user from access-cookie JWT + live session row.
@@ -94,9 +94,8 @@ async fn create_session_and_tokens(
     let refresh = generate_refresh_token();
     let refresh_hash = hash_refresh_token(&refresh);
     let now = Utc::now();
-    let expires_at = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
+    let expires_at =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
     let absolute_expires_at = expires_at;
     let (ua, ip) = client_meta(headers);
 
@@ -158,8 +157,7 @@ pub async fn signup(
 
     let workspace_id = Uuid::now_v7();
     let slug = workspace_slug_for_user(&email_normalized, user_id);
-    let workspace_name =
-        default_workspace_name(display_name.as_deref(), &email_normalized);
+    let workspace_name = default_workspace_name(display_name.as_deref(), &email_normalized);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
@@ -188,13 +186,9 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
-    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
-        &state.db,
-        user_id,
-        &email_normalized,
-        now,
-    )
-    .await
+    if let Err(e) =
+        workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
+            .await
     {
         tracing::warn!(
             user_id = %user_id,
@@ -270,13 +264,9 @@ pub async fn login(
         );
     }
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     tracing::info!(
         user_id = %user.id,
@@ -298,14 +288,28 @@ pub async fn login(
     ))
 }
 
-pub async fn logout(
-    State(state): State<AuthState>,
-    jar: CookieJar,
-) -> AppResult<Response> {
-    if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
-        let hash = hash_refresh_token(&refresh);
-        let now = Utc::now();
-        session_repo::revoke_by_refresh_hash(&state.db, &hash, now).await?;
+pub async fn logout(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Response> {
+    let now = Utc::now();
+    let refresh_revoked =
+        if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
+            let hash = hash_refresh_token(&refresh);
+            session_repo::revoke_by_refresh_hash(&state.db, &hash, now).await? > 0
+        } else {
+            false
+        };
+
+    if !refresh_revoked {
+        if let Some(access) = jar.get(ACCESS_COOKIE).map(|c| c.value().to_string()) {
+            // Access-only logout, or a present refresh that missed (empty,
+            // stale after rotation, hash miss), still revokes this sid so
+            // /me and stolen refresh fail. Do not revoke_family — a
+            // concurrent login must stay valid.
+            if let Ok(claims) = decode_access_token_for_logout(&state.config.jwt_secret, &access) {
+                if let Ok(session_id) = Uuid::parse_str(&claims.sid) {
+                    session_repo::revoke_by_id(&state.db, session_id, now).await?;
+                }
+            }
+        }
     }
 
     let mut headers = HeaderMap::new();
@@ -358,15 +362,13 @@ pub async fn refresh(
     let new_session_id = Uuid::now_v7();
     let new_refresh = generate_refresh_token();
     let new_hash = hash_refresh_token(&new_refresh);
-    let new_expires = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
+    let new_expires =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
     let (ua, ip) = client_meta(&headers);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
-    let revoked =
-        session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
+    let revoked = session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
 
     if revoked != 1 {
         tx.rollback().await.ok();
@@ -400,13 +402,9 @@ pub async fn refresh(
         state.config.access_ttl,
     )?;
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     Ok(auth_json_response(
         &state,
@@ -424,13 +422,8 @@ pub async fn refresh(
 pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Json<MeResponse>> {
     let user = require_user(&state, &jar).await?;
     // Ensure a default workspace exists for older accounts / edge cases.
-    let _ = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let _ = ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+        .await?;
     let workspaces = workspace_repo::list_for_user(&state.db, user.id)
         .await?
         .into_iter()

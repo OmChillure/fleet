@@ -29,8 +29,10 @@ pub struct TicketRow {
     pub key: String,
     #[serde(default)]
     pub title: String,
+    /// API sends `null` for seeded / URL-less tickets. `String` + default
+    /// only covers a missing field, not JSON null — that used to drop the list.
     #[serde(default)]
-    pub url: String,
+    pub url: Option<String>,
     #[serde(default)]
     pub state: String,
     #[serde(default)]
@@ -112,12 +114,11 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Res
 }
 
 pub async fn list_inbox(workspace_id: &str) -> Result<InboxResponse, InboxError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/inbox"
-    ))))
-    .send()
-    .await
-    .map_err(|e| InboxError::Network(format!("could not reach API: {e}")))?;
+    let res =
+        with_credentials(client().get(api_url(&format!("/api/workspaces/{workspace_id}/inbox"))))
+            .send()
+            .await
+            .map_err(|e| InboxError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
 
@@ -161,17 +162,13 @@ pub async fn stop_monitor(workspace_id: &str) -> Result<Value, InboxError> {
     .await
 }
 
-pub async fn update_monitor(
-    workspace_id: &str,
-    patch: &MonitorPatch,
-) -> Result<Value, InboxError> {
-    let res = with_credentials(client().post(api_url(&format!(
-        "/api/workspaces/{workspace_id}/inbox"
-    ))))
-    .json(patch)
-    .send()
-    .await
-    .map_err(|e| InboxError::Network(format!("could not reach API: {e}")))?;
+pub async fn update_monitor(workspace_id: &str, patch: &MonitorPatch) -> Result<Value, InboxError> {
+    let res =
+        with_credentials(client().post(api_url(&format!("/api/workspaces/{workspace_id}/inbox"))))
+            .json(patch)
+            .send()
+            .await
+            .map_err(|e| InboxError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
 

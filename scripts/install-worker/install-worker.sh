@@ -5,9 +5,9 @@
 #   B) a control plane URL the user supplies (FLEET_URL).
 #
 # Usage:
-#   curl -fsSL https://<cp>/install-worker.sh | FLEET_URL=https://<cp> sh
-#   fetch -o - https://<cp>/install-worker.sh | FLEET_URL=https://<cp> sh
-#   FLEET_URL=http://127.0.0.1:8080 sh install-worker.sh
+#   curl -fsSL https://<cp>/install-worker.sh | FLEET_URL=https://<cp> FLEET_PAIR_TOKEN=<token> sh
+#   fetch -o - https://<cp>/install-worker.sh | FLEET_URL=https://<cp> FLEET_PAIR_TOKEN=<token> sh
+#   FLEET_URL=http://127.0.0.1:8080 FLEET_PAIR_TOKEN=<token> sh install-worker.sh
 #   FLEET_DETECT_ONLY=1 sh install-worker.sh   # print platform id and exit
 #
 # Windows native: use install-worker.ps1 (this file is POSIX).
@@ -20,6 +20,93 @@ err() { printf 'worker install: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Host of an http(s) URL. IPv6 in brackets ([::1]:8080) or bare ::1.
+# userinfo (user@ / user:pass@) is dropped; last @, same as host_from_url.
+url_host() {
+    _u=$1
+    case $_u in
+        *://*) _u=${_u#*://} ;;
+    esac
+    _u=${_u%%/*}
+    case $_u in
+        *@*) _u=${_u##*@} ;;
+    esac
+    case $_u in
+        \[*)
+            _u=${_u#\[}
+            _u=${_u%%]*}
+            ;;
+        *)
+            case $_u in
+                *:*)
+                    _rest=${_u#*:}
+                    case $_rest in
+                        *:*) ;;
+                        *) _u=${_u%%:*} ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+    printf '%s\n' "$_u"
+}
+
+# 127/8, localhost, or ::1 — another computer cannot reach this URL.
+host_is_loopback() {
+    _h=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    _h=${_h#[}
+    _h=${_h%]}
+    case $_h in
+        localhost|::1) return 0 ;;
+        127.*)
+            _a=${_h#127.}
+            _b=${_a#*.}
+            [ "$_b" = "$_a" ] && return 1
+            _c=${_b#*.}
+            [ "$_c" = "$_b" ] && return 1
+            case $_c in *.*) return 1 ;; esac
+            _o1=${_a%%.*}
+            _o2=${_b%%.*}
+            _o3=$_c
+            for _p in "$_o1" "$_o2" "$_o3"; do
+                case $_p in
+                    ''|*[!0-9]*) return 1 ;;
+                esac
+                [ "$_p" -le 255 ] || return 1
+            done
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+probe_health() {
+    _url=$1
+    if have curl; then
+        curl -fsSL "$_url" || return 1
+    elif have wget; then
+        wget -qO- "$_url" || return 1
+    elif have fetch; then
+        fetch -o - "$_url" || return 1
+    else
+        return 1
+    fi
+}
+
+# Warn on loopback. Off-box (GET /health fails) dies before any other fetch.
+# Same-box /health may continue (local fleet-dev).
+warn_loopback_origin() {
+    _origin=$1
+    if ! host_is_loopback "$(url_host "$_origin")"; then
+        return 0
+    fi
+    err "FLEET_URL $_origin is loopback. Another computer needs a LAN or public control-plane URL."
+    if probe_health "$_origin/health" >/dev/null; then
+        return 0
+    fi
+    die "refusing to pair: $_origin is loopback and this host is not the control plane"
+}
 
 # Download URL to stdout. Named http_get so `command -v fetch` sees FreeBSD fetch(1).
 http_get() {
@@ -175,9 +262,12 @@ ORIGIN=$(prompt_origin)
 export FLEET_URL="$ORIGIN"
 export FLEET_INSTALL_ORIGIN="$ORIGIN"
 export FLEET_PLATFORM="$PLATFORM"
+# UI one-liner sets FLEET_PAIR_TOKEN on this sh; the platform child must see it.
+export FLEET_PAIR_TOKEN
 
 info "platform: $PLATFORM"
 info "source:   $ORIGIN"
+warn_loopback_origin "$ORIGIN"
 
 case $PLATFORM in
     windows-*)

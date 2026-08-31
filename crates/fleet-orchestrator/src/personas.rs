@@ -148,7 +148,12 @@ pub async fn resolve(profile: &str, data_dir: &Path) -> Persona {
 
 fn pick(all: &[Persona], profile: &str) -> Option<Persona> {
     let key = normalize(profile);
-    if key.is_empty() || key == "default" || key == "worker" || key == "generalist" || key == "specialist" {
+    if key.is_empty()
+        || key == "default"
+        || key == "worker"
+        || key == "generalist"
+        || key == "specialist"
+    {
         return all
             .iter()
             .find(|p| p.slug == "generalist")
@@ -163,10 +168,7 @@ fn pick(all: &[Persona], profile: &str) -> Option<Persona> {
             .cloned();
     }
     if key == "reviewer" || key == "code-reviewer" || key == "review" {
-        return all
-            .iter()
-            .find(|p| p.slug.contains("reviewer"))
-            .cloned();
+        return all.iter().find(|p| p.slug.contains("reviewer")).cloned();
     }
     if key == "frontend" || key == "ui" {
         return all
@@ -182,9 +184,8 @@ fn pick(all: &[Persona], profile: &str) -> Option<Persona> {
         .or_else(|| all.iter().find(|p| normalize(&p.slug).ends_with(&key)))
         .or_else(|| all.iter().find(|p| normalize(&p.name) == key))
         .or_else(|| {
-            all.iter().find(|p| {
-                normalize(&p.slug).contains(&key) || normalize(&p.name).contains(&key)
-            })
+            all.iter()
+                .find(|p| normalize(&p.slug).contains(&key) || normalize(&p.name).contains(&key))
         })
         .cloned()
 }
@@ -415,7 +416,10 @@ mod tests {
 
     #[test]
     fn title_case_slug() {
-        assert_eq!(title_case("engineering-backend-architect"), "Engineering Backend Architect");
+        assert_eq!(
+            title_case("engineering-backend-architect"),
+            "Engineering Backend Architect"
+        );
         assert_eq!(title_case(""), "");
     }
 

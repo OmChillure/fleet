@@ -4,9 +4,7 @@ use agent_fleet_contracts::{
     BusMessage, MessageBody, Producer, SessionCancelled, SessionCompleted, SessionFailed,
     SessionId, SessionState, SessionStateChanged,
 };
-use fleet_bus::{
-    DEFAULT_TENANT, key_for_message, put_bus_message, try_open_from_env,
-};
+use fleet_bus::{DEFAULT_TENANT, key_for_message, put_bus_message, try_open_from_env};
 use tracing::{info, warn};
 use uuid::Uuid;
 use zenoh::Session;

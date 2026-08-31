@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::Route;
+use crate::components::app_shell::clear_session_ok;
 use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
@@ -358,7 +359,7 @@ pub fn Sidebar() -> Element {
                         label: "All agents",
                     }
                     NavSubLink {
-                        to: Route::Sandboxes { workspace_id: workspace_id.clone() },
+                        to: Route::Sessions { workspace_id: workspace_id.clone() },
                         label: "Live sessions",
                     }
                 }
@@ -534,6 +535,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                             spawn(async move {
                                 match logout().await {
                                     Ok(()) => {
+                                        clear_session_ok();
                                         let _ = navigator.replace(Route::Login {});
                                     }
                                     Err(e) => {

@@ -424,12 +424,20 @@ async fn case_create_claim_and_complete() {
         .await
         .expect("event");
 
-    let claimed = cases::claim_due(&pool, 10).await.expect("claim");
-    assert!(
-        claimed.iter().any(|c| c.id == id),
-        "case should be claimed when next_wake_at is past"
-    );
-    let claimed_row = claimed.into_iter().find(|c| c.id == id).unwrap();
+    // claim_due is global (oldest due first, limit 10). A dirty shared
+    // Postgres can have leftover due rows from earlier runs.
+    let mut claimed_row = None;
+    for _ in 0..80 {
+        let batch = cases::claim_due(&pool, 50).await.expect("claim");
+        if batch.is_empty() {
+            break;
+        }
+        if let Some(c) = batch.into_iter().find(|c| c.id == id) {
+            claimed_row = Some(c);
+            break;
+        }
+    }
+    let claimed_row = claimed_row.expect("case should be claimed when next_wake_at is past");
     assert_eq!(claimed_row.status, "deciding");
 
     let done = cases::apply_patch(

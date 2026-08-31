@@ -1,6 +1,6 @@
 //! Confluence Cloud REST helpers (same Atlassian cloud_id as Jira).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -111,5 +111,11 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
     } else {
         "upstream"
     };
-    ProxyResult::err("confluence", op, code, format!("{msg} ({status})"), Some(status))
+    ProxyResult::err(
+        "confluence",
+        op,
+        code,
+        format!("{msg} ({status})"),
+        Some(status),
+    )
 }

@@ -270,10 +270,7 @@ pub struct LocalModelCatalog {
 
 /// `GET /api/workspaces/{id}/local-models` — live top-50 Ollama library.
 pub async fn fetch_local_models(workspace_id: &str) -> Result<LocalModelCatalog, String> {
-    let res = authorized_get(&format!(
-        "/api/workspaces/{workspace_id}/local-models"
-    ))
-    .await?;
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/local-models")).await?;
     parse_json(res).await
 }
 

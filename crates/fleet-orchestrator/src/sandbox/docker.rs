@@ -12,9 +12,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::worker_script::materialize_workspace;
-use super::{
-    RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest,
-};
+use super::{RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest};
 
 struct DockerEntry {
     project_id: Uuid,
@@ -294,7 +292,9 @@ fn read_fleet_exit(work_dir: &std::path::Path) -> Option<i32> {
 async fn ensure_docker() -> Result<(), SandboxError> {
     let out = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new("docker").args(["version", "--format", "{{.Server.Version}}"]).output(),
+        Command::new("docker")
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .output(),
     )
     .await
     .map_err(|_| SandboxError::Spawn("docker version timed out".into()))?

@@ -3,4 +3,4 @@
 mod client;
 pub mod tools;
 
-pub use tools::{invoke, OPERATIONS};
+pub use tools::{OPERATIONS, invoke};

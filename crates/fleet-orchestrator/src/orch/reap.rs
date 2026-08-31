@@ -20,9 +20,10 @@ pub async fn orphan_reap(
         .filter_map(|s| s.runtime_handle.clone())
         .collect();
 
-    let listed = runtime.list(project_id).await.map_err(|e| {
-        TickError::Other(format!("runtime list: {e}"))
-    })?;
+    let listed = runtime
+        .list(project_id)
+        .await
+        .map_err(|e| TickError::Other(format!("runtime list: {e}")))?;
 
     let mut destroyed = 0usize;
     for h in listed {
@@ -34,21 +35,22 @@ pub async fn orphan_reap(
 
     // Terminal tasks still claiming sessions
     for t in &snap.tasks {
-        if matches!(t.status.as_str(), "done_success" | "done_failed" | "cancelled")
-            && let Some(sid) = t.claimed_session_id
-                && let Some(s) = store.get_session(sid).await? {
-                    if let Some(hid) = s.runtime_handle {
-                        let h = RuntimeHandle {
-                            backend: s.runtime_backend,
-                            id: hid,
-                        };
-                        let _ = runtime.destroy(&h).await;
-                    }
-                    store
-                        .free_session_claim(t.id, sid, "clean")
-                        .await?;
-                    destroyed += 1;
-                }
+        if matches!(
+            t.status.as_str(),
+            "done_success" | "done_failed" | "cancelled"
+        ) && let Some(sid) = t.claimed_session_id
+            && let Some(s) = store.get_session(sid).await?
+        {
+            if let Some(hid) = s.runtime_handle {
+                let h = RuntimeHandle {
+                    backend: s.runtime_backend,
+                    id: hid,
+                };
+                let _ = runtime.destroy(&h).await;
+            }
+            store.free_session_claim(t.id, sid, "clean").await?;
+            destroyed += 1;
+        }
     }
     Ok(destroyed)
 }

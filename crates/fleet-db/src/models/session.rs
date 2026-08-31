@@ -18,9 +18,7 @@ pub struct AuthSession {
 
 impl AuthSession {
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
-        self.revoked_at.is_none()
-            && self.expires_at > now
-            && self.absolute_expires_at > now
+        self.revoked_at.is_none() && self.expires_at > now && self.absolute_expires_at > now
     }
 }
 

@@ -41,7 +41,10 @@ pub fn render_team_md(you: &str, members: &[TeamMember]) -> String {
     if let Some(me) = members.iter().find(|m| m.plan_task_id == you) {
         out.push_str(&format!(
             "You are **`{}`** — persona `{}`.\n**Your job:** {}\n**Your status:** {}\n\n",
-            me.plan_task_id, me.worker_profile, me.title, human_status(&me.status)
+            me.plan_task_id,
+            me.worker_profile,
+            me.title,
+            human_status(&me.status)
         ));
         if !me.depends_on.is_empty() {
             out.push_str(&format!(
@@ -56,7 +59,11 @@ pub fn render_team_md(you: &str, members: &[TeamMember]) -> String {
     out.push_str("## Teammates\n\n");
     out.push_str("| id | persona | doing | status |\n| --- | --- | --- | --- |\n");
     for m in members {
-        let mark = if m.plan_task_id == you { " ← you" } else { "" };
+        let mark = if m.plan_task_id == you {
+            " ← you"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "| `{}` | `{}` | {} | {}{} |\n",
             m.plan_task_id,
@@ -137,7 +144,11 @@ pub fn members_from_snapshot(
     data_dir: &Path,
 ) -> Vec<TeamMember> {
     let mut tasks: Vec<&BoardTaskRow> = snap.tasks.iter().filter(|t| t.run_id == run_id).collect();
-    tasks.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+    tasks.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then(a.created_at.cmp(&b.created_at))
+    });
 
     let id_to_plan: std::collections::HashMap<uuid::Uuid, String> = tasks
         .iter()
@@ -214,7 +225,12 @@ pub async fn archive_session_result(
 }
 
 /// Copy durable handoffs this task depends on into `work_dir/handoff/`.
-pub async fn copy_dep_handoffs(work_dir: &Path, you: &TeamMember, data_dir: &Path, task: &BoardTaskRow) {
+pub async fn copy_dep_handoffs(
+    work_dir: &Path,
+    you: &TeamMember,
+    data_dir: &Path,
+    task: &BoardTaskRow,
+) {
     if you.depends_on.is_empty() {
         return;
     }
@@ -279,14 +295,8 @@ pub async fn prepare_agent_workspace(
     );
     crate::sandbox::team_chat::write_team_talk(work_dir, &talk).await;
     crate::sandbox::team_chat::copy_team_chat_into(work_dir, &talk).await;
-    crate::sandbox::share::hydrate_session_files(
-        data_dir,
-        work_dir,
-        task,
-        snap,
-        &you.depends_on,
-    )
-    .await;
+    crate::sandbox::share::hydrate_session_files(data_dir, work_dir, task, snap, &you.depends_on)
+        .await;
 }
 
 /// Refresh TEAM.md in every live session + archive result.md before wipe.

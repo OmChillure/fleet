@@ -14,7 +14,7 @@ use fleet_orchestrator::domain::{
 };
 use fleet_orchestrator::orch::TickRunner;
 use fleet_orchestrator::sandbox::StubRuntime;
-use fleet_orchestrator::store::{connect, migrate, Store};
+use fleet_orchestrator::store::{Store, connect, migrate};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -221,7 +221,11 @@ async fn e2e_fail_and_retry() {
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
     assert_eq!(t1.status, "done_success", "task={t1:?}");
-    assert!(t1.attempt >= 2, "should have re-assigned, attempt={}", t1.attempt);
+    assert!(
+        t1.attempt >= 2,
+        "should have re-assigned, attempt={}",
+        t1.attempt
+    );
     assert_eq!(run_status(&store, run_id).await, "completed");
 }
 

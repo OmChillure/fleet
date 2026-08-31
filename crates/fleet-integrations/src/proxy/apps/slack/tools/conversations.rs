@@ -1,9 +1,9 @@
 //! Slack conversations + messaging tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn list_channels(
     http: &reqwest::Client,
@@ -97,11 +97,7 @@ pub(crate) async fn list_users(http: &reqwest::Client, token: &str, args: &Value
     )
 }
 
-pub(crate) async fn post_message(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn post_message(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let channel = match req_str(args, "channel") {
         Ok(c) => c,
         Err(e) => return ProxyResult::err("slack", "post_message", "bad_args", e, None),
@@ -136,7 +132,13 @@ pub(crate) async fn post_message(
     {
         payload["thread_ts"] = json!(ts);
     }
-    let (status, body) = slack_post(http, token, "https://slack.com/api/chat.postMessage", &payload).await;
+    let (status, body) = slack_post(
+        http,
+        token,
+        "https://slack.com/api/chat.postMessage",
+        &payload,
+    )
+    .await;
     if let Err(e) = slack_ok(status, &body, "post_message") {
         return e;
     }
@@ -177,9 +179,8 @@ pub(crate) async fn get_channel_history(
         .and_then(|v| v.as_u64())
         .unwrap_or(20)
         .clamp(1, 100);
-    let mut url = format!(
-        "https://slack.com/api/conversations.history?channel={channel}&limit={limit}"
-    );
+    let mut url =
+        format!("https://slack.com/api/conversations.history?channel={channel}&limit={limit}");
     if let Some(oldest) = args.get("oldest").and_then(|v| v.as_str()) {
         url.push_str("&oldest=");
         url.push_str(oldest);
@@ -314,9 +315,7 @@ pub(crate) fn match_listed_channel(items: &[Value], raw: &str) -> Option<String>
 
 fn looks_like_slack_channel_id(raw: &str) -> bool {
     let s = raw.trim();
-    s.len() >= 8
-        && s.starts_with('C')
-        && s.chars().all(|c| c.is_ascii_alphanumeric())
+    s.len() >= 8 && s.starts_with('C') && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 async fn resolve_channel_id(
@@ -345,7 +344,9 @@ async fn resolve_channel_id(
         "slack",
         "resolve_channel",
         "bad_args",
-        format!("no Slack channel named `{raw}` — pass the channel id or connect a workspace that has it"),
+        format!(
+            "no Slack channel named `{raw}` — pass the channel id or connect a workspace that has it"
+        ),
         None,
     ))
 }
@@ -360,9 +361,15 @@ mod tests {
             json!({"id": "C111", "name": "general"}),
             json!({"id": "CENG", "name": "eng"}),
         ];
-        assert_eq!(match_listed_channel(&items, "#eng").as_deref(), Some("CENG"));
+        assert_eq!(
+            match_listed_channel(&items, "#eng").as_deref(),
+            Some("CENG")
+        );
         assert_eq!(match_listed_channel(&items, "eng").as_deref(), Some("CENG"));
-        assert_eq!(match_listed_channel(&items, "C111").as_deref(), Some("C111"));
+        assert_eq!(
+            match_listed_channel(&items, "C111").as_deref(),
+            Some("C111")
+        );
         assert!(match_listed_channel(&items, "missing").is_none());
     }
 }

@@ -268,7 +268,9 @@ pub fn format_inbox(msgs: &[TeamMessage]) -> String {
 }
 
 pub fn render_team_chat_md(msgs: &[TeamMessage]) -> String {
-    let mut out = String::from("# Team chat\n\nLive channel for this run. Agents post with `send_message` / `ask_teammate`.\n\n");
+    let mut out = String::from(
+        "# Team chat\n\nLive channel for this run. Agents post with `send_message` / `ask_teammate`.\n\n",
+    );
     if msgs.is_empty() {
         out.push_str("_No messages yet._\n");
         return out;
@@ -476,6 +478,43 @@ mod tests {
         assert_eq!(normalize_to("ALL"), "*");
         assert_eq!(normalize_to("team"), "*");
         assert_eq!(normalize_to(" t2 "), "t2");
+    }
+
+    #[test]
+    fn run_dir_is_project_and_run_scoped() {
+        let root = Path::new("/data");
+        let project = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        let dir = run_dir(root, project, run);
+        assert_eq!(
+            dir,
+            root.join("projects")
+                .join(project.to_string())
+                .join("runs")
+                .join(run.to_string())
+        );
+        let other = run_dir(root, Uuid::now_v7(), run);
+        assert_ne!(
+            dir, other,
+            "same run_id under another project must not share the chat dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_projects_do_not_share_chat_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = Uuid::now_v7();
+        let a = TeamTalk::from_spawn(dir.path(), Uuid::now_v7(), run, "t1", "be");
+        let b = TeamTalk::from_spawn(dir.path(), Uuid::now_v7(), run, "human", "human");
+        post_message(&a, "*", "say", "secret from project A", None)
+            .await
+            .unwrap();
+        assert!(a.chat_path().is_file());
+        assert!(
+            !b.chat_path().is_file(),
+            "posting on project A must not create chat.jsonl under another project"
+        );
+        assert!(list_messages(&b).await.is_empty());
     }
 
     #[test]

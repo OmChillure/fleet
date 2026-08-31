@@ -1,9 +1,9 @@
 //! Figma file / project read tools. Full file trees are truncated.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn get_me(http: &reqwest::Client, token: &str, _args: &Value) -> ProxyResult {
     let (status, body) = figma_get(http, token, "https://api.figma.com/v1/me").await;
@@ -65,14 +65,12 @@ pub(crate) async fn get_file_nodes(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            args.get("ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
+            args.get("ids").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
         });
     let Some(ids) = ids.filter(|s| !s.is_empty()) else {
         return ProxyResult::err(

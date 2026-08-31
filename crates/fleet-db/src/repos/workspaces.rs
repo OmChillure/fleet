@@ -93,7 +93,8 @@ pub async fn create_personal_workspace_tx(
     Ok(())
 }
 
-/// Workspaces the user belongs to, oldest first (default = first).
+/// Workspaces the user belongs to, oldest first. Login default is the
+/// oldest *owned* workspace (`ensure_default_workspace`), not this first row.
 pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<WorkspaceWithRole>> {
     sqlx::query_as::<_, WorkspaceWithRole>(
         r#"

@@ -1,9 +1,9 @@
 //! GitHub write tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
@@ -19,7 +19,7 @@ pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) 
                 "bad_args",
                 "path is required (e.g. README.md, no leading /)",
                 None,
-            )
+            );
         }
     };
     let content = match args.get("content").and_then(|v| v.as_str()) {
@@ -31,7 +31,7 @@ pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) 
                 "bad_args",
                 "content is required (UTF-8 text)",
                 None,
-            )
+            );
         }
     };
     if content.len() > MAX_FILE_BYTES {
@@ -67,7 +67,10 @@ pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) 
     }
     let (get_status, existing) = github_get(http, token, &get_url).await;
     let sha = if (200..300).contains(&get_status) {
-        existing.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+        existing
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
@@ -150,7 +153,7 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
                 "bad_args",
                 "files must be a non-empty array of {path, content}",
                 None,
-            )
+            );
         }
     };
     if files.len() > MAX_COMMIT_FILES {
@@ -163,8 +166,51 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    // Docs §7.2: reject oversize / invalid files before any GitHub call.
+    let mut validated: Vec<(&str, &str)> = Vec::with_capacity(files.len());
+    for f in files {
+        let path = match f.get("path").and_then(|v| v.as_str()).map(str::trim) {
+            Some(p) if !p.is_empty() && !p.starts_with('/') => p,
+            _ => {
+                return ProxyResult::err(
+                    "github",
+                    "commit_files",
+                    "bad_args",
+                    "each file needs a relative path",
+                    None,
+                );
+            }
+        };
+        let content = match f.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => {
+                return ProxyResult::err(
+                    "github",
+                    "commit_files",
+                    "bad_args",
+                    format!("file `{path}` missing content"),
+                    None,
+                );
+            }
+        };
+        if content.len() > MAX_FILE_BYTES {
+            return ProxyResult::err(
+                "github",
+                "commit_files",
+                "bad_args",
+                format!("file `{path}` too large (max {MAX_FILE_BYTES} bytes)"),
+                None,
+            );
+        }
+        validated.push((path, content));
+    }
+
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("commit_files", st, &repo_body);
     }
@@ -264,40 +310,7 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
 
     let mut tree_items = Vec::new();
     let mut paths = Vec::new();
-    for f in files {
-        let path = match f.get("path").and_then(|v| v.as_str()).map(str::trim) {
-            Some(p) if !p.is_empty() && !p.starts_with('/') => p,
-            _ => {
-                return ProxyResult::err(
-                    "github",
-                    "commit_files",
-                    "bad_args",
-                    "each file needs a relative path",
-                    None,
-                )
-            }
-        };
-        let content = match f.get("content").and_then(|v| v.as_str()) {
-            Some(c) => c,
-            None => {
-                return ProxyResult::err(
-                    "github",
-                    "commit_files",
-                    "bad_args",
-                    format!("file `{path}` missing content"),
-                    None,
-                )
-            }
-        };
-        if content.len() > MAX_FILE_BYTES {
-            return ProxyResult::err(
-                "github",
-                "commit_files",
-                "bad_args",
-                format!("file `{path}` too large (max {MAX_FILE_BYTES} bytes)"),
-                None,
-            );
-        }
+    for (path, content) in &validated {
         let (st, blob) = github_post(
             http,
             token,
@@ -398,7 +411,11 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
     )
 }
 
-pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+pub(crate) async fn create_branch(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_branch", "bad_args", e, None),
@@ -412,11 +429,15 @@ pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Va
                 "bad_args",
                 "branch is required",
                 None,
-            )
+            );
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_branch", st, &repo_body);
     }
@@ -491,15 +512,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     };
     let title = match args.get("title").and_then(|v| v.as_str()).map(str::trim) {
         Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            return ProxyResult::err(
-                "github",
-                "create_pr",
-                "bad_args",
-                "title is required",
-                None,
-            )
-        }
+        _ => return ProxyResult::err("github", "create_pr", "bad_args", "title is required", None),
     };
     let head = match args
         .get("head")
@@ -515,11 +528,15 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
                 "bad_args",
                 "head (branch name) is required",
                 None,
-            )
+            );
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_pr", st, &repo_body);
     }
@@ -539,10 +556,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
         .and_then(|v| v.as_str())
         .unwrap_or("Opened by Agent Fleet (control-plane integration; no tokens in sandboxes).")
         .to_string();
-    let draft = args
-        .get("draft")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let draft = args.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (st, pr) = github_post(
         http,
@@ -573,11 +587,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     )
 }
 
-pub(crate) async fn create_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_issue", "bad_args", e, None),
@@ -623,11 +633,7 @@ pub(crate) async fn create_issue(
     )
 }
 
-pub(crate) async fn update_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "update_issue", "bad_args", e, None),
@@ -705,11 +711,7 @@ pub(crate) async fn update_issue(
     )
 }
 
-pub(crate) async fn add_comment(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "add_comment", "bad_args", e, None),
@@ -771,3 +773,221 @@ pub(crate) async fn add_comment(
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    /// Docs §7.2. Hard numbers — do not read `MAX_*` when building payloads.
+    const DOC_MAX_COMMIT_FILES: usize = 40;
+    const DOC_MAX_FILE_BYTES: usize = 512 * 1024;
+
+    /// HTTP client that can only reach a local sink. Any connect is an upstream call.
+    struct NoUpstream {
+        hits: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        http: reqwest::Client,
+    }
+
+    impl Drop for NoUpstream {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl NoUpstream {
+        fn bind() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local sink");
+            listener.set_nonblocking(true).expect("nonblocking sink");
+            let addr = listener.local_addr().expect("sink addr");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let hits_t = hits.clone();
+            let stop_t = stop.clone();
+            thread::spawn(move || {
+                while !stop_t.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_t.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+                            let mut buf = [0u8; 128];
+                            let _ = stream.read(&mut buf);
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 503 sink\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                            );
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            let http = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(format!("http://{addr}")).expect("proxy"))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .expect("client");
+            Self { hits, stop, http }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    fn assert_local_bad_args(r: &ProxyResult, sink: &NoUpstream, what: &str) {
+        assert!(!r.ok, "{what}: ok must be false, got {r:?}");
+        assert_eq!(
+            r.error_code.as_deref(),
+            Some("bad_args"),
+            "{what}: must be bad_args (never upstream): {r:?}"
+        );
+        assert_eq!(
+            r.provider_status, None,
+            "{what}: local reject must not report an upstream status: {r:?}"
+        );
+        assert_eq!(
+            sink.hits(),
+            0,
+            "{what}: must not call GitHub (sink saw {} TCP hit(s))",
+            sink.hits()
+        );
+    }
+
+    /// 41 files and a 512KB+1 blob (and the same byte cap on `put_file`) are
+    /// `ok: false` / `bad_args` and never touch GitHub. Raising or skipping
+    /// the cap fails this test; 40 files / exactly 512KB must still reach HTTP.
+    #[tokio::test]
+    async fn commit_files_rejects_over_doc_limits_without_github() {
+        assert_eq!(
+            MAX_COMMIT_FILES, DOC_MAX_COMMIT_FILES,
+            "docs §7.2: max 40 files — raising MAX_COMMIT_FILES must fail this test"
+        );
+        assert_eq!(
+            MAX_FILE_BYTES, DOC_MAX_FILE_BYTES,
+            "docs §7.2: 512KB each — raising MAX_FILE_BYTES must fail this test"
+        );
+
+        let sink = NoUpstream::bind();
+        let files: Vec<Value> = (0..41)
+            .map(|i| json!({"path": format!("f{i}.txt"), "content": "x"}))
+            .collect();
+        assert_eq!(files.len(), 41);
+        let r = commit_files(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({"owner": "acme", "repo": "app", "files": files}),
+        )
+        .await;
+        assert_eq!(r.provider, "github");
+        assert_eq!(r.operation, "commit_files");
+        assert_local_bad_args(&r, &sink, "41 files");
+
+        let sink = NoUpstream::bind();
+        let oversized = "a".repeat(512 * 1024 + 1);
+        assert_eq!(oversized.len(), 512 * 1024 + 1);
+        let r = commit_files(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({
+                "owner": "acme",
+                "repo": "app",
+                "files": [{"path": "huge.txt", "content": oversized}],
+            }),
+        )
+        .await;
+        assert_local_bad_args(&r, &sink, "commit_files 512KiB+1");
+
+        let sink = NoUpstream::bind();
+        let oversized = "b".repeat(512 * 1024 + 1);
+        let r = put_file(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({
+                "owner": "acme",
+                "repo": "app",
+                "path": "huge.txt",
+                "content": oversized,
+            }),
+        )
+        .await;
+        assert_eq!(r.provider, "github");
+        assert_eq!(r.operation, "put_file");
+        assert_local_bad_args(&r, &sink, "put_file 512KiB+1");
+
+        let sink = NoUpstream::bind();
+        let files: Vec<Value> = (0..40)
+            .map(|i| json!({"path": format!("f{i}.txt"), "content": "x"}))
+            .collect();
+        assert_eq!(files.len(), 40);
+        let r = commit_files(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({"owner": "acme", "repo": "app", "files": files}),
+        )
+        .await;
+        assert!(
+            sink.hits() > 0,
+            "40 files is the documented max and must reach HTTP (sink), not be dropped locally: {r:?}"
+        );
+        assert_ne!(
+            r.error_code.as_deref(),
+            Some("bad_args"),
+            "40 files must not be bad_args: {r:?}"
+        );
+
+        let sink = NoUpstream::bind();
+        let exact = "c".repeat(512 * 1024);
+        assert_eq!(exact.len(), 512 * 1024);
+        let r = commit_files(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({
+                "owner": "acme",
+                "repo": "app",
+                "files": [{"path": "exact.txt", "content": exact}],
+            }),
+        )
+        .await;
+        assert!(
+            sink.hits() > 0,
+            "512KiB exactly is the documented max and must reach HTTP: {r:?}"
+        );
+        assert_ne!(
+            r.error_code.as_deref(),
+            Some("bad_args"),
+            "exact 512KiB commit_files must not be bad_args: {r:?}"
+        );
+
+        let sink = NoUpstream::bind();
+        let exact = "d".repeat(512 * 1024);
+        let r = put_file(
+            &sink.http,
+            "must-not-be-sent",
+            &json!({
+                "owner": "acme",
+                "repo": "app",
+                "path": "exact.txt",
+                "content": exact,
+            }),
+        )
+        .await;
+        assert!(
+            sink.hits() > 0,
+            "512KiB exactly put_file must reach HTTP: {r:?}"
+        );
+        assert_ne!(
+            r.error_code.as_deref(),
+            Some("bad_args"),
+            "exact 512KiB put_file must not be bad_args: {r:?}"
+        );
+    }
+}

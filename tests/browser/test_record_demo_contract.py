@@ -73,6 +73,7 @@ EXPECTED_PAUSE_TITLES = (
     "Kubernetes sandboxes",
     "Cases",
     "Inbox",
+    "Settings members",
     "Chat history",
     "User menu",
     "Unify runners",

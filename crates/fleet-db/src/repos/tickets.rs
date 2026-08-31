@@ -32,10 +32,7 @@ pub struct UpsertMonitor {
     pub started_by: Option<Uuid>,
 }
 
-pub async fn get_monitor(
-    pool: &PgPool,
-    workspace_id: Uuid,
-) -> DbResult<Option<TicketMonitor>> {
+pub async fn get_monitor(pool: &PgPool, workspace_id: Uuid) -> DbResult<Option<TicketMonitor>> {
     let q = format!(
         r#"
         SELECT {MONITOR_COLS}
@@ -136,11 +133,7 @@ pub struct UpsertInbox {
 }
 
 pub async fn upsert_inbox(pool: &PgPool, item: &UpsertInbox) -> DbResult<TicketInboxItem> {
-    let next_state = if item.provider_closed {
-        "done"
-    } else {
-        "open"
-    };
+    let next_state = if item.provider_closed { "done" } else { "open" };
     let q = format!(
         r#"
         INSERT INTO ticket_inbox (

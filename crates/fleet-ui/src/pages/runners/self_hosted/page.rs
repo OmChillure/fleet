@@ -3,24 +3,23 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
+    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
     identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    not_taking_reason, provider_install_command, runtime_line,
-    settings_draft_dirty, shows_software_line, software_bin_rows, stale_package_warning,
-    sort_hosts_for_list, specs_line, status_label, update_now_label, update_requested,
-    widgets_locked, worker_id_label, BEHAVIOR_LABEL,
+    not_taking_reason, package_header_driver_line, package_header_host_line,
+    provider_install_command, public_status, runtime_line, settings_draft_dirty, shows_auto_update,
+    shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
+    status_label, update_now_label, update_requested, widgets_locked, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    create_host, fetch_local_model_tags, fetch_local_models, install_commands, list_workers_page,
-    patch_host, revoke_host, windows_install_command, CreateHostBody, CreateHostResponse,
-    HostPatch, HostPublic, LocalModelCatalog, LocalModelTag, LocalModelTags, PackageInventory,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTag,
+    LocalModelTags, PackageInventory, create_host, fetch_local_model_tags, fetch_local_models,
+    install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
 };
 use crate::clipboard::copy_text;
-use crate::components::side_panel::SidePanel;
 use crate::components::toast::show_toast;
 use fleet_runners_view::InstallModelRequest;
 
@@ -100,7 +99,14 @@ pub fn SelfHosted(workspace_id: String) -> Element {
         creating.set(true);
         let ws = ws_create.clone();
         spawn(async move {
-            match create_host(&ws, &CreateHostBody::default()).await {
+            match create_host(
+                &ws,
+                &CreateHostBody {
+                    name: Some("New worker".into()),
+                },
+            )
+            .await
+            {
                 Ok(created) => {
                     let mut list = hosts();
                     if !list.iter().any(|h| h.id == created.host.id) {
@@ -122,7 +128,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
 
     let all = hosts();
     let mut active: Vec<HostPublic> = all.iter().filter(|h| !is_removed(h)).cloned().collect();
-    sort_hosts_for_list(&mut active);
+    sort_hosts_for_list(&mut active, js_sys::Date::now());
     let removed: Vec<HostPublic> = all
         .iter()
         .filter(|h| in_removed_list(h, &all))
@@ -130,12 +136,10 @@ pub fn SelfHosted(workspace_id: String) -> Element {
         .collect();
     let removed_n = removed.len();
 
-    let selected = selected_id().and_then(|id| all.iter().find(|h| h.id == id).cloned());
     let pkg_ver = packages().package_versions;
     let stale_builds = stale_package_warning(&packages());
 
     rsx! {
-        div { class: "relative flex h-full min-h-0 w-full",
         div { class: "mx-auto flex h-full w-full max-w-3xl flex-col overflow-auto px-4 py-6 md:px-6",
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div { class: "min-w-0 flex-1",
@@ -145,14 +149,16 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
                         "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
                     }
-                    if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
+                    if let Some(host_line) = package_header_host_line(&pkg_ver) {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
                             title: "Verification version ([verify] in runner-packages.toml). Same number on every OS.",
-                            "Current fleet-host version {pkg_ver.host}"
+                            "{host_line}"
                         }
+                    }
+                    if let Some(driver_line) = package_header_driver_line(&pkg_ver) {
                         p { class: "mt-0.5 text-xs text-[var(--app-muted)]",
                             title: "Verification version ([verify] in runner-packages.toml). Same number on every OS.",
-                            "Current fleet-driver version {pkg_ver.driver}"
+                            "{driver_line}"
                         }
                     }
                     if let Some(warn) = stale_builds {
@@ -165,7 +171,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                 button {
                     class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
                     r#type: "button",
-                    disabled: creating() || loading(),
+                    disabled: creating(),
                     onclick: on_add,
                     if creating() { "Adding…" } else { "Add worker" }
                 }
@@ -212,14 +218,24 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     } else {
                         div { class: "mt-6 flex flex-col gap-3",
                             for host in active {
-                                HostListRow {
+                                HostDetailPanel {
                                     key: "{host.id}",
+                                    workspace_id: workspace_id.clone(),
                                     sandbox_backend: sandbox_backend(),
-                                    selected: selected_id().as_deref() == Some(host.id.as_str()),
                                     host: host.clone(),
-                                    on_open: move |id: String| {
-                                        write_runner_query(Some(&id));
-                                        selected_id.set(Some(id));
+                                    on_updated: move |updated: HostPublic| {
+                                        let mut list = hosts();
+                                        replace_host(&mut list, updated);
+                                        hosts.set(list);
+                                    },
+                                    on_revoked: move |id: String| {
+                                        let mut list = hosts();
+                                        if let Some(slot) = list.iter_mut().find(|h| h.id == id) {
+                                            slot.status = "disabled".into();
+                                        }
+                                        hosts.set(list);
+                                        write_runner_query(None);
+                                        selected_id.set(None);
                                     },
                                 }
                             }
@@ -255,35 +271,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     }
                 }
             }
-        }
-        if let Some(host) = selected {
-            SidePanel {
-                title: display_name(&host),
-                on_close: move |_| {
-                    write_runner_query(None);
-                    selected_id.set(None);
-                },
-                HostDetailPanel {
-                    workspace_id: workspace_id.clone(),
-                    sandbox_backend: sandbox_backend(),
-                    host,
-                    on_updated: move |updated: HostPublic| {
-                        let mut list = hosts();
-                        replace_host(&mut list, updated);
-                        hosts.set(list);
-                    },
-                    on_revoked: move |id: String| {
-                        let mut list = hosts();
-                        if let Some(slot) = list.iter_mut().find(|h| h.id == id) {
-                            slot.status = "disabled".into();
-                        }
-                        hosts.set(list);
-                        write_runner_query(None);
-                        selected_id.set(None);
-                    },
-                }
-            }
-        }
         }
     }
 }
@@ -493,9 +480,32 @@ fn HostListRow(
 ) -> Element {
     let extra_pills = extra_status_pills(&host);
     let runtime = runtime_line(&host, &sandbox_backend);
-    let pill = status_pill_class(&host.status);
-    let last_seen = last_seen_label(&host, js_sys::Date::now());
-    let title = display_name(&host);
+    let now_ms = js_sys::Date::now();
+    let status = public_status(&host, now_ms);
+    let pill = status_pill_class(status);
+    let last_seen = last_seen_label(&host, now_ms);
+    let title = {
+        let n = host.name.trim();
+        if n.is_empty() {
+            "Unnamed worker".to_string()
+        } else {
+            n.to_string()
+        }
+    };
+    let name_tags_label = {
+        let mut tags: Vec<&str> = Vec::new();
+        if host.is_control_plane_box {
+            tags.push("control plane");
+        }
+        if host.is_this_machine {
+            tags.push("this machine");
+        }
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags.join(" · "))
+        }
+    };
     let plane = is_control_plane(&host);
     let ring = if selected {
         "border-[var(--app-fg)]/40"
@@ -504,18 +514,22 @@ fn HostListRow(
     };
     let host_id = host.id.clone();
     rsx! {
-        button {
-            class: "w-full rounded-2xl border {ring} bg-[var(--app-bg-elevated)] p-4 text-left hover:bg-[var(--app-bg-hover)]",
-            r#type: "button",
+        article {
+            class: "w-full cursor-pointer rounded-2xl border {ring} bg-[var(--app-bg-elevated)] p-4 text-left hover:bg-[var(--app-bg-hover)]",
             onclick: move |_| on_open.call(host_id.clone()),
             div { class: "flex flex-wrap items-start justify-between gap-x-3 gap-y-1",
                 div { class: "min-w-0 flex flex-wrap items-center gap-2",
                     span { class: "text-sm font-semibold text-[var(--app-fg)]",
                         "{title}"
                     }
+                    if let Some(tags) = &name_tags_label {
+                        span { class: "text-xs text-[var(--app-muted)]",
+                            "({tags})"
+                        }
+                    }
                     span {
                         class: "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium {pill}",
-                        "{status_label(&host.status)}"
+                        "{status_label(status)}"
                     }
                     for extra in extra_pills {
                         span {
@@ -538,6 +552,11 @@ fn HostListRow(
                 }
                 p { class: "m-0", "{jobs_line(&host)}" }
                 p { class: "m-0", "{runtime}" }
+                if plane {
+                    p { class: "m-0",
+                        "This process does not run sandboxes."
+                    }
+                }
             }
         }
     }
@@ -607,9 +626,32 @@ fn HostDetailPanel(
     let draft_holding = draft_holding_new_jobs(d_accepting());
     let runtime = runtime_line(&host, &sandbox_backend);
     let revoked = host.status == "disabled";
-    let pill = status_pill_class(&host.status);
-    let last_seen = last_seen_label(&host, js_sys::Date::now());
-    let title = display_name(&host);
+    let now_ms = js_sys::Date::now();
+    let status = public_status(&host, now_ms);
+    let pill = status_pill_class(status);
+    let last_seen = last_seen_label(&host, now_ms);
+    let title = {
+        let n = host.name.trim();
+        if n.is_empty() {
+            "Unnamed worker".to_string()
+        } else {
+            n.to_string()
+        }
+    };
+    let name_tags_label = {
+        let mut tags: Vec<&str> = Vec::new();
+        if host.is_control_plane_box {
+            tags.push("control plane");
+        }
+        if host.is_this_machine {
+            tags.push("this machine");
+        }
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags.join(" · "))
+        }
+    };
     let why = not_taking_reason(&host);
     let last_error = host.last_error.clone().unwrap_or_default();
     let show_error = !last_error.is_empty()
@@ -683,9 +725,14 @@ fn HostDetailPanel(
                             "{title}"
                         }
                     }
+                    if let Some(tags) = &name_tags_label {
+                        span { class: "text-xs text-[var(--app-muted)]",
+                            "({tags})"
+                        }
+                    }
                     span {
                         class: "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium {pill}",
-                        "{status_label(&host.status)}"
+                        "{status_label(status)}"
                     }
                     for extra in extra_pills {
                         span {
@@ -729,6 +776,11 @@ fn HostDetailPanel(
                 p { class: "m-0",
                     "{runtime}"
                 }
+                if plane {
+                    p { class: "m-0",
+                        "This process does not run sandboxes."
+                    }
+                }
             }
 
             if let Some(reason) = why {
@@ -758,7 +810,7 @@ fn HostDetailPanel(
                         },
                         "{accept_jobs_label(draft_holding)}"
                     }
-                    if !plane {
+                    if shows_auto_update(&host) {
                     label {
                         class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
                         title: "When on, this worker pulls the served package by itself. Turn off to wait for Update now.",
@@ -836,7 +888,7 @@ fn HostDetailPanel(
                     on_updated,
                 }
 
-                if !plane {
+                if !plane && host.status != "pending" {
                     SandboxBlock {
                         host: host.clone(),
                         pending,
@@ -987,7 +1039,7 @@ fn HostDetailPanel(
                                 });
                             }
                         },
-                        "Apply"
+                        "Apply changes"
                     }
                 }
             }
@@ -1949,5 +2001,304 @@ fn SandboxBlock(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn production_src() -> &'static str {
+        include_str!("page.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page source")
+    }
+
+    fn pair_panel_src(prod: &str) -> &str {
+        let idx = prod.find("fn PairPanel").expect("PairPanel");
+        let after = &prod[idx..];
+        let end = after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(after.len());
+        &after[..end]
+    }
+
+    #[test]
+    fn pending_host_hides_sandbox_block() {
+        let prod = production_src();
+        assert!(
+            prod.contains("if !plane && host.status != \"pending\""),
+            "unpaired pending cards must not show Allow container / sandbox knobs"
+        );
+    }
+
+    #[test]
+    fn add_worker_sends_a_name() {
+        let prod = production_src();
+        assert!(
+            prod.contains("name: Some(\"New worker\".into())"),
+            "Add worker must POST a name; API 400s on omitted/empty"
+        );
+        assert!(
+            !prod.contains("CreateHostBody::default()"),
+            "default create body omits name and the plane rejects it"
+        );
+    }
+
+    #[test]
+    fn self_hosted_sorts_with_js_date_not_chrono_utc_now() {
+        let prod = production_src();
+        assert!(
+            prod.contains("sort_hosts_for_list(&mut active, js_sys::Date::now())"),
+            "Self-hosted must sort with Date.now(); chrono Utc::now panics on wasm32"
+        );
+        assert!(
+            !prod.contains("chrono::Utc::now()"),
+            "chrono::Utc::now() is unreachable in the UI wasm without wasmbind"
+        );
+    }
+
+    /// Pair panel Copy buttons must call `copy_text` (textarea/execCommand
+    /// first — HTTP LAN has no clipboard getter). A silent no-op or
+    /// clipboard-API-only onclick still looks like a working button on
+    /// localhost and dies on http://192.168.x.x.
+    #[test]
+    fn pair_panel_copy_buttons_call_copy_text() {
+        let prod = production_src();
+        let pair = pair_panel_src(prod);
+        assert!(
+            prod.contains("use crate::clipboard::copy_text"),
+            "pair panel must use the HTTP LAN clipboard helper, not a local no-op"
+        );
+        assert!(
+            !prod.contains("fn copy_text"),
+            "page.rs must not shadow copy_text"
+        );
+        assert!(
+            pair.contains("let unix = install_commands(&created)"),
+            "Unix pre + Copy must be the pair install-worker.sh command"
+        );
+        assert!(
+            pair.contains("let windows = windows_install_command(&created)"),
+            "Windows pre + Copy must be the pair install-worker.ps1 command"
+        );
+        assert!(
+            pair.contains("let unix_copy = unix.clone()"),
+            "Unix Copy must copy the same command shown in the pre"
+        );
+        assert!(
+            pair.contains("let windows_copy = windows.clone()"),
+            "Windows Copy must copy the same command shown in the pre"
+        );
+        assert!(
+            pair.contains("let token = created.pair_token.clone()"),
+            "token Copy must copy the flp_ pair token shown once"
+        );
+        assert!(
+            pair.contains("if copy_text(&unix_copy)"),
+            "Unix Copy must call copy_text with the install-worker.sh command"
+        );
+        assert!(
+            pair.contains("if copy_text(&windows_copy)"),
+            "Windows Copy must call copy_text with the install-worker.ps1 command"
+        );
+        assert!(
+            pair.contains("if copy_text(&token)"),
+            "token Copy must call copy_text with the flp_ pair token"
+        );
+        assert_copy_gated_on_helper(pair, "if copy_text(&unix_copy)", "Command copied.");
+        assert_copy_gated_on_helper(pair, "if copy_text(&windows_copy)", "Command copied.");
+        assert_copy_gated_on_helper(pair, "if copy_text(&token)", "Token copied.");
+        assert!(
+            pair.contains("\"Copy failed. Select the command and copy it yourself.\""),
+            "failed Unix/Windows copy must not look like success"
+        );
+        assert!(
+            pair.contains("\"Copy failed. Select the token and copy it yourself.\""),
+            "failed token copy must not look like success"
+        );
+        assert!(
+            pair.matches("\"Copy\"").count() >= 3,
+            "Pair this worker must offer Unix, Windows, and token Copy"
+        );
+        assert!(
+            !pair.contains("let _ = copy_text"),
+            "must not ignore copy_text — HTTP LAN no-op would still toast success"
+        );
+        assert!(
+            !pair.contains("navigator.clipboard") && !pair.contains("navigator().clipboard"),
+            "must not read navigator.clipboard in PairPanel (Firefox HTTP LAN panics)"
+        );
+        assert!(
+            !pair.contains("write_text"),
+            "PairPanel must not call clipboard write_text itself"
+        );
+        assert!(
+            pair.contains("{unix}")
+                && pair.contains("{windows}")
+                && pair.contains("{created.pair_token}"),
+            "pres must show the same unix / windows / token values Copy sends"
+        );
+        assert_copy_is_type_button(pair, "if copy_text(&unix_copy)");
+        assert_copy_is_type_button(pair, "if copy_text(&windows_copy)");
+        assert_copy_is_type_button(pair, "if copy_text(&token)");
+
+        // just test excludes fleet-ui; this crate still compiles the helper.
+        // ExecCommand must come first so http://192.168.x.x never reads the
+        // clipboard getter (Firefox throws; a silent no-op looks like Copy worked).
+        let helper = include_str!("../../../clipboard.rs");
+        let helper_prod = helper
+            .split("#[cfg(test)]")
+            .next()
+            .expect("clipboard.rs production source");
+        let lan = helper_prod
+            .split("const HTTP_LAN_THEN_API")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("HTTP_LAN_THEN_API backends");
+        let exec_at = lan
+            .find("ExecCommandTextarea")
+            .expect("textarea/execCommand backend");
+        let api_at = lan
+            .find("ClipboardApiIfPresent")
+            .expect("clipboard API backend");
+        assert!(
+            exec_at < api_at,
+            "HTTP LAN must try execCommand before navigator.clipboard"
+        );
+        assert!(
+            helper_prod.contains("exec_command(\"copy\")"),
+            "copy_text must actually execCommand('copy') the textarea"
+        );
+        assert!(
+            helper_prod.contains("js_sys::Reflect::get"),
+            "clipboard API probe must use Reflect.get, not the panic getter"
+        );
+        assert!(
+            !helper_prod.contains("navigator().clipboard()"),
+            "copy_text must not read navigator.clipboard (Firefox HTTP LAN panics)"
+        );
+        assert!(
+            helper_prod.contains("if backends.is_empty()") && helper_prod.contains("return false"),
+            "empty payload must fail closed, not toast success"
+        );
+        assert!(
+            !pair.contains("is_secure_context") && !helper_prod.contains("is_secure_context"),
+            "must not skip Copy on insecure HTTP LAN"
+        );
+    }
+
+    /// Catalog: Done keeps the pending worker, closes the panel. Must not
+    /// revoke/DELETE. Cancel is the discard path (sibling card).
+    #[test]
+    fn done_closes_pair_panel_without_revoke_keeps_pending() {
+        let prod = production_src();
+        let pair = pair_panel_src(prod);
+        let done = button_named(pair, "\"Done\"");
+        let cancel = button_named(
+            pair,
+            "if cancelling() { \"Cancelling…\" } else { \"Cancel\" }",
+        );
+
+        assert!(
+            done.contains("onclick: move |e| on_dismiss.call(e)"),
+            "Done must only dismiss the pair overlay:\n{done}"
+        );
+        assert!(
+            !done.contains("revoke_host")
+                && !done.contains("on_revoked")
+                && !done.contains("spawn(")
+                && !done.contains("DELETE")
+                && !done.contains("authorized_delete"),
+            "Done must not revoke or DELETE the unused pending host:\n{done}"
+        );
+        assert!(
+            done.contains("disabled: cancelling()"),
+            "Done stays a type=button while Cancel is in flight:\n{done}"
+        );
+        assert!(
+            cancel.contains("revoke_host(&ws, &id)") && cancel.contains("on_revoked.call(id)"),
+            "Cancel is the HTTP DELETE discard path — not Done:\n{cancel}"
+        );
+        assert!(
+            cancel.contains("\"Worker discarded.\""),
+            "Cancel toast must not be the Done path:\n{cancel}"
+        );
+
+        assert!(
+            prod.contains("if let Some(created) = pair_result()")
+                && prod.contains("on_dismiss: move |_| pair_result.set(None),"),
+            "Pair this worker is shown only while pair_result is Some; Done clears it"
+        );
+        let dismiss_line = "on_dismiss: move |_| pair_result.set(None),";
+        assert!(
+            prod.contains(dismiss_line),
+            "on_dismiss must only clear pair_result"
+        );
+        assert!(
+            !dismiss_line.contains("revoke_host") && !dismiss_line.contains("on_revoked"),
+            "on_dismiss must not revoke"
+        );
+        assert!(
+            prod.contains("list.insert(0, created.host.clone())")
+                && prod.contains("pair_result.set(Some(created))"),
+            "Add worker must keep the pending host on the list before Done"
+        );
+        let revoked = prod
+            .split("on_revoked: move |id: String|")
+            .nth(1)
+            .and_then(|rest| rest.split("PairPanel").next())
+            .expect("on_revoked wiring");
+        assert!(
+            revoked.contains("slot.status = \"disabled\".into()")
+                && revoked.contains("pair_result.set(None)"),
+            "only Cancel/revoke marks the card disabled: {revoked}"
+        );
+        assert!(
+            prod.contains("filter(|h| !is_removed(h))"),
+            "unused pending (not disabled) stays in the active list after Done"
+        );
+    }
+
+    fn button_named<'a>(src: &'a str, label: &str) -> &'a str {
+        let at = src.find(label).unwrap_or_else(|| panic!("missing {label}"));
+        let before = &src[..at];
+        let start = before
+            .rfind("button {")
+            .unwrap_or_else(|| panic!("{label} must sit on a button {{ ... }}"));
+        let after = &src[at + label.len()..];
+        let end = after.find("button {").unwrap_or(after.len());
+        &src[start..at + label.len() + end]
+    }
+
+    fn assert_copy_gated_on_helper(pair: &str, call: &str, ok_toast: &str) {
+        let at = pair.find(call).unwrap_or_else(|| panic!("{call}"));
+        let after = &pair[at..];
+        let ok_at = after
+            .find(ok_toast)
+            .unwrap_or_else(|| panic!("{call} must toast {ok_toast}"));
+        let err_at = after
+            .find("Copy failed.")
+            .unwrap_or_else(|| panic!("{call} must have a Copy failed path"));
+        assert!(
+            ok_at < err_at,
+            "{call} must toast success only on copy_text ok, then the fail path"
+        );
+        assert!(
+            !after[..ok_at].contains("let _ ="),
+            "{call} must not ignore copy_text before toasting success"
+        );
+    }
+
+    fn assert_copy_is_type_button(pair: &str, call: &str) {
+        let at = pair.find(call).unwrap_or_else(|| panic!("{call}"));
+        let before = &pair[..at];
+        let start = before
+            .rfind("button {")
+            .unwrap_or_else(|| panic!("{call} must sit on a button {{ ... }} (not a submit form)"));
+        assert!(
+            before[start..].contains("r#type: \"button\""),
+            "{call} must be type=button so HTTP LAN click stays a user gesture"
+        );
     }
 }

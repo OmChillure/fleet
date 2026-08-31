@@ -123,6 +123,18 @@ pub async fn list_for_workspace(
     }
 }
 
+/// Wire statuses `claim_due` (and therefore `process_due`) may pick.
+///
+/// A leftover due `next_wake_at` on completed/cancelled/failed/acting/deciding
+/// must not flip the row to `deciding`. Keep the SQL `status IN (...)` in
+/// `claim_due` identical to this list.
+pub const CLAIM_DUE_STATUSES: &[&str] = &["open", "waiting"];
+
+/// `true` only for statuses `claim_due` / `process_due` may select.
+pub fn is_claim_due_status(status: &str) -> bool {
+    CLAIM_DUE_STATUSES.iter().copied().any(|s| s == status)
+}
+
 /// Claim due cases for decision (status open/waiting, next_wake_at <= now).
 pub async fn claim_due(pool: &PgPool, limit: i64) -> DbResult<Vec<Case>> {
     let limit = limit.clamp(1, 50);
@@ -235,6 +247,7 @@ pub async fn apply_patch(
             version = version + 1,
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND version = $11
+          AND status NOT IN ('completed', 'cancelled', 'failed')
         RETURNING {CASE_COLS}
         "#
     );
@@ -280,11 +293,7 @@ pub async fn append_event(
         .map_err(map_query_err)
 }
 
-pub async fn list_events(
-    pool: &PgPool,
-    case_id: Uuid,
-    limit: i64,
-) -> DbResult<Vec<CaseEvent>> {
+pub async fn list_events(pool: &PgPool, case_id: Uuid, limit: i64) -> DbResult<Vec<CaseEvent>> {
     let limit = limit.clamp(1, 200);
     let q = format!(
         r#"
@@ -333,4 +342,118 @@ pub async fn schedule_wake_now(
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)
+}
+
+#[cfg(test)]
+mod process_due_claim_due_tests {
+    use super::*;
+
+    fn production_src() -> &'static str {
+        let src = include_str!("cases.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    /// A due `next_wake_at` on a terminal row must not be a claim source.
+    #[test]
+    fn process_due_claim_due_statuses_exclude_completed_cancelled_failed() {
+        for terminal in ["completed", "cancelled", "failed"] {
+            assert!(
+                !is_claim_due_status(terminal),
+                "process_due/claim_due must not pick {terminal} even when next_wake_at is due"
+            );
+            assert!(!CLAIM_DUE_STATUSES.contains(&terminal));
+        }
+        assert!(is_claim_due_status("open"));
+        assert!(is_claim_due_status("waiting"));
+        assert_eq!(CLAIM_DUE_STATUSES, &["open", "waiting"]);
+        for inflight in ["acting", "deciding"] {
+            assert!(
+                !is_claim_due_status(inflight),
+                "{inflight} is not a process_due claim source"
+            );
+        }
+    }
+
+    /// SQL `WHERE` must AND the open/waiting filter with due-wake.
+    /// `status IN ('open', 'waiting') OR next_wake_at <= now()` would
+    /// revive a due completed row. Not the product lock — see cases_repos.
+    #[test]
+    fn process_due_claim_due_sql_skips_terminal_statuses() {
+        let claim = fn_src(production_src(), "pub async fn claim_due");
+        assert!(
+            claim.contains("WHERE status IN ('open', 'waiting')"),
+            "claim_due must only SELECT open/waiting; got:\n{claim}"
+        );
+        assert!(
+            claim.contains("AND next_wake_at IS NOT NULL"),
+            "due-wake must be AND-ed with the status filter:\n{claim}"
+        );
+        assert!(
+            claim.contains("AND next_wake_at <= now()"),
+            "due-wake must be AND-ed with the status filter:\n{claim}"
+        );
+        assert!(
+            !claim.contains("OR next_wake_at"),
+            "OR-ing next_wake_at with the status IN-list would revive a due terminal:\n{claim}"
+        );
+        assert!(
+            claim.contains("SET status = 'deciding'"),
+            "claim_due must move claimed rows to deciding"
+        );
+
+        let reclaim = fn_src(production_src(), "pub async fn reclaim_stale_deciding");
+        assert!(
+            reclaim.contains("WHERE status = 'deciding'"),
+            "reclaim (process_due's first step) must only touch deciding"
+        );
+    }
+
+    /// A decide patch (status change + optional `bump_decision`) on
+    /// completed/cancelled/failed must not UPDATE the row. Version-only
+    /// WHERE would reopen the case. Live lock is in cases_repos.
+    #[test]
+    fn decide_on_terminal_apply_patch_sql_refuses_reopen() {
+        let apply = fn_src(production_src(), "pub async fn apply_patch");
+        let where_at = apply
+            .find("WHERE ")
+            .unwrap_or_else(|| panic!("apply_patch UPDATE needs WHERE:\n{apply}"));
+        let where_sql = &apply[where_at..];
+        assert!(
+            where_sql.contains("version"),
+            "apply_patch must stay version-locked:\n{where_sql}"
+        );
+        for terminal in ["completed", "cancelled", "failed"] {
+            assert!(
+                where_sql.contains(terminal),
+                "apply_patch WHERE must refuse leaving {terminal} so a decide cannot reopen:\n{where_sql}"
+            );
+        }
+        assert!(
+            where_sql.contains("status"),
+            "version-only WHERE would apply a decide patch to a terminal case:\n{where_sql}"
+        );
+        assert!(
+            where_sql.contains("NOT IN")
+                || where_sql.contains("status IN ('completed'")
+                || where_sql.contains("status IN ('cancelled'")
+                || where_sql.contains("status IN ('failed'"),
+            "apply_patch WHERE must predicate on terminal statuses (NOT IN / keep-same):\n{where_sql}"
+        );
+    }
 }

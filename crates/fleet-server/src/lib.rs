@@ -31,12 +31,12 @@ pub use state::AppState;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use fleet_orchestrator::api::router as orch_router;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, TraceLayer};
@@ -278,9 +278,15 @@ pub async fn api_index() -> Json<Value> {
 }
 
 pub fn build_cors(config: &ServerConfig) -> anyhow::Result<CorsLayer> {
+    // `*` is a literal no browser sends as Origin. tower-http's
+    // `AllowOrigin::list` panics on a wildcard, and `AllowOrigin::any()`
+    // cannot be combined with `allow_credentials(true)`. Drop `*` so a
+    // `CORS_ORIGINS=*` env stays fail-closed instead of reflecting every
+    // Origin or sending `Access-Control-Allow-Origin: *` with credentials.
     let origins: Vec<HeaderValue> = config
         .cors_origins
         .iter()
+        .filter(|o| o.as_str() != "*")
         .map(|o| o.parse::<HeaderValue>())
         .collect::<Result<_, _>>()?;
 

@@ -47,9 +47,15 @@ pub fn Login() -> Element {
                     // Prefer workspace returned by login (created on the spot if none).
                     let mut ws_id = res.default_workspace.map(|w| w.id);
                     if ws_id.is_none() {
-                        // Fallback: list (server ensures a default exists).
+                        // Fallback: prefer an owned workspace (invites are extra).
                         match list_workspaces().await {
-                            Ok(list) => ws_id = list.into_iter().next().map(|w| w.id),
+                            Ok(list) => {
+                                ws_id = list
+                                    .iter()
+                                    .find(|w| w.role == "owner")
+                                    .or_else(|| list.first())
+                                    .map(|w| w.id.clone());
+                            }
                             Err(e) => {
                                 loading.set(false);
                                 show_toast().error(e.message());

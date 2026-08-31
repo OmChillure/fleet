@@ -2,7 +2,11 @@
 """Agent-recorded product demos (Playwright .webm).
 
 Humans do not screen-record. The coding agent runs this (usually via
-./scripts/human-test.sh record) and attaches the file to the GitLab MR.
+./scripts/human-test.sh record) on the final tree that will be merged.
+Default scenes come from HUMAN_TEST_SCOPE.md (surface_scope.py). Film
+every surface that merge can break, not a random walkthrough. After the
+clip, review each scene frame + the .webm for bugs, fill the Film review
+section in HUMAN_TEST_SCOPE.md, and attach the .webm to the GitLab MR.
 
   python3 tests/browser/record_demo.py --list
   python3 tests/browser/record_demo.py              # core UI scenes
@@ -16,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -138,8 +143,13 @@ class Demo:
         pause(p, 1200)
 
     def scene_auth(self) -> None:
-        self.signup_login()
+        # Scope order may film other pages first. Reuse that session;
+        # a second Sign up with the same email never reaches /login.
+        if not self.workspace_url:
+            self.signup_login()
         p = self.page
+        p.goto(self.workspace_url + "/dashboard", wait_until="networkidle")
+        pause(p, 800)
         p.reload(wait_until="networkidle")
         pause(p, 800)
         if "/login" in p.url:
@@ -234,33 +244,64 @@ class Demo:
         p = self.page
         p.goto(f"{base}/cases", wait_until="networkidle")
         pause(p, 800)
+        if p.locator("h1").first.inner_text().strip() != "Cases":
+            raise RuntimeError("Cases page missing Cases heading")
         title = p.locator("input[placeholder*='Title']")
         policy = p.locator("textarea[placeholder*='Policy']")
-        if title.count() and policy.count():
-            title.first.fill("Demo case")
-            policy.first.fill("Wait until observed, then complete.")
-            create = p.get_by_role("button", name="Create case")
-            if create.count():
-                create.first.click()
-                pause(p, 1500)
-        first = p.locator("a[href*='/cases/']")
-        if first.count():
-            first.first.click()
-            pause(p, 800)
-            decide = p.get_by_role("button", name="Decide now")
-            if decide.count():
-                decide.first.click()
-                pause(p, 1500)
+        if title.count() == 0 or policy.count() == 0:
+            raise RuntimeError("Cases page missing New case title/policy fields")
+        title.first.fill("Demo case")
+        policy.first.fill("Wait until observed, then stay open until cancelled.")
+        create = p.get_by_role("button", name="Create case")
+        if create.count() == 0:
+            raise RuntimeError("Cases page missing 'Create case'")
+        create.first.click()
+        p.wait_for_url(re.compile(r"/cases/[0-9a-f-]{36}", re.I), timeout=15_000)
+        pause(p, 1000)
+        note = p.locator("input[placeholder*='Observe']")
+        if note.count() == 0:
+            raise RuntimeError("Case detail missing Observe field")
+        note.first.fill("Demo observed a reply in Slack.")
+        observe = p.get_by_role("button", name="Observe", exact=True)
+        if observe.count() == 0:
+            raise RuntimeError("Case detail missing Observe")
+        observe.first.click()
+        pause(p, 1500)
+        cancel = p.get_by_role("button", name="Cancel", exact=True)
+        if cancel.count() == 0:
+            raise RuntimeError("Case detail missing Cancel")
+        cancel.first.click()
+        pause(p, 1500)
 
     def scene_inbox(self) -> None:
+        from inbox_e2e_helpers import seed_connected_github, seed_open_ticket
+
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/inbox", wait_until="networkidle")
         pause(p, 800)
+        if p.locator("h1").first.inner_text().strip() != "Inbox":
+            raise RuntimeError("Inbox page missing Inbox heading")
+        for name in ("Start monitor", "Stop monitor", "Refresh now"):
+            if p.get_by_role("button", name=name).count() == 0:
+                raise RuntimeError(f"Inbox page missing {name}")
+        ws = base.rstrip("/").rsplit("/", 1)[-1]
+        seed_connected_github(ws)
+        key = f"demo-inbox-{uuid.uuid4().hex[:8]}/board#1"
+        title = "Demo inbox ticket"
+        seed_open_ticket(ws, "github", key, title)
         start = p.get_by_role("button", name="Start monitor")
-        if start.count():
-            start.first.click()
-            pause(p, 1200)
+        start.first.click()
+        pause(p, 1500)
+        refresh = p.get_by_role("button", name="Refresh now")
+        refresh.first.click()
+        pause(p, 1200)
+        p.get_by_text(f"{key} · {title}", exact=False).first.wait_for(timeout=15_000)
+        finish = p.get_by_role("button", name="Finish", exact=True)
+        if finish.count() == 0:
+            raise RuntimeError("Inbox row missing Finish")
+        finish.first.click()
+        pause(p, 2000)
 
     def scene_agents(self) -> None:
         base = self.ensure_session()
@@ -291,10 +332,32 @@ class Demo:
         p = self.page
         p.goto(f"{base}/settings", wait_until="networkidle")
         pause(p, 800)
-        members = p.get_by_text("Members", exact=True)
-        if members.count():
-            members.first.scroll_into_view_if_needed()
-            pause(p, 800)
+        if p.locator("h1").first.inner_text().strip() != "Settings":
+            raise RuntimeError("Settings page missing Settings heading")
+        heading = p.get_by_role("heading", name="Members", exact=True)
+        if heading.count() == 0:
+            raise RuntimeError("Settings page missing Members heading")
+        heading.first.scroll_into_view_if_needed()
+        pause(p, 600)
+        email_box = p.locator("input[type='email'][placeholder='teammate@example.test']")
+        if email_box.count() == 0:
+            raise RuntimeError("Settings members missing invite email field")
+        form = email_box.first.locator("xpath=..")
+        role_select = form.locator("select")
+        invite_btn = form.get_by_role("button", name="Invite", exact=True)
+        if role_select.count() == 0 or invite_btn.count() == 0:
+            raise RuntimeError("Settings members missing invite role/Invite")
+        guest = f"demo-member-{uuid.uuid4().hex[:8]}@example.test"
+        email_box.first.fill(guest)
+        role_select.first.select_option("member")
+        invite_btn.first.click()
+        p.get_by_text(
+            "Invite sent — they join on signup or login.", exact=True
+        ).wait_for(timeout=15_000)
+        p.get_by_text(f"{guest} · member (pending)", exact=False).first.wait_for(
+            timeout=15_000
+        )
+        pause(p, 1200)
 
     def scene_unify(self) -> None:
         """Isolation + runners + fleet tick — the unify-runners user path."""
@@ -630,7 +693,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "scenes",
         nargs="*",
-        help="scene names (default: core UI). 'all' = core. See --list.",
+        help="scene names. Default: HUMAN_TEST_SCOPE.md (not all CORE). "
+        "'all' = core. See --list.",
+    )
+    parser.add_argument(
+        "--from-scope",
+        action="store_true",
+        help="use scenes from HUMAN_TEST_SCOPE.md (default when none given)",
     )
     parser.add_argument("--list", action="store_true", help="print scenes and exit")
     parser.add_argument(
@@ -647,7 +716,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {name}")
         return 0
 
-    names = list(args.scenes) or ["all"]
+    names = list(args.scenes)
+    use_scope = args.from_scope or not names
+    if use_scope and not names:
+        from surface_scope import SCOPE, parse_scenes_from_scope
+
+        if not SCOPE.is_file():
+            raise SystemExit(
+                "HUMAN_TEST_SCOPE.md missing. Run: "
+                "python3 tests/browser/surface_scope.py --write"
+            )
+        names = parse_scenes_from_scope(SCOPE.read_text(encoding="utf-8"))
+        if not names:
+            print("HUMAN_TEST_SCOPE.md has no product scenes — skip film.")
+            return 0
+        print("from-scope:", " ".join(names), flush=True)
     if names == ["all"] or "all" in names:
         extra = [n for n in names if n not in ("all", *CORE)]
         names = CORE + extra
@@ -683,11 +766,16 @@ def main(argv: list[str] | None = None) -> int:
         page = context.new_page()
         page.set_default_timeout(25_000)
         demo = Demo(page, video_dir)
+        frames_dir = out_dir / f"{stamp}-frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
         try:
             for name in names:
                 print(f"==> scene {name}", flush=True)
                 SCENES[name](demo)
                 pause(page, 500)
+                frame = frames_dir / f"{name}.png"
+                page.screenshot(path=str(frame), full_page=True)
+                print(f"FRAME {frame}", flush=True)
         finally:
             context.close()
             browser.close()
@@ -707,7 +795,12 @@ def main(argv: list[str] | None = None) -> int:
     except StopIteration:
         video_dir.rmdir()
     print(f"DEMO_VIDEO={final}")
-    print("Attach this file to the GitLab MR. Do not git add it.")
+    print(f"REVIEW_FRAMES={frames_dir}")
+    print(
+        "REVIEW: inspect every frame and this .webm for bugs. "
+        "Fill HUMAN_TEST_SCOPE.md Film review. Attach the .webm to the MR. "
+        "Do not git add the video."
+    )
     return 0
 
 

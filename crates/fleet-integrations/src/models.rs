@@ -66,4 +66,3 @@ pub struct DisconnectResponse {
     pub provider: String,
     pub disconnected: bool,
 }
-

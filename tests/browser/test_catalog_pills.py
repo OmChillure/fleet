@@ -159,6 +159,41 @@ class CatalogPillsTests(unittest.TestCase):
         host_id = created["host"]["id"]
         machine_token = paired["machine_token"]
 
+        manifest = _staged_linux_manifest(page)
+        self.assertIsNotNone(
+            manifest,
+            "staged linux-x86_64 manifest is required to assert the outdated "
+            "pill (scripts/stage-worker-dist.sh). Missing staged dist is a fail.",
+        )
+        current_bins: dict[str, Any] = {}
+        for stem, info in (manifest.get("bins") or {}).items():
+            if isinstance(info, dict):
+                sha = info.get("sha256")
+                ver = info.get("version")
+                if isinstance(sha, str) and sha.strip():
+                    entry: dict[str, Any] = {"sha256": sha.strip()}
+                    if isinstance(ver, str) and ver.strip():
+                        entry["version"] = ver.strip()
+                    current_bins[str(stem)] = entry
+        current = heartbeat(
+            page,
+            machine_token,
+            {
+                "platform": "linux-x86_64",
+                "hostname": name,
+                "software": {
+                    "git_sha": str(manifest.get("git_sha") or "").strip(),
+                    "bins": current_bins,
+                },
+            },
+        )
+        current_host = current.get("host") or {}
+        self.assertFalse(
+            bool(current_host.get("outdated"))
+            or current_host.get("software_status") == "behind",
+            f"matching staged software must not mark the fresh pair behind: {current_host}",
+        )
+
         row = _host_row(page, ws, host_id)
         self.assertEqual(row.get("status"), "online", row)
         self.assertFalse(row.get("settings_pending"), row)
@@ -211,12 +246,6 @@ class CatalogPillsTests(unittest.TestCase):
             f"auto-update must be off so outdated (not updating) can show: {row}",
         )
 
-        manifest = _staged_linux_manifest(page)
-        self.assertIsNotNone(
-            manifest,
-            "staged linux-x86_64 manifest is required to assert the outdated "
-            "pill (scripts/stage-worker-dist.sh). Missing staged dist is a fail.",
-        )
         software = _behind_software(manifest)
         behind = heartbeat(
             page,

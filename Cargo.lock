@@ -1880,6 +1880,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
+ "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
@@ -1992,6 +1995,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tower",

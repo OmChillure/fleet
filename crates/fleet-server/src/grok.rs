@@ -13,13 +13,13 @@ use std::time::{Duration, Instant};
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
-    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
+    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
+    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -342,18 +342,42 @@ fn write_auth_entry(path: &Path, entry_key: &str, entry: &AuthEntry) -> Result<(
     Ok(())
 }
 
+fn usable_api_key(cfg: &GrokConfig) -> Option<&str> {
+    cfg.api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+}
+
+/// Never send `Authorization: Bearer` with an empty token (would hang on retries).
+fn require_bearer(bearer: &str) -> AppResult<&str> {
+    let b = bearer.trim();
+    if b.is_empty() {
+        return Err(AppError::bad_request(
+            "Grok auth missing — run `grok login` (or set XAI_API_KEY)".to_string(),
+        ));
+    }
+    Ok(b)
+}
+
+fn api_key_fallback(cfg: &GrokConfig, cli_err: String) -> Result<AuthSource, String> {
+    if let Some(key) = usable_api_key(cfg) {
+        tracing::info!("grok: using XAI_API_KEY fallback (CLI: {cli_err})");
+        Ok(AuthSource::ApiKey(key.to_string()))
+    } else {
+        Err(cli_err)
+    }
+}
+
 /// Resolve Bearer credentials: CLI auth.json (with refresh) → XAI_API_KEY.
 async fn resolve_auth(cfg: &GrokConfig) -> Result<AuthSource, String> {
     match load_cli_auth(cfg).await {
-        Ok(src) => Ok(src),
-        Err(cli_err) => {
-            if let Some(key) = cfg.api_key.as_ref().filter(|k| !k.is_empty()) {
-                tracing::info!("grok: using XAI_API_KEY fallback (CLI: {cli_err})");
-                Ok(AuthSource::ApiKey(key.clone()))
-            } else {
-                Err(cli_err)
-            }
-        }
+        Ok(src) if !auth_bearer(&src).trim().is_empty() => Ok(src),
+        Ok(_) => api_key_fallback(
+            cfg,
+            "Grok CLI session has an empty token — run `grok login`".into(),
+        ),
+        Err(cli_err) => api_key_fallback(cfg, cli_err),
     }
 }
 
@@ -654,6 +678,7 @@ async fn chat_completions(
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
     effort: Option<&str>,
 ) -> AppResult<CompletionsResponse> {
+    let bearer = require_bearer(bearer)?;
     if progress.is_some() {
         return chat_completions_stream(cfg, bearer, model, messages, with_tools, progress, effort)
             .await;
@@ -959,7 +984,7 @@ pub async fn complete_text(
         ));
     }
     let auth = resolve_auth(cfg).await.map_err(AppError::bad_request)?;
-    let bearer = auth_bearer(&auth);
+    let bearer = require_bearer(auth_bearer(&auth))?;
     let fallback = default_model();
     let model = if model.trim().is_empty() {
         if fallback.is_empty() {
@@ -1011,7 +1036,7 @@ pub async fn chat_with_tools(
         tracing::warn!(error = %e, "grok auth");
         AppError::bad_request(e)
     })?;
-    let bearer = auth_bearer(&auth);
+    let bearer = require_bearer(auth_bearer(&auth))?;
 
     let fallback = default_model();
     let model = if model.trim().is_empty() {
@@ -1236,5 +1261,73 @@ mod tests {
     fn parse_expires_rfc3339() {
         let dt = parse_expires_at("2026-08-05T19:43:29.657696501Z");
         assert!(dt.is_some());
+    }
+
+    /// Missing CLI session + no usable API key. `api_base` is not api.x.ai so a
+    /// regression that sends HTTP cannot reach a live LLM.
+    fn cfg_no_usable_auth(api_key: Option<String>) -> GrokConfig {
+        GrokConfig {
+            enabled: true,
+            auth_path: std::env::temp_dir()
+                .join(format!("fleet-grok-no-auth-{}/auth.json", Uuid::new_v4())),
+            api_key,
+            api_base: "http://127.0.0.1:1".into(),
+        }
+    }
+
+    fn assert_auth_fail_closed(err: &str) {
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            !lower.contains("cannot reach"),
+            "must not send HTTP with empty Authorization: {err}"
+        );
+        assert!(
+            lower.contains("auth") || lower.contains("login"),
+            "expected missing-auth error, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_empty_api_key_fails_closed_without_hang() {
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        for api_key in [None, Some(String::new())] {
+            let cfg = cfg_no_usable_auth(api_key);
+            let started = Instant::now();
+            let auth = tokio::time::timeout(FAIL_CLOSED, resolve_auth(&cfg))
+                .await
+                .expect("missing/empty Grok key must fail immediately, not hang");
+            let err = auth.expect_err("must not resolve a Bearer without a key");
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "resolve_auth took {:?}",
+                started.elapsed()
+            );
+            assert_auth_fail_closed(&err);
+
+            let started = Instant::now();
+            let text =
+                tokio::time::timeout(FAIL_CLOSED, complete_text(&cfg, "grok-4", "sys", "ping"))
+                    .await
+                    .expect("complete_text without key must fail immediately, not hang");
+            let err = text.expect_err("must not call xAI with empty Authorization");
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "complete_text took {:?}",
+                started.elapsed()
+            );
+            assert_auth_fail_closed(&err.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_status_without_key_unavailable() {
+        let cfg = cfg_no_usable_auth(None);
+        let info = tokio::time::timeout(Duration::from_secs(2), provider_status(&cfg))
+            .await
+            .expect("provider_status without key must return immediately");
+        assert!(!info.available);
+        assert!(!info.coming_soon);
+        assert!(info.models.is_empty());
+        assert_auth_fail_closed(info.error.as_deref().unwrap_or(""));
     }
 }

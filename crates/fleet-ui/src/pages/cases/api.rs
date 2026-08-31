@@ -93,18 +93,15 @@ fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder
     req
 }
 
-async fn parse_json<T: for<'de> Deserialize<'de>>(
-    res: reqwest::Response,
-) -> Result<T, CaseError> {
+async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result<T, CaseError> {
     let status = res.status();
     let text = res
         .text()
         .await
         .map_err(|e| CaseError::Network(e.to_string()))?;
     if status.is_success() {
-        serde_json::from_str(&text).map_err(|e| {
-            CaseError::Network(format!("invalid JSON: {e} ({text})"))
-        })
+        serde_json::from_str(&text)
+            .map_err(|e| CaseError::Network(format!("invalid JSON: {e} ({text})")))
     } else {
         #[derive(Deserialize)]
         struct ErrBody {
@@ -139,28 +136,26 @@ pub async fn create_case(
     policy_md: &str,
     kind: Option<&str>,
 ) -> Result<CaseRow, CaseError> {
-    let res = with_credentials(client().post(api_url(&format!(
-        "/api/workspaces/{workspace_id}/cases"
-    ))))
-    .json(&CreateCaseBody {
-        title: title.to_string(),
-        policy_md: policy_md.to_string(),
-        kind: kind.map(|s| s.to_string()),
-        stage: None,
-    })
-    .send()
-    .await
-    .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
+    let res =
+        with_credentials(client().post(api_url(&format!("/api/workspaces/{workspace_id}/cases"))))
+            .json(&CreateCaseBody {
+                title: title.to_string(),
+                policy_md: policy_md.to_string(),
+                kind: kind.map(|s| s.to_string()),
+                stage: None,
+            })
+            .send()
+            .await
+            .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
 
 pub async fn list_cases(workspace_id: &str) -> Result<CaseListResponse, CaseError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/cases"
-    ))))
-    .send()
-    .await
-    .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
+    let res =
+        with_credentials(client().get(api_url(&format!("/api/workspaces/{workspace_id}/cases"))))
+            .send()
+            .await
+            .map_err(|e| CaseError::Network(format!("could not reach API: {e}")))?;
     parse_json(res).await
 }
 

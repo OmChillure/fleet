@@ -329,6 +329,131 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertEqual(stamped.returncode, 0, stamped.stderr + stamped.stdout)
             stamped_man = json.loads((linux / "manifest.json").read_text())
             self.assertEqual(stamped_man["git_sha"], "test-tree-id")
+            # File hash is not bake id.
+            self.assertNotEqual(
+                stamped_man["git_sha"],
+                stamped_man["bins"]["fleet-host"]["sha256"],
+            )
+            self.assertNotEqual(
+                stamped_man["git_sha"],
+                stamped_man["bins"]["fleet-driver"]["sha256"],
+            )
+
+    def test_stage_manifest_missing_platform_or_hash_not_current(self):
+        """Missing platform / host / driver must not leave a current manifest."""
+        import hashlib
+        import json
+        import tempfile
+
+        stage = (REPO / "scripts" / "stage-worker-dist.sh").read_text()
+        self.assertIn("Fail closed: missing platform or missing host/driver hash", stage)
+        self.assertIn("File hash is not bake id", stage)
+        self.assertIn("git_sha must not be a file hash", stage)
+        self.assertIn("empty sha256", stage)
+        self.assertIn("is_file_sha256()", stage)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            empty = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+            self.assertIn("no staged platforms", empty.stderr)
+            self.assertFalse((root / "manifest.json").exists())
+
+            host_only = root / "linux-x86_64"
+            host_only.mkdir()
+            (host_only / "fleet-host").write_bytes(b"fleet-host")
+            missing_driver = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(
+                missing_driver.returncode, 0, missing_driver.stdout + missing_driver.stderr
+            )
+            self.assertIn("missing host/driver", missing_driver.stderr)
+            self.assertFalse(
+                (host_only / "manifest.json").exists(),
+                "incomplete platform must not be reported current",
+            )
+
+            (host_only / "fleet-host").unlink()
+            (host_only / "fleet-driver").write_bytes(b"fleet-driver")
+            missing_host = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(
+                missing_host.returncode, 0, missing_host.stdout + missing_host.stderr
+            )
+            self.assertFalse((host_only / "manifest.json").exists())
+
+            (host_only / "fleet-host").write_bytes(b"fleet-host")
+            file_hash = hashlib.sha256(b"fleet-host").hexdigest()
+            stamped_hash = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(host_only),
+                ],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "FLEET_GIT_SHA": file_hash,
+                    "FLEET_MANIFEST_STAMP": "1",
+                },
+            )
+            self.assertNotEqual(
+                stamped_hash.returncode,
+                0,
+                stamped_hash.stdout + stamped_hash.stderr,
+            )
+            self.assertIn("git_sha must not be a file hash", stamped_hash.stderr)
+            self.assertFalse(
+                (host_only / "manifest.json").exists(),
+                "file hash must not be written as bake id",
+            )
+
+            ok = subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "scripts" / "stage-worker-dist.sh"),
+                    "--write-manifest",
+                    str(host_only),
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "FLEET_GIT_SHA": "test-tree-id"},
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+            man = json.loads((host_only / "manifest.json").read_text())
+            self.assertEqual(man["platform"], "linux-x86_64")
+            self.assertEqual(man["git_sha"], "")
+            self.assertEqual(man["bins"]["fleet-host"]["sha256"], file_hash)
+            self.assertIn("sha256", man["bins"]["fleet-driver"])
+            self.assertNotEqual(man["git_sha"], man["bins"]["fleet-host"]["sha256"])
+            self.assertNotEqual(man["git_sha"], man["bins"]["fleet-driver"]["sha256"])
 
     def test_install_skips_download_when_sha256_matches(self):
         """Reuse a local bin only when it matches the CP checksum; else refetch."""
@@ -405,6 +530,12 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertIn("stopping fleet-host if it is running", common)
         self.assertIn("already paired; restarting fleet-host", common)
         self.assertIn("machine.token", common)
+        # leftover empty/whitespace machine.token is unpaired (MachineToken::parse)
+        self.assertIn('sed \'s/^[[:space:]]*//;s/[[:space:]]*$//\' "$token_file"', common)
+        self.assertNotRegex(
+            common,
+            r'(?m)^\s*\[ -f "\$token_file" \] && already_paired=1\s*$',
+        )
         # enable --now is a no-op when the unit is already active.
         self.assertIn("systemctl --user restart fleet-host", common)
         self.assertIn("systemctl restart fleet-host", common)
@@ -422,6 +553,8 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn("Stop-Process", text, name)
             self.assertIn("already paired; starting fleet-host", text, name)
             self.assertIn("machine.token", text, name)
+            self.assertIn("Get-Content", text, name)
+            self.assertIn(".Trim()", text, name)
             self.assertLess(
                 text.find("Stop-Process"),
                 text.find("stale; downloading again"),
@@ -475,13 +608,14 @@ class InstallWorkerTests(unittest.TestCase):
         plat = (SCRIPT_DIR / "freebsd-amd64.sh").read_bytes()
         boot = BOOTSTRAP.read_bytes()
         bins = {
-            "fleet-host": b"fake-freebsd-host\n",
-            "fleet-driver": b"fake-freebsd-driver\n",
+            "fleet-host": b"#!/bin/sh\nexit 0\n",
+            "fleet-driver": b"#!/bin/sh\nexit 0\n",
         }
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 mapping = {
+                    "/health": b'{"status":"ok"}\n',
                     "/install-worker.sh": boot,
                     "/install/worker/_unix_common.sh": common,
                     "/install/worker/freebsd-amd64.sh": plat,
@@ -578,7 +712,7 @@ class InstallWorkerTests(unittest.TestCase):
                 env["FLEET_PREFIX"] = str(prefix)
                 env["HOME"] = str(td)
                 env.pop("FLEET_DETECT_ONLY", None)
-                env.pop("FLEET_PAIR_TOKEN", None)
+                env["FLEET_PAIR_TOKEN"] = "flp_testdeadbeef"
                 # Confirm curl/wget are hidden.
                 hidden = subprocess.run(
                     ["sh", "-c", "command -v curl; command -v wget; command -v fetch"],
@@ -627,13 +761,14 @@ class InstallWorkerTests(unittest.TestCase):
         common = (SCRIPT_DIR / "_unix_common.sh").read_bytes()
         plat = (SCRIPT_DIR / "linux-x86_64.sh").read_bytes()
         bins = {
-            "fleet-host": b"fake-linux-host\n",
-            "fleet-driver": b"fake-linux-driver\n",
+            "fleet-host": b"#!/bin/sh\nexit 0\n",
+            "fleet-driver": b"#!/bin/sh\nexit 0\n",
         }
 
         class Handler(BaseHTTPRequestHandler):
             def _body(self):
                 mapping = {
+                    "/health": b'{"status":"ok"}\n',
                     "/install/worker/_unix_common.sh": common,
                     "/install/worker/linux-x86_64.sh": plat,
                     "/install/worker/bin/linux-x86_64/fleet-host": bins["fleet-host"],
@@ -679,7 +814,7 @@ class InstallWorkerTests(unittest.TestCase):
                 env["FLEET_PREFIX"] = str(prefix)
                 env["HOME"] = str(td)
                 env.pop("FLEET_DETECT_ONLY", None)
-                env.pop("FLEET_PAIR_TOKEN", None)
+                env["FLEET_PAIR_TOKEN"] = "flp_testdeadbeef"
                 r = subprocess.run(
                     ["sh", str(SCRIPT_DIR / "linux-x86_64.sh")],
                     capture_output=True,
@@ -701,6 +836,189 @@ class InstallWorkerTests(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_url_host_strips_userinfo_like_rust(self):
+        """url_host drops user@ (last @), same as host_from_url."""
+        for name in ("_unix_common.sh", "install-worker.sh"):
+            text = (SCRIPT_DIR / name).read_text()
+            start = text.index("url_host()")
+            end = text.index("\nhost_is_loopback()")
+            fn = text[start:end]
+            cases = {
+                "http://127.0.0.1:8080": "127.0.0.1",
+                "http://user@127.0.0.1:8080": "127.0.0.1",
+                "http://user:pass@127.0.0.1:8080": "127.0.0.1",
+                "https://user@localhost/path": "localhost",
+                "http://user@[::1]:8080": "::1",
+                "http://[::1]:8080": "::1",
+            }
+            for url, want in cases.items():
+                r = subprocess.run(
+                    ["sh", "-c", fn + '\nurl_host "$1"', "url_host", url],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(r.returncode, 0, f"{name} {url}: {r.stderr}")
+                self.assertEqual(r.stdout.strip(), want, f"{name} {url}")
+        for name in ("install-worker.ps1", "windows-x86_64.ps1", "windows-arm64.ps1"):
+            text = (SCRIPT_DIR / name).read_text(encoding="ascii")
+            self.assertIn("LastIndexOf('@')", text, name)
+
+    def test_loopback_missing_health_dies_before_mkdir_or_fetch(self):
+        """Loopback origin without GET /health must die before mkdir or bin fetch."""
+        import tempfile
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        common = (SCRIPT_DIR / "_unix_common.sh").read_bytes()
+        plat = (SCRIPT_DIR / "linux-x86_64.sh").read_bytes()
+        hits: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                hits.append(path)
+                mapping = {
+                    "/install/worker/_unix_common.sh": common,
+                    "/install/worker/linux-x86_64.sh": plat,
+                }
+                body = mapping.get(path)
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                prefix = td / "prefix"
+                env = os.environ.copy()
+                env["FLEET_URL"] = f"http://127.0.0.1:{port}"
+                env["FLEET_PLATFORM"] = "linux-x86_64"
+                env["FLEET_PREFIX"] = str(prefix)
+                env["HOME"] = str(td)
+                env.pop("FLEET_DETECT_ONLY", None)
+                env["FLEET_PAIR_TOKEN"] = "flp_testdeadbeef"
+                r = subprocess.run(
+                    ["sh", str(SCRIPT_DIR / "linux-x86_64.sh")],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                out = (r.stdout or "") + (r.stderr or "")
+                self.assertNotEqual(r.returncode, 0, out)
+                self.assertIn("refusing to pair", out)
+                self.assertIn("loopback", out)
+                self.assertFalse(prefix.exists(), out)
+                self.assertFalse((prefix / "bin" / "fleet-host").exists(), out)
+                self.assertNotIn("downloading fleet-host", out)
+                self.assertFalse(
+                    any("/install/worker/bin/" in p for p in hits),
+                    hits,
+                )
+                self.assertIn("/health", hits)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_missing_or_whitespace_pair_token_dies_before_bins(self):
+        """First-install token gate dies before writing bins (no leftover token)."""
+        import tempfile
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        common = (SCRIPT_DIR / "_unix_common.sh").read_bytes()
+        plat = (SCRIPT_DIR / "linux-x86_64.sh").read_bytes()
+        host_bin = b"#!/bin/sh\nexit 0\n"
+        driver_bin = b"#!/bin/sh\nexit 0\n"
+
+        cases = (
+            ("missing", None, None),
+            ("whitespace", "  \t  ", None),
+            ("empty-machine-token", None, ""),
+            ("whitespace-machine-token", "   ", "  \n"),
+        )
+        for label, pair_token, token_file in cases:
+            with self.subTest(label=label):
+                hits: list[str] = []
+
+                class Handler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        path = self.path.split("?", 1)[0]
+                        hits.append(path)
+                        mapping = {
+                            "/health": b'{"status":"ok"}\n',
+                            "/install/worker/_unix_common.sh": common,
+                            "/install/worker/linux-x86_64.sh": plat,
+                            "/install/worker/bin/linux-x86_64/fleet-host": host_bin,
+                            "/install/worker/bin/linux-x86_64/fleet-driver": driver_bin,
+                        }
+                        body = mapping.get(path)
+                        if body is None:
+                            self.send_error(404)
+                            return
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+
+                    def log_message(self, fmt, *args):
+                        return
+
+                httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                port = httpd.server_address[1]
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    with tempfile.TemporaryDirectory() as td:
+                        td = Path(td)
+                        prefix = td / "prefix"
+                        cfg = td / "cfg"
+                        cfg.mkdir()
+                        if token_file is not None:
+                            (cfg / "machine.token").write_text(token_file)
+                        env = os.environ.copy()
+                        env["FLEET_URL"] = f"http://127.0.0.1:{port}"
+                        env["FLEET_PLATFORM"] = "linux-x86_64"
+                        env["FLEET_PREFIX"] = str(prefix)
+                        env["HOME"] = str(td)
+                        env["FLEET_HOST_CONFIG_DIR"] = str(cfg)
+                        env.pop("FLEET_DETECT_ONLY", None)
+                        if pair_token is None:
+                            env.pop("FLEET_PAIR_TOKEN", None)
+                        else:
+                            env["FLEET_PAIR_TOKEN"] = pair_token
+                        r = subprocess.run(
+                            ["sh", str(SCRIPT_DIR / "linux-x86_64.sh")],
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                        )
+                        out = (r.stdout or "") + (r.stderr or "")
+                        self.assertNotEqual(r.returncode, 0, out)
+                        self.assertIn("FLEET_PAIR_TOKEN is not set", out)
+                        self.assertFalse(prefix.exists(), out)
+                        self.assertFalse((prefix / "bin" / "fleet-host").exists(), out)
+                        self.assertNotIn("downloading fleet-host", out)
+                        self.assertFalse(
+                            any("/install/worker/bin/" in p for p in hits),
+                            hits,
+                        )
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
 
 
 if __name__ == "__main__":

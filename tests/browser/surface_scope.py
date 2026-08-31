@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""Compute which human-test / record scenes this merge must cover.
+
+The developer AI re-runs this whenever the diff changes (direct or
+indirect path hits in surface_map.toml). The MR must include
+HUMAN_TEST_SCOPE.md and it must match this computation.
+
+  python3 tests/browser/surface_scope.py --write
+  python3 tests/browser/surface_scope.py --check
+  python3 tests/browser/surface_scope.py --scenes
+  python3 tests/browser/surface_scope.py --pause-titles
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MAP = Path(__file__).resolve().parent / "surface_map.toml"
+SCOPE = REPO / "HUMAN_TEST_SCOPE.md"
+
+# Not product chrome. A hit here does not add a scene.
+SKIP_PREFIXES = (
+    "docs/",
+    "tests/",
+    "AGENTS.md",
+    "HUMAN_TEST_SCOPE.md",
+    "justfile",
+    ".gitlab-ci.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "development.md",
+    "README.md",
+    "docker-compose.yml",
+)
+
+ALWAYS_PAUSE = ("This merge request",)
+
+# Film auth/shell before pages that call ensure_session, then extras.
+SCENE_ORDER = (
+    "landing",
+    "auth",
+    "shell",
+    "workspace",
+    "api",
+    "chat",
+    "fleet",
+    "sandboxes",
+    "cases",
+    "inbox",
+    "agents",
+    "integrations",
+    "settings",
+    "runners",
+    "cloud",
+    "partners",
+    "sessions",
+    "dashboard",
+    "lab",
+    "kind",
+    "k8s",
+    "unify",
+    "workers",
+)
+
+
+def _sort_scenes(scenes: list[str]) -> list[str]:
+    rank = {name: i for i, name in enumerate(SCENE_ORDER)}
+    return sorted(scenes, key=lambda name: (rank.get(name, 1000), name))
+
+
+def load_rules() -> list[dict]:
+    data = tomllib.loads(MAP.read_text(encoding="utf-8"))
+    rules = data.get("rule") or []
+    if not rules:
+        raise SystemExit(f"{MAP} has no [[rule]] entries")
+    return rules
+
+
+def path_matches(path: str, prefix: str) -> bool:
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def skip_path(path: str) -> bool:
+    if path.startswith(SKIP_PREFIXES):
+        return True
+    for p in SKIP_PREFIXES:
+        if path == p or path.startswith(p):
+            return True
+    return False
+
+
+def merge_base() -> str:
+    for cand in (
+        ["git", "merge-base", "HEAD", "origin/main"],
+        ["git", "merge-base", "HEAD", "main"],
+        ["git", "rev-parse", "HEAD"],
+    ):
+        r = subprocess.run(
+            cand,
+            cwd=REPO,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    raise SystemExit("could not resolve merge-base")
+
+
+def changed_paths(base: str) -> list[str]:
+    names: set[str] = set()
+    for args in (
+        ["git", "diff", "--name-only", f"{base}...HEAD"],
+        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ):
+        r = subprocess.run(args, cwd=REPO, check=True, capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            p = line.strip()
+            if p:
+                names.add(p)
+    return sorted(names)
+
+
+def hits_for(paths: list[str], rules: list[dict]) -> tuple[list[str], list[str], list[tuple[str, list[str]]]]:
+    scenes: list[str] = []
+    pauses: list[str] = []
+    why: list[tuple[str, list[str]]] = []
+    scene_seen: set[str] = set()
+    pause_seen: set[str] = set()
+    for path in paths:
+        if skip_path(path):
+            continue
+        hit_scenes: list[str] = []
+        for rule in rules:
+            if any(path_matches(path, pref) for pref in rule.get("paths") or []):
+                for s in rule.get("scenes") or []:
+                    if s not in scene_seen:
+                        scene_seen.add(s)
+                        scenes.append(s)
+                    if s not in hit_scenes:
+                        hit_scenes.append(s)
+                for t in rule.get("pauses") or []:
+                    if t not in pause_seen:
+                        pause_seen.add(t)
+                        pauses.append(t)
+        if hit_scenes:
+            why.append((path, hit_scenes))
+    scenes = _sort_scenes(scenes)
+    for t in ALWAYS_PAUSE:
+        if t not in pause_seen:
+            pauses.append(t)
+    return scenes, pauses, why
+
+
+def tree_id() -> str:
+    r = subprocess.run(
+        ["bash", str(REPO / "scripts" / "tree-id.sh")],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return r.stdout.strip()
+
+
+def render(base: str, tid: str, scenes: list[str], pauses: list[str], why: list[tuple[str, list[str]]]) -> str:
+    lines = [
+        "# Human test scope",
+        "",
+        "This merge must **record** and **human-walk** the scenes below.",
+        "Generated by `python3 tests/browser/surface_scope.py --write`.",
+        "Re-run that command whenever the diff changes — the map follows",
+        "direct and indirect path hits in `tests/browser/surface_map.toml`.",
+        "",
+        f"- Merge-base: `{base}`",
+        f"- Tree-id: `{tid}`",
+        "",
+        "## Scenes",
+        "",
+    ]
+    if scenes:
+        for s in scenes:
+            lines.append(f"- `{s}`")
+    else:
+        lines.append("- _(none — no product surface in the diff)_")
+    lines.extend(["", "## Pause steps", ""])
+    for t in pauses:
+        lines.append(f"- {t}")
+    lines.extend(["", "## Why", "", "| Path | Scenes |", "| --- | --- |"])
+    if why:
+        for path, sc in why:
+            lines.append(f"| `{path}` | {', '.join(f'`{s}`' for s in sc)} |")
+    else:
+        lines.append("| — | — |")
+    lines.extend(
+        [
+            "",
+            "## Film review (agent fills after recording)",
+            "",
+            "Record on the **final merge tree** (identity == tree-id above).",
+            "Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`",
+            "and the `.webm`. Look for bugs: wrong heading, error toast,",
+            "missing control, broken layout, failed action, leaked secret.",
+            "",
+            "- Recorded on final merge tree: ",
+            "- Frames + webm inspected: ",
+            "- Bugs found: ",
+            "  - (none / list them)",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def parse_scenes_from_scope(text: str) -> list[str]:
+    scenes: list[str] = []
+    in_scenes = False
+    for line in text.splitlines():
+        if line.strip() == "## Scenes":
+            in_scenes = True
+            continue
+        if in_scenes and line.startswith("## "):
+            break
+        if not in_scenes:
+            continue
+        raw = line.strip()
+        if raw.startswith("- `") and raw.endswith("`"):
+            scenes.append(raw[3:-1])
+        elif raw.startswith("- _(none"):
+            return []
+    return scenes
+
+
+def cmd_write() -> int:
+    rules = load_rules()
+    base = merge_base()
+    paths = changed_paths(base)
+    scenes, pauses, why = hits_for(paths, rules)
+    text = render(base, tree_id(), scenes, pauses, why)
+    SCOPE.write_text(text, encoding="utf-8")
+    print(f"wrote {SCOPE.relative_to(REPO)} scenes={' '.join(scenes) or '(none)'}")
+    return 0
+
+
+def cmd_check() -> int:
+    if not SCOPE.is_file():
+        print(
+            f"FAIL: {SCOPE.name} missing. Run: python3 tests/browser/surface_scope.py --write",
+            file=sys.stderr,
+        )
+        return 1
+    rules = load_rules()
+    base = merge_base()
+    want, _, _ = hits_for(changed_paths(base), rules)
+    got = parse_scenes_from_scope(SCOPE.read_text(encoding="utf-8"))
+    if want != got:
+        print(
+            "FAIL: HUMAN_TEST_SCOPE.md scenes do not match this diff "
+            f"(direct+indirect).\n  want: {want or ['(none)']}\n  got:  {got or ['(none)']}\n"
+            "Re-run: python3 tests/browser/surface_scope.py --write",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"OK {SCOPE.name} scenes={' '.join(want) or '(none)'}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--write", action="store_true")
+    g.add_argument("--check", action="store_true")
+    g.add_argument("--scenes", action="store_true")
+    g.add_argument("--pause-titles", action="store_true")
+    g.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+
+    if args.write:
+        return cmd_write()
+    if args.check:
+        return cmd_check()
+
+    rules = load_rules()
+    base = merge_base()
+    scenes, pauses, why = hits_for(changed_paths(base), rules)
+    if args.scenes:
+        print(" ".join(scenes))
+        return 0
+    if args.pause_titles:
+        for t in pauses:
+            print(t)
+        return 0
+    print(
+        json.dumps(
+            {"merge_base": base, "scenes": scenes, "pauses": pauses, "why": why},
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

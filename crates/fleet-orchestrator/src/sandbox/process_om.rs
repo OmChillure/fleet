@@ -10,9 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::worker_script::materialize_workspace;
-use super::{
-    RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest,
-};
+use super::{RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest};
 
 struct ProcessEntry {
     project_id: Uuid,
@@ -62,7 +60,10 @@ impl SandboxRuntime for ProcessRuntime {
             .env_clear();
 
         // Minimal env + FLEET_* only (no host secrets).
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()));
+        cmd.env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        );
         cmd.env("HOME", &req.work_dir);
         cmd.env("TMPDIR", &req.work_dir);
         cmd.env("LANG", "C.UTF-8");
@@ -74,9 +75,7 @@ impl SandboxRuntime for ProcessRuntime {
         cmd.env("FLEET_WORK_DIR", req.work_dir.display().to_string());
 
         let child = cmd.spawn().map_err(|e| {
-            SandboxError::Spawn(format!(
-                "process spawn failed (is bash installed?): {e}"
-            ))
+            SandboxError::Spawn(format!("process spawn failed (is bash installed?): {e}"))
         })?;
 
         let handle = RuntimeHandle {
@@ -176,7 +175,9 @@ impl SandboxRuntime for ProcessRuntime {
         if let Some(child) = e.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let code = status.code().unwrap_or(if status.success() { 0 } else { 1 });
+                    let code = status
+                        .code()
+                        .unwrap_or(if status.success() { 0 } else { 1 });
                     e.exit_code = Some(code);
                     e.child = None;
                     return Ok(SandboxState::Exited { code: Some(code) });

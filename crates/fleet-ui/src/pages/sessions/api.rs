@@ -4,6 +4,7 @@ pub use crate::pages::fleet::api::FleetError;
 
 use serde_json::Value;
 
+use super::shape::worker_session_detail_path;
 use crate::pages::auth::api::auth_base_url;
 
 fn client() -> reqwest::Client {
@@ -28,8 +29,9 @@ fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder
 }
 
 pub async fn get_session_detail(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
-    let res = with_credentials(client().get(api_url(&format!(
-        "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}"
+    let res = with_credentials(client().get(api_url(&worker_session_detail_path(
+        workspace_id,
+        session_id,
     ))))
     .send()
     .await

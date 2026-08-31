@@ -9,14 +9,16 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_STATUS_DISABLED,
-    WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
-    parse_worker_host_isolation,
+    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation, HostCpSettings,
+    NewWorkerHost, WorkerHost, WorkerHostPairToken, WORKER_HOST_ISOLATION_SANDBOXED,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING,
 };
 use crate::pool::map_query_err;
 
 pub const PAIR_TOKEN_PREFIX: &str = "flp_";
 pub const MACHINE_TOKEN_PREFIX: &str = "flm_";
+/// Catalog: pair tokens expire after one hour (HTTP create/rotate uses `now + PAIR_TTL`).
+pub const PAIR_TTL: Duration = Duration::hours(1);
 
 const HOST_COLS: &str = r#"
     id, workspace_id, name, status, enabled, paused, drain, isolation,
@@ -87,6 +89,7 @@ pub async fn create_pending(
         RETURNING {HOST_COLS}
         "#
     );
+    let labels = normalize_host_labels(&new.labels);
     let host = sqlx::query_as::<_, WorkerHost>(&q)
         .bind(new.id)
         .bind(new.workspace_id)
@@ -95,7 +98,7 @@ pub async fn create_pending(
         .bind(new.allow_container)
         .bind(new.max_concurrent)
         .bind(new.max_job_timeout_s)
-        .bind(&new.labels)
+        .bind(&labels)
         .bind(new.created_by)
         .fetch_one(&mut *tx)
         .await
@@ -187,9 +190,15 @@ pub async fn patch_cp_settings(
     };
     let allow_host = patch.allow_host.unwrap_or(current.allow_host);
     let allow_container = patch.allow_container.unwrap_or(current.allow_container);
-    let max_concurrent = patch.max_concurrent.unwrap_or(current.max_concurrent);
+    let max_concurrent = patch
+        .max_concurrent
+        .unwrap_or(current.max_concurrent)
+        .clamp(1, 256);
     let max_job_timeout_s = patch.max_job_timeout_s.unwrap_or(current.max_job_timeout_s);
-    let labels = patch.labels.as_ref().unwrap_or(&current.labels);
+    let labels = match patch.labels.as_ref() {
+        Some(incoming) => normalize_host_labels(incoming),
+        None => current.labels.clone(),
+    };
     let auto_update = patch.auto_update.unwrap_or(current.auto_update);
     let update_requested_at = if patch.request_update == Some(true) {
         Some(Utc::now())
@@ -199,7 +208,10 @@ pub async fn patch_cp_settings(
     let (install_request, install_requested_at) = if let Some(spec) = patch.install_model.as_ref() {
         (Some(spec.clone()), Some(Utc::now()))
     } else {
-        (current.install_request.clone(), current.install_requested_at)
+        (
+            current.install_request.clone(),
+            current.install_requested_at,
+        )
     };
     let runtime_settings = if let Some(incoming) = patch.runtime_settings.as_ref() {
         merge_json_objects(&current.runtime_settings, incoming)
@@ -215,7 +227,7 @@ pub async fn patch_cp_settings(
         || allow_container != current.allow_container
         || max_concurrent != current.max_concurrent
         || max_job_timeout_s != current.max_job_timeout_s
-        || labels != &current.labels
+        || labels != current.labels
         || auto_update != current.auto_update
         || runtime_settings != current.runtime_settings;
     let settings_gen = if bump {
@@ -307,15 +319,6 @@ pub async fn set_runtime_reported(
 }
 
 pub async fn clear_install_request(pool: &PgPool, host_id: Uuid) -> DbResult<WorkerHost> {
-    clear_install_request_if(pool, host_id, None).await
-}
-
-/// Clear only when `ack_spec` is omitted (old host) or matches the queued spec.
-pub async fn clear_install_request_if(
-    pool: &PgPool,
-    host_id: Uuid,
-    ack_spec: Option<&str>,
-) -> DbResult<WorkerHost> {
     let q = format!(
         r#"
         UPDATE worker_hosts
@@ -323,12 +326,37 @@ pub async fn clear_install_request_if(
             install_requested_at = NULL,
             updated_at = now()
         WHERE id = $1
-          AND (
-            $2::text IS NULL
-            OR install_request IS NULL
-            OR COALESCE(install_request->>'spec', '') = ''
-            OR install_request->>'spec' = $2
-          )
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+/// Clear only when `ack_spec` matches the queued spec. Omitted/empty/whitespace
+/// does not drop a queued install (old hosts that omit spec must not Apply-clear).
+pub async fn clear_install_request_if(
+    pool: &PgPool,
+    host_id: Uuid,
+    ack_spec: Option<&str>,
+) -> DbResult<WorkerHost> {
+    let Some(ack_spec) = ack_spec.map(str::trim).filter(|s| !s.is_empty()) else {
+        return get(pool, host_id)
+            .await?
+            .ok_or_else(|| DbError::NotFound("worker host not found".into()));
+    };
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET install_request = NULL,
+            install_requested_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND install_request->>'spec' = $2
         RETURNING {HOST_COLS}
         "#
     );
@@ -691,6 +719,29 @@ pub async fn authenticate_machine(
     Ok(Some(host))
 }
 
+/// Drop GPU entries whose name is empty, whitespace, null, missing, or
+/// trademark-only. Named cards stay as reported so a later Some(json)
+/// can replace the snapshot exactly.
+fn sanitize_heartbeat_hardware(hardware: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let Some(mut hardware) = hardware else {
+        return None;
+    };
+    let Some(gpus) = hardware.get_mut("gpus").and_then(|g| g.as_array_mut()) else {
+        return Some(hardware);
+    };
+    gpus.retain(gpu_entry_has_inventory_name);
+    Some(hardware)
+}
+
+fn gpu_entry_has_inventory_name(entry: &serde_json::Value) -> bool {
+    match entry.get("name") {
+        Some(serde_json::Value::Null) | None => false,
+        Some(v) => v
+            .as_str()
+            .is_some_and(|n| !n.trim().is_empty() && !normalize_gpu_name(n).is_empty()),
+    }
+}
+
 pub async fn heartbeat(
     pool: &PgPool,
     host_id: Uuid,
@@ -746,6 +797,7 @@ pub async fn heartbeat_with_machine(
     let current_jobs = current_jobs.max(0);
     let advertised_max_concurrent = advertised_max_concurrent.map(|n| n.clamp(1, 256));
     let report_software = software_git_sha.is_some() || software_bins.is_some();
+    let hardware = sanitize_heartbeat_hardware(hardware);
     let q = format!(
         r#"
         UPDATE worker_hosts
@@ -950,13 +1002,18 @@ pub async fn rotate_machine_token(pool: &PgPool, host_id: Uuid) -> DbResult<Pair
     })
 }
 
+/// Same rule as [`WorkerHost::is_cluster_host`]: trimmed, case-insensitive `cluster`.
+const CLUSTER_LABEL_SQL: &str =
+    "EXISTS (SELECT 1 FROM unnest(labels) l WHERE lower(trim(l)) = 'cluster')";
+
 /// In-cluster bootstrap boxes (`labels` contains `cluster`), any workspace.
+/// HTTP PATCH must not stamp `cluster` on a regular paired host.
 pub async fn list_cluster(pool: &PgPool) -> DbResult<Vec<WorkerHost>> {
     let q = format!(
         r#"
         SELECT {HOST_COLS}
         FROM worker_hosts
-        WHERE 'cluster' = ANY (labels)
+        WHERE {CLUSTER_LABEL_SQL}
         ORDER BY last_seen_at DESC NULLS LAST, id ASC
         "#
     );
@@ -966,7 +1023,10 @@ pub async fn list_cluster(pool: &PgPool) -> DbResult<Vec<WorkerHost>> {
         .map_err(map_query_err)
 }
 
-/// Tick candidate set: enabled, not paused/drain, stored `online`, seen recently, paired.
+/// Tick candidate set: enabled, not holding new jobs (paused/drain/no
+/// plane modes), stored `online`, seen recently, paired, under cap.
+/// Revoked (`disabled`, `machine_token_hash` cleared) is never a candidate.
+/// A running job may finish; this list must not lease another.
 pub async fn list_assignable(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -977,10 +1037,11 @@ pub async fn list_assignable(
         r#"
         SELECT {HOST_COLS}
         FROM worker_hosts
-        WHERE (workspace_id = $1 OR 'cluster' = ANY(labels))
+        WHERE (workspace_id = $1 OR {CLUSTER_LABEL_SQL})
           AND enabled
           AND NOT paused
           AND NOT drain
+          AND (allow_host OR allow_container)
           AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
           AND machine_token_hash IS NOT NULL
@@ -989,12 +1050,37 @@ pub async fn list_assignable(
         ORDER BY last_seen_at DESC, id ASC
         "#
     );
-    sqlx::query_as::<_, WorkerHost>(&q)
+    let hosts = sqlx::query_as::<_, WorkerHost>(&q)
         .bind(workspace_id)
         .bind(cutoff)
         .fetch_all(pool)
         .await
-        .map_err(map_query_err)
+        .map_err(map_query_err)?;
+    Ok(hosts
+        .into_iter()
+        .filter(|h| !holding_new_jobs(h) && !at_job_cap(h))
+        .collect())
+}
+
+/// Plane ∩ advertised, each clamped to 1–256. Missing advertised uses the plane cap.
+pub fn effective_max_concurrent(host: &WorkerHost) -> i32 {
+    let cp = host.max_concurrent.clamp(1, 256);
+    match host.advertised_max_concurrent {
+        Some(n) => cp.min(n.clamp(1, 256)),
+        None => cp,
+    }
+}
+
+/// True when `current_jobs` has reached [`effective_max_concurrent`].
+/// Advertised `0` is a cap of 1, not unlimited.
+pub fn at_job_cap(host: &WorkerHost) -> bool {
+    host.current_jobs.max(0) >= effective_max_concurrent(host)
+}
+
+/// Stop taking new jobs. Same predicate as `fleet-runners-view::holding_new_jobs`.
+/// A running job may finish; [`list_assignable`] must not lease another.
+pub fn holding_new_jobs(host: &WorkerHost) -> bool {
+    host.paused || host.drain || !(host.allow_host || host.allow_container)
 }
 
 /// Paired hosts mid host-bin restart (`software_updating`) seen within `seen_within`.
@@ -1047,5 +1133,24 @@ mod token_tests {
         assert!(verify_token(&pair, &h));
         assert!(!verify_token(&machine, &h));
         assert!(!verify_token(&pair, "deadbeef"));
+    }
+
+    #[test]
+    fn hash_token_is_not_plaintext() {
+        let token = generate_pair_token();
+        let hashed = hash_token(&token);
+        assert_ne!(hashed, token);
+        assert_eq!(hashed, hash_token(&token));
+        assert_eq!(hashed.len(), 64);
+        assert!(
+            hashed.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be sha256 hex: {hashed}"
+        );
+        assert!(!hashed.contains(&token), "hash must not embed plaintext");
+        assert!(
+            !hashed.contains(PAIR_TOKEN_PREFIX),
+            "hash must not embed {PAIR_TOKEN_PREFIX}: {hashed}"
+        );
+        assert!(verify_token(&token, &hashed));
     }
 }

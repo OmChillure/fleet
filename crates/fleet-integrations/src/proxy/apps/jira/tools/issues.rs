@@ -1,9 +1,9 @@
 //! Jira issue tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn search_issues(
     http: &reqwest::Client,
@@ -32,9 +32,7 @@ pub(crate) async fn search_issues(
         .clamp(1, 50);
 
     // Prefer new search/jql endpoint; fall back to classic /search.
-    let url = format!(
-        "https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql"
-    );
+    let url = format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql");
     let payload = json!({
         "jql": jql,
         "maxResults": max,
@@ -229,19 +227,13 @@ pub(crate) async fn add_comment(
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err(
-                "jira",
-                "add_comment",
-                "bad_args",
-                "body is required",
-                None,
-            );
+            return ProxyResult::err("jira", "add_comment", "bad_args", "body is required", None);
         }
     };
-    let url = format!(
-        "https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/comment"
-    );
-    let (status, body) = jira_post(http, token, &url, &json!({ "body": adf_doc(&body_text) })).await;
+    let url =
+        format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/comment");
+    let (status, body) =
+        jira_post(http, token, &url, &json!({ "body": adf_doc(&body_text) })).await;
     if !(200..300).contains(&status) {
         return upstream_err("add_comment", status, &body);
     }
@@ -264,9 +256,8 @@ pub(crate) async fn list_transitions(
         Ok(k) => k,
         Err(e) => return ProxyResult::err("jira", "list_transitions", "bad_args", e, None),
     };
-    let url = format!(
-        "https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/transitions"
-    );
+    let url =
+        format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/transitions");
     let (status, body) = jira_get(http, token, &url).await;
     if !(200..300).contains(&status) {
         return upstream_err("list_transitions", status, &body);
@@ -309,9 +300,11 @@ pub(crate) async fn transition_issue(
     let transition_id = match args
         .get("transition_id")
         .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| {
-            v.as_u64().map(|n| n.to_string())
-        }))
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
         .filter(|s| !s.is_empty())
     {
         Some(id) => id,
@@ -325,9 +318,8 @@ pub(crate) async fn transition_issue(
             );
         }
     };
-    let url = format!(
-        "https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/transitions"
-    );
+    let url =
+        format!("https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{key}/transitions");
     let (status, body) = jira_post(
         http,
         token,
@@ -346,4 +338,3 @@ pub(crate) async fn transition_issue(
         Some(status),
     )
 }
-

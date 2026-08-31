@@ -1,7 +1,7 @@
 //! Plan validation: deps, cycles, size limits.
 
 use crate::domain::{
-    WorkPlanBody, MAX_DEPENDENCY_FAN_IN, MAX_PLAN_BODY_BYTES, MAX_SPEC_MD_BYTES, MAX_TASKS_PER_PLAN,
+    MAX_DEPENDENCY_FAN_IN, MAX_PLAN_BODY_BYTES, MAX_SPEC_MD_BYTES, MAX_TASKS_PER_PLAN, WorkPlanBody,
 };
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -55,7 +55,10 @@ pub fn validate_plan(p: &WorkPlanBody) -> Result<()> {
             return Err(err(format!("tasks[{i}].plan_task_id is required")));
         }
         if !ids.insert(t.plan_task_id.clone()) {
-            return Err(err(format!("duplicate plan_task_id \"{}\"", t.plan_task_id)));
+            return Err(err(format!(
+                "duplicate plan_task_id \"{}\"",
+                t.plan_task_id
+            )));
         }
         if t.title.trim().is_empty() {
             return Err(err(format!("tasks[{i}].title is required")));

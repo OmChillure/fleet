@@ -101,18 +101,23 @@ Protocol (checklist, when to film, which scene maps to which crate):
 `docs/human-testing.md`.
 
 - **Humans** run `./scripts/human-test.sh`. It starts Postgres + API (:8080)
-  + UI (:3030) if needed and walks every current surface. Use it when you
-  do not know the product yet, and again whenever you add a surface.
+  + UI (:3030) if needed and walks **HUMAN_TEST_SCOPE.md** (not the full
+  catalog). `guide-all` is a first product tour only. After any code
+  change, the developer AI runs
+  `python3 tests/browser/surface_scope.py --write` so the scope file
+  lists every surface the diff can break (direct + indirect path hits).
+  The MR must include that file; `--check` must pass.
 - Port-up is not this tree. Live gates require `GET /health` `git_sha` **and**
   UI `/fleet-git-sha.txt` == `scripts/tree-id.sh` (Kind extraPortMappings
-  often steal :8080/:3030). Rebuild after edits or the result is not valid.
+  often steal :8080/:3030). Host `fleet-dev` then uses :18080/:13030.
+  Rebuild the sha-consuming bits after edits or the result is not valid.
 - When you add a user-visible or operator-visible path, add a step to
   `scripts/human-test.sh` and a scene to `tests/browser/record_demo.py` in
   the **same** change.
 
 ## Merge requests and review
 
-Ship work through a **GitLab merge request** and **ask for a review on
+Ship work through a **GitLab merge request** and **ask for a peer review on
 Slack**. That is the default.
 
 Skip the MR/review loop **only** for small tweaks: typos, comment nits,
@@ -126,14 +131,26 @@ Do not merge unless a human asks you to merge.
 
 The **coding agent** records the demo, not the human.
 
-1. Launch if needed: `./scripts/human-test.sh launch`
-2. Film the scenes your diff can break (see the crate → scene table in
-   `docs/human-testing.md`):
-   `./scripts/human-test.sh record`  
-   or `./scripts/human-test.sh record fleet chat`
-3. Attach the `.webm` under `.tmp/demos/` to the GitLab MR. One sentence
-   in the description: what the clip shows.
-4. **Never** `git add` videos, tokens, or personal emails. Use
+Film the **final tree that will be merged**: all edits done, identity
+(`GET /health` `git_sha` **and** UI `/fleet-git-sha.txt`) ==
+`scripts/tree-id.sh` for that tree. A clip shot before later edits, or
+against an older bake, is **not** MR proof — discard it and re-film.
+Do not film, then change code, then attach the old `.webm`.
+
+The clip must show **every surface in HUMAN_TEST_SCOPE.md** (not a
+random walkthrough, not a full-app tour). After the recording, the
+agent **must review the film**: open each `.tmp/demos/<stamp>-frames/*.png`
+and the `.webm`, look for bugs (wrong heading, error toast, missing
+control, broken layout, failed action, leaked secret), and fill the
+**Film review** section in `HUMAN_TEST_SCOPE.md` before attaching.
+
+1. Finish the change. Rebuild if you edited after the last bake.
+2. `python3 tests/browser/surface_scope.py --write` (and `--check`).
+3. Launch if needed: `./scripts/human-test.sh launch`
+4. Film the scope: `./scripts/human-test.sh record`
+5. Review frames + `.webm` for bugs; fill HUMAN_TEST_SCOPE.md Film review.
+6. Attach the `.webm` to the GitLab MR. One sentence: which scenes + review.
+7. **Never** `git add` videos, tokens, or personal emails. Use
    `*@example.test` in recordings.
 
 Every MR that is not a small tweak needs this clip. If Playwright cannot

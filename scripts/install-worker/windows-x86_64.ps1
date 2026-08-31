@@ -6,6 +6,61 @@ if (-not $Origin) { $Origin = $env:FLEET_URL }
 if (-not $Origin) { throw "set FLEET_URL to the control plane" }
 $Origin = $Origin.TrimEnd("/")
 
+# Pair token is required for first install. Missing/empty/whitespace must
+# fail closed before mkdir or fetch so we never write bins that never pair.
+# A leftover empty or whitespace-only machine.token is unpaired (same as
+# MachineToken::parse). A non-empty file may re-run without a new pair token.
+$pairToken = "$env:FLEET_PAIR_TOKEN".Trim()
+$cfgDir = if ($env:FLEET_HOST_CONFIG_DIR) { $env:FLEET_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".config\fleet-host" }
+$tokenFile = Join-Path $cfgDir "machine.token"
+$alreadyPaired = $false
+if (Test-Path -LiteralPath $tokenFile) {
+    $existing = ([string](Get-Content -Raw -LiteralPath $tokenFile -ErrorAction SilentlyContinue)).Trim()
+    if ($existing) { $alreadyPaired = $true }
+}
+if (-not $pairToken -and -not $alreadyPaired) {
+    throw "FLEET_PAIR_TOKEN is not set"
+}
+if ($pairToken) {
+    $env:FLEET_PAIR_TOKEN = $pairToken
+}
+
+# 127/8, localhost, or [::1] -- another computer cannot reach this URL.
+function Test-FleetUrlLoopback([string]$Url) {
+    if (-not $Url) { return $false }
+    $hostPart = $Url -replace '^https?://', ''
+    $hostPart = $hostPart.Split('/')[0]
+    # last @ (userinfo), same as host_from_url
+    $at = $hostPart.LastIndexOf('@')
+    if ($at -ge 0) { $hostPart = $hostPart.Substring($at + 1) }
+    if ($hostPart -match '^\[(.+)\](?::\d+)?$') {
+        $hostPart = $Matches[1]
+    } elseif ($hostPart -notmatch ':.*:') {
+        $hostPart = $hostPart.Split(':')[0]
+    }
+    $h = $hostPart.Trim().TrimStart('[').TrimEnd(']').ToLowerInvariant()
+    if ($h -eq 'localhost' -or $h -eq '::1') { return $true }
+    if ($h -match '^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+        foreach ($p in @($Matches[1], $Matches[2], $Matches[3])) {
+            $n = [int]$p
+            if ($n -gt 255) { return $false }
+        }
+        return $true
+    }
+    return $false
+}
+if (Test-FleetUrlLoopback $Origin) {
+    Write-Warning "FLEET_URL $Origin is loopback. Another computer needs a LAN or public control-plane URL."
+    $healthOk = $false
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "$Origin/health"
+        $healthOk = $true
+    } catch { }
+    if (-not $healthOk) {
+        throw "refusing to pair: $Origin is loopback and this host is not the control plane"
+    }
+}
+
 $Prefix = $env:FLEET_PREFIX
 if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA "fleet-host" }
 $BinDir = Join-Path $Prefix "bin"
@@ -188,11 +243,9 @@ $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup
 "@echo off`r`n`"$BinDir\fleet-host.exe`" run`r`n" | Set-Content -Path $startup -Encoding ASCII
 Write-Host "startup shortcut: $startup"
 
-$cfgDir = if ($env:FLEET_HOST_CONFIG_DIR) { $env:FLEET_HOST_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".config\fleet-host" }
-$alreadyPaired = Test-Path (Join-Path $cfgDir "machine.token")
-if ($env:FLEET_PAIR_TOKEN) {
+if ($pairToken) {
     Write-Host "pairing with the control plane"
-    & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $env:FLEET_PAIR_TOKEN
+    & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $pairToken
     Write-Host "starting fleet-host (heartbeats; offline after 90s if this fails)"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
     Write-Host "started fleet-host run (also at logon: $startup)"

@@ -2,10 +2,10 @@
 
 use anyhow::Context as _;
 use fleet_operator::crd::FleetSandbox;
-use fleet_operator::reconcile::{error_policy, reconcile, Context, OperatorConfig};
+use fleet_operator::reconcile::{Context, OperatorConfig, error_policy, reconcile};
 use futures::StreamExt;
-use kube::runtime::watcher::Config as WatcherConfig;
 use kube::runtime::Controller;
+use kube::runtime::watcher::Config as WatcherConfig;
 use kube::{Api, Client, CustomResourceExt};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -15,8 +15,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,kube=warn")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kube=warn")),
         )
         .with_target(true)
         .init();

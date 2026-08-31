@@ -1,6 +1,6 @@
 use super::StoreError;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -36,8 +36,7 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 
     let mut opts = PgConnectOptions::from_str(&url).map_err(StoreError::Sqlx)?;
     let lower = url.to_ascii_lowercase();
-    if lower.contains("pooler") || lower.contains("supabase") || lower.contains("pgbouncer=true")
-    {
+    if lower.contains("pooler") || lower.contains("supabase") || lower.contains("pgbouncer=true") {
         opts = opts.statement_cache_capacity(0);
     }
 

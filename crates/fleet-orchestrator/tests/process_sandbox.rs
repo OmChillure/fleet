@@ -10,8 +10,12 @@ use fleet_orchestrator::config::{AuthMode, Config};
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
+use fleet_orchestrator::orch::TickRunner;
+use fleet_orchestrator::sandbox::{ProcessRuntime, SandboxRuntime};
+use fleet_orchestrator::store::{Store, connect, migrate};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -36,7 +40,9 @@ fn driver_bin() -> PathBuf {
     let target = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("target")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target")
         });
     let driver = target.join(profile).join("fleet-driver");
     {
@@ -272,5 +278,167 @@ async fn e2e_process_worker_completes_chain_and_writes_artifacts() {
         found_artifact,
         "fleet-driver did not write artifacts/result.json\n{}",
         diag.join("\n")
+    );
+}
+
+/// Docs §16: `SANDBOX_BACKEND=process` without a worker bin → spawn fails →
+/// session `failed_spawn` → task not left assigned → run fails (`fail_run`).
+/// Must not complete via a silent stub.
+#[tokio::test]
+async fn process_backend_missing_worker_bin_is_failed_spawn_then_fail_run() {
+    let url = require_database_url();
+    let pool = connect(&url).await.expect("connect");
+    migrate(&pool).await.expect("migrate");
+    let store = Store::new(pool);
+
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let missing = data_dir.path().join("no-such-fleet-driver");
+    assert!(
+        !missing.exists(),
+        "fixture must not exist: {}",
+        missing.display()
+    );
+    let rt = Arc::new(
+        ProcessRuntime::new(
+            data_dir.path(),
+            vec![missing.to_string_lossy().into_owned()],
+        )
+        .expect("ProcessRuntime accepts a missing bin path; exec fails at spawn"),
+    );
+    assert_eq!(rt.backend_name(), "process");
+    assert_ne!(rt.backend_name(), "stub");
+
+    let runner = TickRunner::new(
+        store.clone(),
+        rt,
+        data_dir.path().to_path_buf(),
+        "http://127.0.0.1:1",
+    )
+    .with_local_spawn();
+
+    let project = store
+        .create_project(&format!("missing-bin-{}", Uuid::new_v4()), 3)
+        .await
+        .expect("project");
+    let cfg = store.get_project_config(project.id).await.expect("config");
+    assert_eq!(
+        cfg.on_task_fail, "fail_run",
+        "project default must be fail_run (docs §16); got {}",
+        cfg.on_task_fail
+    );
+
+    let plan = WorkPlanBody {
+        plan_id: Uuid::new_v4(),
+        project_id: project.id,
+        run_id: Uuid::new_v4(),
+        version: 1,
+        status: WorkPlanStatus::Accepted,
+        source: "missing-bin".into(),
+        tasks: vec![PlanTask {
+            plan_task_id: "t1".into(),
+            title: "Only".into(),
+            summary: String::new(),
+            spec_md: String::new(),
+            depends_on: vec![],
+            worker_profile: "coding".into(),
+            acceptance: vec![],
+            priority: 100,
+            external_ref: None,
+            timeout_s: Some(60),
+            max_retries: Some(0),
+        }],
+        policy: PlanPolicy {
+            max_agents_override: None,
+            on_task_fail: OnTaskFailPolicy::FailRun,
+            auto_sync_external: false,
+            ..Default::default()
+        },
+    };
+    let run_id = plan.run_id;
+    store
+        .insert_accepted_plan(project.id, plan)
+        .await
+        .expect("plan");
+
+    let r1 = runner.tick_project(project.id).await.expect("tick1");
+    // Same tick materializes, promotes t1, spawn-fails, rollup. Extra tick is
+    // a no-op if already terminal.
+    let r2 = runner.tick_project(project.id).await.expect("tick2");
+
+    assert_eq!(
+        r1.spawned + r2.spawned,
+        0,
+        "missing worker bin must not succeed spawn (no silent stub): r1={r1:?} r2={r2:?}"
+    );
+    assert!(
+        r1.spawn_failed + r2.spawn_failed >= 1,
+        "missing worker bin must count spawn_failed: r1={r1:?} r2={r2:?}"
+    );
+    assert_eq!(
+        r1.completed_via_runtime + r2.completed_via_runtime,
+        0,
+        "must not complete via stub/runtime success: r1={r1:?} r2={r2:?}"
+    );
+
+    let snap = store.load_board_snapshot(project.id).await.expect("snap");
+    assert!(
+        !snap.sessions.is_empty(),
+        "spawn attempt must leave a session row (failed_spawn), not skip assignment"
+    );
+    for s in &snap.sessions {
+        assert_eq!(
+            s.runtime_backend, "process",
+            "must not fall back to stub or another backend: {s:?}"
+        );
+        assert_ne!(s.runtime_backend, "stub");
+        assert_eq!(
+            s.status, "failed_spawn",
+            "session must be failed_spawn, not left spawning/healthy: {s:?}"
+        );
+        assert_eq!(
+            s.exit_reason.as_deref(),
+            Some("spawn_failed"),
+            "exit_reason: {s:?}"
+        );
+        assert!(
+            s.runtime_handle.is_none(),
+            "failed exec must not record a runtime handle: {s:?}"
+        );
+        if let Some(dir) = s.work_dir.as_ref() {
+            assert!(
+                !PathBuf::from(dir).join("pid").exists(),
+                "missing bin must not write a pidfile in {dir}"
+            );
+        }
+    }
+
+    let t1 = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "t1")
+        .expect("t1");
+    assert_eq!(
+        t1.status, "done_failed",
+        "task must not stay assigned/in_progress/ready after failed_spawn: {t1:?}"
+    );
+    assert!(
+        t1.claimed_session_id.is_none(),
+        "failed_spawn must release the claim: {t1:?}"
+    );
+    assert_eq!(
+        t1.failure_reason.as_deref(),
+        Some("spawn_failed"),
+        "failure_reason: {t1:?}"
+    );
+
+    let run_status: String = sqlx::query_scalar("SELECT status FROM work_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("run status");
+    assert_eq!(
+        run_status, "failed",
+        "fail_run must terminate the run as failed after spawn_failed; \
+         r1={r1:?} r2={r2:?}"
     );
 }

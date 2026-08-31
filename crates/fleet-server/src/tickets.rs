@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult};
-use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
+use fleet_db::TicketInboxItem;
 use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -144,23 +144,48 @@ pub fn parse_github_owner_repo_num(key: &str) -> Option<(String, String, u64)> {
     Some((owner.to_string(), name.to_string(), n))
 }
 
-pub async fn monitor_tickets(
-    state: &AppState,
-    workspace_id: Uuid,
-    user_id: Uuid,
-    args: MonitorArgs,
-) -> AppResult<Value> {
-    let enabled = args.enabled.unwrap_or(true);
-    let connected = connected_task_providers(state, workspace_id).await?;
-    let mut providers: Vec<String> = args
-        .providers
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| p.trim().to_ascii_lowercase())
-        .filter(|p| TASK_PROVIDERS.contains(&p.as_str()))
-        .collect();
+/// Finish, HTTP monitor, and chat `monitor_tickets` share this gate.
+/// Unknown names are 400 — never silently dropped (that would still
+/// upsert `auto_launch` or insert a run).
+fn require_task_provider(raw: &str) -> AppResult<String> {
+    let p = raw.trim().to_ascii_lowercase();
+    if TASK_PROVIDERS.iter().any(|known| *known == p) {
+        Ok(p)
+    } else {
+        Err(AppError::bad_request(format!(
+            "unknown inbox provider `{p}`"
+        )))
+    }
+}
+
+/// Explicit monitor provider list. Any name not in TASK_PROVIDERS is 400.
+/// Blank entries are ignored. Empty result is Ok — caller may fall back
+/// to connected sources.
+fn require_requested_task_providers(raw: &[String]) -> AppResult<Vec<String>> {
+    let mut out = Vec::new();
+    for p in raw {
+        if p.trim().is_empty() {
+            continue;
+        }
+        out.push(require_task_provider(p)?);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Resolve the monitor listen list. Unknown names 400 (never silently
+/// dropped). An empty request falls back to connected sources. Enabling
+/// with nothing connected is 400 — never upsert `auto_launch` on a blank
+/// listen list (UI Start monitor / chat `monitor_tickets`).
+fn resolve_monitor_providers(
+    requested: &[String],
+    connected: &[String],
+    enabled: bool,
+) -> AppResult<Vec<String>> {
+    let mut providers = require_requested_task_providers(requested)?;
     if providers.is_empty() {
-        providers = connected.clone();
+        providers = connected.to_vec();
     }
     if enabled && providers.is_empty() {
         return Err(AppError::bad_request(
@@ -169,6 +194,25 @@ pub async fn monitor_tickets(
     }
     providers.sort();
     providers.dedup();
+    Ok(providers)
+}
+
+/// `auto_launch` is only persisted when there is something to listen to.
+/// Disabled empty + `auto_launch: true` must not arm a later Start monitor.
+fn persist_monitor_auto_launch(providers: &[String], requested: Option<bool>) -> bool {
+    !providers.is_empty() && requested.unwrap_or(false)
+}
+
+pub async fn monitor_tickets(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    args: MonitorArgs,
+) -> AppResult<Value> {
+    let enabled = args.enabled.unwrap_or(true);
+    let connected = connected_task_providers(state, workspace_id).await?;
+    let providers =
+        resolve_monitor_providers(&args.providers.unwrap_or_default(), &connected, enabled)?;
 
     let github_repos: Vec<String> = args
         .github_repos
@@ -195,7 +239,7 @@ pub async fn monitor_tickets(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let auto_launch = args.auto_launch.unwrap_or(false);
+    let auto_launch = persist_monitor_auto_launch(&providers, args.auto_launch);
 
     let monitor = ticket_repo::upsert_monitor(
         &state.db,
@@ -375,6 +419,15 @@ pub async fn mark_ticket_launched(
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(())
+}
+
+/// Second Finish of the same inbox key reuses this run instead of inserting another.
+fn already_launched_run(item: &TicketInboxItem) -> Option<Uuid> {
+    if item.state.eq_ignore_ascii_case("launched") || item.run_id.is_some() {
+        item.run_id
+    } else {
+        None
+    }
 }
 
 pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -> AppResult<Value> {
@@ -1405,11 +1458,7 @@ async fn resolve_ticket(
         .filter(|s| !s.is_empty())
         .or_else(|| parsed.as_ref().and_then(|p| p.provider.clone()));
     if let Some(p) = provider.as_deref() {
-        if !TASK_PROVIDERS.iter().any(|known| *known == p) {
-            return Err(AppError::bad_request(format!(
-                "unknown inbox provider `{p}`"
-            )));
-        }
+        require_task_provider(p)?;
     }
     let key = parsed.as_ref().map(|p| p.key.clone());
 
@@ -1515,7 +1564,11 @@ async fn fetch_ticket_details(
         _ => return None,
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
-    if result.ok { Some(result.data) } else { None }
+    if result.ok {
+        Some(result.data)
+    } else {
+        None
+    }
 }
 
 fn ticket_spec_md(item: &TicketInboxItem, live: Option<&Value>) -> String {
@@ -1588,7 +1641,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{AuthState, require_user};
+use fleet_auth::{require_user, AuthState};
 use fleet_db::repos::workspaces as workspace_repo;
 
 pub fn router() -> Router<AppState> {
@@ -1614,15 +1667,23 @@ async fn require_member(
         config: state.auth.clone(),
     };
     let user = require_user(&auth, jar).await?;
-    let role = require_workspace_role(
-        workspace_repo::user_role(&state.db, workspace_id, user.id).await?,
-    )?;
+    let role =
+        require_workspace_role(workspace_repo::user_role(&state.db, workspace_id, user.id).await?)?;
     Ok((user, role))
 }
 
 #[derive(Debug, Deserialize)]
 struct InboxQuery {
+    /// Free string so `GET /inbox?state=` cannot 500 on unknown/junk.
+    /// Empty/whitespace is unfiltered (`inbox_state_query_filter`).
+    #[serde(default)]
     state: Option<String>,
+}
+
+/// `GET /inbox?state=` filter. Empty/whitespace is unfiltered. Unknown values
+/// stay `Some` so the list is an empty match, not a 500.
+fn inbox_state_query_filter(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|s| !s.is_empty())
 }
 
 async fn http_list(
@@ -1632,7 +1693,7 @@ async fn http_list(
     Query(q): Query<InboxQuery>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
-    let filter = q.state.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let filter = inbox_state_query_filter(q.state.as_deref());
     Ok(Json(list_tickets(&state, workspace_id, filter).await?))
 }
 
@@ -1643,11 +1704,6 @@ async fn http_monitor(
     Json(args): Json<MonitorArgs>,
 ) -> AppResult<Json<Value>> {
     let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let _ = state
-        .orch
-        .store
-        .set_auto_sync_external(workspace_id, true)
-        .await;
     Ok(Json(
         monitor_tickets(&state, workspace_id, user.id, args).await?,
     ))
@@ -1682,6 +1738,18 @@ pub async fn finish_and_launch(
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
+    if let Some(run_id) = already_launched_run(&prep.item) {
+        return Ok(json!({
+            "ok": true,
+            "run_id": run_id,
+            "ticket": {
+                "provider": prep.item.provider,
+                "key": prep.item.external_key,
+                "title": prep.item.title,
+            },
+            "title": prep.title,
+        }));
+    }
     state
         .orch
         .store
@@ -1741,6 +1809,8 @@ async fn stamp_inbox_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
 
     #[test]
     fn parses_linear_and_jira_keys() {
@@ -1750,6 +1820,64 @@ mod tests {
         let p = parse_ticket_ref("jira:PROJ-9").unwrap();
         assert_eq!(p.provider.as_deref(), Some("jira"));
         assert_eq!(p.key, "PROJ-9");
+    }
+
+    /// `InboxQuery.state` is a free string so `GET /inbox?state=` cannot 500
+    /// on an unknown value. Empty/whitespace is unfiltered. Parsed the same
+    /// way the handler does (`axum::extract::Query`). Live HTTP filter is
+    /// `inbox_get_state_query_filters_and_unknown_does_not_500` in
+    /// `tests/inbox_state_query.rs` (no DATABASE_URL in `--lib`).
+    #[test]
+    fn inbox_query_state_unknown_does_not_fail_deserialize() {
+        fn parse_query(uri: &str) -> InboxQuery {
+            let uri: axum::http::Uri = uri.parse().unwrap_or_else(|e| panic!("{uri}: {e}"));
+            Query::<InboxQuery>::try_from_uri(&uri)
+                .unwrap_or_else(|e| {
+                    panic!("InboxQuery must deserialize {uri} so GET ?state= cannot 500: {e}")
+                })
+                .0
+        }
+
+        let unknown = parse_query("/inbox?state=not_a_real_state");
+        assert_eq!(
+            inbox_state_query_filter(unknown.state.as_deref()),
+            Some("not_a_real_state"),
+            "unknown must stay Some (empty list), not be rejected"
+        );
+
+        for (qs, want) in [
+            ("state=open", Some("open")),
+            ("state=launched", Some("launched")),
+            ("state=done", Some("done")),
+            ("state=ignored", Some("ignored")),
+            ("state=%20launched%20", Some("launched")),
+            ("state=OPEN", Some("OPEN")),
+            ("state=open%27%20OR%201%3D1", Some("open' OR 1=1")),
+            ("state=../../../etc/passwd", Some("../../../etc/passwd")),
+            ("state=", None),
+            ("state=%20%20", None),
+            ("", None),
+        ] {
+            let uri = if qs.is_empty() {
+                "/inbox".to_string()
+            } else {
+                format!("/inbox?{qs}")
+            };
+            let q = parse_query(&uri);
+            assert_eq!(inbox_state_query_filter(q.state.as_deref()), want, "{uri}");
+        }
+
+        assert_eq!(
+            inbox_state_query_filter(None),
+            None,
+            "omitted state is unfiltered"
+        );
+        assert_eq!(inbox_state_query_filter(Some("")), None);
+        assert_eq!(inbox_state_query_filter(Some("   ")), None);
+        assert_eq!(
+            inbox_state_query_filter(Some("not_a_real_state")),
+            Some("not_a_real_state")
+        );
     }
 
     #[test]
@@ -1843,5 +1971,394 @@ mod tests {
         ] {
             assert!(!status_done(open), "expected open: {open:?}");
         }
+    }
+
+    fn production_src() -> &'static str {
+        let src = include_str!("tickets.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\nasync fn ")
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    fn inbox_item(workspace_id: Uuid) -> TicketInboxItem {
+        let now = Utc::now();
+        TicketInboxItem {
+            id: Uuid::new_v4(),
+            workspace_id,
+            provider: "linear".into(),
+            external_key: "ENG-1".into(),
+            title: "from another workspace".into(),
+            url: None,
+            state: "open".into(),
+            summary: String::new(),
+            run_id: None,
+            last_seen_at: now,
+            created_at: now,
+        }
+    }
+
+    /// Knowing a ticket id from workspace A must not finish or monitor it via B.
+    /// Helper units only — live HTTP is `finish_or_monitor_ticket_in_another_workspace_is_403`
+    /// in `tests/http_api.rs` (no DATABASE_URL in `--lib`).
+    #[test]
+    fn finish_or_monitor_ticket_in_another_workspace_is_403() {
+        let err = require_workspace_role(None).expect_err("non-member must fail");
+        assert!(
+            matches!(&err, AppError::Forbidden(m) if m == "not a member of this workspace"),
+            "{err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            require_workspace_role(Some("member".into())).expect("member"),
+            "member"
+        );
+
+        let home = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let item = inbox_item(home);
+        let err = require_ticket_workspace(&item, other)
+            .expect_err("ticket from another workspace must fail");
+        assert!(
+            matches!(&err, AppError::Forbidden(m) if m == "ticket is not in this workspace"),
+            "{err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        require_ticket_workspace(&item, home).expect("same workspace is allowed");
+    }
+
+    fn item_with(state: &str, run_id: Option<Uuid>) -> TicketInboxItem {
+        let mut item = inbox_item(Uuid::new_v4());
+        item.state = state.into();
+        item.run_id = run_id;
+        item
+    }
+
+    /// Open tickets have no run; launched (or any row that already has a run)
+    /// must reuse that run_id so a second Finish cannot insert another plan.
+    #[test]
+    fn already_launched_run_is_the_existing_run_only() {
+        let run = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        assert_eq!(already_launched_run(&item_with("open", None)), None);
+        assert_eq!(already_launched_run(&item_with("ignored", None)), None);
+        assert_eq!(
+            already_launched_run(&item_with("launched", Some(run))),
+            Some(run)
+        );
+        assert_eq!(
+            already_launched_run(&item_with("Launched", Some(run))),
+            Some(run)
+        );
+        assert_eq!(
+            already_launched_run(&item_with("open", Some(run))),
+            Some(run),
+            "any run_id means already launched — fail closed"
+        );
+        assert_eq!(
+            already_launched_run(&item_with("ignored", Some(run))),
+            Some(run)
+        );
+        assert_eq!(
+            already_launched_run(&item_with("launched", None)),
+            None,
+            "launched without a run_id has nothing to reuse"
+        );
+        assert_ne!(
+            already_launched_run(&item_with("launched", Some(run))),
+            Some(other),
+            "must not invent a second run id"
+        );
+    }
+
+    fn assert_unknown_provider_400(raw: &str, err: AppError) {
+        match err {
+            AppError::BadRequest(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                assert!(
+                    lower.contains("unknown"),
+                    "{raw:?} must name the reject, got {msg}"
+                );
+                assert!(
+                    lower.contains("provider"),
+                    "{raw:?} must mention provider, got {msg}"
+                );
+                assert_eq!(
+                    AppError::bad_request(msg).into_response().status(),
+                    StatusCode::BAD_REQUEST,
+                    "{raw:?}"
+                );
+            }
+            other => panic!("{raw:?} must be 400 BadRequest, not {other:?}"),
+        }
+    }
+
+    /// Names not in TASK_PROVIDERS are 400 on finish and monitor (HTTP +
+    /// chat `monitor_tickets`). Silent filter would still upsert auto_launch
+    /// or insert a run.
+    ///
+    /// Helper + source-order lock only. Live POST /inbox, /inbox/finish, and
+    /// chat `execute_tool` paths are in `tests/http_api.rs` (`-- unknown_provider`).
+    #[test]
+    fn unknown_provider_is_400_and_does_not_enable_auto_launch_or_insert_a_run() {
+        for raw in [
+            "not_a_real_provider",
+            "openai",
+            "grok",
+            "gmail",
+            "http",
+            "TASK_PROVIDERS",
+            "githubb",
+            " jira2 ",
+        ] {
+            assert_unknown_provider_400(raw, require_task_provider(raw).expect_err(raw));
+        }
+        for known in TASK_PROVIDERS {
+            assert_eq!(require_task_provider(known).expect(known), *known);
+            assert_eq!(
+                require_task_provider(&known.to_ascii_uppercase()).expect(known),
+                *known
+            );
+        }
+        assert_eq!(require_task_provider(" GitHub ").expect("trim"), "github");
+
+        // Chat-tool / HTTP monitor body: same MonitorArgs, unknown must 400
+        // even when auto_launch is requested.
+        let args: MonitorArgs = serde_json::from_value(json!({
+            "enabled": true,
+            "providers": ["not_a_real_provider"],
+            "auto_launch": true,
+        }))
+        .expect("chat-tool MonitorArgs shape");
+        assert_eq!(args.auto_launch, Some(true));
+        assert_unknown_provider_400(
+            "not_a_real_provider",
+            require_requested_task_providers(args.providers.as_deref().unwrap_or(&[]))
+                .expect_err("monitor args with unknown provider"),
+        );
+
+        let mixed =
+            require_requested_task_providers(&["github".into(), "not_a_real_provider".into()])
+                .expect_err("mixed list must not keep github and drop the typo");
+        assert_unknown_provider_400("github+not_a_real_provider", mixed);
+
+        let only_unknown =
+            require_requested_task_providers(&["not_a_real_provider".into(), " ".into()])
+                .expect_err("unknown-only monitor list");
+        assert_unknown_provider_400("not_a_real_provider", only_unknown);
+
+        let ok =
+            require_requested_task_providers(&["linear".into(), " GitHub ".into(), String::new()])
+                .expect("known list");
+        assert_eq!(ok, vec!["github".to_string(), "linear".to_string()]);
+
+        let src = production_src();
+        let mon = fn_src(src, "pub async fn monitor_tickets(");
+        let reject_at = mon
+            .find("resolve_monitor_providers(")
+            .or_else(|| mon.find("require_requested_task_providers("))
+            .unwrap_or_else(|| {
+                panic!("monitor_tickets must reject unknown/empty providers before mutate:\n{mon}")
+            });
+        let upsert_at = mon
+            .find("upsert_monitor(")
+            .unwrap_or_else(|| panic!("monitor_tickets still upserts a monitor row:\n{mon}"));
+        assert!(
+            reject_at < upsert_at,
+            "unknown provider must 400 before upsert_monitor (auto_launch write):\n{mon}"
+        );
+        if let Some(sync_at) = mon.find("set_auto_sync_external(") {
+            assert!(
+                reject_at < sync_at,
+                "unknown provider must 400 before set_auto_sync_external:\n{mon}"
+            );
+        }
+        assert!(
+            !mon.contains(".filter(|p| TASK_PROVIDERS.contains"),
+            "unknown providers must 400, not be silently filtered:\n{mon}"
+        );
+
+        let finish = fn_src(src, "async fn resolve_ticket(");
+        let finish_reject = finish.find("require_task_provider(").unwrap_or_else(|| {
+            panic!("finish resolve_ticket must use the same unknown-provider reject:\n{finish}")
+        });
+        if let Some(seed_at) = finish.find("upsert_inbox(") {
+            assert!(
+                finish_reject < seed_at,
+                "unknown provider must 400 before seeding an inbox row:\n{finish}"
+            );
+        }
+
+        let launch = fn_src(src, "pub async fn finish_and_launch(");
+        let prep_at = launch.find("prepare_finish(").unwrap_or_else(|| {
+            panic!("finish_and_launch must prepare_finish (provider reject):\n{launch}")
+        });
+        if let Some(insert_at) = launch.find("insert_accepted_plan(") {
+            assert!(
+                prep_at < insert_at,
+                "unknown provider must 400 before insert_accepted_plan:\n{launch}"
+            );
+        }
+
+        let http = fn_src(src, "async fn http_monitor(");
+        let member_at = http
+            .find("require_member(&state, &jar, workspace_id)")
+            .unwrap_or_else(|| panic!("http_monitor must require_member:\n{http}"));
+        let call_at = http.find("monitor_tickets(").unwrap_or_else(|| {
+            panic!("http_monitor must call monitor_tickets (shared reject):\n{http}")
+        });
+        assert!(
+            member_at < call_at,
+            "http_monitor must require_member before monitor_tickets"
+        );
+        if let Some(sync_at) = http.find("set_auto_sync_external(") {
+            assert!(
+                call_at < sync_at,
+                "http_monitor must not enable auto_sync before monitor_tickets can 400:\n{http}"
+            );
+        }
+
+        // Chat tool deserializes MonitorArgs and calls the same monitor_tickets.
+        let chat = include_str!("chat_tools.rs");
+        let start = chat
+            .find("\"monitor_tickets\" =>")
+            .unwrap_or_else(|| panic!("chat tool dispatch must have a monitor_tickets arm"));
+        let rest = &chat[start..];
+        let end = rest.find("\"list_tickets\" =>").unwrap_or(400);
+        let tool = &rest[..end];
+        assert!(
+            tool.contains("crate::tickets::monitor_tickets(")
+                || tool.contains("tickets::monitor_tickets("),
+            "chat monitor_tickets tool must call tickets::monitor_tickets:\n{tool}"
+        );
+        assert!(
+            !tool.contains("upsert_monitor("),
+            "chat tool must not upsert a monitor itself (would skip the reject):\n{tool}"
+        );
+        assert!(
+            !tool.contains("insert_accepted_plan("),
+            "chat monitor_tickets must not insert a run:\n{tool}"
+        );
+    }
+
+    fn assert_no_listen_source_400(err: AppError, label: &str) {
+        match err {
+            AppError::BadRequest(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                assert!(
+                    lower.contains("listen") || lower.contains("connected"),
+                    "{label} must name the missing source, got {msg}"
+                );
+                assert!(
+                    !lower.contains("unknown"),
+                    "{label} is empty, not unknown provider: {msg}"
+                );
+                assert_eq!(
+                    AppError::bad_request(msg).into_response().status(),
+                    StatusCode::BAD_REQUEST,
+                    "{label}"
+                );
+            }
+            other => panic!("{label} must be 400 BadRequest, not {other:?}"),
+        }
+    }
+
+    /// Empty / blank / unknown monitor provider lists fail closed. Empty
+    /// request falls back to connected sources; enabling with nothing
+    /// connected is 400 so auto_launch cannot be upserted. Live POST
+    /// /inbox and chat `monitor_tickets` are in `tests/http_api.rs`
+    /// (`-- empty_or_invalid_monitor`).
+    #[test]
+    fn empty_or_invalid_monitor_provider_list_fails_closed() {
+        for (label, requested) in [
+            ("empty", vec![]),
+            ("blanks", vec!["".into(), "  ".into(), "\t".into()]),
+        ] {
+            assert_no_listen_source_400(
+                resolve_monitor_providers(&requested, &[], true).expect_err(label),
+                label,
+            );
+        }
+
+        // UI Start monitor + auto_launch with no providers field.
+        let start: MonitorArgs = serde_json::from_value(json!({
+            "enabled": true,
+            "auto_launch": true,
+        }))
+        .expect("start-monitor + auto_launch shape");
+        assert_eq!(start.auto_launch, Some(true));
+        assert!(start.providers.as_deref().unwrap_or(&[]).is_empty());
+        assert_no_listen_source_400(
+            resolve_monitor_providers(
+                start.providers.as_deref().unwrap_or(&[]),
+                &[],
+                start.enabled.unwrap_or(true),
+            )
+            .expect_err("start + auto_launch + no connect"),
+            "start+auto_launch",
+        );
+
+        let empty_list: MonitorArgs = serde_json::from_value(json!({
+            "enabled": true,
+            "providers": [],
+            "auto_launch": true,
+        }))
+        .expect("empty providers + auto_launch");
+        assert_no_listen_source_400(
+            resolve_monitor_providers(
+                empty_list.providers.as_deref().unwrap_or(&[]),
+                &[],
+                empty_list.enabled.unwrap_or(true),
+            )
+            .expect_err("empty providers + auto_launch"),
+            "empty providers + auto_launch",
+        );
+
+        // Not a tautology: empty request + a connected source is allowed.
+        let fallback =
+            resolve_monitor_providers(&[], &["github".into()], true).expect("connected fallback");
+        assert_eq!(fallback, vec!["github".to_string()]);
+
+        // Explicit known name still works with no Connect (poll owns not_connected).
+        let explicit =
+            resolve_monitor_providers(&[" GitHub ".into()], &[], true).expect("explicit github");
+        assert_eq!(explicit, vec!["github".to_string()]);
+
+        // Invalid name is 400 even when something is connected — must not
+        // keep github and drop the typo, then arm auto_launch.
+        let only_typo =
+            resolve_monitor_providers(&["not_a_real_provider".into()], &["github".into()], true)
+                .expect_err("invalid name");
+        assert_unknown_provider_400("not_a_real_provider", only_typo);
+
+        let mixed =
+            resolve_monitor_providers(&["github".into(), "not_a_real_provider".into()], &[], true)
+                .expect_err("mixed must not keep github");
+        assert_unknown_provider_400("github+not_a_real_provider", mixed);
+
+        // Stop monitor (enabled false) with an empty list is allowed.
+        let stopped = resolve_monitor_providers(&[], &[], false).expect("stop");
+        assert!(stopped.is_empty());
+        assert!(
+            !persist_monitor_auto_launch(&stopped, Some(true)),
+            "disabled empty + auto_launch must not persist auto_launch"
+        );
+        assert!(persist_monitor_auto_launch(&["github".into()], Some(true)));
+        assert!(!persist_monitor_auto_launch(
+            &["github".into()],
+            Some(false)
+        ));
+        assert!(!persist_monitor_auto_launch(&["github".into()], None));
     }
 }

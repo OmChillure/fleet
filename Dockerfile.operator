@@ -1,12 +1,22 @@
+# syntax=docker/dockerfile:1
 # fleet-operator — Kubernetes controller for FleetSandbox CRs
 #
-#   docker build -f Dockerfile.operator -t agent-fleet-operator:local .
+#   docker build -f Dockerfile.operator --build-arg FLEET_GIT_SHA=$(./scripts/tree-id.sh) -t agent-fleet-operator:local .
+#
+# Operator binary does not read option_env!("FLEET_GIT_SHA"). Compile before
+# ARG; identity is the runtime LABEL only.
 
 FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release -p fleet-operator --locked --bin fleet-operator
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo fetch --locked \
+    && cargo build --release --locked -p fleet-operator --bin fleet-operator \
+    && mkdir -p /out \
+    && cp target/release/fleet-operator /out/
 
 FROM debian:bookworm-slim AS runtime
 ARG FLEET_GIT_SHA
@@ -16,7 +26,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 fleet
-COPY --from=builder /app/target/release/fleet-operator /usr/local/bin/fleet-operator
+COPY --from=builder /out/fleet-operator /usr/local/bin/fleet-operator
 USER fleet
 ENV RUST_LOG=info,kube=warn
 ENTRYPOINT ["fleet-operator"]

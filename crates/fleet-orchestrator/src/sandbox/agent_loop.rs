@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::task::AbortHandle;
 
-use super::team_chat::{
-    self, copy_team_chat_into, format_inbox, load_team_talk, mark_seen_through, post_message,
-    unread_for, wait_for_reply, TeamTalk, DEFAULT_ASK_WAIT_SECS, MAX_ASK_WAIT_SECS,
-};
 use super::SpawnRequest;
+use super::team_chat::{
+    self, DEFAULT_ASK_WAIT_SECS, MAX_ASK_WAIT_SECS, TeamTalk, copy_team_chat_into, format_inbox,
+    load_team_talk, mark_seen_through, post_message, unread_for, wait_for_reply,
+};
 
 /// Resolved worker LLM after combining env (Grok only) + workspace settings (Ollama).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,14 +139,9 @@ impl AgentJob {
     pub fn start(req: &SpawnRequest) -> Self {
         let work_dir = req.work_dir.clone();
         let timeout = req.timeout;
-        let backend = req
-            .agent_backend
-            .clone()
-            .unwrap_or_else(|| "grok".into());
+        let backend = req.agent_backend.clone().unwrap_or_else(|| "grok".into());
         let model = req.agent_model.clone();
-        let talk = load_team_talk(&req.work_dir).or_else(|| {
-            infer_talk(req)
-        });
+        let talk = load_team_talk(&req.work_dir).or_else(|| infer_talk(req));
         let io = req.io.clone();
         let workspace_id = req.project_id;
         let exit_code = Arc::new(Mutex::new(None));
@@ -501,7 +496,8 @@ fn find_owner_repo(text: &str) -> Option<(String, String)> {
         }
     }
     for raw in text.split_whitespace() {
-        let t = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '-' && c != '_');
+        let t = raw
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '-' && c != '_');
         if t.starts_with("feature/") || t.starts_with("fleet/") || t.starts_with("agent-fleet/") {
             continue;
         }
@@ -512,7 +508,9 @@ fn find_owner_repo(text: &str) -> Option<(String, String)> {
             && owner.len() >= 2
             && repo.len() >= 2
             && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            && repo.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && repo
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Some((owner.to_string(), repo.to_string()));
         }
@@ -550,12 +548,19 @@ fn skip_ship_name(name: &str) -> bool {
     }
     let n = name.to_ascii_lowercase();
     n.ends_with(".json")
-        && (n.contains("commit") || n.contains("ship") || n.contains("payload") || n.contains("_args"))
+        && (n.contains("commit")
+            || n.contains("ship")
+            || n.contains("payload")
+            || n.contains("_args"))
 }
 
 fn collect_ship_files(root: &Path) -> Vec<(String, String)> {
     let work = root.join("work");
-    let base = if work.is_dir() { work } else { root.to_path_buf() };
+    let base = if work.is_dir() {
+        work
+    } else {
+        root.to_path_buf()
+    };
     let mut out = Vec::new();
     fn walk(dir: &Path, rel: &Path, out: &mut Vec<(String, String)>) {
         if out.len() >= 40 {
@@ -669,7 +674,9 @@ async fn run_ship(
     if let Some(url) = find_existing_pr_url(work_dir) {
         write_result(
             work_dir,
-            &format!("Shipped.\n\nPR: {url}\n\nReused an existing pull request from the workspace.\n"),
+            &format!(
+                "Shipped.\n\nPR: {url}\n\nReused an existing pull request from the workspace.\n"
+            ),
         )
         .await;
         emit_live(work_dir, "done", &format!("Opened {url}")).await;
@@ -703,7 +710,9 @@ async fn run_ship(
         )
         .await;
     if listed.ok {
-        if let Some(url) = pr_url_from_data(&listed.data).or_else(|| extract_github_pr_url(&listed.summary)) {
+        if let Some(url) =
+            pr_url_from_data(&listed.data).or_else(|| extract_github_pr_url(&listed.summary))
+        {
             write_result(
                 work_dir,
                 &format!("Shipped {owner}/{repo}.\n\nPR: {url}\n\nAlready open on GitHub.\n"),
@@ -723,7 +732,10 @@ async fn run_ship(
     emit_live(
         work_dir,
         "think",
-        &format!("Committing {} files to {owner}/{repo}@{branch}", files.len()),
+        &format!(
+            "Committing {} files to {owner}/{repo}@{branch}",
+            files.len()
+        ),
     )
     .await;
     let file_json: Vec<Value> = files
@@ -996,7 +1008,12 @@ async fn exec_tool(
             };
             let tool_args = args.get("args").cloned().unwrap_or(json!({}));
             let res = inv
-                .invoke(workspace_id, provider.to_string(), operation.to_string(), tool_args)
+                .invoke(
+                    workspace_id,
+                    provider.to_string(),
+                    operation.to_string(),
+                    tool_args,
+                )
                 .await;
             let payload = json!({
                 "ok": res.ok,
@@ -1070,12 +1087,10 @@ async fn exec_tool(
             };
             run_bash_limited(root, cmd, Duration::from_secs(60)).await
         }
-        "read_team" | "list_team" => {
-            match std::fs::read_to_string(root.join("TEAM.md")) {
-                Ok(s) if !s.trim().is_empty() => s,
-                _ => "No TEAM.md yet. You are the only worker so far.".into(),
-            }
-        }
+        "read_team" | "list_team" => match std::fs::read_to_string(root.join("TEAM.md")) {
+            Ok(s) if !s.trim().is_empty() => s,
+            _ => "No TEAM.md yet. You are the only worker so far.".into(),
+        },
         "send_message" | "message_teammate" => {
             let Some(talk) = talk else {
                 return "error: no team chat on this run".into();
@@ -1309,11 +1324,7 @@ async fn complete(messages: &[Value], backend: &str, model: Option<&str>) -> Res
                 .filter(|s| !s.is_empty())
                 .or_else(grok_model)
                 .ok_or_else(|| "no Grok model: set GROK_MODEL or pick one".to_string())?;
-            (
-                "https://api.x.ai/v1/chat/completions".into(),
-                key,
-                model,
-            )
+            ("https://api.x.ai/v1/chat/completions".into(), key, model)
         }
     };
 
@@ -1522,7 +1533,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(safe_path(dir.path(), "../etc/passwd").is_err());
         assert!(safe_path(dir.path(), "ok/file.txt").is_ok());
-        assert!(safe_path(dir.path(), "").unwrap().ends_with(dir.path().file_name().unwrap()));
+        assert!(
+            safe_path(dir.path(), "")
+                .unwrap()
+                .ends_with(dir.path().file_name().unwrap())
+        );
     }
 
     #[cfg(unix)]
@@ -1697,23 +1712,37 @@ mod tests {
             find_owner_repo("branch feature/calculator for OmChillure/test"),
             Some(("OmChillure".into(), "test".into()))
         );
-        assert_eq!(find_branch("use `feature/calculator` please"), "feature/calculator");
+        assert_eq!(
+            find_branch("use `feature/calculator` please"),
+            "feature/calculator"
+        );
         assert!(skip_ship_name("commit_payload.json"));
         assert!(skip_ship_name("ship_all_files_commit.json"));
         assert!(!skip_ship_name("page.tsx"));
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("work");
         std::fs::create_dir_all(work.join("app")).unwrap();
-        std::fs::write(work.join("SHIP.md"), "PR: https://github.com/OmChillure/test/pull/2\n").unwrap();
+        std::fs::write(
+            work.join("SHIP.md"),
+            "PR: https://github.com/OmChillure/test/pull/2\n",
+        )
+        .unwrap();
         std::fs::write(work.join("commit_payload.json"), "{\"files\":[]}\n").unwrap();
-        std::fs::write(work.join("app").join("page.tsx"), "export default function Page(){}\n").unwrap();
+        std::fs::write(
+            work.join("app").join("page.tsx"),
+            "export default function Page(){}\n",
+        )
+        .unwrap();
         assert_eq!(
             find_existing_pr_url(dir.path()).as_deref(),
             Some("https://github.com/OmChillure/test/pull/2")
         );
         let files = collect_ship_files(dir.path());
         assert!(files.iter().any(|(p, _)| p == "app/page.tsx"), "{files:?}");
-        assert!(files.iter().all(|(p, _)| p != "commit_payload.json"), "{files:?}");
+        assert!(
+            files.iter().all(|(p, _)| p != "commit_payload.json"),
+            "{files:?}"
+        );
     }
 
     #[tokio::test]
@@ -1735,7 +1764,10 @@ mod tests {
         .unwrap();
         assert_eq!(code, 0);
         let result = std::fs::read_to_string(dir.path().join("result.md")).unwrap();
-        assert!(result.contains("https://github.com/OmChillure/test/pull/2"), "{result}");
+        assert!(
+            result.contains("https://github.com/OmChillure/test/pull/2"),
+            "{result}"
+        );
     }
 
     #[tokio::test]

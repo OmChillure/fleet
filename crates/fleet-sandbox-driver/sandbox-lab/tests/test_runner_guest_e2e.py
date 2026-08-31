@@ -17,6 +17,7 @@ Do not WARN-and-continue. Do not invent a second install path.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -139,6 +140,143 @@ class RunnerGuestCatalogTests(unittest.TestCase):
                 f"PROFILE={profile} must default guest e2e on",
             )
 
+    def test_flag_explicit_zero_wins(self) -> None:
+        for profile in ("full", "lab", "minimal"):
+            self.assertFalse(
+                env_flag(
+                    "ENABLE_RUNNER_GUEST_E2E",
+                    environ={"ENABLE_RUNNER_GUEST_E2E": "1"},
+                    dotenv_text=f"PROFILE={profile}\nENABLE_RUNNER_GUEST_E2E=0\n",
+                ),
+                f"explicit 0 must win over PROFILE={profile}",
+            )
+
+
+class RunnerGuestFailClosedContractTests(unittest.TestCase):
+    """Always on. Missing required guests fail without booting a VM."""
+
+    def test_required_guests_are_not_live_skipped(self) -> None:
+        for plat in (
+            "linux-x86_64",
+            "linux-x86_64-musl",
+            "linux-x86_64-bookworm",
+            "windows-x86_64",
+        ):
+            self.assertIn(plat, PLATFORMS, plat)
+            self.assertNotIn(plat, LIVE_SKIPPED, plat)
+
+    def test_live_methods_exist_for_every_platform(self) -> None:
+        for plat in PLATFORMS:
+            name = "test_" + plat.replace("-", "_")
+            self.assertTrue(
+                hasattr(RunnerGuestLiveTests, name),
+                f"RunnerGuestLiveTests.{name} missing for {plat}",
+            )
+
+    def test_missing_required_guest_fails_not_warn(self) -> None:
+        required = tuple(p for p in PLATFORMS if p not in LIVE_SKIPPED)
+        self.assertIn("linux-x86_64", required)
+        self.assertIn("windows-x86_64", required)
+        prev = os.environ.get("FLEET_RUNNER_GUEST_DRIVER")
+        os.environ["FLEET_RUNNER_GUEST_DRIVER"] = ""
+        try:
+            case = RunnerGuestLiveTests("test_linux_x86_64")
+            for plat in required:
+                with self.subTest(plat=plat):
+                    with self.assertRaises(AssertionError) as ctx:
+                        case._require_guest(plat)
+                    msg = str(ctx.exception)
+                    self.assertIn(plat, msg)
+                    self.assertIn("ENABLE_RUNNER_GUEST_E2E=1", msg)
+                    self.assertNotIn("WARN", msg)
+        finally:
+            if prev is None:
+                os.environ.pop("FLEET_RUNNER_GUEST_DRIVER", None)
+            else:
+                os.environ["FLEET_RUNNER_GUEST_DRIVER"] = prev
+
+    def test_live_skipped_guest_skips_not_fail(self) -> None:
+        case = RunnerGuestLiveTests("test_linux_aarch64")
+        self.assertTrue(LIVE_SKIPPED)
+        for plat in LIVE_SKIPPED:
+            with self.subTest(plat=plat):
+                with self.assertRaises(unittest.SkipTest) as ctx:
+                    case._require_guest(plat)
+                msg = str(ctx.exception)
+                self.assertIn(plat, msg)
+                self.assertIn("skipped for now", msg)
+
+    def test_live_skipped_guests_remain_in_catalog(self) -> None:
+        # Hardcoded ids — iterating LIVE_SKIPPED would pass if a guest
+        # was deleted from both the set and the catalog.
+        catalog_skipped = (
+            "linux-aarch64",
+            "linux-aarch64-musl",
+            "linux-armv7",
+            "linux-armv7-musl",
+            "freebsd-amd64",
+            "darwin-x86_64",
+            "darwin-arm64",
+            "windows-arm64",
+        )
+        req = REQUIREMENTS.read_text(encoding="utf-8")
+        proc = PROCEDURES.read_text(encoding="utf-8")
+        for plat in catalog_skipped:
+            with self.subTest(plat=plat, part="catalog"):
+                self.assertIn(plat, PLATFORMS, f"{plat} dropped from PLATFORMS")
+                self.assertIn(plat, LIVE_SKIPPED, f"{plat} must stay LIVE_SKIPPED")
+                self.assertIn(plat, req, f"requirements catalog dropped {plat}")
+                self.assertIn(plat, proc, f"procedures catalog dropped {plat}")
+                name = "test_" + plat.replace("-", "_")
+                self.assertTrue(
+                    hasattr(RunnerGuestLiveTests, name),
+                    f"RunnerGuestLiveTests.{name} was deleted; skip, do not drop",
+                )
+        self.assertIn("Live skipped for now", req)
+        self.assertIn("Skipped for now", proc)
+
+        required = ("linux-x86_64", "windows-x86_64")
+        prev = os.environ.get("FLEET_RUNNER_GUEST_DRIVER")
+        os.environ["FLEET_RUNNER_GUEST_DRIVER"] = ""
+        try:
+            case = RunnerGuestLiveTests("test_linux_x86_64")
+            for plat in required:
+                with self.subTest(plat=plat, part="required"):
+                    self.assertIn(plat, PLATFORMS, plat)
+                    self.assertNotIn(plat, LIVE_SKIPPED, plat)
+                    with self.assertRaises(AssertionError) as ctx:
+                        case._require_guest(plat)
+                    msg = str(ctx.exception)
+                    self.assertIn(plat, msg)
+                    self.assertIn("ENABLE_RUNNER_GUEST_E2E=1", msg)
+                    self.assertNotIn("WARN", msg)
+        finally:
+            if prev is None:
+                os.environ.pop("FLEET_RUNNER_GUEST_DRIVER", None)
+            else:
+                os.environ["FLEET_RUNNER_GUEST_DRIVER"] = prev
+
+    def test_explicit_zero_skips_live_setup(self) -> None:
+        real = _guest_e2e_on
+        globals()["_guest_e2e_on"] = lambda: False
+        try:
+            with self.assertRaises(unittest.SkipTest) as ctx:
+                RunnerGuestLiveTests.setUpClass()
+            self.assertIn("ENABLE_RUNNER_GUEST_E2E is off", str(ctx.exception))
+        finally:
+            globals()["_guest_e2e_on"] = real
+
+    def test_catalog_tests_always_run(self) -> None:
+        src = inspect.getsource(RunnerGuestCatalogTests)
+        self.assertNotIn("SkipTest", src)
+        self.assertNotIn("_guest_e2e_on", src)
+
+    def test_require_guest_source_is_fail_closed(self) -> None:
+        src = inspect.getsource(RunnerGuestLiveTests._require_guest)
+        self.assertIn("self.fail(", src)
+        self.assertNotIn("WARN", src)
+        self.assertIn("LIVE_SKIPPED", src)
+
 
 class RunnerGuestLiveTests(unittest.TestCase):
     """Live guests. Skip when the flag is off. Fail closed when on."""
@@ -175,19 +313,38 @@ class RunnerGuestLiveTests(unittest.TestCase):
                 f"UI /fleet-git-sha.txt={ui_sha!r} != this tree {want!r}."
             )
 
+    def _default_guest_driver(self, platform: str) -> str:
+        """Lab driver under `.tmp/vms/<platform>/` when one exists."""
+        names = {
+            "linux-x86_64": ("run-guest-procedure.py",),
+            "linux-x86_64-musl": ("run-guest-e2e.py",),
+            "linux-x86_64-bookworm": ("driver.sh",),
+            "windows-x86_64": ("guest-e2e-driver.py",),
+        }
+        for name in names.get(platform, ()):
+            path = REPO / ".tmp" / "vms" / platform / name
+            if path.is_file():
+                return str(path)
+        return ""
+
     def _require_guest(self, platform: str) -> None:
         """Fail until a guest for `platform` completes the procedure.
 
         Wire the guest driver here (`.tmp/vms/<platform>/`, qemu, ssh).
-        Until then, ENABLE_RUNNER_GUEST_E2E=1 is an explicit fail so the
-        hole cannot go green.
+        ENABLE_RUNNER_GUEST_E2E=1 is an explicit fail when no guest
+        driver exists so the hole cannot go green.
         """
         if platform in LIVE_SKIPPED:
             self.skipTest(
                 f"guest {platform} skipped for now. "
                 "Still listed in the catalog; re-enable LIVE_SKIPPED."
             )
-        driver = os.environ.get("FLEET_RUNNER_GUEST_DRIVER", "").strip()
+        # Empty FLEET_RUNNER_GUEST_DRIVER is an explicit missing-guest
+        # (fail-closed contract). Unset falls back to the lab driver.
+        if "FLEET_RUNNER_GUEST_DRIVER" in os.environ:
+            driver = os.environ.get("FLEET_RUNNER_GUEST_DRIVER", "").strip()
+        else:
+            driver = self._default_guest_driver(platform)
         if driver:
             self._run_driver(driver, platform)
             return

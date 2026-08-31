@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::LocalConfig;
@@ -22,9 +22,17 @@ static HOST_PKG_STAMP: &[u8] =
 
 /// Compile-time tree-id (`FLEET_GIT_SHA`), same bake as fleet-server.
 /// `build.rs` reruns rustc when the env changes so a cached object without
-/// the sha cannot be reused.
+/// the sha cannot be reused. A 64-hex file hash is never a bake id.
 pub fn baked_git_sha() -> Option<&'static str> {
-    option_env!("FLEET_GIT_SHA").filter(|s| !s.is_empty())
+    option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| !is_file_sha256(s))
+}
+
+fn is_file_sha256(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub fn host_pkg_version() -> &'static str {
@@ -57,6 +65,8 @@ pub fn pkg_version_from_file(path: &Path, prefix: &[u8]) -> Option<String> {
 }
 
 /// `updating` is true only while a **host-bin** apply is waiting / restarting.
+/// `git_sha` is the compile-time bake id (or JSON null). File hashes stay
+/// under `bins.*.sha256`.
 pub fn heartbeat_software(cfg: &LocalConfig, updating: bool) -> Value {
     json!({
         "git_sha": baked_git_sha(),
@@ -196,10 +206,7 @@ mod tests {
 
     #[test]
     fn heartbeat_driver_version_only_from_on_disk_stamp() {
-        let dir = std::env::temp_dir().join(format!(
-            "fleet-host-hb-drv-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fleet-host-hb-drv-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let mut cfg = LocalConfig::default();
 
@@ -246,5 +253,72 @@ mod tests {
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn heartbeat_software_build_id_is_never_file_hash() {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-host-sw-build-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let driver = dir.join("fleet-driver");
+        fs::write(&driver, b"driver-bytes-for-software-build-id").unwrap();
+        let driver_hash = file_sha256(&driver).expect("driver hash");
+
+        let mut cfg = LocalConfig::default();
+        cfg.fleet_driver_bin = driver.display().to_string();
+        let v = heartbeat_software(&cfg, false);
+
+        assert!(v.get("git_sha").is_some(), "git_sha key must be present");
+        match baked_git_sha() {
+            Some(s) => {
+                assert!(!s.is_empty());
+                assert_eq!(
+                    v.get("git_sha"),
+                    Some(&json!(s)),
+                    "git_sha is the compile-time bake id, not a bin SHA"
+                );
+            }
+            None => assert!(
+                v.get("git_sha").unwrap().is_null(),
+                "unset bake must be JSON null, never a file hash: {}",
+                v["git_sha"]
+            ),
+        }
+
+        let host_hash = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(file_sha256);
+        if let Some(ref hash) = host_hash {
+            assert_ne!(
+                v.get("git_sha"),
+                Some(&json!(hash)),
+                "current_exe sha256 is bins.fleet-host.sha256, not software_build_id"
+            );
+        }
+        assert_ne!(
+            v.get("git_sha"),
+            Some(&json!(driver_hash)),
+            "driver file hash is not the bake id"
+        );
+        assert_eq!(
+            v["bins"]["fleet-driver"]["sha256"].as_str(),
+            Some(driver_hash.as_str())
+        );
+        if let Some(reported_host) = v["bins"]["fleet-host"]["sha256"].as_str() {
+            assert_ne!(v.get("git_sha"), Some(&json!(reported_host)));
+            if let Some(ref hash) = host_hash {
+                assert_eq!(reported_host, hash.as_str());
+            }
+        }
+
+        let _ = fs::remove_file(&driver);
+        let _ = fs::remove_dir(&dir);
     }
 }

@@ -1,5 +1,5 @@
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::{Argon2, Algorithm, Params, Version};
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 
 use crate::error::{AppError, AppResult};

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn run_stdout_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(bin)
@@ -325,7 +325,14 @@ const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 fn claude_cli_models() -> Option<Vec<String>> {
     env_model_list("CLAUDE_MODELS")
         .or_else(|| env_model_list("ANTHROPIC_MODELS"))
-        .or_else(|| Some(CLAUDE_MODEL_ALIASES.iter().map(|s| (*s).to_string()).collect()))
+        .or_else(|| {
+            Some(
+                CLAUDE_MODEL_ALIASES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            )
+        })
 }
 
 fn claude_model_details(models: &[String]) -> Vec<ModelDetail> {

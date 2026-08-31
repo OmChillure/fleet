@@ -1,9 +1,9 @@
 //! Linear write + team tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn list_teams(http: &reqwest::Client, token: &str, _args: &Value) -> ProxyResult {
     let query = r#"
@@ -122,11 +122,7 @@ pub(crate) async fn list_workflow_states(
     )
 }
 
-pub(crate) async fn create_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let title = match args
         .get("title")
         .and_then(|v| v.as_str())
@@ -135,7 +131,13 @@ pub(crate) async fn create_issue(
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err("linear", "create_issue", "bad_args", "title is required", None);
+            return ProxyResult::err(
+                "linear",
+                "create_issue",
+                "bad_args",
+                "title is required",
+                None,
+            );
         }
     };
     let team_id = match args
@@ -194,7 +196,10 @@ pub(crate) async fn create_issue(
             Some(status),
         );
     }
-    let created = body.pointer("/data/issueCreate/issue").cloned().unwrap_or(json!({}));
+    let created = body
+        .pointer("/data/issueCreate/issue")
+        .cloned()
+        .unwrap_or(json!({}));
     let ident = created
         .get("identifier")
         .and_then(|v| v.as_str())
@@ -208,11 +213,7 @@ pub(crate) async fn create_issue(
     )
 }
 
-pub(crate) async fn update_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let id = match args
         .get("id")
         .and_then(|v| v.as_str())
@@ -234,7 +235,11 @@ pub(crate) async fn update_issue(
     if let Some(p) = args.get("priority").and_then(|v| v.as_i64()) {
         input["priority"] = json!(p);
     }
-    if let Some(s) = args.get("state_id").or_else(|| args.get("stateId")).and_then(|v| v.as_str()) {
+    if let Some(s) = args
+        .get("state_id")
+        .or_else(|| args.get("stateId"))
+        .and_then(|v| v.as_str())
+    {
         input["stateId"] = json!(s);
     }
     if input.as_object().map(|m| m.is_empty()).unwrap_or(true) {
@@ -279,7 +284,10 @@ pub(crate) async fn update_issue(
             Some(status),
         );
     }
-    let issue = body.pointer("/data/issueUpdate/issue").cloned().unwrap_or(json!({}));
+    let issue = body
+        .pointer("/data/issueUpdate/issue")
+        .cloned()
+        .unwrap_or(json!({}));
     ProxyResult::ok_result(
         "linear",
         "update_issue",
@@ -289,11 +297,7 @@ pub(crate) async fn update_issue(
     )
 }
 
-pub(crate) async fn add_comment(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let issue_id = match args
         .get("issue_id")
         .or_else(|| args.get("id"))
@@ -322,7 +326,13 @@ pub(crate) async fn add_comment(
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err("linear", "add_comment", "bad_args", "body is required", None);
+            return ProxyResult::err(
+                "linear",
+                "add_comment",
+                "bad_args",
+                "body is required",
+                None,
+            );
         }
     };
     let query = r#"

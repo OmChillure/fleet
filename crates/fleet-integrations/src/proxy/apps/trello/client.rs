@@ -1,6 +1,6 @@
 //! Trello HTTP helpers (key + user token).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -92,7 +92,12 @@ pub(crate) async fn trello_get(
     path: &str,
 ) -> (u16, Value) {
     let url = with_auth(&format!("{API}{path}"), api_key, token);
-    match http.get(&url).header("Accept", "application/json").send().await {
+    match http
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
         Ok(res) => {
             let status = res.status().as_u16();
             let body = res.json::<Value>().await.unwrap_or(json!({}));
@@ -164,8 +169,16 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
     let msg = body
         .as_str()
         .map(|s| s.to_string())
-        .or_else(|| body.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .or_else(|| body.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .or_else(|| {
+            body.get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            body.get("error")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_else(|| "upstream error".into());
     let code = if status == 401 || status == 403 {
         "token_expired"

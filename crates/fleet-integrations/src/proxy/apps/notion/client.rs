@@ -1,6 +1,6 @@
 //! Notion REST helpers (control plane only).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -111,7 +111,10 @@ fn extract_title(item: &Value) -> Value {
             return json!(s);
         }
     }
-    if let Some(title) = item.pointer("/properties/Name/title").or_else(|| item.get("title")) {
+    if let Some(title) = item
+        .pointer("/properties/Name/title")
+        .or_else(|| item.get("title"))
+    {
         if let Some(arr) = title.as_array() {
             let s: String = arr
                 .iter()
@@ -196,7 +199,12 @@ pub(crate) fn map_block(block: &Value) -> Value {
 /// `body`, `message`, `children` as a string or list of strings/blocks).
 pub(crate) fn write_text_from_args(args: &Value) -> Option<String> {
     for key in ["text", "content", "body", "message", "summary"] {
-        if let Some(s) = args.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(s) = args
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return Some(s.to_string());
         }
     }

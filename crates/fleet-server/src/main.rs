@@ -128,7 +128,7 @@ async fn run() -> anyhow::Result<()> {
         tracing::error!(error = %e, "configuration error");
         e
     })?;
-    validate_cookie_policy(&config.auth);
+    validate_cookie_policy(&config.auth)?;
 
     let oauth_configured: Vec<&str> = [
         ("github", config.integrations.github.is_some()),

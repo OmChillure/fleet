@@ -7,6 +7,10 @@ use crate::components::toast::show_toast;
 use crate::pages::chat::{ConversationSummary, delete_conversation, list_conversations};
 
 use super::api::get_session_detail;
+use super::shape::{
+    BACK_TO_HISTORY_LABEL, EMPTY_COPY, GO_TO_CHAT_LABEL, LIVE_SESSION_HEADING, NEW_CHAT_LABEL,
+    PAGE_HEADING, PAGE_SUBTITLE,
+};
 use gloo_timers::future::TimeoutFuture;
 
 #[component]
@@ -17,15 +21,10 @@ pub fn Sessions(workspace_id: String) -> Element {
     let navigator = use_navigator();
 
     let ws = workspace_id.clone();
-    let mut bootstrapped = use_signal(|| false);
-    use_effect(move || {
-        if bootstrapped() {
-            return;
-        }
-        bootstrapped.set(true);
-        loading.set(true);
+    use_future(move || {
         let ws = ws.clone();
-        spawn(async move {
+        async move {
+            loading.set(true);
             match list_conversations(&ws).await {
                 Ok(list) => {
                     conversations.set(list);
@@ -36,7 +35,7 @@ pub fn Sessions(workspace_id: String) -> Element {
                 }
             }
             loading.set(false);
-        });
+        }
     });
 
     rsx! {
@@ -44,16 +43,16 @@ pub fn Sessions(workspace_id: String) -> Element {
             div { class: "mb-6 flex flex-wrap items-center justify-between gap-3",
                 div {
                     h1 { class: "m-0 text-xl font-semibold text-[var(--app-fg)]",
-                        "Chat history"
+                        "{PAGE_HEADING}"
                     }
                     p { class: "m-0 mt-1 text-sm text-[var(--app-muted)]",
-                        "Saved conversations for this workspace. Open one to continue."
+                        "{PAGE_SUBTITLE}"
                     }
                 }
                 Link {
                     to: Route::Chat { workspace_id: workspace_id.clone() },
                     class: "inline-flex items-center rounded-xl bg-[var(--app-fg)] px-3.5 py-2 text-sm font-medium text-[var(--app-bg)] transition hover:opacity-90",
-                    "New chat"
+                    "{NEW_CHAT_LABEL}"
                 }
             }
 
@@ -67,12 +66,12 @@ pub fn Sessions(workspace_id: String) -> Element {
                 div {
                     class: "flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-[var(--app-border)] px-6 py-16 text-center",
                     p { class: "m-0 text-sm text-[var(--app-muted)]",
-                        "No saved chats yet. Start a conversation and it will appear here."
+                        "{EMPTY_COPY}"
                     }
                     Link {
                         to: Route::Chat { workspace_id: workspace_id.clone() },
                         class: "text-sm font-medium text-[var(--app-fg)] underline-offset-2 hover:underline",
-                        "Go to Chat"
+                        "{GO_TO_CHAT_LABEL}"
                     }
                 }
             } else {
@@ -218,9 +217,9 @@ pub fn SessionDetail(workspace_id: String, session_id: String) -> Element {
                     Link {
                         class: "text-xs text-[var(--app-accent)] hover:underline",
                         to: Route::Sessions { workspace_id: workspace_id.clone() },
-                        "← All sessions"
+                        "{BACK_TO_HISTORY_LABEL}"
                     }
-                    h1 { class: "m-0 mt-1 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Live session" }
+                    h1 { class: "m-0 mt-1 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "{LIVE_SESSION_HEADING}" }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "{session_id}" }
                     p { class: "mt-0.5 text-sm text-[var(--app-muted)]", "{status} · {progress}%" }
                 }

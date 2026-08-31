@@ -18,6 +18,9 @@ pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 pub const WORKER_HOST_KIND_HOST: &str = "host";
 pub const WORKER_HOST_KIND_CONTROL_PLANE: &str = "control_plane";
 
+/// Bootstrap-only guest label. HTTP PATCH must not stamp this.
+pub const WORKER_HOST_LABEL_CLUSTER: &str = "cluster";
+
 pub const WORKER_HOST_ISOLATION_NATIVE: &str = "native";
 /// Placeholder self-hosted sandbox. Not assignable; no k8s executor in v1.
 pub const WORKER_HOST_ISOLATION_SANDBOXED: &str = "sandboxed";
@@ -29,6 +32,29 @@ pub fn parse_worker_host_isolation(raw: &str) -> Option<&'static str> {
         WORKER_HOST_ISOLATION_SANDBOXED => Some(WORKER_HOST_ISOLATION_SANDBOXED),
         _ => None,
     }
+}
+
+/// Trimmed, case-insensitive match for [`WORKER_HOST_LABEL_CLUSTER`].
+/// Same rule as list_cluster / list_assignable SQL.
+pub fn label_is_cluster(raw: &str) -> bool {
+    raw.trim().eq_ignore_ascii_case(WORKER_HOST_LABEL_CLUSTER)
+}
+
+/// Trim labels; store the cluster token as lowercase `cluster`.
+pub fn normalize_host_labels(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else if label_is_cluster(trimmed) {
+                Some(WORKER_HOST_LABEL_CLUSTER.to_string())
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect()
 }
 
 /// Stored `online` older than this is serialized as `offline`.
@@ -106,9 +132,28 @@ impl WorkerHost {
         self.allow_container && self.advertised_container
     }
 
+    /// `/me/lease`: native + plane ∩ advertised host.
+    /// Container-only *cluster* hosts (Kind `fleet-host`) also lease so they
+    /// can create FleetSandbox CRs. A paired k3d-only box must not take
+    /// host-runtime spawn_session.
+    pub fn accepts_v1_leases(&self) -> bool {
+        self.enabled
+            && !self.paused
+            && !self.drain
+            && self.is_native_isolation()
+            && self.status == WORKER_HOST_STATUS_ONLINE
+            && (self.effective_host()
+                || (self.is_cluster_host() && self.effective_container()))
+    }
+
     /// Tick / lease assignment: only native isolation is v1.
     pub fn is_native_isolation(&self) -> bool {
         self.isolation == WORKER_HOST_ISOLATION_NATIVE
+    }
+
+    /// Bootstrap-only guest on every workspace. HTTP PATCH must not stamp this.
+    pub fn is_cluster_host(&self) -> bool {
+        self.labels.iter().any(|l| label_is_cluster(l))
     }
 
     pub fn settings_pending(&self) -> bool {
@@ -458,7 +503,8 @@ const PACKAGE_BIN_STEMS: [&str; 2] = ["fleet-host", "fleet-driver"];
 ///
 /// No report or no manifest → `unknown` (not behind). Present package bins
 /// that disagree → `behind`. Mixed match/mismatch is behind. When no bin
-/// pair exists, fall back to both git shas if they are non-empty.
+/// pair exists, fall back to both git shas only if they are bake ids (not
+/// 64-hex file hashes). A file hash is integrity for bins, never a bake id.
 pub fn compute_software_status(
     software: Option<&WorkerSoftwarePublic>,
     desired: Option<&WorkerSoftwareManifest>,
@@ -528,7 +574,10 @@ pub fn compute_software_status(
     let desired_sha = desired.git_sha.trim();
     match (reported_sha, desired_sha.is_empty()) {
         (Some(got), false) => {
-            if sha_eq(got, desired_sha) {
+            // A 64-hex on either side is a file hash, not a bake id.
+            if is_file_hash(got) || is_file_hash(desired_sha) {
+                WORKER_SOFTWARE_STATUS_UNKNOWN
+            } else if sha_eq(got, desired_sha) {
                 WORKER_SOFTWARE_STATUS_CURRENT
             } else {
                 WORKER_SOFTWARE_STATUS_BEHIND
@@ -536,6 +585,12 @@ pub fn compute_software_status(
         }
         _ => WORKER_SOFTWARE_STATUS_UNKNOWN,
     }
+}
+
+/// SHA-256 of a bin on disk — never a tree-id / bake stamp.
+fn is_file_hash(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn sha_eq(a: &str, b: &str) -> bool {
@@ -745,6 +800,63 @@ mod public_view_tests {
         let gpus = pub_h.hardware.expect("hw").gpus.expect("gpus");
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name.as_deref(), Some("Intel UHD Graphics"));
+    }
+
+    #[test]
+    fn cluster_label_is_trimmed_case_insensitive() {
+        assert!(label_is_cluster("cluster"));
+        assert!(label_is_cluster("CLUSTER"));
+        assert!(label_is_cluster(" Cluster "));
+        assert!(label_is_cluster("cLuStEr"));
+        assert!(!label_is_cluster("gpu"));
+        assert!(!label_is_cluster("cluster-host"));
+        assert!(!label_is_cluster(""));
+
+        assert_eq!(
+            normalize_host_labels(&[
+                " CLUSTER ".into(),
+                "".into(),
+                "  ".into(),
+                "gpu".into(),
+                "Cluster".into(),
+            ]),
+            vec![
+                "cluster".to_string(),
+                "gpu".to_string(),
+                "cluster".to_string()
+            ]
+        );
+
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        boxed.labels = vec!["CLUSTER".into()];
+        assert!(boxed.is_cluster_host());
+        boxed.labels = vec!["gpu".into()];
+        assert!(!boxed.is_cluster_host());
+    }
+
+    #[test]
+    fn v1_lease_gate_is_host_or_cluster_container() {
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        boxed.allow_host = false;
+        boxed.advertised_host = false;
+        boxed.allow_container = true;
+        boxed.advertised_container = true;
+        boxed.labels = vec![];
+        assert!(
+            !boxed.accepts_v1_leases(),
+            "paired container-only must not take host-runtime /me/lease"
+        );
+        boxed.labels = vec!["cluster".into()];
+        assert!(
+            boxed.accepts_v1_leases(),
+            "cluster container-only (Kind fleet-host) must lease"
+        );
+        boxed.allow_container = false;
+        boxed.advertised_container = false;
+        boxed.allow_host = true;
+        boxed.advertised_host = true;
+        boxed.labels = vec![];
+        assert!(boxed.accepts_v1_leases(), "paired host-capable must lease");
     }
 
     #[test]
@@ -1060,6 +1172,133 @@ mod public_view_tests {
         assert_eq!(
             compute_software_status(Some(&empty), Some(&desired)),
             WORKER_SOFTWARE_STATUS_UNKNOWN
+        );
+    }
+
+    #[test]
+    fn compute_software_status_never_treats_file_hash_as_bake_id() {
+        let file_hash = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e";
+        let other_hash = "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d";
+        let bake = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351";
+
+        fn empty_bins(git_sha: &str) -> WorkerSoftwareManifest {
+            WorkerSoftwareManifest {
+                git_sha: git_sha.into(),
+                platform: "linux-x86_64".into(),
+                staged_at: String::new(),
+                bins: BTreeMap::new(),
+            }
+        }
+
+        // Empty-bin fallback: a 64-hex on either side is not a bake id.
+        // Matching or differing file hashes must be unknown, not current.
+        let both_hash = reported(Some(file_hash), None);
+        assert_eq!(
+            compute_software_status(Some(&both_hash), Some(&empty_bins(file_hash))),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "matching 64-hex git_sha is not a bake-id compare"
+        );
+        assert_eq!(
+            compute_software_status(
+                Some(&reported(Some(file_hash), None)),
+                Some(&empty_bins(bake))
+            ),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "reported 64-hex git_sha is not a bake id"
+        );
+        assert_eq!(
+            compute_software_status(
+                Some(&reported(Some(bake), None)),
+                Some(&empty_bins(file_hash))
+            ),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "manifest 64-hex git_sha is not a bake id"
+        );
+        assert_eq!(
+            compute_software_status(
+                Some(&reported(Some(file_hash), None)),
+                Some(&empty_bins(other_hash))
+            ),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "two different 64-hex git_sha values are still file hashes, not bake ids"
+        );
+
+        // Matching real bake ids without a staged bin/version compare must not
+        // be current when the staged package lists fleet-host + fleet-driver.
+        let staged = sample_manifest("aaa");
+        let bake_only = reported(Some("stage-tree-id"), None);
+        assert_ne!(
+            compute_software_status(Some(&bake_only), Some(&staged)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "matching bake without host+driver compare must not be current"
+        );
+        assert_eq!(
+            compute_software_status(Some(&bake_only), Some(&staged)),
+            WORKER_SOFTWARE_STATUS_BEHIND
+        );
+
+        // File-hash equality is integrity only when versions are absent.
+        let mut hash_bins = BTreeMap::new();
+        hash_bins.insert(
+            "fleet-host".into(),
+            WorkerBinMeta {
+                sha256: file_hash.into(),
+                size: 1,
+                version: None,
+            },
+        );
+        hash_bins.insert(
+            "fleet-driver".into(),
+            WorkerBinMeta {
+                sha256: other_hash.into(),
+                size: 1,
+                version: None,
+            },
+        );
+        let hash_only = WorkerSoftwareManifest {
+            git_sha: bake.into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: hash_bins,
+        };
+        let matching_hashes = reported(
+            Some(file_hash),
+            Some(serde_json::json!({
+                "fleet-host": file_hash,
+                "fleet-driver": other_hash
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&matching_hashes), Some(&hash_only)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "matching file hashes with no versions is integrity, not a bake-id compare"
+        );
+        let mismatch_hashes = reported(
+            Some(file_hash),
+            Some(serde_json::json!({
+                "fleet-host": file_hash,
+                "fleet-driver": "wrong-driver-bytes"
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&mismatch_hashes), Some(&hash_only)),
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "a 64-hex git_sha must not override a bin-hash mismatch"
+        );
+
+        // Versions win; a 64-hex git_sha cannot make an old package current.
+        let versioned = sample_manifest(file_hash);
+        let old_ver = reported(
+            Some(file_hash),
+            Some(serde_json::json!({
+                "fleet-host": { "sha256": file_hash, "version": "0.0.0" },
+                "fleet-driver": { "sha256": other_hash, "version": "0.0.1" }
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&old_ver), Some(&versioned)),
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "file hash in git_sha is not a bake id that can override version compare"
         );
     }
 

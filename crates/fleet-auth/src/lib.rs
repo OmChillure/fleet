@@ -20,4 +20,6 @@ pub use cookies::validate_cookie_policy;
 pub use error::{AppError, AppResult};
 pub use routes::{require_user, router};
 pub use state::AuthState;
-pub use tokens::{ACCESS_COOKIE, REFRESH_COOKIE};
+pub use tokens::{
+    ACCESS_COOKIE, AccessClaims, REFRESH_COOKIE, decode_access_token, issue_access_token,
+};

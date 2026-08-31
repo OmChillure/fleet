@@ -13,6 +13,15 @@ pub const PROVIDER_ATTEMPTS: u32 = 3;
 pub const TOOL_TRANSIENT_RETRIES: u32 = 2;
 pub const EXTRA_ROUNDS_ON_FAIL: usize = 3;
 
+const BACKOFF_STEP_MS: u64 = 400;
+const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+/// Linear `400ms * attempt`, min 400ms. Cap so huge counts never overflow Duration.
+pub fn retry_backoff(attempt: u32) -> Duration {
+    let n = u64::from(attempt.max(1));
+    Duration::from_millis(n.saturating_mul(BACKOFF_STEP_MS)).min(BACKOFF_CAP)
+}
+
 pub async fn retry_provider<T, F, Fut>(label: &str, mut f: F) -> AppResult<T>
 where
     F: FnMut() -> Fut,
@@ -24,7 +33,7 @@ where
             Ok(v) => return Ok(v),
             Err(e) if is_retryable_provider(&e.to_string()) && attempt + 1 < PROVIDER_ATTEMPTS => {
                 attempt += 1;
-                let wait = Duration::from_millis(400 * u64::from(attempt));
+                let wait = retry_backoff(attempt);
                 tracing::warn!(
                     attempt,
                     error = %e,
@@ -103,6 +112,7 @@ pub fn fail_nudge(failed: &[&ChatAction]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn provider_retries_network_and_429() {
@@ -158,6 +168,41 @@ mod tests {
                 &json!({ "error_code": "upstream", "provider_status": 400 })
             ),
             "400 must not replay the same payload"
+        );
+    }
+
+    #[test]
+    fn retry_backoff_first_attempts_are_400ms_steps() {
+        assert_eq!(retry_backoff(1), Duration::from_millis(400));
+        assert_eq!(retry_backoff(2), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn retry_backoff_zero_attempt_does_not_busy_spin() {
+        let wait = retry_backoff(0);
+        assert!(
+            wait > Duration::ZERO,
+            "attempt 0 must not yield Duration::ZERO (busy-spin in tests)"
+        );
+    }
+
+    #[test]
+    fn retry_backoff_huge_attempt_clamps_without_overflow() {
+        // 10^9 * 400ms is ~12.7y; Duration::from_secs of that panics.
+        let wait = retry_backoff(1_000_000_000);
+        assert!(
+            wait > Duration::ZERO,
+            "clamped delay must stay positive, got {wait:?}"
+        );
+        let linear = Duration::from_millis(400u64.saturating_mul(1_000_000_000));
+        assert!(
+            wait < linear,
+            "attempt 10^9 must clamp below unclamped 400ms*n ({linear:?}), got {wait:?}"
+        );
+        assert_eq!(
+            retry_backoff(u32::MAX),
+            wait,
+            "all huge attempts must share the same cap"
         );
     }
 }

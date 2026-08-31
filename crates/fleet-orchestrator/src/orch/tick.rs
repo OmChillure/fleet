@@ -1,7 +1,7 @@
 //! Full reconcile tick PR5a–c: lock → … → spawn → stuck → cancel → rollup → reap.
 //! PR10: external board sync after status mutations when `auto_sync_external`.
 
-use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkRunStatus};
+use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkPlanStatus, WorkRunStatus};
 use crate::notify::{LogNotify, NotificationSink};
 use crate::orch::board_sync_step::sync_external_board;
 use crate::orch::cancel::cancel_drain;
@@ -66,7 +66,8 @@ pub struct TickRunner {
     data_dir: PathBuf,
     orchestrator_url: String,
     integrations: crate::sandbox::io::IntegrationHandle,
-    /// Test helper only. Production never local-spawns.
+    /// Local SANDBOX_BACKEND when no assignable host and the plane is on.
+    /// TickRunner::new() stays off; production `build_app_state` turns it on.
     allow_local_spawn: std::sync::atomic::AtomicBool,
 }
 
@@ -105,14 +106,14 @@ impl TickRunner {
         }
     }
 
-    /// Orchestrator integration tests that still drive local spawn.
+    /// Prefer remote native; otherwise spawn on this process's SANDBOX_BACKEND.
     pub fn with_local_spawn(self) -> Self {
         self.allow_local_spawn
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self
     }
 
-    /// Enable after `Arc` wrap (integration tests that use `build_app_state`).
+    /// Enable after `Arc` wrap.
     pub fn enable_local_spawn(&self) {
         self.allow_local_spawn
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -237,10 +238,8 @@ impl TickRunner {
             ..Default::default()
         };
 
-        let mut lock_conn = match self.store.lock_project(project_id).await {
-            Err(crate::store::StoreError::Conflict(_)) => return Ok(report),
-            other => other?,
-        };
+        // Held advisory lock is Conflict (HTTP 409), not a silent empty report.
+        let mut lock_conn = self.store.lock_project(project_id).await?;
         let result = self.tick_project_locked(project_id, &mut report).await;
         let unlock = Store::unlock_project(&mut lock_conn, project_id).await;
         match (result, unlock) {
@@ -293,8 +292,11 @@ impl TickRunner {
         for p in pending {
             let run_status = WorkRunStatus::from_db(&p.run_status)
                 .ok_or_else(|| TickError::Other(format!("bad run status {}", p.run_status)))?;
+            let plan_status = WorkPlanStatus::from_db(&p.plan_status)
+                .ok_or_else(|| TickError::Other(format!("bad plan status {}", p.plan_status)))?;
             let candidate = PlanMaterializeCandidate {
                 plan_id: p.plan_id,
+                plan_status,
                 run_status,
                 cancel_requested: p.cancel_requested_at.is_some(),
                 already_materialized: p.materialized_at.is_some(),

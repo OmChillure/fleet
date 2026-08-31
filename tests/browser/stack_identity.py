@@ -6,6 +6,7 @@ Port-up is not this tree. Kind extraPortMappings steal host :8080/:3030.
   python3 tests/browser/stack_identity.py          # live API + UI must match HEAD
   python3 tests/browser/stack_identity.py --tools  # cargo/dx/docker/… must be on PATH
   python3 tests/browser/stack_identity.py --all    # tools then live stack
+  python3 tests/browser/stack_identity.py --api-only --repo DIR  # this DIR's tree-id.sh
 
 There is no green path for a foreign stack, a missing dx, or a faked
 `FLEET_GIT_SHA` env. Rebuild images / run the install script.
@@ -25,9 +26,12 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parents[2]
-API_DEFAULT = os.environ.get("FLEET_API_URL", "http://127.0.0.1:8080").rstrip("/")
+# Fallback only. Read FLEET_API_URL at call time so a leftover import-time
+# value cannot pin identity to Kind :8080 after the caller sets the env.
+API_DEFAULT = "http://127.0.0.1:8080"
 UI_HOST = "127.0.0.1"
 UI_PORT = 3030
 UI_SHA_PATH = "/fleet-git-sha.txt"
@@ -57,7 +61,35 @@ class MissingToolsError(RuntimeError):
     pass
 
 
+def resolve_api_url(api_url: str | None = None) -> str:
+    """FLEET_API_URL at call time. Import-time bake is the Kind :8080 trap."""
+    if api_url is not None:
+        return str(api_url).rstrip("/")
+    return os.environ.get("FLEET_API_URL", API_DEFAULT).rstrip("/")
+
+
+def resolve_ui_host_port() -> tuple[str, int]:
+    """FLEET_UI_URL at call time (host stack may be :13030 when Kind owns :3030)."""
+    raw = os.environ.get("FLEET_UI_URL", f"http://{UI_HOST}:{UI_PORT}")
+    parsed = urlparse(raw)
+    host = parsed.hostname or UI_HOST
+    if host in ("localhost", "::1"):
+        host = UI_HOST
+    if parsed.port:
+        port = parsed.port
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = UI_PORT
+    return host, port
+
+
 def expected_sha(repo: Path | None = None) -> str:
+    """This worktree's id from scripts/tree-id.sh only.
+
+    A process-env bake (the kubectl set-env trick) is not this tree.
+    Live e2e compares /health.git_sha to this value and must fail on mismatch.
+    """
     root = repo or REPO
     script = (root / "scripts" / "tree-id.sh") if root != REPO else TREE_ID
     out = subprocess.check_output(
@@ -88,8 +120,8 @@ def require_tools() -> None:
         )
 
 
-def probe(api_url: str = API_DEFAULT) -> dict:
-    url = api_url.rstrip("/") + "/health"
+def probe(api_url: str | None = None) -> dict:
+    url = resolve_api_url(api_url) + "/health"
     try:
         with urllib.request.urlopen(url, timeout=3) as resp:
             raw = resp.read().decode()
@@ -109,7 +141,8 @@ def probe(api_url: str = API_DEFAULT) -> dict:
 
 
 def probe_ui_sha() -> str:
-    url = f"http://{UI_HOST}:{UI_PORT}{UI_SHA_PATH}"
+    host, port = resolve_ui_host_port()
+    url = f"http://{host}:{port}{UI_SHA_PATH}"
     try:
         with urllib.request.urlopen(url, timeout=3) as resp:
             raw = resp.read().decode()
@@ -140,7 +173,7 @@ def probe_ui_sha() -> str:
 
 def require_this_tree(
     repo: Path | None = None,
-    api_url: str = API_DEFAULT,
+    api_url: str | None = None,
     require_ui: bool = True,
 ) -> dict:
     want = expected_sha(repo)
@@ -170,9 +203,10 @@ def require_this_tree(
             f"/health.apis missing 'chat' (old fleet-server): {apis!r}. {FOREIGN_HINT}"
         )
     if require_ui:
-        if not listening(UI_HOST, UI_PORT):
+        ui_host, ui_port = resolve_ui_host_port()
+        if not listening(ui_host, ui_port):
             problems.append(
-                "UI :3030 is down. Start this tree: ./scripts/human-test.sh launch "
+                f"UI :{ui_port} is down. Start this tree: ./scripts/human-test.sh launch "
                 "(needs host dx from the install script)."
             )
         else:
@@ -201,12 +235,23 @@ def main(argv: list[str] | None = None) -> int:
     if "--tools" in args and "--all" not in args and "--stack" not in args:
         want_stack = False
     require_ui = "--api-only" not in args
+    repo: Path | None = None
+    if "--repo" in args:
+        idx = args.index("--repo")
+        if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+            print("stack_identity.py --repo needs a directory", file=sys.stderr)
+            return 2
+        repo = Path(args[idx + 1])
     try:
         if want_tools:
             require_tools()
             print("TOOLS_OK " + " ".join(REQUIRED_TOOLS))
         if want_stack:
-            body = require_this_tree(require_ui=require_ui)
+            body = require_this_tree(
+                repo=repo,
+                api_url=resolve_api_url(),
+                require_ui=require_ui,
+            )
             print(
                 f"THIS_TREE git_sha={body.get('git_sha')} "
                 f"ui_git_sha={body.get('ui_git_sha')} apis={body.get('apis')}"

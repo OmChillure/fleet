@@ -1,12 +1,11 @@
 //! Asana workspace / project / task tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
 
-const TASK_FIELDS: &str =
-    "gid,name,notes,completed,assignee.name,projects.gid,projects.name,due_on,permalink_url,modified_at";
+const TASK_FIELDS: &str = "gid,name,notes,completed,assignee.name,projects.gid,projects.name,due_on,permalink_url,modified_at";
 
 pub(crate) async fn list_workspaces(
     http: &reqwest::Client,
@@ -42,8 +41,8 @@ pub(crate) async fn list_projects(
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut path = "/projects?opt_fields=gid,name,archived,workspace.gid,permalink_url&limit=50"
-        .to_string();
+    let mut path =
+        "/projects?opt_fields=gid,name,archived,workspace.gid,permalink_url&limit=50".to_string();
     if let Some(ws) = workspace {
         path.push_str(&format!("&workspace={ws}"));
     }
@@ -65,11 +64,7 @@ pub(crate) async fn list_projects(
     )
 }
 
-pub(crate) async fn list_tasks(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn list_tasks(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let project = args
         .get("project")
         .or_else(|| args.get("project_gid"))
@@ -114,11 +109,7 @@ pub(crate) async fn list_tasks(
     )
 }
 
-pub(crate) async fn get_task(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn get_task(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let gid = match req_str(args, "task").or_else(|_| req_str(args, "gid")) {
         Ok(id) => id,
         Err(e) => return ProxyResult::err("asana", "get_task", "bad_args", e, None),
@@ -141,11 +132,7 @@ pub(crate) async fn get_task(
     )
 }
 
-pub(crate) async fn create_task(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_task(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let name = match req_str(args, "name").or_else(|_| req_str(args, "title")) {
         Ok(n) => n,
         Err(e) => return ProxyResult::err("asana", "create_task", "bad_args", e, None),
@@ -194,11 +181,7 @@ pub(crate) async fn create_task(
     )
 }
 
-pub(crate) async fn update_task(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn update_task(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let gid = match req_str(args, "task").or_else(|_| req_str(args, "gid")) {
         Ok(id) => id,
         Err(e) => return ProxyResult::err("asana", "update_task", "bad_args", e, None),
@@ -246,11 +229,7 @@ pub(crate) async fn update_task(
     )
 }
 
-pub(crate) async fn add_comment(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let gid = match req_str(args, "task").or_else(|_| req_str(args, "gid")) {
         Ok(id) => id,
         Err(e) => return ProxyResult::err("asana", "add_comment", "bad_args", e, None),

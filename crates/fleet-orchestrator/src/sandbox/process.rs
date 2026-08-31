@@ -6,9 +6,7 @@
 //! Unix only. Spawns `PROCESS_WORKER_BIN` (default `fleet-driver`) with the
 //! FLEET_* env contract. The guest is `fleet-driver` (ACP + heartbeat/status).
 
-use super::{
-    RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest,
-};
+use super::{RuntimeHandle, SandboxError, SandboxRuntime, SandboxState, Signal, SpawnRequest};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,7 +23,10 @@ pub struct ProcessRuntime {
 }
 
 impl ProcessRuntime {
-    pub fn new(data_dir: impl Into<PathBuf>, worker_argv: Vec<String>) -> Result<Self, SandboxError> {
+    pub fn new(
+        data_dir: impl Into<PathBuf>,
+        worker_argv: Vec<String>,
+    ) -> Result<Self, SandboxError> {
         if worker_argv.is_empty() {
             return Err(SandboxError::Spawn(
                 "PROCESS_WORKER_BIN / worker argv is empty".into(),
@@ -186,7 +187,8 @@ impl SandboxRuntime for ProcessRuntime {
 
             // Optional spec dump for workers that read files.
             if !req.plan_task_id.is_empty() {
-                let _ = tokio::fs::write(work_dir.join("plan_task_id.txt"), &req.plan_task_id).await;
+                let _ =
+                    tokio::fs::write(work_dir.join("plan_task_id.txt"), &req.plan_task_id).await;
             }
 
             let program = &self.worker_argv[0];
@@ -344,16 +346,15 @@ impl SandboxRuntime for ProcessRuntime {
 /// by whitespace (no quotes). Default: `fleet-driver` on PATH.
 pub fn worker_argv_from_env() -> Vec<String> {
     match std::env::var("PROCESS_WORKER_BIN") {
-        Ok(s) if !s.trim().is_empty() => s
-            .split_whitespace()
-            .map(|p| p.to_string())
-            .collect(),
+        Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|p| p.to_string()).collect(),
         _ => vec!["fleet-driver".into()],
     }
 }
 
 /// Build process runtime from data_dir + env worker bin.
-pub fn build_process_runtime(data_dir: impl Into<PathBuf>) -> Result<Arc<ProcessRuntime>, SandboxError> {
+pub fn build_process_runtime(
+    data_dir: impl Into<PathBuf>,
+) -> Result<Arc<ProcessRuntime>, SandboxError> {
     Ok(Arc::new(ProcessRuntime::new(
         data_dir,
         worker_argv_from_env(),
@@ -363,7 +364,7 @@ pub fn build_process_runtime(data_dir: impl Into<PathBuf>) -> Result<Arc<Process
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{fleet_worker_env, SandboxRuntime};
+    use crate::sandbox::{SandboxRuntime, fleet_worker_env};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -416,7 +417,10 @@ mod tests {
             .join(session.to_string());
         tokio::fs::create_dir_all(&work).await.unwrap();
 
-        let h = rt.spawn(sample_req(session, project, work.clone())).await.unwrap();
+        let h = rt
+            .spawn(sample_req(session, project, work.clone()))
+            .await
+            .unwrap();
         assert_eq!(h.backend, "process");
         assert_eq!(h.id, session.to_string());
         assert!(work.join("pid").exists());
@@ -462,6 +466,57 @@ mod tests {
             }
             other => panic!("expected exited, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_spawn_missing_worker_bin_errors_without_pidfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-fleet-driver");
+        assert!(
+            !missing.exists(),
+            "fixture must not exist: {}",
+            missing.display()
+        );
+        let rt =
+            ProcessRuntime::new(dir.path(), vec![missing.to_string_lossy().into_owned()]).unwrap();
+        let project = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let work = dir
+            .path()
+            .join("projects")
+            .join(project.to_string())
+            .join("sessions")
+            .join(session.to_string());
+        tokio::fs::create_dir_all(&work).await.unwrap();
+
+        let err = match rt.spawn(sample_req(session, project, work.clone())).await {
+            Ok(h) => panic!(
+                "missing PROCESS_WORKER_BIN must not spawn a handle (got {h:?}); \
+                 no silent stub"
+            ),
+            Err(e) => e,
+        };
+        match err {
+            SandboxError::Spawn(msg) => {
+                assert!(
+                    msg.contains("exec"),
+                    "spawn error must name the exec, got {msg}"
+                );
+                assert!(
+                    msg.contains("no-such-fleet-driver"),
+                    "spawn error must name the missing bin, got {msg}"
+                );
+            }
+            other => panic!("expected SandboxError::Spawn, got {other:?}"),
+        }
+        assert!(
+            !work.join("pid").exists(),
+            "missing worker bin must not write a pidfile (that would be a silent stub)"
+        );
+        assert!(
+            rt.list(project).await.unwrap().is_empty(),
+            "missing worker bin must not list a running process session"
+        );
     }
 
     #[tokio::test]

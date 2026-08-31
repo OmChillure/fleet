@@ -1,9 +1,9 @@
 //! GitHub read tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn list_repos(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let per_page = args
@@ -49,10 +49,7 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "list_issues", "bad_args", e, None),
     };
-    let state = args
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("open");
+    let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("open");
     let per_page = args
         .get("per_page")
         .and_then(|v| v.as_u64())
@@ -103,7 +100,7 @@ pub(crate) async fn get_issue(http: &reqwest::Client, token: &str, args: &Value)
                 "bad_args",
                 "number is required",
                 None,
-            )
+            );
         }
     };
     let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
@@ -125,10 +122,7 @@ pub(crate) async fn list_prs(http: &reqwest::Client, token: &str, args: &Value) 
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "list_prs", "bad_args", e, None),
     };
-    let state = args
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("open");
+    let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("open");
     let per_page = args
         .get("per_page")
         .and_then(|v| v.as_u64())
@@ -167,7 +161,7 @@ pub(crate) async fn get_pr(http: &reqwest::Client, token: &str, args: &Value) ->
     }) {
         Some(n) => n,
         None => {
-            return ProxyResult::err("github", "get_pr", "bad_args", "number is required", None)
+            return ProxyResult::err("github", "get_pr", "bad_args", "number is required", None);
         }
     };
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
@@ -199,16 +193,18 @@ pub(crate) async fn get_file(http: &reqwest::Client, token: &str, args: &Value) 
         "https://api.github.com/repos/{owner}/{repo}/contents/{}",
         path_enc(&path)
     );
-    if let Some(r) = args.get("ref").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(r) = args
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         url.push_str(&format!("?ref={}", urlencoding(r)));
     }
     let (status, body) = github_get(http, token, &url).await;
     if !(200..300).contains(&status) {
         return upstream_err("get_file", status, &body);
     }
-    if body.get("type").and_then(|v| v.as_str()) == Some("dir")
-        || body.as_array().is_some()
-    {
+    if body.get("type").and_then(|v| v.as_str()) == Some("dir") || body.as_array().is_some() {
         let entries: Vec<Value> = body
             .as_array()
             .cloned()
@@ -264,11 +260,7 @@ pub(crate) async fn get_file(http: &reqwest::Client, token: &str, args: &Value) 
     )
 }
 
-pub(crate) async fn list_commits(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn list_commits(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "list_commits", "bad_args", e, None),
@@ -278,10 +270,13 @@ pub(crate) async fn list_commits(
         .and_then(|v| v.as_u64())
         .unwrap_or(20)
         .clamp(1, 50);
-    let mut url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/commits?per_page={per_page}"
-    );
-    if let Some(sha) = args.get("sha").or_else(|| args.get("branch")).and_then(|v| v.as_str()) {
+    let mut url =
+        format!("https://api.github.com/repos/{owner}/{repo}/commits?per_page={per_page}");
+    if let Some(sha) = args
+        .get("sha")
+        .or_else(|| args.get("branch"))
+        .and_then(|v| v.as_str())
+    {
         url.push_str(&format!("&sha={}", urlencoding(sha)));
     }
     let (status, body) = github_get(http, token, &url).await;
@@ -316,4 +311,3 @@ pub(crate) async fn list_commits(
         Some(status),
     )
 }
-

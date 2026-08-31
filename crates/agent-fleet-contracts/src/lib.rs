@@ -100,7 +100,10 @@ mod tests {
         assert_eq!(value["type"], "sandbox.failed");
         assert_eq!(value["producer"], "sandbox-manager");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
-        assert_eq!(value["payload"]["sandbox_id"], uuid::Uuid::nil().to_string());
+        assert_eq!(
+            value["payload"]["sandbox_id"],
+            uuid::Uuid::nil().to_string()
+        );
         assert_eq!(value["payload"]["reason_code"], "oom_killed");
         assert_eq!(value["payload"]["severity"], "failed");
         assert_eq!(value["payload"]["restart_count"], 1);

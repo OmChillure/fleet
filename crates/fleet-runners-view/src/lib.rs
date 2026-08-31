@@ -213,6 +213,29 @@ pub fn status_label(status: &str) -> &str {
     }
 }
 
+/// Heartbeats are ~10s. Stored `online` older than this is listed as `offline`.
+/// 90s is several missed beats plus a roam, so a laptop does not flicker.
+pub const HOST_OFFLINE_AFTER_MS: f64 = 90_000.0;
+
+/// List-card status. Stored `online` with `last_seen_at` older than 90s is
+/// `offline`. Pending / removed (`disabled`) / error keep their stored status —
+/// the 90s rule must not overwrite them.
+pub fn public_status(host: &HostPublic, now_ms: f64) -> &str {
+    if host.status == "online" {
+        match host
+            .last_seen_at
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(parse_iso_millis)
+        {
+            Some(seen) if now_ms - seen <= HOST_OFFLINE_AFTER_MS => "online",
+            _ => "offline",
+        }
+    } else {
+        &host.status
+    }
+}
+
 pub fn settings_awaiting_ack(host: &HostPublic) -> bool {
     host.settings_pending || host.settings_gen != host.settings_ack_gen
 }
@@ -240,7 +263,10 @@ pub fn software_flag(host: &HostPublic) -> Option<&'static str> {
         return Some("updating");
     }
     let rows = software_bin_rows(host);
-    if rows.iter().any(|r| r.status == "behind" || r.status == "missing") {
+    if rows
+        .iter()
+        .any(|r| r.status == "behind" || r.status == "missing")
+    {
         return Some("outdated");
     }
     if !rows.is_empty() && rows.iter().all(|r| r.status == "current") {
@@ -259,12 +285,42 @@ fn software_platform(host: &HostPublic) -> Option<&str> {
 
 /// Compile-time tree-id baked into fleet-host. Internal only (plane-bake
 /// skip). Not a runner version and not shown on the card.
+///
+/// A file hash (64-hex SHA-256) or a `git_sha` that is just a copy of a
+/// reported bin SHA is not a bake id.
 pub fn software_build_id(host: &HostPublic) -> Option<&str> {
-    host.software
+    let sha = host
+        .software
         .as_ref()
         .and_then(|s| s.git_sha.as_deref())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty())?;
+    if is_file_hash(sha) || reported_bin_sha_eq(host, sha) {
+        return None;
+    }
+    Some(sha)
+}
+
+/// SHA-256 of a bin on disk — never a tree-id / bake stamp.
+fn is_file_hash(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn reported_bin_sha_eq(host: &HostPublic, sha: &str) -> bool {
+    let Some(bins) = host.software.as_ref().and_then(|s| s.bins.as_ref()) else {
+        return false;
+    };
+    let Some(map) = bins.as_object() else {
+        return false;
+    };
+    map.values().any(|v| match v.as_str() {
+        Some(got) => sha_eq(got, sha),
+        None => v
+            .get("sha256")
+            .and_then(|x| x.as_str())
+            .is_some_and(|got| sha_eq(got, sha)),
+    })
 }
 
 /// What this plane will send a runner for one OS. `host`/`driver` are file hashes.
@@ -312,11 +368,7 @@ pub fn served_platforms(inv: &PackageInventory) -> Vec<ServedPlatform> {
 
 fn short_sha(sha: &str) -> &str {
     let s = sha.trim();
-    if s.len() > 12 {
-        &s[..12]
-    } else {
-        s
-    }
+    if s.len() > 12 { &s[..12] } else { s }
 }
 
 /// The two files the plane serves and the box must report. Not `fleet-worker`.
@@ -405,11 +457,82 @@ pub fn stale_package_warning(inv: &PackageInventory) -> Option<String> {
     ))
 }
 
+/// Self-hosted list header prefixes. Catalog / e2e: never "Current runner build".
+pub const PACKAGE_HEADER_HOST_PREFIX: &str = "Current fleet-host version";
+pub const PACKAGE_HEADER_DRIVER_PREFIX: &str = "Current fleet-driver version";
+
+/// One header line per [verify] binary from `package_versions`.
+/// Empty when that field is missing or is a bake SHA / file hash — those
+/// are not runner versions. Never emits "Current runner build".
+pub fn package_header_host_line(versions: &PackageVersions) -> Option<String> {
+    package_header_line(PACKAGE_HEADER_HOST_PREFIX, &versions.host)
+}
+
+/// See [`package_header_host_line`].
+pub fn package_header_driver_line(versions: &PackageVersions) -> Option<String> {
+    package_header_line(PACKAGE_HEADER_DRIVER_PREFIX, &versions.driver)
+}
+
+/// Both header lines, host then driver. Skip a side that is not [verify] semver.
+pub fn package_header_lines(versions: &PackageVersions) -> Vec<String> {
+    [
+        package_header_host_line(versions),
+        package_header_driver_line(versions),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn package_header_line(prefix: &str, raw: &str) -> Option<String> {
+    let version = verify_header_version(raw)?;
+    Some(format!("{prefix} {version}"))
+}
+
+/// [verify] semver the header may show. Bake SHA / file hash / empty → none.
+fn verify_header_version(raw: &str) -> Option<&str> {
+    let s = raw.trim();
+    if s.is_empty() || is_file_hash(s) || is_git_bake_id(s) || !looks_like_package_semver(s) {
+        return None;
+    }
+    Some(s)
+}
+
+/// Plane `/health.git_sha` / compile-time `FLEET_GIT_SHA` (clean 40-hex or
+/// dirty `HEAD-<12hex>`). Not a fleet-host / fleet-driver [verify] semver.
+fn is_git_bake_id(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    if option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
+        .is_some_and(|baked| !baked.is_empty() && baked == s)
+    {
+        return true;
+    }
+    let hex = s.split_once('-').map(|(h, _)| h).unwrap_or(s);
+    hex.len() == 40 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn looks_like_package_semver(s: &str) -> bool {
+    let core = s.split_once('-').map(|(c, _)| c).unwrap_or(s);
+    let mut parts = core.split('.');
+    let (Some(maj), Some(min), Some(pat), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    [maj, min, pat]
+        .iter()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// One served binary vs what this box reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SoftwareBinRow {
     pub name: &'static str,
-    /// Package semver the box reported (file hash only if no version yet).
+    /// Package semver the box reported, or em-dash. Never a file-hash prefix.
     pub version: String,
     pub status: &'static str,
 }
@@ -419,8 +542,8 @@ pub fn software_bin_rows(host: &HostPublic) -> Vec<SoftwareBinRow> {
         .iter()
         .map(|name| {
             let got_ver = reported_bin_version(host, name);
-            let want_ver = desired_bin_version(host, name)
-                .or_else(|| current_pkg_version(host, name));
+            let want_ver =
+                desired_bin_version(host, name).or_else(|| current_pkg_version(host, name));
             let got = reported_bin_sha(host, name);
             let want = desired_bin_sha(host, name);
             let status = match (
@@ -437,10 +560,7 @@ pub fn software_bin_rows(host: &HostPublic) -> Vec<SoftwareBinRow> {
                 (Some(_), None, _, None) | (_, _, Some(_), None) => "reported",
                 _ => "unknown",
             };
-            let version = got_ver
-                .or(want_ver)
-                .or_else(|| got.as_deref().map(short_sha).map(str::to_string))
-                .unwrap_or_else(|| "—".into());
+            let version = got_ver.or(want_ver).unwrap_or_else(|| "—".into());
             SoftwareBinRow {
                 name,
                 version,
@@ -804,7 +924,11 @@ pub fn worker_id_label(host: &HostPublic) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(host.id.as_str());
-    let hex: String = raw.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
     if hex.len() >= 8 {
         hex[..8].to_string()
     } else {
@@ -812,12 +936,20 @@ pub fn worker_id_label(host: &HostPublic) -> String {
     }
 }
 
+/// Card `n / cap` and assignable skip. Plane ∩ advertised, each clamped
+/// 1–256. Missing advertised uses the plane cap. Advertised `0` is 1, not unlimited.
 pub fn job_cap(host: &HostPublic) -> i32 {
     let cp = host.max_concurrent.clamp(1, 256);
     match host.advertised_max_concurrent {
         Some(n) => cp.min(n.clamp(1, 256)),
         None => cp,
     }
+}
+
+/// True when `current_jobs` has reached [`job_cap`]. Same min as the card
+/// `n / cap` and as assignable skip. Advertised `0` is a cap of 1, not unlimited.
+pub fn at_job_cap(host: &HostPublic) -> bool {
+    host.current_jobs.max(0) >= job_cap(host)
 }
 
 fn fmt_gib(bytes: u64) -> String {
@@ -900,16 +1032,21 @@ pub fn specs_line(host: &HostPublic) -> Option<String> {
     }
 }
 
-/// Control plane first, then status rank, then name.
-pub fn cmp_hosts_for_list(a: &HostPublic, b: &HostPublic) -> std::cmp::Ordering {
+/// Control plane first, then public-status rank (same as the pill), then name.
+pub fn cmp_hosts_for_list(a: &HostPublic, b: &HostPublic, now_ms: f64) -> std::cmp::Ordering {
     is_control_plane(b)
         .cmp(&is_control_plane(a))
-        .then_with(|| status_rank(&a.status).cmp(&status_rank(&b.status)))
+        .then_with(|| {
+            status_rank(public_status(a, now_ms)).cmp(&status_rank(public_status(b, now_ms)))
+        })
         .then_with(|| a.name.cmp(&b.name))
 }
 
-pub fn sort_hosts_for_list(hosts: &mut [HostPublic]) {
-    hosts.sort_by(cmp_hosts_for_list);
+/// Sort in place. `now_ms` is milliseconds since Unix epoch (`Date.now()` in
+/// the UI). Do not call `chrono::Utc::now()` here — that panics on wasm32
+/// without chrono's `wasmbind` feature and blanks Self-hosted.
+pub fn sort_hosts_for_list(hosts: &mut [HostPublic], now_ms: f64) {
+    hosts.sort_by(|a, b| cmp_hosts_for_list(a, b, now_ms));
 }
 
 pub fn format_ts(ts: &str) -> String {
@@ -964,6 +1101,14 @@ pub fn last_seen_label(host: &HostPublic, now_ms: f64) -> String {
 /// Software line is paired boxes only — never the plane, pending pair, or removed.
 pub fn shows_software_line(host: &HostPublic) -> bool {
     !is_control_plane(host) && host.status != "pending" && host.status != "disabled"
+}
+
+/// Auto-update checkbox is host cards only (including pending pair).
+/// Catalog "paired only" means not the plane — this process does not pull a
+/// host package — not "hide on pending". Removed cards hide Behavior behind
+/// `if !revoked`.
+pub fn shows_auto_update(host: &HostPublic) -> bool {
+    !is_control_plane(host) && host.status != "disabled"
 }
 
 /// Jobs `n / cap` plus optional load % (cpu / mem / gpu).
@@ -1030,13 +1175,14 @@ pub fn draft_holding_new_jobs(accepting: bool) -> bool {
     !accepting
 }
 
-/// How this runner executes. Isolation is process < container < vm, not SANDBOX_BACKEND.
+/// How this runner executes. Plane shows workspace SANDBOX_BACKEND; a paired host is process.
 pub fn runtime_line(host: &HostPublic, sandbox_backend: &str) -> String {
     if is_control_plane(host) {
-        let _ = sandbox_backend;
-        "Control plane does not run sandboxes".into()
+        let backend = sandbox_backend.trim();
+        let backend = if backend.is_empty() { "stub" } else { backend };
+        format!("Runtime: {backend} (SANDBOX_BACKEND)")
     } else {
-        "Runtime: fleet-host".into()
+        "Runtime: process on this machine".into()
     }
 }
 
@@ -1149,7 +1295,9 @@ pub fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
     if patch.request_update == Some(true) {
         host.update_requested_at = Some("requested".into());
     }
-    if bump {
+    // Paired hosts wait for fleet-host to ack the new gen. The plane is this
+    // process: apply is immediate (no pending apply, no gen/ack cycle).
+    if bump && !is_control_plane(&host) {
         host.settings_gen = host.settings_gen.saturating_add(1);
         host.settings_pending = true;
     }
@@ -1167,11 +1315,155 @@ mod tests {
             .expect("sample host")
     }
 
+    /// Reported vs served package versions. Extra "outdated" is this compare,
+    /// not the API `outdated` / `software_status` fields.
+    fn set_package_versions(host: &mut HostPublic, reported: &str, served: &str) {
+        host.current_versions = PackageVersions {
+            host: served.into(),
+            driver: served.into(),
+        };
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "served-host", "version": served},
+                "fleet-driver": {"sha256": "served-drv", "version": served}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host":{{"sha256":"got-host","version":"{reported}"}},"fleet-driver":{{"sha256":"got-drv","version":"{reported}"}}}}}}"#
+        ))
+        .expect("software");
+    }
+
+    /// Card renders `{row.name} {row.version} · {row.status}` from
+    /// `software_bin_rows`. Version is package semver or an em-dash —
+    /// never a file-hash prefix (`software_line` is not shown).
+    fn is_package_semver_or_emdash(s: &str) -> bool {
+        if s == "—" {
+            return true;
+        }
+        let core = s.split_once('-').map(|(c, _)| c).unwrap_or(s);
+        let mut parts = core.split('.');
+        let (Some(maj), Some(min), Some(pat), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        [maj, min, pat]
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    fn is_hex_prefix(s: &str) -> bool {
+        let s = s.trim();
+        (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    fn is_sha256_hex(s: &str) -> bool {
+        let s = s.trim();
+        s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    fn reported_bin_shas(host: &HostPublic) -> Vec<String> {
+        let Some(bins) = host.software.as_ref().and_then(|s| s.bins.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(map) = bins.as_object() else {
+            return Vec::new();
+        };
+        map.values()
+            .filter_map(|v| {
+                if let Some(s) = v.as_str() {
+                    let s = s.trim();
+                    return (!s.is_empty()).then(|| s.to_string());
+                }
+                v.get("sha256")
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn assert_card_row_versions_are_semver_or_emdash(host: &HostPublic) {
+        let shas = reported_bin_shas(host);
+        for row in software_bin_rows(host) {
+            assert!(
+                is_package_semver_or_emdash(&row.version),
+                "card renders `{} {} · {}`; version must be package semver or em-dash, never a hash prefix",
+                row.name,
+                row.version,
+                row.status
+            );
+            assert!(
+                !is_hex_prefix(&row.version),
+                "card row `{}` version {:?} is a hash prefix",
+                row.name,
+                row.version
+            );
+            for sha in &shas {
+                let prefix = if sha.len() >= 12 {
+                    &sha[..12]
+                } else {
+                    sha.as_str()
+                };
+                assert_ne!(
+                    row.version.as_str(),
+                    prefix,
+                    "{} version must not be the first 12 of bin SHA {sha}",
+                    row.name
+                );
+                assert!(
+                    !row.version.contains(sha.as_str()),
+                    "{} version must not contain bin SHA {sha}",
+                    row.name
+                );
+            }
+        }
+    }
+
+    fn assert_software_build_id_never_hash_or_bin_sha(host: &HostPublic) {
+        if let Some(id) = software_build_id(host) {
+            assert!(
+                !is_sha256_hex(id),
+                "software_build_id must never be a 64-hex file hash: {id}"
+            );
+            for sha in reported_bin_shas(host) {
+                assert_ne!(
+                    id,
+                    sha.as_str(),
+                    "software_build_id must not be a reported bin SHA"
+                );
+            }
+        }
+    }
+
     fn assert_no_pause(text: &str) {
         let lower = text.to_ascii_lowercase();
         assert!(
             !lower.contains("pause") && !lower.contains("resume"),
             "hold copy must not say Pause/Resume: {text}"
+        );
+    }
+
+    /// Same strings the list row + detail panel render from this crate.
+    fn card_copy(host: &HostPublic, now_ms: f64) -> String {
+        let mut parts = vec![
+            status_label(public_status(host, now_ms)).to_string(),
+            last_seen_label(host, now_ms),
+        ];
+        parts.extend(extra_status_pills(host).iter().copied().map(str::to_string));
+        if let Some(why) = not_taking_reason(host) {
+            parts.push(why);
+        }
+        parts.join(" ")
+    }
+
+    fn assert_no_heartbeating(text: &str) {
+        assert!(
+            !text.to_ascii_lowercase().contains("heartbeat"),
+            "offline card must not say heartbeating: {text}"
         );
     }
 
@@ -1358,6 +1650,259 @@ mod tests {
         assert!(in_removed_list(&newer, &all));
     }
 
+    /// catalog:list-hide-removed-never-paired
+    /// catalog:unit-hide-removed — Show / hide removed; hide clones + never-paired.
+    /// Never-paired cancel is not a removed card. Revoked paired box appears
+    /// when Show removed. Re-pair hides the old clone.
+    #[test]
+    fn in_removed_list_hides_clones_and_never_paired() {
+        // just test excludes fleet-ui; lock the live list split so swapping
+        // is_removed onto Show removed (or in_removed_list onto the default
+        // list) cannot go green. Never-paired cancel must vanish, not become
+        // a removed card; revoked paired stays off the default list.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("in_removed_list"),
+            "production source must import in_removed_list"
+        );
+        assert!(
+            import.contains("is_removed"),
+            "production source must import is_removed"
+        );
+        assert!(
+            !prod.contains("fn in_removed_list"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert!(
+            prod.contains("filter(|h| !is_removed(h))"),
+            "default list must hide every disabled row (Cancel leftover is discarded)"
+        );
+        assert!(
+            prod.contains("filter(|h| in_removed_list(h, &all))"),
+            "Show removed must use in_removed_list, not every disabled row"
+        );
+        assert!(
+            prod.contains("Show removed ({removed_n})"),
+            "Show removed (N) must count in_removed_list cards only"
+        );
+        assert!(
+            prod.contains("Hide removed ({removed_n})"),
+            "Hide removed (N) must count in_removed_list cards only"
+        );
+        assert!(
+            prod.contains("if removed_n > 0"),
+            "Show removed must stay hidden until a paired box is revoked"
+        );
+        assert!(
+            prod.contains("if show_removed()"),
+            "removed cards render only after Show removed"
+        );
+
+        fn page_lists(all: &[HostPublic]) -> (Vec<String>, Vec<String>) {
+            let active: Vec<String> = all
+                .iter()
+                .filter(|h| !is_removed(h))
+                .map(|h| h.id.clone())
+                .collect();
+            let removed: Vec<String> = all
+                .iter()
+                .filter(|h| in_removed_list(h, all))
+                .map(|h| h.id.clone())
+                .collect();
+            (active, removed)
+        }
+
+        let mut leftover = sample_host();
+        leftover.id = "leftover".into();
+        leftover.name = "never-paired-cancel".into();
+        leftover.kind = "host".into();
+        leftover.status = "disabled".into();
+        leftover.paired_at = None;
+        leftover.last_seen_at = None;
+        leftover.hostname = None;
+        leftover.platform = None;
+        leftover.machine_id = None;
+        leftover.created_at = Some("2026-01-01T00:00:00Z".into());
+        assert!(is_removed(&leftover));
+        assert_eq!(status_label(&leftover.status), "removed");
+        assert!(
+            !in_removed_list(&leftover, std::slice::from_ref(&leftover)),
+            "never-paired cancel is not a removed card"
+        );
+
+        let mut live = sample_host();
+        live.id = "live".into();
+        live.name = "paired-box".into();
+        live.kind = "host".into();
+        live.status = "online".into();
+        live.paired_at = Some("2026-01-01T00:00:00Z".into());
+        live.last_seen_at = Some("2026-03-01T00:00:00Z".into());
+        live.hostname = Some("x1".into());
+        live.platform = Some("windows-x86_64".into());
+        live.machine_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+
+        // Leftover + live paired: no Show removed. Cancel leftover is gone.
+        let all = [leftover.clone(), live.clone()];
+        let (active, removed) = page_lists(&all);
+        assert_eq!(active, vec!["live".to_string()]);
+        assert!(
+            removed.is_empty(),
+            "Show removed stays hidden until a paired box is revoked; leftover is not a card: {removed:?}"
+        );
+        assert!(!in_removed_list(&leftover, &all));
+        assert!(!in_removed_list(&live, &all));
+
+        // Revoke the paired box: hidden by default, appears under Show removed.
+        // Never-paired leftover still does not increment the count.
+        let mut revoked = live.clone();
+        revoked.status = "disabled".into();
+        let all = [leftover.clone(), revoked.clone()];
+        let (active, removed) = page_lists(&all);
+        assert!(
+            active.is_empty(),
+            "revoked paired box is hidden until Show removed: {active:?}"
+        );
+        assert_eq!(
+            removed,
+            vec!["live".to_string()],
+            "Show removed after revoke of a paired box; leftover stays hidden: {removed:?}"
+        );
+        assert!(in_removed_list(&revoked, &all));
+        assert!(!in_removed_list(&leftover, &all));
+        assert_eq!(status_label(&revoked.status), "removed");
+
+        // Blank identity fields are still never-paired (Cancel leftover).
+        leftover.hostname = Some("  ".into());
+        leftover.platform = Some("".into());
+        leftover.paired_at = Some("   ".into());
+        leftover.last_seen_at = Some(" ".into());
+        let all = [leftover.clone(), revoked.clone()];
+        assert!(
+            !in_removed_list(&leftover, &all),
+            "whitespace hostname/platform/paired_at is still never-paired"
+        );
+        leftover.hostname = None;
+        leftover.platform = None;
+        leftover.paired_at = None;
+        leftover.last_seen_at = None;
+
+        // Re-pair of the same box hides the old clone. Leftover stays gone.
+        let mut clone = revoked.clone();
+        clone.id = "old-clone".into();
+        clone.hostname = Some("X1".into());
+        clone.platform = Some("WINDOWS-x86_64".into());
+        let mut repaired = live.clone();
+        repaired.id = "repaired".into();
+        repaired.status = "online".into();
+        let all = [leftover.clone(), clone.clone(), repaired.clone()];
+        let (active, removed) = page_lists(&all);
+        assert_eq!(active, vec!["repaired".to_string()]);
+        assert!(
+            removed.is_empty(),
+            "re-pair hides the old clone; leftover is not a removed card: {removed:?}"
+        );
+        assert!(!in_removed_list(&clone, &all));
+        assert!(!in_removed_list(&repaired, &all));
+        assert!(!in_removed_list(&leftover, &all));
+
+        // Same machine_id is the same box even when hostname/platform differ.
+        clone.hostname = Some("other".into());
+        clone.platform = Some("linux-x86_64".into());
+        clone.machine_id = Some("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".into());
+        let all = [clone.clone(), repaired.clone()];
+        assert!(
+            !in_removed_list(&clone, &all),
+            "same machine_id (case-insensitive) is a clone of the live box"
+        );
+
+        // Same hostname + different platform is a different box, not a clone.
+        let mut win = revoked.clone();
+        win.id = "win-dead".into();
+        win.hostname = Some("lab".into());
+        win.platform = Some("windows-x86_64".into());
+        win.machine_id = None;
+        win.paired_at = Some("2026-01-01T00:00:00Z".into());
+        let mut linux = win.clone();
+        linux.id = "linux-dead".into();
+        linux.platform = Some("linux-x86_64".into());
+        linux.last_seen_at = Some("2026-01-02T00:00:00Z".into());
+        let all = [win.clone(), linux.clone()];
+        assert!(
+            in_removed_list(&win, &all) && in_removed_list(&linux, &all),
+            "same hostname on different OS is not a clone"
+        );
+
+        // Same platform with empty hostname is not a clone (no identity to match).
+        win.hostname = None;
+        linux.hostname = None;
+        linux.platform = win.platform.clone();
+        let all = [win.clone(), linux.clone()];
+        assert!(
+            in_removed_list(&win, &all) && in_removed_list(&linux, &all),
+            "empty hostname + same platform is not a clone"
+        );
+
+        // An unrelated revoked paired box still appears when Show removed.
+        let mut other = sample_host();
+        other.id = "other-dead".into();
+        other.name = "other-paired".into();
+        other.kind = "host".into();
+        other.status = "disabled".into();
+        other.paired_at = Some("2026-02-01T00:00:00Z".into());
+        other.last_seen_at = Some("2026-02-02T00:00:00Z".into());
+        other.hostname = Some("lab-2".into());
+        other.platform = Some("linux-x86_64".into());
+        other.machine_id = Some("bbbbbbbb-cccc-dddd-eeee-ffffffffffff".into());
+        let all = [
+            leftover.clone(),
+            clone.clone(),
+            repaired.clone(),
+            other.clone(),
+        ];
+        let (active, removed) = page_lists(&all);
+        assert_eq!(active, vec!["repaired".to_string()]);
+        assert_eq!(
+            removed,
+            vec!["other-dead".to_string()],
+            "unrelated revoked paired box is the only Show-removed card"
+        );
+        assert!(in_removed_list(&other, &all));
+        assert!(!in_removed_list(&clone, &all));
+        assert!(!in_removed_list(&leftover, &all));
+
+        // Two removed rows for the same box: only the newest is a card.
+        let mut older = clone.clone();
+        older.id = "old".into();
+        older.status = "disabled".into();
+        older.hostname = Some("x1".into());
+        older.platform = Some("windows-x86_64".into());
+        older.machine_id = None;
+        older.paired_at = Some("2026-01-01T00:00:00Z".into());
+        older.last_seen_at = Some("2026-01-01T00:00:00Z".into());
+        let mut newer = older.clone();
+        newer.id = "new".into();
+        newer.last_seen_at = Some("2026-02-01T00:00:00Z".into());
+        let all = [older.clone(), newer.clone()];
+        assert!(!in_removed_list(&older, &all));
+        assert!(in_removed_list(&newer, &all));
+
+        // Unused pending (not yet cancelled) is waiting to pair, not removed.
+        let mut pending = leftover.clone();
+        pending.id = "pending".into();
+        pending.status = "pending".into();
+        assert!(!is_removed(&pending));
+        assert!(!in_removed_list(&pending, std::slice::from_ref(&pending)));
+    }
+
     fn sample_served(platform: &str, host: &str, driver: &str) -> HostDesiredSoftware {
         HostDesiredSoftware {
             platform: Some(platform.into()),
@@ -1474,6 +2019,273 @@ mod tests {
         };
         assert!(stale_package_platforms(&inv).is_empty());
         assert!(stale_package_warning(&inv).is_none());
+    }
+
+    /// catalog:list-header-current-host-driver-version
+    /// Header is Current fleet-host version / Current fleet-driver version
+    /// from runner-packages.toml [verify] via package_versions. Never a bake
+    /// SHA or "Current runner build". Distinct from stale_package_warning
+    /// and plane /health.git_sha.
+    #[test]
+    fn package_header_is_current_host_driver_version_from_verify_not_bake_sha() {
+        fn toml_section_value(raw: &str, section: &str, key: &str) -> String {
+            let header = format!("[{section}]");
+            let needle = format!("{key} = \"");
+            let mut in_section = false;
+            for line in raw.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_section = line == header;
+                    continue;
+                }
+                if !in_section {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix(needle.as_str()) {
+                    if let Some(end) = rest.find('"') {
+                        let v = &rest[..end];
+                        if !v.is_empty() {
+                            return v.to_string();
+                        }
+                    }
+                }
+            }
+            String::new()
+        }
+
+        fn is_40_hex_git_sha(s: &str) -> bool {
+            let s = s.trim();
+            let hex = s.split_once('-').map(|(h, _)| h).unwrap_or(s);
+            hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit())
+        }
+
+        let toml = include_str!("../../../runner-packages.toml");
+        assert!(
+            toml.contains("[verify]"),
+            "runner-packages.toml must have a [verify] section for the header"
+        );
+        let verify_host = toml_section_value(toml, "verify", "fleet-host");
+        let verify_driver = toml_section_value(toml, "verify", "fleet-driver");
+        assert!(
+            looks_like_package_semver(&verify_host),
+            "[verify] fleet-host must be package semver, not bake SHA: {verify_host:?}"
+        );
+        assert!(
+            looks_like_package_semver(&verify_driver),
+            "[verify] fleet-driver must be package semver, not bake SHA: {verify_driver:?}"
+        );
+        assert!(
+            !is_40_hex_git_sha(&verify_host) && !is_file_hash(&verify_host),
+            "[verify] fleet-host is a bake/file hash, not a version: {verify_host}"
+        );
+        assert!(
+            !is_40_hex_git_sha(&verify_driver) && !is_file_hash(&verify_driver),
+            "[verify] fleet-driver is a bake/file hash, not a version: {verify_driver}"
+        );
+        if let Some(sha) = option_env!("FLEET_GIT_SHA")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            assert_ne!(
+                verify_host, sha,
+                "[verify] fleet-host must not be FLEET_GIT_SHA /health.git_sha"
+            );
+            assert_ne!(
+                verify_driver, sha,
+                "[verify] fleet-driver must not be FLEET_GIT_SHA /health.git_sha"
+            );
+        }
+
+        // Header reads package_versions, which the plane fills from [verify]
+        // — not [versions] (staging) and not plane_git_sha.
+        let from_verify = PackageVersions {
+            host: verify_host.clone(),
+            driver: verify_driver.clone(),
+        };
+        let header = package_header_lines(&from_verify);
+        assert_eq!(
+            header,
+            vec![
+                format!("{PACKAGE_HEADER_HOST_PREFIX} {verify_host}"),
+                format!("{PACKAGE_HEADER_DRIVER_PREFIX} {verify_driver}"),
+            ]
+        );
+        assert_eq!(
+            package_header_host_line(&from_verify).as_deref(),
+            Some(header[0].as_str())
+        );
+        assert_eq!(
+            package_header_driver_line(&from_verify).as_deref(),
+            Some(header[1].as_str())
+        );
+        let blob = header.join("\n");
+        assert!(
+            !blob.contains("Current runner build"),
+            "header must not use the retired Current runner build label: {blob}"
+        );
+        assert!(
+            !blob.contains("linux-") && !blob.contains("windows-"),
+            "header is one [verify] number, not a per-OS served list: {blob}"
+        );
+        for line in &header {
+            for tok in line.split_whitespace() {
+                assert!(
+                    !is_40_hex_git_sha(tok) && !is_file_hash(tok),
+                    "header must not show a bake SHA: {line}"
+                );
+            }
+        }
+
+        // A bake SHA in package_versions is not a runner version — omit the line.
+        let bake = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351";
+        let dirty = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351-e8260cd5c443";
+        let file_hash = "8c015655431b5287e58eb79e26d29647a8a4488d797d8c436ae4bd8181db3f58";
+        for bad in [bake, dirty, file_hash, "9d239a509055", "", "  "] {
+            let only_bad = PackageVersions {
+                host: bad.into(),
+                driver: bad.into(),
+            };
+            assert!(
+                package_header_lines(&only_bad).is_empty(),
+                "bake/file-hash/empty {bad:?} must not become a header line"
+            );
+        }
+        let mixed = PackageVersions {
+            host: verify_host.clone(),
+            driver: bake.into(),
+        };
+        assert_eq!(
+            package_header_lines(&mixed),
+            vec![format!("{PACKAGE_HEADER_HOST_PREFIX} {verify_host}")],
+            "driver bake SHA must not leak onto the header next to a real host version"
+        );
+        if let Some(sha) = option_env!("FLEET_GIT_SHA")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let baked = PackageVersions {
+                host: sha.into(),
+                driver: sha.into(),
+            };
+            assert!(
+                package_header_lines(&baked).is_empty(),
+                "FLEET_GIT_SHA {sha} is /health.git_sha, not a header version"
+            );
+        }
+
+        // Distinct from the amber stale-OS banner.
+        let stale_inv = PackageInventory {
+            package_versions: from_verify.clone(),
+            plane_git_sha: Some(bake.into()),
+            packages: vec![HostDesiredSoftware {
+                platform: Some("windows-x86_64".into()),
+                git_sha: Some(dirty.into()),
+                bins: Some(serde_json::json!({
+                    "fleet-host": {"sha256": file_hash, "version": "0.0.1"},
+                    "fleet-driver": {"sha256": file_hash, "version": "0.0.1"}
+                })),
+                ..HostDesiredSoftware::default()
+            }],
+            ..PackageInventory::default()
+        };
+        let warn = stale_package_warning(&stale_inv).expect("stale OS banner is a sibling");
+        assert!(warn.contains("windows-x86_64"), "{warn}");
+        assert_ne!(
+            package_header_lines(&stale_inv.package_versions).join(" "),
+            warn,
+            "header labels are not the stale-OS banner"
+        );
+        assert!(
+            !package_header_lines(&stale_inv.package_versions)
+                .iter()
+                .any(|l| l.contains("windows-x86_64") || l.contains(file_hash)),
+            "header must not list stale OS or bin SHA"
+        );
+
+        // just test excludes fleet-ui; lock the live RSX so swapping the
+        // labels back to Current runner build, interpolating plane_git_sha,
+        // or dropping the helper still fails on the default unit path.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("package_header_host_line"),
+            "production source must import package_header_host_line"
+        );
+        assert!(
+            import.contains("package_header_driver_line"),
+            "production source must import package_header_driver_line"
+        );
+        assert!(
+            !prod.contains("fn package_header_host_line")
+                && !prod.contains("fn package_header_driver_line")
+                && !prod.contains("fn package_header_lines"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert!(
+            prod.contains("package_header_host_line(&pkg_ver)"),
+            "header must render package_header_host_line(&pkg_ver)"
+        );
+        assert!(
+            prod.contains("package_header_driver_line(&pkg_ver)"),
+            "header must render package_header_driver_line(&pkg_ver)"
+        );
+        assert!(
+            prod.contains("let pkg_ver = packages().package_versions"),
+            "header values come from API package_versions ([verify]), not a compile-time bake"
+        );
+        assert!(
+            !prod.contains("Current runner build"),
+            "production RSX must not say Current runner build"
+        );
+        assert!(
+            !prod.contains("\"Current fleet-host version {pkg_ver.host}\""),
+            "raw pkg_ver.host interpolation would show a bake SHA; use the helper"
+        );
+        assert!(
+            !prod.contains("\"Current fleet-driver version {pkg_ver.driver}\""),
+            "raw pkg_ver.driver interpolation would show a bake SHA; use the helper"
+        );
+        let host_at = prod
+            .find("package_header_host_line(&pkg_ver)")
+            .expect("host header call");
+        let driver_at = prod
+            .find("package_header_driver_line(&pkg_ver)")
+            .expect("driver header call");
+        let stale_at = prod
+            .find("if let Some(warn) = stale_builds")
+            .expect("stale banner stays a sibling, not the header");
+        assert!(
+            host_at < driver_at && driver_at < stale_at,
+            "header host/driver lines must render above the stale-OS banner"
+        );
+        assert!(
+            prod.contains("stale_package_warning(&packages())"),
+            "amber stale-OS banner must stay a sibling of the header, not replace it"
+        );
+        let header_block = &prod[host_at..stale_at];
+        for needle in [
+            "plane_git_sha",
+            "software_build_id",
+            "git_sha",
+            "FLEET_GIT_SHA",
+        ] {
+            assert!(
+                !header_block.contains(needle),
+                "header must not interpolate {needle} (that is /health.git_sha, not [verify])"
+            );
+        }
+        assert!(
+            prod.contains("[verify] in runner-packages.toml"),
+            "header title must say the number is [verify], not a bake SHA"
+        );
     }
 
     #[test]
@@ -1603,11 +2415,13 @@ mod tests {
     #[test]
     fn effort_picker_hidden_when_model_has_no_menu() {
         let details = vec![detail("sxs-claude-opus-4-6", &[], "high")];
-        assert!(pick_effort_value(
-            find_model_detail(&details, "sxs-claude-opus-4-6"),
-            Some("high")
-        )
-        .is_none());
+        assert!(
+            pick_effort_value(
+                find_model_detail(&details, "sxs-claude-opus-4-6"),
+                Some("high")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1849,12 +2663,81 @@ mod tests {
         assert!(software_line(&host).ends_with("updating"));
     }
 
+    /// catalog:unit-fleet-ui-helpers — Offline does not repeat a heartbeat
+    /// sentence. Body has no “heartbeating” even when last_seen is recent.
     #[test]
-    fn offline_does_not_repeat_status_as_a_sentence() {
+    fn not_taking_reason_offline_no_heartbeat_sentence() {
         let mut host = sample_host();
+        host.kind = "host".into();
         host.status = "offline".into();
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+
+        // Trap: a helper that said "heartbeating" when last_seen was fresh
+        // would pass a no-timestamp offline check. Offline is the status
+        // pill; last_seen stays "just now" and must not become a sentence.
+        host.last_seen_at = Some("2026-08-20T12:00:00Z".into());
+        assert_eq!(last_seen_label(&host, now_ms), "just now");
+        assert_eq!(status_label(&host.status), "offline");
+        assert!(
+            not_taking_reason(&host).is_none(),
+            "offline must not add a not-taking sentence: {:?}",
+            not_taking_reason(&host)
+        );
+        let copy = card_copy(&host, now_ms);
+        assert!(copy.contains("offline"), "{copy}");
+        assert!(copy.contains("just now"), "{copy}");
+        assert_no_heartbeating(&copy);
+
+        // Still-fresh last_seen (seconds ago, inside a 90s window) is the
+        // same lock — status offline must not flip the body to heartbeating.
+        host.last_seen_at = Some("2026-08-20T11:59:30Z".into());
+        assert_eq!(last_seen_label(&host, now_ms), "30s ago");
+        assert!(
+            not_taking_reason(&host).is_none(),
+            "offline + 30s last_seen must stay silent: {:?}",
+            not_taking_reason(&host)
+        );
+        assert_no_heartbeating(&card_copy(&host, now_ms));
+
+        host.last_seen_at = Some("2026-08-20T11:59:01Z".into());
+        assert_eq!(last_seen_label(&host, now_ms), "59s ago");
         assert!(not_taking_reason(&host).is_none());
-        assert!(extra_status_pills(&host).is_empty());
+        assert_no_heartbeating(&card_copy(&host, now_ms));
+
+        // Hold / drain / last_error / running jobs must not invent a
+        // heartbeating line. Offline wins the match before hold_jobs_reason.
+        host.last_seen_at = Some("2026-08-20T12:00:00Z".into());
+        host.paused = true;
+        host.drain = true;
+        host.allow_host = false;
+        host.allow_container = false;
+        host.advertised_host = false;
+        host.current_jobs = 3;
+        host.last_error = Some("disk full".into());
+        assert!(holding_new_jobs(&host));
+        assert!(
+            not_taking_reason(&host).is_none(),
+            "offline still wins over hold/error: {:?}",
+            not_taking_reason(&host)
+        );
+        assert_no_heartbeating(&card_copy(&host, now_ms));
+
+        // Never seen — last-seen chip is "never", still no heartbeat sentence.
+        host.last_seen_at = None;
+        assert_eq!(last_seen_label(&host, now_ms), "never");
+        assert!(not_taking_reason(&host).is_none());
+        assert_no_heartbeating(&card_copy(&host, now_ms));
+
+        // Control: other statuses still emit their own sentence, never
+        // "heartbeating". Proves we did not make not_taking_reason always None.
+        host.status = "pending".into();
+        assert_eq!(
+            not_taking_reason(&host).as_deref(),
+            Some("Waiting to pair.")
+        );
+        assert_no_heartbeating(&card_copy(&host, now_ms));
     }
 
     #[test]
@@ -1870,28 +2753,86 @@ mod tests {
         assert!(is_control_plane(&plane));
         assert!(!is_control_plane(&other));
         let mut active = vec![other.clone(), plane.clone()];
-        sort_hosts_for_list(&mut active);
+        sort_hosts_for_list(&mut active, 1_700_000_000_000.0);
         assert_eq!(active[0].id, plane.id);
     }
 
+    /// catalog:unit-extra-status-pills — settings_gen != ack → pending apply;
+    /// behind package → outdated; control plane has neither.
     #[test]
-    fn extra_pills_show_pending_apply_and_outdated() {
+    fn extra_status_pills_includes_pending_apply_and_outdated() {
         let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.settings_pending = false;
+        host.outdated = false;
+        host.software_status = None;
+
+        set_package_versions(&mut host, "0.0.2", "0.0.2");
+        host.settings_gen = 1;
+        host.settings_ack_gen = 1;
+        assert!(!settings_awaiting_ack(&host));
+        assert_eq!(software_flag(&host), Some("up to date"));
+        assert!(
+            extra_status_pills(&host).is_empty(),
+            "current package + acked gen must show no extra pills: {:?}",
+            extra_status_pills(&host)
+        );
+
+        // Card: settings_gen != ack → pending apply. Do not rely on
+        // settings_pending; that flag can lag or stay set after a bad ack.
         host.settings_gen = 2;
         host.settings_ack_gen = 1;
+        host.settings_pending = false;
+        assert!(settings_awaiting_ack(&host));
+        assert_eq!(extra_status_pills(&host), vec!["pending apply"]);
+
+        // API outdated/behind bits without a behind package must not fake
+        // the outdated chip. The pill is the package compare.
         host.outdated = true;
         host.software_status = Some("behind".into());
-        assert!(settings_awaiting_ack(&host));
+        assert_eq!(extra_status_pills(&host), vec!["pending apply"]);
+
+        set_package_versions(&mut host, "0.0.1", "0.0.2");
+        host.outdated = false;
+        host.software_status = None;
+        assert_eq!(software_flag(&host), Some("outdated"));
         assert_eq!(extra_status_pills(&host), vec!["pending apply", "outdated"]);
 
-        host.status = "pending".into();
+        // Ack clears pending apply; behind package keeps outdated.
+        host.settings_gen = 2;
+        host.settings_ack_gen = 2;
+        host.settings_pending = false;
+        assert!(!settings_awaiting_ack(&host));
         assert_eq!(extra_status_pills(&host), vec!["outdated"]);
 
-        host.status = "online".into();
-        host.settings_gen = 1;
-        host.settings_pending = false;
-        host.software = serde_json::from_str(r#"{"updating":true}"#).expect("software");
-        assert!(extra_status_pills(&host).is_empty());
+        // Unpaired / removed cards still show outdated when behind; they
+        // have not Applied, so no pending-apply chip.
+        host.settings_gen = 2;
+        host.settings_ack_gen = 1;
+        host.status = "pending".into();
+        assert_eq!(extra_status_pills(&host), vec!["outdated"]);
+        host.status = "disabled".into();
+        assert_eq!(extra_status_pills(&host), vec!["outdated"]);
+
+        // Plane apply is immediate and this process is not a host package.
+        let mut plane = host.clone();
+        plane.kind = "control_plane".into();
+        plane.status = "online".into();
+        plane.settings_gen = 4;
+        plane.settings_ack_gen = 1;
+        plane.settings_pending = true;
+        plane.outdated = true;
+        plane.software_status = Some("behind".into());
+        set_package_versions(&mut plane, "0.0.1", "0.0.2");
+        assert!(is_control_plane(&plane));
+        assert!(settings_awaiting_ack(&plane));
+        assert_eq!(software_flag(&plane), Some("outdated"));
+        assert!(
+            extra_status_pills(&plane).is_empty(),
+            "control plane must not show pending apply or outdated: {:?}",
+            extra_status_pills(&plane)
+        );
     }
 
     #[test]
@@ -1914,6 +2855,145 @@ mod tests {
         assert_eq!(status_label("offline"), "offline");
         assert_eq!(status_label("pending"), "pending");
         assert_eq!(status_label("error"), "error");
+    }
+
+    /// catalog:list-public-status-offline-after-90s
+    /// catalog:unit-public-status — Pills: online, offline, pending, removed, error.
+    /// Stored online + 91s silent → offline. Pending / removed / error keep
+    /// their status; the 90s rule must not overwrite them.
+    #[test]
+    fn public_status_is_offline_when_last_seen_older_than_90s() {
+        // just test excludes fleet-ui; lock the live pills so swapping
+        // status_label(&host.status) back onto the card cannot go green.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("public_status"),
+            "production source must import public_status"
+        );
+        assert!(
+            !prod.contains("fn public_status"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert!(
+            prod.contains("public_status(&host, now_ms)"),
+            "list + detail pills must call public_status, not raw host.status"
+        );
+        assert!(
+            prod.contains("status_label(status)"),
+            "pill text must be status_label(public_status(...))"
+        );
+        assert!(
+            !prod.contains("status_label(&host.status)"),
+            "pills must not render stored host.status without the 90s rule"
+        );
+        assert!(
+            !prod.contains("status_pill_class(&host.status)"),
+            "pill color must use public_status, not stored host.status"
+        );
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        let iso = |raw: &str| Some(raw.to_string());
+
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+
+        // Trap: returning host.status as-is would stay "online" after 91s.
+        host.last_seen_at = iso("2026-08-20T11:58:29Z");
+        assert_eq!(public_status(&host, now_ms), "offline");
+        assert_eq!(status_label(public_status(&host, now_ms)), "offline");
+        let copy = card_copy(&host, now_ms);
+        assert!(copy.contains("offline"), "{copy}");
+        assert!(
+            !copy.split_whitespace().any(|w| w == "online"),
+            "91s silent must not keep the online pill: {copy}"
+        );
+
+        // Exactly 90s is still online — a missed beat must not flicker.
+        host.last_seen_at = iso("2026-08-20T11:58:30Z");
+        assert_eq!(public_status(&host, now_ms), "online");
+        assert_eq!(status_label(public_status(&host, now_ms)), "online");
+
+        host.last_seen_at = iso("2026-08-20T11:59:00Z");
+        assert_eq!(
+            public_status(&host, now_ms),
+            "online",
+            "60s silent is inside the 90s window"
+        );
+        host.last_seen_at = iso("2026-08-20T11:59:55Z");
+        assert_eq!(public_status(&host, now_ms), "online");
+        host.last_seen_at = iso("2026-08-20T12:00:00Z");
+        assert_eq!(public_status(&host, now_ms), "online");
+
+        // Sub-second: 90.001s is older than 90s.
+        host.last_seen_at = iso("2026-08-20T11:58:29.999Z");
+        assert_eq!(public_status(&host, now_ms), "offline");
+        host.last_seen_at = iso("2026-08-20T11:58:30.000Z");
+        assert_eq!(public_status(&host, now_ms), "online");
+
+        // Never seen / empty / unparseable online is offline, not a hung pill.
+        host.last_seen_at = None;
+        assert_eq!(public_status(&host, now_ms), "offline");
+        host.last_seen_at = iso("");
+        assert_eq!(public_status(&host, now_ms), "offline");
+        host.last_seen_at = iso("   ");
+        assert_eq!(public_status(&host, now_ms), "offline");
+        host.last_seen_at = iso("not-a-timestamp");
+        assert_eq!(public_status(&host, now_ms), "offline");
+
+        // Trap: flipping any stale last_seen to offline would smash
+        // pending / removed / error. The 90s rule is online-only.
+        let stale = iso("2026-08-20T11:58:29Z");
+        for (stored, pill) in [
+            ("pending", "pending"),
+            ("disabled", "removed"),
+            ("error", "error"),
+            ("offline", "offline"),
+            ("removed", "removed"),
+        ] {
+            host.status = stored.into();
+            host.last_seen_at = stale.clone();
+            host.last_error = Some("disk full".into());
+            assert_eq!(
+                public_status(&host, now_ms),
+                stored,
+                "{stored} + 91s silent must not become offline"
+            );
+            assert_eq!(status_label(public_status(&host, now_ms)), pill);
+            let copy = card_copy(&host, now_ms);
+            assert!(
+                copy.contains(pill),
+                "{stored} card must keep the {pill} pill: {copy}"
+            );
+            if stored != "offline" {
+                assert!(
+                    !copy.split_whitespace().any(|w| w == "offline"),
+                    "{stored} must not be overwritten to offline: {copy}"
+                );
+            }
+        }
+
+        // Fresh last_seen must not revive a stored offline / error / pending.
+        host.last_seen_at = iso("2026-08-20T12:00:00Z");
+        host.status = "offline".into();
+        assert_eq!(public_status(&host, now_ms), "offline");
+        host.status = "error".into();
+        assert_eq!(public_status(&host, now_ms), "error");
+        host.status = "pending".into();
+        assert_eq!(public_status(&host, now_ms), "pending");
+        host.status = "disabled".into();
+        assert_eq!(public_status(&host, now_ms), "disabled");
+        assert_eq!(status_label(public_status(&host, now_ms)), "removed");
     }
 
     #[test]
@@ -2079,12 +3159,474 @@ mod tests {
     #[test]
     fn software_never_uses_file_hash_as_build_id() {
         let mut host = sample_host();
-        host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"}}"#,
-        )
+        let host_sha = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e";
+        host.software =
+            serde_json::from_str(&format!(r#"{{"bins":{{"fleet-host":"{host_sha}"}}}}"#))
+                .expect("software");
+
+        // Operator card is software_bin_rows, not software_line.
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "fleet-host");
+        assert_eq!(
+            rows[0].version, "—",
+            "hash-only report must show em-dash, not the first 12 of the bin SHA"
+        );
+        assert_eq!(rows[1].name, "fleet-driver");
+        assert_eq!(rows[1].version, "—");
+        assert_ne!(rows[0].version.as_str(), &host_sha[..12]);
+        assert_card_row_versions_are_semver_or_emdash(&host);
+
+        assert_eq!(software_build_id(&host), None, "a bin SHA is not a bake id");
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        // 64-hex stuffed into git_sha is still a file hash, not a bake id.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{host_sha}","bins":{{"fleet-host":"{host_sha}"}}}}"#
+        ))
         .expect("software");
-        assert_eq!(software_line(&host), "unknown");
-        assert!(!software_line(&host).contains("2a971d69"));
+        assert_eq!(software_build_id(&host), None);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_eq!(software_bin_rows(&host)[0].version, "—");
+        assert_card_row_versions_are_semver_or_emdash(&host);
+    }
+
+    /// catalog:list-software-hash-not-bake-id
+    /// Heartbeat that only sends sha256 must not treat that file hash as the
+    /// bake id, and the card must not display the SHA as a version.
+    #[test]
+    fn software_hash_is_never_bake_id_or_card_version() {
+        let host_sha = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e";
+        let driver_sha = "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d";
+        let other_64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let bake = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351";
+
+        fn card_software_lines(host: &HostPublic) -> Vec<String> {
+            software_bin_rows(host)
+                .into_iter()
+                .map(|r| format!("{} {} · {}", r.name, r.version, r.status))
+                .collect()
+        }
+
+        fn assert_sha256_only_not_on_card(host: &HostPublic, hashes: &[&str]) {
+            assert_eq!(
+                software_build_id(host),
+                None,
+                "a file hash is not a bake id on the card"
+            );
+            assert_software_build_id_never_hash_or_bin_sha(host);
+            assert_card_row_versions_are_semver_or_emdash(host);
+            let rows = software_bin_rows(host);
+            assert_eq!(rows.len(), 2);
+            for row in &rows {
+                assert_eq!(
+                    row.version, "—",
+                    "sha256-only heartbeat must show em-dash, not the SHA as version ({})",
+                    row.name
+                );
+            }
+            for line in card_software_lines(host) {
+                for h in hashes {
+                    let h = h.trim();
+                    let lower_line = line.to_ascii_lowercase();
+                    let lower_h = h.to_ascii_lowercase();
+                    assert!(
+                        !lower_line.contains(&lower_h),
+                        "card line must not contain file hash {h}: {line}"
+                    );
+                    if h.len() >= 12 {
+                        assert!(
+                            !lower_line.contains(&lower_h[..12]),
+                            "card line must not contain short_sha of {h}: {line}"
+                        );
+                    }
+                }
+            }
+            for surface in [
+                software_line(host),
+                software_title(host),
+                extra_status_pills(host).join(" "),
+                identity_line(host).unwrap_or_default(),
+            ] {
+                for h in hashes {
+                    let h = h.trim();
+                    assert!(
+                        !surface
+                            .to_ascii_lowercase()
+                            .contains(&h.to_ascii_lowercase()),
+                        "card surface must not contain file hash {h}: {surface}"
+                    );
+                }
+            }
+        }
+
+        let mut host = sample_host();
+        host.platform = Some("linux-x86_64".into());
+
+        // Object-form heartbeat: sha256 only — no version, no git_sha.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha]);
+
+        // String-form hashes only (older host).
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host":"{host_sha}","fleet-driver":"{driver_sha}"}}}}"#
+        ))
+        .expect("software");
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha]);
+
+        // Windows .exe object-form sha256 only.
+        host.platform = Some("windows-x86_64".into());
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host.exe":{{"sha256":"{host_sha}"}},"fleet-driver.exe":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha]);
+
+        // Uppercase / whitespace 64-hex in git_sha is still a file hash.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"  {other_64}  ","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha, other_64]);
+
+        // git_sha copied from a reported bin SHA is still a file hash.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{host_sha}","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha]);
+
+        // desired / plane stamps that are file hashes must not stand in.
+        host.desired = Some(HostDesiredSoftware {
+            git_sha: Some(host_sha.into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": host_sha},
+                "fleet-driver": {"sha256": driver_sha}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        host.plane_git_sha = Some(host_sha.into());
+        assert_sha256_only_not_on_card(&host, &[host_sha, driver_sha]);
+        assert_ne!(software_build_id(&host), Some(host_sha));
+        assert_ne!(software_build_id(&host), Some(driver_sha));
+
+        // Control: a 40-hex tree-id with different 64-hex bin hashes is a bake
+        // id internally (plane-bake skip). The card still must not print the
+        // file hashes — or that bake id — as a version.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{bake}","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(software_build_id(&host), Some(bake));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_card_row_versions_are_semver_or_emdash(&host);
+        for row in software_bin_rows(&host) {
+            assert_eq!(row.version, "—");
+        }
+        for line in card_software_lines(&host) {
+            assert!(
+                !line.contains(host_sha) && !line.contains(&host_sha[..12]),
+                "card must not print host file hash as version: {line}"
+            );
+            assert!(
+                !line.contains(driver_sha) && !line.contains(&driver_sha[..12]),
+                "card must not print driver file hash as version: {line}"
+            );
+            assert!(
+                !line.contains(bake),
+                "card must not print bake id as version: {line}"
+            );
+        }
+
+        // just test excludes fleet-ui; lock the live RSX so interpolating
+        // software_build_id / git_sha / sha256 as the version still fails.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let gate = "if shows_software_line(&host)";
+        let gate_at = prod.find(gate).expect("if shows_software_line(&host)");
+        let after_gate = &prod[gate_at..];
+        let block_end = after_gate
+            .find("\"{jobs_line(&host)}\"")
+            .unwrap_or(after_gate.len());
+        let inner = &after_gate[..block_end];
+        assert!(
+            inner.contains("for row in software_bin_rows(&host)"),
+            "package rows come from software_bin_rows, not a hash/bake fallback"
+        );
+        assert!(
+            inner.contains("\"{row.name} {row.version} · {row.status}\""),
+            "card renders software_bin_rows version, never a raw SHA"
+        );
+        for needle in [
+            "software_build_id",
+            "git_sha",
+            "sha256",
+            "plane_git_sha",
+            "FLEET_GIT_SHA",
+        ] {
+            assert!(
+                !inner.contains(needle),
+                "card software rows must not interpolate {needle} as version"
+            );
+        }
+        assert!(
+            !prod
+                .replace("shows_software_line", "")
+                .contains("software_line("),
+            "card must not render software_line(); hash-only reports used to leak short_sha there"
+        );
+    }
+
+    #[test]
+    fn software_build_id_is_git_sha_never_bin_hash() {
+        let mut host = sample_host();
+        assert_eq!(software_build_id(&host), None);
+
+        let host_sha = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e";
+        let driver_sha = "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d";
+        let other_64 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let bake = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351";
+
+        // String-form hashes only — integrity, not bake id. Staged bake / plane
+        // bake / desired.git_sha must not be used as a stand-in either.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host":"{host_sha}","fleet-driver":"{driver_sha}"}}}}"#
+        ))
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            git_sha: Some(bake.into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": host_sha},
+                "fleet-driver": {"sha256": driver_sha}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        host.plane_git_sha = Some(bake.into());
+        assert_eq!(software_build_id(&host), None);
+        assert_ne!(software_build_id(&host), Some(host_sha));
+        assert_ne!(software_build_id(&host), Some(driver_sha));
+        assert_ne!(software_build_id(&host), Some(bake));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_card_row_versions_are_semver_or_emdash(&host);
+        assert_eq!(software_bin_rows(&host)[0].version, "—");
+        assert_eq!(software_bin_rows(&host)[1].version, "—");
+
+        // Object-form sha256 + empty / whitespace git_sha still not a hash.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"   ","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(software_build_id(&host), None);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        host.software = serde_json::from_str(r#"{"git_sha":""}"#).expect("software");
+        assert_eq!(software_build_id(&host), None);
+
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host.exe":{{"sha256":"{host_sha}"}},"fleet-driver.exe":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(software_build_id(&host), None);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        // 64-hex git_sha is never a bake id, even when it is not any reported bin SHA.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{other_64}","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(
+            software_build_id(&host),
+            None,
+            "a 64-hex git_sha is a file hash, not a bake id"
+        );
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        // Bake id is software.git_sha only, when it is a tree-id and the bins
+        // carry different 64-hex hashes. A 40-hex git_sha is a valid bake id
+        // — do not disqualify it by stuffing it into sha256.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{bake}","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(software_build_id(&host), Some(bake));
+        assert_ne!(software_build_id(&host), Some(host_sha));
+        assert_ne!(software_build_id(&host), Some(driver_sha));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        // A git_sha that equals a reported 64-hex bin SHA is a file hash.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{host_sha}","bins":{{"fleet-host":{{"sha256":"{host_sha}"}},"fleet-driver":{{"sha256":"{driver_sha}"}}}}}}"#
+        ))
+        .expect("software");
+        assert_eq!(
+            software_build_id(&host),
+            None,
+            "file hash stuffed into git_sha is still a file hash, not a bake id"
+        );
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+    }
+
+    #[test]
+    fn software_status_vs_staged_manifest_not_hash_or_bake() {
+        let mut host = sample_host();
+        host.platform = Some("linux-x86_64".into());
+        let host_sha = "aaaaaaaaaaaa1111bbbbbbbb2222ccccdddd3333eeeeffff4444aaaabbbbcccc";
+        let driver_sha = "1111aaaaaaaa2222bbbbbbbb3333ccccdddd4444eeeeffff5555aaaabbbbcccc";
+        let other_64 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let bake = "9d239a509055abcdef0123456789abcd01234567";
+
+        // No report → unknown, not behind.
+        assert_eq!(software_flag(&host), None);
+        assert!(!needs_software_update(&host));
+        assert_card_row_versions_are_semver_or_emdash(&host);
+        assert_eq!(software_build_id(&host), None);
+
+        // Bake ids match but the box has not reported the staged package
+        // versions — current/behind is vs the staged manifest, not bake.
+        host.software = serde_json::from_str(&format!(r#"{{"git_sha":"{bake}"}}"#)).expect("sw");
+        host.software_status = Some("current".into());
+        host.desired = Some(HostDesiredSoftware {
+            git_sha: Some(bake.into()),
+            platform: Some("linux-x86_64".into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": host_sha, "version": "0.0.2"},
+                "fleet-driver": {"sha256": driver_sha, "version": "0.0.2"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        assert_eq!(software_flag(&host), Some("outdated"));
+        assert_eq!(software_build_id(&host), Some(bake));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].version, "0.0.2");
+        assert_eq!(rows[1].version, "0.0.2");
+        assert_eq!(rows[0].status, "missing");
+        assert_eq!(rows[1].status, "missing");
+        assert_card_row_versions_are_semver_or_emdash(&host);
+
+        // Versions disagree with the staged package. git_sha is a tree-id;
+        // bins have different 64-hex hashes. software_build_id stays Some(bake).
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{bake}","bins":{{"fleet-host":{{"sha256":"{host_sha}","version":"0.0.1"}},"fleet-driver":{{"sha256":"{driver_sha}","version":"0.0.1"}}}}}}"#
+        ))
+        .expect("sw");
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].status, "behind");
+        assert_eq!(rows[1].status, "behind");
+        assert_eq!(software_flag(&host), Some("outdated"));
+        assert_eq!(
+            software_build_id(&host),
+            Some(bake),
+            "a 40-hex tree-id is a valid bake id when bins carry different 64-hex hashes"
+        );
+        assert_eq!(rows[0].version, "0.0.1");
+        assert_eq!(rows[1].version, "0.0.1");
+        assert_card_row_versions_are_semver_or_emdash(&host);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+
+        // 64-hex git_sha → None, even when it is not a reported bin SHA.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{other_64}","bins":{{"fleet-host":{{"sha256":"{host_sha}","version":"0.0.1"}},"fleet-driver":{{"sha256":"{driver_sha}","version":"0.0.1"}}}}}}"#
+        ))
+        .expect("sw");
+        assert_eq!(software_build_id(&host), None);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_card_row_versions_are_semver_or_emdash(&host);
+
+        // git_sha that equals a reported 64-hex bin SHA → None.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"{host_sha}","bins":{{"fleet-host":{{"sha256":"{host_sha}","version":"0.0.1"}},"fleet-driver":{{"sha256":"{driver_sha}","version":"0.0.1"}}}}}}"#
+        ))
+        .expect("sw");
+        assert_eq!(software_build_id(&host), None);
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_eq!(software_bin_rows(&host)[0].version, "0.0.1");
+        assert_card_row_versions_are_semver_or_emdash(&host);
+
+        // Staged versions match even when bake / plane / file hashes differ.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"git_sha":"old-tree-id","bins":{{"fleet-host":{{"sha256":"cargo-host","version":"0.0.2"}},"fleet-driver":{{"sha256":"cargo-drv","version":"0.0.2"}}}}}}"#
+        ))
+        .expect("sw");
+        host.plane_git_sha = Some("other-plane-bake".into());
+        host.software_status = Some("behind".into());
+        host.outdated = true;
+        assert_eq!(software_flag(&host), Some("up to date"));
+        assert_eq!(software_build_id(&host), Some("old-tree-id"));
+        assert_ne!(software_build_id(&host), Some("cargo-host"));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].version, "0.0.2");
+        assert_eq!(rows[1].version, "0.0.2");
+        assert_card_row_versions_are_semver_or_emdash(&host);
+
+        // Hash-only report (old host) vs staged hashes — integrity, not bake.
+        // Matching files can be current; the hash still must not become bake id
+        // or the operator-visible version.
+        host.software = serde_json::from_str(&format!(
+            r#"{{"bins":{{"fleet-host":"{host_sha}","fleet-driver":"{driver_sha}"}}}}"#
+        ))
+        .expect("sw");
+        host.desired = Some(HostDesiredSoftware {
+            git_sha: Some(host_sha.into()),
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": host_sha},
+                "fleet-driver": {"sha256": driver_sha}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        host.current_versions = PackageVersions::default();
+        host.software_status = None;
+        host.outdated = false;
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].status, "current");
+        assert_eq!(rows[1].status, "current");
+        assert_eq!(
+            rows[0].version, "—",
+            "hash-only integrity must not print a SHA prefix as version"
+        );
+        assert_eq!(rows[1].version, "—");
+        assert_eq!(software_build_id(&host), None);
+        assert_ne!(software_build_id(&host), Some(host_sha));
+        assert_software_build_id_never_hash_or_bin_sha(&host);
+        assert_card_row_versions_are_semver_or_emdash(&host);
+    }
+
+    /// catalog:list-relative-seen-just-now-never
+    /// catalog: last seen relative — None → never; recent heartbeat → just now;
+    /// older stamps use bounded s/m/h/d units. Far-future must not panic.
+    fn is_bounded_relative_seen(s: &str) -> bool {
+        if s == "never" || s == "just now" {
+            return true;
+        }
+        let Some(rest) = s.strip_suffix(" ago") else {
+            return false;
+        };
+        let mut chars = rest.chars();
+        let Some(unit) = chars.next_back() else {
+            return false;
+        };
+        let n: String = chars.collect();
+        matches!(unit, 's' | 'm' | 'h' | 'd')
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+            && n.as_str() != "0"
+            && !n.starts_with('0')
+    }
+
+    fn relative_seen_no_panic(ts: Option<String>, now_ms: f64, why: &str) -> String {
+        std::panic::catch_unwind(|| relative_seen(&ts, now_ms))
+            .unwrap_or_else(|_| panic!("relative_seen must not panic on {why}"))
     }
 
     #[test]
@@ -2110,6 +3652,174 @@ mod tests {
         );
     }
 
+    /// catalog:list-relative-seen-just-now-never
+    /// last seen relative: None → never. Recent heartbeat → just now.
+    /// Older valid stamps are only Ns/m/h/d ago (no weeks/months/years).
+    /// Far-future / clock-skew stamps must not panic or print a negative unit.
+    #[test]
+    fn relative_seen_is_just_now_never_bounded_units() {
+        // just test excludes fleet-ui; lock the live chip so swapping
+        // last_seen_label for format_ts / raw last_seen_at cannot go green.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("last_seen_label"),
+            "production source must import last_seen_label"
+        );
+        assert!(
+            !prod.contains("fn last_seen_label") && !prod.contains("fn relative_seen"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert_eq!(
+            prod.matches("last_seen_label(&host, now_ms)").count(),
+            2,
+            "list row + detail must both call last_seen_label"
+        );
+        assert_eq!(
+            prod.matches("last seen {last_seen}").count(),
+            2,
+            "host cards must render last seen {{relative_seen}}, not a raw stamp"
+        );
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        let seen = |raw: &str| relative_seen_no_panic(Some(raw.to_string()), now_ms, raw);
+
+        // Trap: a helper that printed "—" / "unknown" / raw ISO would pass a
+        // non-empty check. Catalog last-seen is the word "never".
+        assert_eq!(relative_seen(&None, now_ms), "never");
+        assert_eq!(relative_seen(&Some(String::new()), now_ms), "never");
+        assert!(is_bounded_relative_seen("never"));
+
+        // Recent heartbeat (a few seconds of jitter) is "just now", not "0s ago".
+        assert_eq!(seen("2026-08-20T12:00:00Z"), "just now");
+        assert_eq!(seen("2026-08-20T11:59:59Z"), "just now");
+        assert_eq!(seen("2026-08-20T11:59:56Z"), "just now");
+        assert_eq!(seen("2026-08-20T12:00:00.000Z"), "just now");
+        assert_eq!(seen("2026-08-20T12:00:00+00:00"), "just now");
+        assert_eq!(seen("2026-08-20T05:00:00-07:00"), "just now");
+
+        // Bounded units only: s / m / h / d. Never weeks, months, years,
+        // signed deltas, or the raw ISO on a parseable stamp.
+        assert_eq!(seen("2026-08-20T11:59:55Z"), "5s ago");
+        assert_eq!(seen("2026-08-20T11:59:01Z"), "59s ago");
+        assert_eq!(seen("2026-08-20T11:59:00Z"), "1m ago");
+        assert_eq!(seen("2026-08-20T11:00:01Z"), "59m ago");
+        assert_eq!(seen("2026-08-20T11:00:00Z"), "1h ago");
+        assert_eq!(seen("2026-08-20T10:00:00Z"), "2h ago");
+        assert_eq!(seen("2026-08-19T12:00:01Z"), "23h ago");
+        assert_eq!(seen("2026-08-19T12:00:00Z"), "1d ago");
+        assert_eq!(seen("2026-08-17T12:00:00Z"), "3d ago");
+        let epoch_days = now.timestamp() / 86_400;
+        assert_eq!(
+            seen("1970-01-01T00:00:00Z"),
+            format!("{epoch_days}d ago"),
+            "old stamps stay in days, not years/months"
+        );
+        for stamp in [
+            "2026-08-20T11:59:55Z",
+            "2026-08-20T11:59:00Z",
+            "2026-08-20T10:00:00Z",
+            "2026-08-17T12:00:00Z",
+            "1970-01-01T00:00:00Z",
+        ] {
+            let got = seen(stamp);
+            assert!(
+                is_bounded_relative_seen(&got),
+                "parseable last_seen must be just now / never / Ns|m|h|d ago, got {got:?} ({stamp})"
+            );
+            assert!(
+                !got.contains("week")
+                    && !got.contains("month")
+                    && !got.contains("year")
+                    && !got.contains('-')
+                    && !got.contains('T'),
+                "must not leak an unbounded unit or raw stamp: {got:?} ({stamp})"
+            );
+        }
+
+        // Compact (no Z) still parses as a heartbeat, not a raw leftover.
+        assert_eq!(seen("2026-08-20T12:00:00"), "just now");
+        assert_eq!(seen("2026-08-20T11:59:50"), "10s ago");
+
+        // Clock skew / far-future: clamp to just now. Must not panic, must
+        // not print "-5s ago" / a future unit / a truncated ISO.
+        for stamp in [
+            "2026-08-20T12:00:01Z",
+            "2026-08-20T13:00:00Z",
+            "2027-08-20T12:00:00Z",
+            "9999-12-31T23:59:59Z",
+            "9999-12-31T23:59:59",
+        ] {
+            let got = seen(stamp);
+            assert_eq!(
+                got, "just now",
+                "far-future last_seen must clamp to just now, not panic or a signed unit: {got:?} ({stamp})"
+            );
+        }
+
+        // Unparseable 5+ digit years must not panic (chrono RFC3339 max is
+        // 9999). Fail-soft; do not abort the list render.
+        let _ = relative_seen_no_panic(
+            Some("+292277026596-01-01T00:00:00Z".into()),
+            now_ms,
+            "overflow-year RFC3339",
+        );
+        let _ = relative_seen_no_panic(
+            Some("275760-09-13T00:00:00Z".into()),
+            now_ms,
+            "js Date max year",
+        );
+
+        // last_seen_label is what the card renders. Hosts use relative_seen;
+        // the plane is "this process", not never/just now.
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.last_seen_at = None;
+        assert_eq!(last_seen_label(&host, now_ms), "never");
+        assert!(
+            card_copy(&host, now_ms).contains("never"),
+            "{}",
+            card_copy(&host, now_ms)
+        );
+
+        host.last_seen_at = Some("2026-08-20T12:00:00Z".into());
+        assert_eq!(last_seen_label(&host, now_ms), "just now");
+        assert_eq!(
+            last_seen_label(&host, now_ms),
+            relative_seen(&host.last_seen_at, now_ms)
+        );
+        assert!(
+            card_copy(&host, now_ms).contains("just now"),
+            "{}",
+            card_copy(&host, now_ms)
+        );
+
+        host.last_seen_at = Some("9999-12-31T23:59:59Z".into());
+        assert_eq!(
+            std::panic::catch_unwind(|| last_seen_label(&host, now_ms))
+                .unwrap_or_else(|_| panic!("last_seen_label must not panic on year 9999")),
+            "just now"
+        );
+
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.last_seen_at = None;
+        assert_eq!(last_seen_label(&plane, now_ms), "this process");
+        assert_ne!(
+            last_seen_label(&plane, now_ms),
+            relative_seen(&None, now_ms)
+        );
+    }
+
     #[test]
     fn worker_id_label_prefers_machine_id_hex() {
         let mut host = sample_host();
@@ -2124,14 +3834,144 @@ mod tests {
         assert_eq!(worker_id_label(&host), "short");
     }
 
+    /// catalog:list-worker-id-label-8hex — Stable 8-hex id from `machine_id`
+    /// (else host id). Regex `id [0-9a-f]{8}`. Same machine_id after
+    /// revoke+reclaim keeps the label. Missing machine_id falls back to
+    /// the host id prefix, not empty.
+    #[test]
+    fn worker_id_label_is_stable_8hex_from_machine_id_else_host_id() {
+        // just test excludes fleet-ui; lock the live RSX so interpolating
+        // host.id (or dropping the id span) still fails. Catalog e2e:
+        // Regex `id [0-9a-f]{8}`.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("worker_id_label"),
+            "production source must import worker_id_label"
+        );
+        assert!(
+            !prod.contains("fn worker_id_label"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert!(
+            prod.matches("id {worker_id_label(&host)}").count() >= 2,
+            "list card and detail panel must render id {{worker_id_label(&host)}}"
+        );
+        assert!(
+            !prod.contains("id {host.id}") && !prod.contains("id {host.machine_id"),
+            "must not interpolate host.id / machine_id raw (must be the 8-hex helper)"
+        );
+
+        fn is_8_hex(s: &str) -> bool {
+            s.len() == 8 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }
+        fn assert_card_id(host: &HostPublic, want: &str) {
+            let label = worker_id_label(host);
+            assert_eq!(label, want, "worker_id_label({:?})", host.machine_id);
+            assert!(
+                is_8_hex(&label),
+                "worker_id_label must match [0-9a-f]{{8}}, got {label:?}"
+            );
+            let rendered = format!("id {label}");
+            assert!(
+                rendered == format!("id {want}") && is_8_hex(&rendered[3..]),
+                "card must render id [0-9a-f]{{8}}, got {rendered:?}"
+            );
+            assert!(!label.is_empty(), "worker_id_label must not be empty");
+        }
+
+        // machine_id UUID: first 8 hex digits. Not the host row id.
+        let mut live = sample_host();
+        live.id = "ffffffff01234567".into();
+        live.kind = "host".into();
+        live.status = "online".into();
+        live.machine_id = Some("cafebabe-0123-4567-89ab-cdef01234567".into());
+        live.paired_at = Some("2026-01-01T00:00:00Z".into());
+        assert_card_id(&live, "cafebabe");
+        assert_ne!(
+            worker_id_label(&live),
+            "ffffffff",
+            "machine_id must win over a different host id"
+        );
+
+        // Surrounding whitespace is still that machine_id.
+        live.machine_id = Some("  cafebabe-0123-4567-89ab-cdef01234567  ".into());
+        assert_card_id(&live, "cafebabe");
+
+        // Uppercase UUID still renders lowercase 8-hex (e2e regex is [0-9a-f]).
+        live.machine_id = Some("CAFEBABE-0123-4567-89AB-CDEF01234567".into());
+        assert_card_id(&live, "cafebabe");
+
+        // Revoke then reclaim the same guest: new host row id, same
+        // durable machine_id → same 8-hex label.
+        let mut revoked = live.clone();
+        revoked.status = "disabled".into();
+        revoked.machine_id = Some("cafebabe-0123-4567-89ab-cdef01234567".into());
+        assert_card_id(&revoked, "cafebabe");
+        assert_eq!(
+            worker_id_label(&revoked),
+            worker_id_label(&live),
+            "revoke must not change the 8-hex label"
+        );
+
+        let mut reclaimed = live.clone();
+        reclaimed.id = "0000000011111111".into();
+        reclaimed.status = "online".into();
+        reclaimed.machine_id = Some("cafebabe-0123-4567-89ab-cdef01234567".into());
+        assert_ne!(reclaimed.id, live.id);
+        assert_card_id(&reclaimed, "cafebabe");
+        assert_eq!(
+            worker_id_label(&reclaimed),
+            worker_id_label(&revoked),
+            "same machine_id after revoke+reclaim must keep the 8-hex label"
+        );
+        assert_ne!(
+            worker_id_label(&reclaimed),
+            "00000000",
+            "reclaim must not snap the label to the new host id"
+        );
+
+        // Missing machine_id falls back to host id prefix, not empty.
+        let mut unpaired = sample_host();
+        unpaired.kind = "host".into();
+        unpaired.status = "pending".into();
+        unpaired.id = "0123456789abcdef".into();
+        unpaired.machine_id = None;
+        assert_card_id(&unpaired, "01234567");
+        assert!(!worker_id_label(&unpaired).is_empty());
+
+        unpaired.machine_id = Some(String::new());
+        assert_card_id(&unpaired, "01234567");
+        unpaired.machine_id = Some("   ".into());
+        assert_card_id(&unpaired, "01234567");
+
+        // Host-id fallback still prefers hex digits (UUID dashes dropped).
+        unpaired.id = "deadbeef-0123-4567-89ab-cdef01234567".into();
+        unpaired.machine_id = None;
+        assert_card_id(&unpaired, "deadbeef");
+    }
+
     #[test]
     fn sort_hosts_plane_then_status_then_name() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
         fn host(id: &str, kind: &str, status: &str, name: &str) -> HostPublic {
             let mut h = sample_host();
             h.id = id.into();
             h.kind = kind.into();
             h.status = status.into();
             h.name = name.into();
+            if status == "online" {
+                h.last_seen_at = Some("2026-08-20T12:00:00Z".into());
+            }
             h
         }
         let plane = host("plane", "control_plane", "offline", "zzz-plane");
@@ -2150,7 +3990,7 @@ mod tests {
             pending.clone(),
             online_a.clone(),
         ];
-        sort_hosts_for_list(&mut active);
+        active.sort_by(|a, b| cmp_hosts_for_list(a, b, now_ms));
         let ids: Vec<&str> = active.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["plane", "oa", "oz", "p", "e", "off", "u"]);
         assert_eq!(status_rank("online"), 0);
@@ -2159,9 +3999,79 @@ mod tests {
         assert_eq!(status_rank("offline"), 3);
         assert_eq!(status_rank("disabled"), 4);
         assert_eq!(status_rank("mystery"), 5);
-        assert!(cmp_hosts_for_list(&plane, &online_a).is_lt());
-        assert!(cmp_hosts_for_list(&online_a, &online_z).is_lt());
-        assert!(cmp_hosts_for_list(&online_z, &pending).is_lt());
+        assert!(cmp_hosts_for_list(&plane, &online_a, now_ms).is_lt());
+        assert!(cmp_hosts_for_list(&online_a, &online_z, now_ms).is_lt());
+        assert!(cmp_hosts_for_list(&online_z, &pending, now_ms).is_lt());
+    }
+
+    /// catalog:list-sort-control-plane-first — Offline named "aaa" must not
+    /// beat the plane card. Pending vs online is status then name.
+    #[test]
+    fn sort_control_plane_first_then_status_then_name() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        fn host(id: &str, kind: &str, status: &str, name: &str) -> HostPublic {
+            let mut h = sample_host();
+            h.id = id.into();
+            h.kind = kind.into();
+            h.status = status.into();
+            h.name = name.into();
+            if status == "online" {
+                h.last_seen_at = Some("2026-08-20T12:00:00Z".into());
+            }
+            h
+        }
+
+        // Name-first or status-then-name (no plane key) would put "aaa"
+        // first: both offline, plane name is last alphabetically.
+        let plane = host("plane", "control_plane", "offline", "zzz-plane");
+        let aaa = host("aaa", "host", "offline", "aaa");
+        assert!(is_control_plane(&plane));
+        assert!(!is_control_plane(&aaa));
+        assert!(
+            cmp_hosts_for_list(&plane, &aaa, now_ms).is_lt(),
+            "offline named aaa must not beat the plane card"
+        );
+        assert!(
+            cmp_hosts_for_list(&aaa, &plane, now_ms).is_gt(),
+            "offline named aaa must sort after the plane card"
+        );
+
+        // Status then name: pending "aaa" must not beat online "zzz".
+        let pending_aaa = host("pend", "host", "pending", "aaa");
+        let online_zzz = host("on", "host", "online", "zzz");
+        assert!(
+            cmp_hosts_for_list(&online_zzz, &pending_aaa, now_ms).is_lt(),
+            "pending vs online is status then name"
+        );
+        assert!(cmp_hosts_for_list(&pending_aaa, &online_zzz, now_ms).is_gt());
+
+        // Name is the last key among the same status.
+        let online_apple = host("oa", "host", "online", "apple");
+        assert!(cmp_hosts_for_list(&online_apple, &online_zzz, now_ms).is_lt());
+
+        // Stored online + last_seen older than 90s is the offline pill — sort
+        // with that rank, not the stored online bucket.
+        let mut silent_aaa = host("silent", "host", "online", "aaa");
+        silent_aaa.last_seen_at = Some("2026-08-20T11:58:29Z".into());
+        assert_eq!(public_status(&silent_aaa, now_ms), "offline");
+        assert!(
+            cmp_hosts_for_list(&pending_aaa, &silent_aaa, now_ms).is_lt(),
+            "silent stored-online must sort as offline, after pending"
+        );
+        assert!(cmp_hosts_for_list(&silent_aaa, &online_zzz, now_ms).is_gt());
+
+        let mut active = vec![
+            aaa.clone(),
+            pending_aaa.clone(),
+            online_zzz.clone(),
+            plane.clone(),
+            online_apple.clone(),
+            silent_aaa.clone(),
+        ];
+        active.sort_by(|a, b| cmp_hosts_for_list(a, b, now_ms));
+        let ids: Vec<&str> = active.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["plane", "oa", "on", "pend", "aaa", "silent"]);
     }
 
     #[test]
@@ -2185,6 +4095,354 @@ mod tests {
         host.status = "online".into();
         host.kind = "control_plane".into();
         assert!(!shows_software_line(&host));
+    }
+
+    /// catalog:list-plane-card-no-software-line — Control plane card has no
+    /// software / package rows. `as_public` software is none; the card gate
+    /// is `shows_software_line` (false for kind=control_plane).
+    #[test]
+    fn control_plane_card_has_no_software_or_package_rows() {
+        // Plane as_public is this process, not a host package. Lock the
+        // struct literal so attaching software / desired still fails here.
+        let plane_src = include_str!("../../fleet-db/src/models/plane_runner.rs");
+        let plane_prod = plane_src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("plane_runner.rs production source");
+        let as_public = {
+            let start = plane_prod
+                .find("fn as_public_with_jobs")
+                .expect("as_public_with_jobs");
+            let rest = &plane_prod[start..];
+            let end = rest.find("fn local_platform").unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            as_public.contains("software: None,"),
+            "as_public software must be none"
+        );
+        assert!(
+            as_public.contains("desired: None,"),
+            "as_public desired package must be none"
+        );
+        assert!(
+            !as_public.contains("software: Some") && !as_public.contains("desired: Some"),
+            "plane as_public must not attach software or a served package"
+        );
+        assert!(
+            as_public.contains("kind: WORKER_HOST_KIND_CONTROL_PLANE.to_string()"),
+            "as_public kind must be control_plane"
+        );
+        assert!(
+            plane_prod.contains("self.as_public_with_jobs(now, 0)"),
+            "as_public must reuse as_public_with_jobs (same software: None)"
+        );
+
+        // just test excludes fleet-ui; lock the live RSX so rendering
+        // software_bin_rows without shows_software_line still fails.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("shows_software_line"),
+            "production source must import shows_software_line"
+        );
+        assert!(
+            import.contains("software_bin_rows"),
+            "production source must import software_bin_rows"
+        );
+        assert!(
+            !prod.contains("fn shows_software_line") && !prod.contains("fn software_bin_rows"),
+            "page.rs must call the crate helpers, not a local shadow"
+        );
+        assert!(
+            !prod
+                .replace("shows_software_line", "")
+                .contains("software_line("),
+            "card must not render software_line(); package rows come from software_bin_rows"
+        );
+        let gate = "if shows_software_line(&host)";
+        assert_eq!(
+            prod.matches(gate).count(),
+            1,
+            "production RSX must gate package rows with if shows_software_line(&host) exactly once"
+        );
+        let gate_at = prod.find(gate).expect("if shows_software_line(&host)");
+        let after_gate = &prod[gate_at..];
+        let block_end = after_gate
+            .find("\"{jobs_line(&host)}\"")
+            .unwrap_or(after_gate.len());
+        let inner = &after_gate[..block_end];
+        assert!(
+            inner.contains("for row in software_bin_rows(&host)"),
+            "software_bin_rows must be inside if shows_software_line(&host)"
+        );
+        assert!(
+            inner.contains("\"{row.name} {row.version} · {row.status}\""),
+            "package rows must be inside if shows_software_line(&host)"
+        );
+        assert!(
+            !inner.contains("if !plane"),
+            "if !plane must not wrap the package rows inside the helper gate"
+        );
+        let last_if = prod[..gate_at + gate.len()]
+            .rfind("if ")
+            .expect("if-gate before software rows");
+        let gate_line = prod[last_if..].lines().next().unwrap_or("");
+        assert_eq!(
+            last_if, gate_at,
+            "nearest if before software_bin_rows must be if shows_software_line(&host), got {gate_line:?}"
+        );
+        assert!(
+            !gate_line.contains("!plane"),
+            "if !plane must not be the only software-row gate"
+        );
+        assert_eq!(
+            prod.matches("software_bin_rows(&host)").count(),
+            1,
+            "software_bin_rows must appear only inside the shows_software_line gate"
+        );
+
+        // Wire payload matches PlaneRunner::as_public: software none.
+        let from_api: HostPublic = serde_json::from_str(
+            r#"{
+                "id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "workspace_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "name":"Control plane",
+                "kind":"control_plane",
+                "status":"online",
+                "software":null,
+                "desired":null,
+                "software_status":"unknown",
+                "outdated":false
+            }"#,
+        )
+        .expect("plane as_public json");
+        assert!(
+            from_api.software.is_none(),
+            "as_public software = none: {from_api:?}"
+        );
+        assert!(from_api.desired.is_none(), "as_public desired = none");
+        assert_eq!(from_api.kind, "control_plane");
+        assert!(is_control_plane(&from_api));
+        assert!(
+            !shows_software_line(&from_api),
+            "shows_software_line must be false for kind=control_plane"
+        );
+        let hidden = software_bin_rows(&from_api);
+        assert_eq!(
+            hidden.len(),
+            PACKAGE_BIN_NAMES.len(),
+            "software_bin_rows still emits fleet-host / fleet-driver; the gate hides them"
+        );
+        assert!(
+            hidden.iter().any(|r| r.name == "fleet-host")
+                && hidden.iter().any(|r| r.name == "fleet-driver"),
+            "ungated card would show package rows: {hidden:?}"
+        );
+
+        // kind=control_plane is the gate — not is_control_plane_box, not a
+        // stuffed software/desired payload, not status/outdated flags.
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.status = "online".into();
+        plane.software = None;
+        plane.desired = None;
+        plane.platform = Some("linux-x86_64".into());
+        plane.outdated = true;
+        plane.software_status = Some("behind".into());
+        plane.is_control_plane_box = false;
+        assert!(is_control_plane(&plane));
+        assert!(plane.software.is_none());
+        assert!(
+            !shows_software_line(&plane),
+            "widget must not render on kind=control_plane"
+        );
+
+        set_package_versions(&mut plane, "0.0.1", "0.0.2");
+        assert!(
+            plane.software.is_some() && plane.desired.is_some(),
+            "stuffed payload would produce package rows if the gate were dropped"
+        );
+        assert_eq!(software_flag(&plane), Some("outdated"));
+        assert_eq!(software_bin_rows(&plane).len(), PACKAGE_BIN_NAMES.len());
+        assert!(
+            !shows_software_line(&plane),
+            "kind=control_plane hides package rows even when software is present"
+        );
+
+        for status in ["online", "offline", "pending", "disabled", "error"] {
+            plane.status = status.into();
+            assert!(
+                !shows_software_line(&plane),
+                "kind=control_plane hides software for status={status}"
+            );
+        }
+
+        plane.status = "online".into();
+        plane.is_control_plane_box = true;
+        plane.outdated = false;
+        plane.software_status = None;
+        plane.software = None;
+        plane.desired = None;
+        assert!(
+            !shows_software_line(&plane),
+            "kind=control_plane stays hidden even as the plane machine"
+        );
+
+        // A paired box tagged as the plane machine still reports host packages.
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.is_control_plane_box = true;
+        set_package_versions(&mut host, "0.0.2", "0.0.2");
+        assert!(
+            shows_software_line(&host),
+            "kind=host still shows package rows even on the plane machine"
+        );
+        assert_eq!(software_bin_rows(&host).len(), PACKAGE_BIN_NAMES.len());
+    }
+
+    /// catalog:unit-auto-update-on-paired — Auto-update checkbox is paired-only.
+    /// "Paired only" means not the plane (this process, no host package pull).
+    #[test]
+    fn auto_update_checkbox_absent_on_control_plane() {
+        // just test excludes fleet-ui; lock the live RSX from this host crate
+        // so deleting the helper or gating Auto-update with only `if !plane`
+        // fails on the default unit path.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("shows_auto_update"),
+            "production source must import shows_auto_update"
+        );
+        assert!(
+            !prod.contains("fn shows_auto_update"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert_eq!(
+            prod.matches("\"Auto-update\"").count(),
+            1,
+            "production RSX must render Auto-update exactly once"
+        );
+        let label_at = prod
+            .find("\"Auto-update\"")
+            .expect("Auto-update label in production RSX");
+        let before = &prod[..label_at];
+        let gate_at = before
+            .rfind("if shows_auto_update(&host)")
+            .expect("if shows_auto_update(&host) before Auto-update");
+        let last_if = before.rfind("if ").expect("if-gate before Auto-update");
+        let gate_line = before[last_if..].lines().next().unwrap_or("");
+        assert_eq!(
+            last_if, gate_at,
+            "nearest if before Auto-update must be if shows_auto_update(&host), got {gate_line:?}"
+        );
+        assert!(
+            !gate_line.contains("!plane"),
+            "if !plane must not be the only Auto-update gate"
+        );
+        let inner = &prod[gate_at..label_at];
+        assert!(
+            inner.contains("r#type: \"checkbox\""),
+            "Auto-update checkbox must be inside if shows_auto_update(&host)"
+        );
+        assert!(
+            !inner.contains("if !plane"),
+            "if !plane must not wrap the Auto-update checkbox inside the helper gate"
+        );
+
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.auto_update = false;
+        assert!(
+            shows_auto_update(&host),
+            "paired host shows the auto-update checkbox"
+        );
+        assert_eq!(update_now_label(&host, false), Some("Update now"));
+
+        host.status = "offline".into();
+        assert!(shows_auto_update(&host));
+        host.status = "error".into();
+        assert!(shows_auto_update(&host));
+        host.status = "pending".into();
+        assert!(
+            shows_auto_update(&host),
+            "pending pair still shows Auto-update (test_17 / widgets-lock e2e)"
+        );
+
+        host.status = "disabled".into();
+        assert!(
+            !shows_auto_update(&host),
+            "removed card has no auto-update widget"
+        );
+
+        // kind=control_plane is the gate — not is_control_plane_box, not
+        // auto_update/outdated/request flags. Plane is this process.
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.status = "online".into();
+        plane.auto_update = true;
+        plane.outdated = true;
+        plane.software_status = Some("behind".into());
+        plane.update_requested_at = Some("requested".into());
+        plane.is_control_plane_box = false;
+        assert!(is_control_plane(&plane));
+        assert!(
+            !shows_auto_update(&plane),
+            "widget must not render on kind=control_plane"
+        );
+        assert_eq!(update_now_label(&plane, false), None);
+        assert_eq!(update_now_label(&plane, true), None);
+        assert!(
+            !settings_draft_dirty(&plane, accepting_jobs(&plane), false, plane.max_concurrent),
+            "absent widget cannot dirty plane settings"
+        );
+
+        plane.status = "offline".into();
+        assert!(!shows_auto_update(&plane));
+        plane.status = "pending".into();
+        assert!(!shows_auto_update(&plane));
+        plane.status = "disabled".into();
+        assert!(!shows_auto_update(&plane));
+
+        // Flags that might look like "this box should update" still hide
+        // the widget on the plane.
+        plane.status = "online".into();
+        plane.auto_update = false;
+        plane.outdated = false;
+        plane.software_status = None;
+        plane.update_requested_at = None;
+        plane.is_control_plane_box = true;
+        assert!(
+            !shows_auto_update(&plane),
+            "kind=control_plane stays hidden even as the plane machine"
+        );
+
+        // A paired box tagged as the plane machine still pulls a host package.
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.is_control_plane_box = true;
+        assert!(
+            shows_auto_update(&host),
+            "kind=host still shows auto-update even on the plane machine"
+        );
     }
 
     #[test]
@@ -2212,6 +4470,224 @@ mod tests {
         });
         assert_eq!(jobs_line(&host), "jobs 2 / 4 · cpu 12% · mem 32%");
         assert!(!jobs_line(&host).contains("gpu"));
+    }
+
+    /// catalog:list-jobs-n-cap-min-advertised — Jobs `n / cap` is
+    /// min(plane, advertised). Cap display and assignable skip at that min.
+    /// 0 advertised is not unlimited.
+    #[test]
+    fn jobs_n_cap_uses_min_of_plane_and_advertised() {
+        // just test excludes fleet-ui; lock the live RSX so interpolating
+        // plane max_concurrent (or advertised alone) as the cap still fails.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("jobs_line"),
+            "production source must import jobs_line"
+        );
+        assert!(
+            !prod.contains("fn jobs_line") && !prod.contains("fn job_cap"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert!(
+            prod.matches("{jobs_line(&host)}").count() >= 2,
+            "list card and detail panel must render jobs_line(&host)"
+        );
+        assert!(
+            !prod.contains("jobs {host.current_jobs} / {host.max_concurrent}"),
+            "must not show plane max_concurrent as the cap (ignores advertised)"
+        );
+        assert!(
+            !prod.contains("jobs {host.current_jobs} / {host.advertised_max_concurrent"),
+            "must not show advertised alone as the cap (ignores plane)"
+        );
+
+        let mut host = sample_host();
+        host.hardware = None;
+        host.kind = "host".into();
+
+        // New card: no advertised report → plane cap. Catalog e2e: jobs 0 / 4.
+        host.current_jobs = 0;
+        host.max_concurrent = 4;
+        host.advertised_max_concurrent = None;
+        assert_eq!(job_cap(&host), 4, "no advertised report → plane cap");
+        assert_eq!(jobs_line(&host), "jobs 0 / 4");
+        assert!(!at_job_cap(&host), "0 jobs is under cap / assignable");
+
+        // Advertised 2 wins over plane 8.
+        host.max_concurrent = 8;
+        host.advertised_max_concurrent = Some(2);
+        host.current_jobs = 0;
+        assert_eq!(job_cap(&host), 2, "advertised 2 must win over plane 8");
+        assert_eq!(jobs_line(&host), "jobs 0 / 2");
+        assert_ne!(
+            jobs_line(&host),
+            "jobs 0 / 8",
+            "must not display the plane cap when advertised is lower"
+        );
+        assert!(!at_job_cap(&host));
+
+        host.current_jobs = 1;
+        assert_eq!(jobs_line(&host), "jobs 1 / 2");
+        assert!(!at_job_cap(&host), "1 < min(8,2) stays assignable");
+
+        host.current_jobs = 2;
+        assert_eq!(jobs_line(&host), "jobs 2 / 2");
+        assert!(
+            at_job_cap(&host),
+            "current_jobs == advertised min must skip assignable"
+        );
+
+        // Plane 2 wins over advertised 8.
+        host.max_concurrent = 2;
+        host.advertised_max_concurrent = Some(8);
+        host.current_jobs = 1;
+        assert_eq!(job_cap(&host), 2, "plane 2 must win over advertised 8");
+        assert_eq!(jobs_line(&host), "jobs 1 / 2");
+        assert_ne!(
+            jobs_line(&host),
+            "jobs 1 / 8",
+            "must not display advertised when the plane cap is lower"
+        );
+        assert!(!at_job_cap(&host));
+
+        host.current_jobs = 2;
+        assert_eq!(jobs_line(&host), "jobs 2 / 2");
+        assert!(
+            at_job_cap(&host),
+            "min(plane=2, advertised=8) at 2 must skip assignable"
+        );
+
+        // 0 advertised is not unlimited — clamp 1, first job ok, second skips.
+        host.max_concurrent = 8;
+        host.advertised_max_concurrent = Some(0);
+        host.current_jobs = 0;
+        assert_eq!(
+            job_cap(&host),
+            1,
+            "0 advertised is a cap of 1, not unlimited"
+        );
+        assert_eq!(jobs_line(&host), "jobs 0 / 1");
+        assert_ne!(
+            jobs_line(&host),
+            "jobs 0 / 8",
+            "advertised 0 must not fall through to the plane cap"
+        );
+        assert!(
+            !jobs_line(&host).to_ascii_lowercase().contains("unlimited"),
+            "{}",
+            jobs_line(&host)
+        );
+        assert!(
+            !at_job_cap(&host),
+            "0 jobs against advertised-0 still assignable"
+        );
+
+        host.current_jobs = 1;
+        assert_eq!(jobs_line(&host), "jobs 1 / 1");
+        assert!(
+            at_job_cap(&host),
+            "advertised 0 is not unlimited; 1 job must skip assignable"
+        );
+
+        // Plane 0 + advertised 0 still clamp to 1 (not 0 / unlimited).
+        host.max_concurrent = 0;
+        host.advertised_max_concurrent = Some(0);
+        host.current_jobs = 0;
+        assert_eq!(job_cap(&host), 1);
+        assert_eq!(jobs_line(&host), "jobs 0 / 1");
+        assert!(!at_job_cap(&host));
+        host.current_jobs = 1;
+        assert_eq!(jobs_line(&host), "jobs 1 / 1");
+        assert!(at_job_cap(&host));
+
+        // Clamped advertised 256 still min'd with plane.
+        host.max_concurrent = 2;
+        host.advertised_max_concurrent = Some(300);
+        host.current_jobs = 2;
+        assert_eq!(job_cap(&host), 2);
+        assert_eq!(jobs_line(&host), "jobs 2 / 2");
+        assert!(at_job_cap(&host));
+
+        // Running a job increments n; cap stays the min.
+        host.max_concurrent = 8;
+        host.advertised_max_concurrent = Some(4);
+        host.current_jobs = 0;
+        assert_eq!(jobs_line(&host), "jobs 0 / 4");
+        host.current_jobs = 1;
+        assert_eq!(jobs_line(&host), "jobs 1 / 4");
+        assert_eq!(job_cap(&host), 4);
+        assert!(!at_job_cap(&host));
+        host.current_jobs = 4;
+        assert_eq!(jobs_line(&host), "jobs 4 / 4");
+        assert!(at_job_cap(&host));
+
+        // Multi-host skip: at-min hosts drop out; under-cap peer stays.
+        let mut under = sample_host();
+        under.id = "under".into();
+        under.hardware = None;
+        under.max_concurrent = 8;
+        under.advertised_max_concurrent = Some(2);
+        under.current_jobs = 1;
+
+        let mut at_adv = under.clone();
+        at_adv.id = "at-adv".into();
+        at_adv.current_jobs = 2;
+
+        let mut at_plane = sample_host();
+        at_plane.id = "at-plane".into();
+        at_plane.hardware = None;
+        at_plane.max_concurrent = 1;
+        at_plane.advertised_max_concurrent = None;
+        at_plane.current_jobs = 1;
+
+        let mut plane_wins = sample_host();
+        plane_wins.id = "plane-wins".into();
+        plane_wins.hardware = None;
+        plane_wins.max_concurrent = 2;
+        plane_wins.advertised_max_concurrent = Some(8);
+        plane_wins.current_jobs = 2;
+
+        let mut zero_adv = sample_host();
+        zero_adv.id = "zero-adv".into();
+        zero_adv.hardware = None;
+        zero_adv.max_concurrent = 8;
+        zero_adv.advertised_max_concurrent = Some(0);
+        zero_adv.current_jobs = 1;
+
+        let pool = [under, at_adv, at_plane, plane_wins, zero_adv];
+        assert!(!at_job_cap(&pool[0]));
+        assert!(at_job_cap(&pool[1]), "advertised-cap host must be skipped");
+        assert!(
+            at_job_cap(&pool[2]),
+            "plane-cap host (no advertised) must be skipped"
+        );
+        assert!(
+            at_job_cap(&pool[3]),
+            "min(plane=2, advertised=8) at 2 must be skipped"
+        );
+        assert!(
+            at_job_cap(&pool[4]),
+            "advertised 0 is not unlimited; 1 job must skip"
+        );
+        let ids: Vec<&str> = pool
+            .iter()
+            .filter(|h| !at_job_cap(h))
+            .map(|h| h.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["under"],
+            "only the under-cap host must stay assignable: {ids:?}"
+        );
     }
 
     #[test]
@@ -2446,6 +4922,171 @@ mod tests {
         assert!(!settings_awaiting_ack(&same));
     }
 
+    /// catalog:unit-never-ack-stays-pending-apply — Old host that never acks
+    /// stays pending apply. gen ≠ ack forever. Plane apply is immediate.
+    #[test]
+    fn old_host_that_never_acks_stays_pending_apply() {
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.paired_at = Some("2026-01-01T00:00:00Z".into());
+        host.settings_gen = 0;
+        host.settings_ack_gen = 0;
+        host.settings_pending = false;
+        assert!(!settings_awaiting_ack(&host));
+        assert!(extra_status_pills(&host).is_empty());
+        assert!(!widgets_locked(&host, false));
+
+        let applied = apply_patch(
+            host,
+            &HostPatch {
+                auto_update: Some(false),
+                ..HostPatch::default()
+            },
+        );
+        assert!(applied.settings_pending);
+        assert_eq!(applied.settings_gen, 1);
+        assert_eq!(applied.settings_ack_gen, 0);
+        assert_ne!(
+            applied.settings_gen, applied.settings_ack_gen,
+            "apply must leave gen ahead of ack"
+        );
+        assert!(settings_awaiting_ack(&applied));
+        assert_eq!(extra_status_pills(&applied), vec!["pending apply"]);
+        assert!(widgets_locked(&applied, false));
+
+        // Old fleet-host: GET list / heartbeat never posts settings_ack_gen.
+        // last_seen and inventory move; gen / ack / pending must not.
+        let mut stale = applied;
+        for i in 0..8 {
+            stale.last_seen_at = Some(format!("2026-01-01T00:00:{i:02}Z"));
+            stale.current_jobs = i % 3;
+            stale.status = if i % 2 == 0 {
+                "online".into()
+            } else {
+                "offline".into()
+            };
+            stale.hostname = Some("old-box".into());
+            stale.platform = Some("linux-x86_64".into());
+            stale.hardware = Some(HostHardware {
+                cpu_cores: Some(8),
+                ..HostHardware::default()
+            });
+            assert_eq!(
+                stale.settings_gen, 1,
+                "heartbeat must not bump settings_gen"
+            );
+            assert_eq!(
+                stale.settings_ack_gen, 0,
+                "old host must never advance settings_ack_gen"
+            );
+            assert!(
+                stale.settings_pending,
+                "gen != ack forever → settings_pending true"
+            );
+            assert!(settings_awaiting_ack(&stale));
+            assert_eq!(
+                extra_status_pills(&stale),
+                vec!["pending apply"],
+                "old host never acks — pending apply must stay (i={i})"
+            );
+            assert!(widgets_locked(&stale, false));
+        }
+
+        // No-op CP apply / Update now must not ack or rewind gen.
+        stale = apply_patch(
+            stale,
+            &HostPatch {
+                auto_update: Some(false),
+                request_update: Some(true),
+                ..HostPatch::default()
+            },
+        );
+        assert_eq!(
+            stale.settings_gen, 1,
+            "never-ack must not bump or rewind settings_gen"
+        );
+        assert_eq!(stale.settings_ack_gen, 0);
+        assert!(stale.settings_pending);
+        assert_eq!(extra_status_pills(&stale), vec!["pending apply"]);
+
+        // Another real settings apply: gen moves further ahead; ack still 0.
+        let again = apply_patch(
+            stale,
+            &HostPatch {
+                max_concurrent: Some(2),
+                ..HostPatch::default()
+            },
+        );
+        assert_eq!(again.settings_gen, 2);
+        assert_eq!(again.settings_ack_gen, 0);
+        assert!(
+            again.settings_pending,
+            "gen != ack forever → settings_pending true"
+        );
+        assert_eq!(extra_status_pills(&again), vec!["pending apply"]);
+
+        // The flag can lag; gen != ack is what keeps pending apply forever.
+        let mut lagged = again.clone();
+        lagged.settings_pending = false;
+        assert_ne!(lagged.settings_gen, lagged.settings_ack_gen);
+        assert!(settings_awaiting_ack(&lagged));
+        assert_eq!(extra_status_pills(&lagged), vec!["pending apply"]);
+        assert!(widgets_locked(&lagged, false));
+
+        // Control: a host that does ack (modern fleet-host) clears the pill.
+        let mut acked = again.clone();
+        acked.settings_ack_gen = acked.settings_gen;
+        acked.settings_pending = false;
+        assert!(!settings_awaiting_ack(&acked));
+        assert!(
+            extra_status_pills(&acked).is_empty(),
+            "matching ack must clear pending apply: {:?}",
+            extra_status_pills(&acked)
+        );
+
+        // Plane apply is this process — no pending apply, widgets stay live.
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.status = "online".into();
+        plane.settings_gen = 0;
+        plane.settings_ack_gen = 0;
+        plane.settings_pending = false;
+        let plane_applied = apply_patch(
+            plane,
+            &HostPatch {
+                max_concurrent: Some(8),
+                paused: Some(true),
+                ..HostPatch::default()
+            },
+        );
+        assert!(is_control_plane(&plane_applied));
+        assert_eq!(plane_applied.max_concurrent, 8);
+        assert!(
+            !plane_applied.settings_pending,
+            "plane apply is immediate — no settings_pending"
+        );
+        assert_eq!(
+            plane_applied.settings_gen, 0,
+            "plane has no host ack cycle — apply must not bump settings_gen"
+        );
+        assert_eq!(plane_applied.settings_ack_gen, 0);
+        assert_eq!(
+            plane_applied.settings_gen, plane_applied.settings_ack_gen,
+            "plane apply acks in the same step"
+        );
+        assert!(!settings_awaiting_ack(&plane_applied));
+        assert!(
+            extra_status_pills(&plane_applied).is_empty(),
+            "plane apply is immediate (no pending apply): {:?}",
+            extra_status_pills(&plane_applied)
+        );
+        assert!(
+            !widgets_locked(&plane_applied, false),
+            "plane apply is immediate — widgets stay live"
+        );
+    }
+
     /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
     #[test]
     fn apply_patch_request_update_marks_host() {
@@ -2513,6 +5154,55 @@ mod tests {
         ));
     }
 
+    /// catalog:e2e-copy-buttons — just test excludes fleet-ui. Lock the live
+    /// PairPanel so a silent no-op or clipboard-API-only Copy still fails here.
+    #[test]
+    fn pair_panel_copy_buttons_use_http_lan_helper() {
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let idx = prod.find("fn PairPanel").expect("PairPanel");
+        let after = &prod[idx..];
+        let end = after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(after.len());
+        let pair = &after[..end];
+        assert!(
+            prod.contains("use crate::clipboard::copy_text"),
+            "pair panel must use the HTTP LAN clipboard helper"
+        );
+        assert!(
+            !prod.contains("fn copy_text"),
+            "page.rs must not shadow copy_text"
+        );
+        assert!(
+            pair.contains("if copy_text(&unix_copy)")
+                && pair.contains("if copy_text(&windows_copy)")
+                && pair.contains("if copy_text(&token)"),
+            "Unix, Windows, and token Copy must call copy_text"
+        );
+        assert!(
+            !pair.contains("let _ = copy_text"),
+            "must not ignore copy_text — HTTP LAN no-op would still toast success"
+        );
+        assert!(
+            !pair.contains("navigator.clipboard") && !pair.contains("navigator().clipboard"),
+            "must not read navigator.clipboard in PairPanel (Firefox HTTP LAN panics)"
+        );
+        assert!(
+            pair.contains("\"Command copied.\"") && pair.contains("\"Token copied.\""),
+            "success toast is how the e2e knows the fallback wrote"
+        );
+        assert!(
+            pair.contains("\"Copy failed. Select the command and copy it yourself.\"")
+                && pair.contains("\"Copy failed. Select the token and copy it yourself.\""),
+            "failed copy must not look like success"
+        );
+    }
+
     #[test]
     fn identity_line_is_hostname_dot_platform() {
         let mut host = sample_host();
@@ -2555,6 +5245,432 @@ mod tests {
         assert!(settings_draft_dirty(&host, false, false, 4));
     }
 
+    /// catalog:list-settings-draft-dirty-until-apply
+    /// catalog:unit-settings-draft-dirty — Edits stay local until Apply.
+    /// Toggle auto-update without Apply must not look applied. Dirty vs
+    /// pending are distinct.
+    #[test]
+    fn settings_draft_dirty_stays_local_until_apply() {
+        // just test excludes fleet-ui; lock the live RSX so a checkbox that
+        // PATCHes immediately, or Apply gated on pending, still fails here.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("settings_draft_dirty"),
+            "production source must import settings_draft_dirty"
+        );
+        assert!(
+            !prod.contains("fn settings_draft_dirty"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+
+        let idx = prod
+            .find("fn HostDetailPanel")
+            .expect("HostDetailPanel in production source");
+        let after = &prod[idx..];
+        let end = after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(after.len());
+        let detail = &after[..end];
+
+        assert!(
+            detail.contains("use_signal(|| host.auto_update)"),
+            "auto-update draft must start from the last applied host"
+        );
+        let dirty_bind = detail
+            .lines()
+            .find(|l| l.contains("settings_draft_dirty("))
+            .expect("dirty binding from settings_draft_dirty");
+        assert!(
+            dirty_bind.contains("d_auto()"),
+            "dirty must compare the auto-update draft, not only the applied host: {dirty_bind}"
+        );
+        assert!(
+            detail.contains("let pending = widgets_locked"),
+            "pending is widgets_locked after Apply, not the dirty flag"
+        );
+
+        let auto_at = detail
+            .find("\"Auto-update\"")
+            .expect("Auto-update label in HostDetailPanel");
+        let auto_gate = detail[..auto_at]
+            .rfind("if shows_auto_update(&host)")
+            .expect("if shows_auto_update(&host) before Auto-update");
+        let auto_block = &detail[auto_gate..auto_at];
+        assert!(
+            auto_block.contains("checked: d_auto()"),
+            "checkbox must bind the draft, not host.auto_update"
+        );
+        assert!(
+            auto_block.contains("d_auto.set("),
+            "checkbox must write the local draft only"
+        );
+        assert!(
+            !auto_block.contains("patch_host")
+                && !auto_block.contains("apply_patch")
+                && !auto_block.contains("HostPatch")
+                && !auto_block.contains("spawn("),
+            "toggling Auto-update must not PATCH / Apply"
+        );
+
+        let apply_at = detail
+            .find("\"Apply changes\"")
+            .expect("Apply changes button in HostDetailPanel");
+        let apply_gate_at = detail[..apply_at]
+            .rfind("if dirty")
+            .expect("if dirty before Apply changes");
+        let apply_gate = detail[apply_gate_at..].lines().next().unwrap_or("");
+        assert!(
+            apply_gate.contains("dirty") && !apply_gate.contains("pending"),
+            "Apply appears for local dirty, not for pending apply: {apply_gate:?}"
+        );
+        let apply_block = &detail[apply_gate_at..apply_at];
+        assert!(
+            apply_block.contains("auto_update: Some(d_auto())"),
+            "Apply is what sends the auto-update draft"
+        );
+        assert!(
+            apply_block.contains("patch_host"),
+            "Apply is the PATCH; the checkbox is not"
+        );
+
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.allow_host = true;
+        host.allow_container = true;
+        host.auto_update = true;
+        host.max_concurrent = 4;
+        host.settings_gen = 3;
+        host.settings_ack_gen = 3;
+        host.settings_pending = false;
+        let snapshot = host.clone();
+        let accepting = accepting_jobs(&host);
+        assert_eq!(accepting, true);
+        assert!(!settings_awaiting_ack(&host));
+        assert!(!widgets_locked(&host, false));
+        assert!(extra_status_pills(&host).is_empty());
+        assert!(!settings_draft_dirty(
+            &host,
+            accepting,
+            host.auto_update,
+            host.max_concurrent
+        ));
+
+        // Draft toggle only: host row, gen, pending pill, and widget lock stay put.
+        let draft_auto = !host.auto_update;
+        assert!(
+            settings_draft_dirty(&host, accepting, draft_auto, host.max_concurrent),
+            "flipped auto-update draft must be dirty"
+        );
+        assert_eq!(
+            host, snapshot,
+            "dirty is a local compare — host is unchanged"
+        );
+        assert_eq!(
+            host.auto_update, true,
+            "toggle without Apply is not applied"
+        );
+        assert_eq!(host.settings_gen, snapshot.settings_gen);
+        assert_eq!(host.settings_ack_gen, snapshot.settings_ack_gen);
+        assert!(!host.settings_pending);
+        assert!(
+            !settings_awaiting_ack(&host),
+            "dirty must not be pending apply"
+        );
+        assert!(
+            extra_status_pills(&host).is_empty(),
+            "toggle without Apply must not show pending apply: {:?}",
+            extra_status_pills(&host)
+        );
+        assert!(
+            !widgets_locked(&host, false),
+            "dirty must not lock widgets — that is pending"
+        );
+        // Revert the draft: clean again, still never Applied.
+        assert!(!settings_draft_dirty(
+            &host,
+            accepting,
+            host.auto_update,
+            host.max_concurrent
+        ));
+        assert_eq!(host, snapshot);
+
+        // Apply is what writes auto_update and starts the ack cycle.
+        let applied = apply_patch(
+            host.clone(),
+            &HostPatch {
+                auto_update: Some(draft_auto),
+                ..HostPatch::default()
+            },
+        );
+        assert_eq!(applied.auto_update, draft_auto);
+        assert_ne!(applied.auto_update, host.auto_update);
+        assert!(applied.settings_pending);
+        assert_eq!(applied.settings_gen, host.settings_gen + 1);
+        assert_eq!(applied.settings_ack_gen, host.settings_ack_gen);
+        assert!(settings_awaiting_ack(&applied));
+        assert_eq!(extra_status_pills(&applied), vec!["pending apply"]);
+        assert!(widgets_locked(&applied, false));
+        assert!(
+            !settings_draft_dirty(
+                &applied,
+                accepting_jobs(&applied),
+                applied.auto_update,
+                applied.max_concurrent
+            ),
+            "after Apply the draft matches the host — dirty is gone; pending remains"
+        );
+        assert_ne!(
+            settings_draft_dirty(
+                &applied,
+                accepting_jobs(&applied),
+                applied.auto_update,
+                applied.max_concurrent
+            ),
+            settings_awaiting_ack(&applied),
+            "dirty vs pending must disagree after Apply, before ack"
+        );
+
+        // Ack clears pending; dirty stays false.
+        let mut acked = applied.clone();
+        acked.settings_ack_gen = acked.settings_gen;
+        acked.settings_pending = false;
+        assert!(!settings_awaiting_ack(&acked));
+        assert!(extra_status_pills(&acked).is_empty());
+        assert!(!widgets_locked(&acked, false));
+        assert!(!settings_draft_dirty(
+            &acked,
+            accepting_jobs(&acked),
+            acked.auto_update,
+            acked.max_concurrent
+        ));
+    }
+
+    /// catalog:list-settings-widgets-lock-while-pending
+    /// catalog:unit-widgets-lock — Widgets lock while pending. The
+    /// settings_pending helper (`settings_awaiting_ack`) is gen ahead of
+    /// ack, not only the API flag. Isolation + auto-update + cap stay
+    /// locked until ack. Plane apply is immediate (no pending).
+    #[test]
+    fn settings_pending_gen_ahead_of_ack_locks_widgets() {
+        // just test excludes fleet-ui; lock the live RSX so a helper that
+        // only reads the settings_pending flag, or widgets that ignore
+        // pending, cannot go green.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("widgets_locked"),
+            "production source must import widgets_locked"
+        );
+        assert!(
+            !prod.contains("fn widgets_locked") && !prod.contains("fn settings_awaiting_ack"),
+            "page.rs must call the crate helpers, not a local shadow"
+        );
+        assert!(
+            !prod.contains("host.settings_pending")
+                && !prod.contains("host.settings_gen")
+                && !prod.contains("host.settings_ack_gen"),
+            "widgets must lock via widgets_locked / settings_awaiting_ack, not the lagging flag"
+        );
+
+        let idx = prod
+            .find("fn HostDetailPanel")
+            .expect("HostDetailPanel in production source");
+        let after = &prod[idx..];
+        let end = after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(after.len());
+        let detail = &after[..end];
+        assert!(
+            detail.contains("let pending = widgets_locked"),
+            "pending is widgets_locked after Apply, not the dirty flag"
+        );
+
+        let auto_at = detail
+            .find("\"Auto-update\"")
+            .expect("Auto-update label in HostDetailPanel");
+        let auto_gate = detail[..auto_at]
+            .rfind("if shows_auto_update(&host)")
+            .expect("if shows_auto_update(&host) before Auto-update");
+        let auto_block = &detail[auto_gate..auto_at];
+        assert!(
+            auto_block.contains("disabled: busy() || pending"),
+            "Auto-update must lock while settings_pending / gen != ack: {auto_block}"
+        );
+
+        let cap_at = detail
+            .find("\"Max jobs at once\"")
+            .expect("Max jobs at once in HostDetailPanel");
+        let cap_end = (cap_at + 400).min(detail.len());
+        let cap_block = &detail[cap_at..cap_end];
+        assert!(
+            cap_block.contains("disabled: busy() || pending"),
+            "Max jobs at once must lock while settings_pending / gen != ack: {cap_block}"
+        );
+
+        let sb_call_at = detail
+            .find("SandboxBlock")
+            .expect("SandboxBlock in HostDetailPanel");
+        let sb_call_end = (sb_call_at + 240).min(detail.len());
+        let sb_call = &detail[sb_call_at..sb_call_end];
+        assert!(
+            sb_call.contains("pending,"),
+            "isolation SandboxBlock must receive pending: {sb_call}"
+        );
+
+        let sb_idx = prod
+            .find("fn SandboxBlock")
+            .expect("SandboxBlock in production source");
+        let sb_after = &prod[sb_idx..];
+        let sb_end = sb_after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(sb_after.len());
+        let sandbox = &sb_after[..sb_end];
+        for needle in [
+            "\"Allow process jobs\"",
+            "\"Allow container jobs\"",
+            "\"Work root\"",
+            "\"Max job timeout (s)\"",
+        ] {
+            let at = sandbox
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} in SandboxBlock"));
+            let start = at.saturating_sub(320);
+            let end = (at + needle.len() + 420).min(sandbox.len());
+            let window = &sandbox[start..end];
+            assert!(
+                window.contains("disabled: pending"),
+                "{needle} must lock while pending: {window}"
+            );
+        }
+
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.status = "online".into();
+        host.settings_gen = 3;
+        host.settings_ack_gen = 3;
+        host.settings_pending = false;
+        assert!(!settings_awaiting_ack(&host));
+        assert!(!widgets_locked(&host, false));
+
+        // The flag can lag; gen ahead of ack is what locks widgets.
+        host.settings_gen = 4;
+        host.settings_ack_gen = 3;
+        host.settings_pending = false;
+        assert_ne!(host.settings_gen, host.settings_ack_gen);
+        assert!(
+            settings_awaiting_ack(&host),
+            "settings_pending helper must treat gen ahead of ack as pending"
+        );
+        assert!(
+            widgets_locked(&host, false),
+            "settings_gen != ack must lock isolation + auto-update + cap"
+        );
+
+        host.settings_gen = 3;
+        host.settings_ack_gen = 3;
+        host.settings_pending = true;
+        assert!(settings_awaiting_ack(&host));
+        assert!(widgets_locked(&host, false));
+
+        let mut clean = sample_host();
+        clean.kind = "host".into();
+        clean.status = "online".into();
+        clean.settings_gen = 1;
+        clean.settings_ack_gen = 1;
+        clean.settings_pending = false;
+        clean.auto_update = true;
+        let applied = apply_patch(
+            clean.clone(),
+            &HostPatch {
+                auto_update: Some(false),
+                ..HostPatch::default()
+            },
+        );
+        assert!(applied.settings_gen > applied.settings_ack_gen);
+        assert!(applied.settings_pending);
+        assert!(settings_awaiting_ack(&applied));
+        assert!(widgets_locked(&applied, false));
+
+        let mut lagged = applied.clone();
+        lagged.settings_pending = false;
+        assert_ne!(lagged.settings_gen, lagged.settings_ack_gen);
+        assert!(settings_awaiting_ack(&lagged));
+        assert!(widgets_locked(&lagged, false));
+
+        let mut acked = applied.clone();
+        acked.settings_ack_gen = acked.settings_gen;
+        acked.settings_pending = false;
+        assert!(!settings_awaiting_ack(&acked));
+        assert!(!widgets_locked(&acked, false));
+
+        // Plane apply is this process — no pending lock even if gen != ack.
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.status = "online".into();
+        plane.settings_gen = 4;
+        plane.settings_ack_gen = 1;
+        plane.settings_pending = true;
+        assert!(is_control_plane(&plane));
+        assert!(
+            !widgets_locked(&plane, false),
+            "plane apply is immediate — widgets stay live"
+        );
+        assert!(
+            extra_status_pills(&plane).is_empty(),
+            "plane has no pending apply: {:?}",
+            extra_status_pills(&plane)
+        );
+
+        let mut plane_clean = sample_host();
+        plane_clean.kind = "control_plane".into();
+        plane_clean.status = "online".into();
+        plane_clean.settings_gen = 0;
+        plane_clean.settings_ack_gen = 0;
+        plane_clean.settings_pending = false;
+        let plane_applied = apply_patch(
+            plane_clean,
+            &HostPatch {
+                max_concurrent: Some(8),
+                auto_update: Some(false),
+                ..HostPatch::default()
+            },
+        );
+        assert!(
+            !plane_applied.settings_pending,
+            "plane apply is immediate — no settings_pending"
+        );
+        assert_eq!(
+            plane_applied.settings_gen, plane_applied.settings_ack_gen,
+            "plane has no host ack cycle"
+        );
+        assert!(!settings_awaiting_ack(&plane_applied));
+        assert!(
+            !widgets_locked(&plane_applied, false),
+            "plane apply is immediate — widgets stay live"
+        );
+    }
+
     #[test]
     fn widgets_lock_while_pending_not_on_plane() {
         let mut host = sample_host();
@@ -2577,19 +5693,228 @@ mod tests {
         assert!(widgets_locked(&host, true));
     }
 
+    /// catalog:list-runtime-line-sandbox-backend-only
+    /// catalog:unit-runtime-line — One runtime: SANDBOX_BACKEND on the plane;
+    /// process on a paired host. Helper must not offer Native/Sandboxed
+    /// checkboxes as a second runtime picker.
     #[test]
     fn runtime_line_is_sandbox_backend_not_isolation_modes() {
+        // just test excludes fleet-ui; lock the live RSX so swapping
+        // runtime_line for Native/Sandboxed checkboxes cannot go green.
+        let src = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let import = prod
+            .split("use fleet_runners_view::{")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .expect("fleet_runners_view import in production source");
+        assert!(
+            import.contains("runtime_line"),
+            "production source must import runtime_line"
+        );
+        assert!(
+            !prod.contains("fn runtime_line"),
+            "page.rs must call the crate helper, not a local shadow"
+        );
+        assert_eq!(
+            prod.matches("runtime_line(&host, &sandbox_backend)")
+                .count(),
+            2,
+            "list row + detail must both call runtime_line"
+        );
+        assert_eq!(
+            prod.matches("\"{runtime}\"").count(),
+            2,
+            "list row + detail must render the runtime_line string"
+        );
+        assert!(
+            !prod.contains("RunnerModeChecks")
+                && !prod.contains("ISOLATION_LABEL")
+                && !prod.contains("SANDBOXED_HINT")
+                && !prod.contains("\"Sandboxed\""),
+            "must not offer Native/Sandboxed isolation checkboxes"
+        );
+        assert!(
+            !prod.contains("\"Isolation\""),
+            "Isolation section was the Native/Sandboxed picker"
+        );
+        // Accessible-name Native checkbox (label text). SandboxBlock's
+        // <p> "Native" heading is not a checkbox name.
+        let native_checkbox = prod.split("r#type: \"checkbox\"").skip(1).any(|after| {
+            after
+                .lines()
+                .take(12)
+                .any(|l| l.contains("\"Native\"") && !l.contains("font-medium"))
+        });
+        assert!(
+            !native_checkbox,
+            "must not offer a Native isolation checkbox"
+        );
+        assert!(
+            !prod.contains("Control plane does not run sandboxes")
+                && !prod.contains("Runtime: fleet-host")
+                && !prod.contains("Runtime: process on this machine"),
+            "page.rs must render runtime_line, not a hardcoded runtime string"
+        );
+
+        let lib = include_str!("lib.rs");
+        let lib_prod = lib.split("#[cfg(test)]").next().expect("lib production");
+        assert!(
+            !lib_prod.contains("ISOLATION_LABEL")
+                && !lib_prod.contains("SANDBOXED_HINT")
+                && !lib_prod.contains("fn plane_native_locked"),
+            "helper must not offer a second runtime picker"
+        );
+        let runtime_fn = {
+            let start = lib_prod
+                .find("pub fn runtime_line")
+                .expect("pub fn runtime_line");
+            let rest = &lib_prod[start..];
+            let end = rest.find("\npub fn ").unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            runtime_fn.contains("sandbox_backend")
+                && !runtime_fn.contains("let _ = sandbox_backend"),
+            "plane runtime_line must display workspace SANDBOX_BACKEND, not discard it"
+        );
+        assert!(
+            !runtime_fn.contains("does not run sandboxes")
+                && !runtime_fn.contains("Runtime: fleet-host"),
+            "must not hide the env backend behind weakened copy"
+        );
+        assert!(
+            !runtime_fn.contains("isolation")
+                && !runtime_fn.contains("allow_host")
+                && !runtime_fn.contains("allow_container"),
+            "runtime_line is not an isolation / allow_* picker"
+        );
+
+        // Missing kind is a paired host (process), not the plane.
+        let bare = sample_host();
+        assert!(
+            bare.kind.is_empty(),
+            "sample host kind defaults empty — lock the non-plane path"
+        );
+        assert_eq!(
+            runtime_line(&bare, "k8s"),
+            "Runtime: process on this machine"
+        );
+
         let mut host = sample_host();
-        assert_eq!(runtime_line(&host, "docker"), "Runtime: fleet-host");
-        host.kind = "control_plane".into();
+        host.kind = "host".into();
+        host.is_control_plane_box = false;
+        // Paired host is process. sandbox_backend is the plane env — it
+        // must not change the host line or become a second picker.
+        for backend in ["docker", "process", "stub", "k8s", "local", "", "  vm  "] {
+            let line = runtime_line(&host, backend);
+            assert_eq!(
+                line, "Runtime: process on this machine",
+                "paired host is process, not {backend:?}: {line}"
+            );
+            assert!(
+                !line.to_ascii_lowercase().contains("native")
+                    && !line.to_ascii_lowercase().contains("sandboxed")
+                    && !line.contains("SANDBOX_BACKEND"),
+                "paired host is not a runtime picker: {line}"
+            );
+        }
+        // Isolation field / allow_* are not a second runtime picker.
+        host.isolation = Some("sandboxed".into());
+        host.allow_host = false;
+        host.allow_container = true;
         assert_eq!(
-            runtime_line(&host, "process"),
-            "Control plane does not run sandboxes"
+            runtime_line(&host, "docker"),
+            "Runtime: process on this machine",
+            "paired host stays process regardless of isolation/allow_*"
+        );
+        host.isolation = Some("native".into());
+        host.allow_host = true;
+        host.allow_container = false;
+        assert_eq!(
+            runtime_line(&host, "k8s"),
+            "Runtime: process on this machine"
+        );
+        host.is_control_plane_box = true;
+        assert_eq!(
+            runtime_line(&host, "docker"),
+            "Runtime: process on this machine",
+            "kind=host stays process even on the plane machine"
+        );
+
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.is_control_plane_box = false;
+        assert_eq!(
+            runtime_line(&plane, "process"),
+            "Runtime: process (SANDBOX_BACKEND)"
         );
         assert_eq!(
-            runtime_line(&host, ""),
-            "Control plane does not run sandboxes"
+            runtime_line(&plane, "docker"),
+            "Runtime: docker (SANDBOX_BACKEND)"
         );
+        assert_eq!(
+            runtime_line(&plane, "stub"),
+            "Runtime: stub (SANDBOX_BACKEND)"
+        );
+        assert_eq!(
+            runtime_line(&plane, "local"),
+            "Runtime: local (SANDBOX_BACKEND)"
+        );
+        assert_eq!(
+            runtime_line(&plane, "k8s"),
+            "Runtime: k8s (SANDBOX_BACKEND)"
+        );
+        assert_eq!(
+            runtime_line(&plane, ""),
+            "Runtime: stub (SANDBOX_BACKEND)",
+            "empty SANDBOX_BACKEND displays as stub"
+        );
+        assert_eq!(
+            runtime_line(&plane, "   "),
+            "Runtime: stub (SANDBOX_BACKEND)",
+            "whitespace-only SANDBOX_BACKEND displays as stub"
+        );
+        assert_eq!(
+            runtime_line(&plane, "  process  "),
+            "Runtime: process (SANDBOX_BACKEND)",
+            "trim workspace SANDBOX_BACKEND"
+        );
+        plane.isolation = Some("sandboxed".into());
+        plane.allow_host = false;
+        assert_eq!(
+            runtime_line(&plane, "docker"),
+            "Runtime: docker (SANDBOX_BACKEND)",
+            "plane isolation/allow_* must not replace SANDBOX_BACKEND"
+        );
+        plane.is_control_plane_box = true;
+        assert_eq!(
+            runtime_line(&plane, "process"),
+            "Runtime: process (SANDBOX_BACKEND)",
+            "kind=control_plane is the gate"
+        );
+
+        // Weakened copy that hid SANDBOX_BACKEND must not pass.
+        for backend in ["process", "docker", "stub", ""] {
+            let line = runtime_line(&plane, backend);
+            assert!(
+                line.contains("SANDBOX_BACKEND"),
+                "plane runtime_line must show SANDBOX_BACKEND, got {line}"
+            );
+            assert!(
+                !line.contains("does not run sandboxes"),
+                "plane must show the env backend, not hide it: {line}"
+            );
+            assert!(
+                !line.to_ascii_lowercase().contains("native")
+                    && !line.to_ascii_lowercase().contains("sandboxed"),
+                "runtime_line is not an isolation picker: {line}"
+            );
+        }
+
         assert_eq!(BEHAVIOR_LABEL, "Behavior");
     }
 

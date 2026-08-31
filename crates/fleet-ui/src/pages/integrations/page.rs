@@ -450,7 +450,7 @@ pub fn Integrations(workspace_id: String) -> Element {
 
 #[component]
 fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
-    use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
+    use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
     use fleet_runners_view::{display_name, is_removed};
 
     let mut hosts = use_signal(Vec::<HostPublic>::new);
@@ -474,7 +474,13 @@ fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
     let selected = hosts().into_iter().find(|h| h.id == runner());
     let agents = selected
         .as_ref()
-        .map(|h| h.agents.iter().filter(|a| a.installed).cloned().collect::<Vec<_>>())
+        .map(|h| {
+            h.agents
+                .iter()
+                .filter(|a| a.installed)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let models = agents
         .iter()

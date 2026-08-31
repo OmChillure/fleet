@@ -4,22 +4,22 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{header, HeaderMap};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::plane_runners;
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, is_control_plane_runner_id,
-    parse_worker_host_isolation,
+    is_control_plane_runner_id, parse_worker_host_isolation, HostCpSettings, NewWorkerHost,
+    WorkerHost, WorkerHostPublic,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -28,84 +28,83 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let name = obj.get("name")?.as_str()?.trim();
-                if name.is_empty() {
-                    return None;
-                }
-                let efforts: Vec<Value> = obj
-                    .get("efforts")
-                    .and_then(|e| e.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|e| {
-                                let value = e
-                                    .get("value")
-                                    .or_else(|| e.get("id"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .trim();
-                                if value.is_empty() {
-                                    return None;
-                                }
-                                Some(json!({
-                                    "value": value,
-                                    "label": e.get("label").and_then(|l| l.as_str()),
-                                }))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(json!({
-                    "name": name,
-                    "efforts": efforts,
-                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let efforts: Vec<Value> = obj
+                .get("efforts")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let value = e
+                                .get("value")
+                                .or_else(|| e.get("id"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if value.is_empty() {
+                                return None;
+                            }
+                            Some(json!({
+                                "value": value,
+                                "label": e.get("label").and_then(|l| l.as_str()),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "name": name,
+                "efforts": efforts,
+                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let id = obj.get("id")?.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                let models: Vec<String> = obj
-                    .get("models")
-                    .and_then(|m| m.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model_details = sanitize_model_details(obj.get("model_details"));
-                Some(json!({
-                    "id": id,
-                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "models": models,
-                    "model_details": model_details,
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let id = obj.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let models: Vec<String> = obj
+                .get("models")
+                .and_then(|m| m.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let model_details = sanitize_model_details(obj.get("model_details"));
+            Some(json!({
+                "id": id,
+                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                "models": models,
+                "model_details": model_details,
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
-const PAIR_TTL: Duration = Duration::hours(1);
 const LEASE_FOR: Duration = Duration::minutes(2);
+/// Sweep size when `/me/lease` returns expired rows to `ready`.
+const RECLAIM_EXPIRED_LIMIT: i64 = 64;
 const ROLE_OWNER: &str = "owner";
 pub const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
@@ -321,13 +320,14 @@ fn local_nonloopback_ips() -> Vec<String> {
     out
 }
 
+/// True when Origin/Referer host is loopback (`localhost`, 127/8, `::1`).
+/// Host only — substring or query `localhost` is not the plane box.
 fn origin_is_loopback(headers: &HeaderMap) -> bool {
     for key in [header::ORIGIN, header::REFERER] {
         let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
             continue;
         };
-        let v = raw.to_ascii_lowercase();
-        if v.contains("localhost") || v.contains("127.0.0.1") || v.contains("[::1]") {
+        if agent_fleet_contracts::url_is_loopback(raw) {
             return true;
         }
     }
@@ -384,11 +384,16 @@ fn api_base(state: &AppState) -> String {
 
 /// LAN URL workers should call. OAuth stays on `API_PUBLIC_BASE` (localhost).
 fn worker_api_base(state: &AppState) -> String {
+    worker_public_base(&api_base(state))
+}
+
+/// `WORKER_PUBLIC_BASE` wins; empty/unset falls back to `api` (`API_PUBLIC_BASE`).
+fn worker_public_base(api: &str) -> String {
     std::env::var("WORKER_PUBLIC_BASE")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| api_base(state))
+        .unwrap_or_else(|| api.trim_end_matches('/').to_string())
 }
 
 fn install_hint(api: &str, pair_token: &str) -> String {
@@ -422,7 +427,7 @@ fn effective_json(host: &WorkerHost) -> Value {
 fn create_pair_material() -> (String, String, chrono::DateTime<Utc>) {
     let pair_token = host_repo::generate_pair_token();
     let pair_token_hash = host_repo::hash_token(&pair_token);
-    let pair_expires_at = Utc::now() + PAIR_TTL;
+    let pair_expires_at = Utc::now() + host_repo::PAIR_TTL;
     (pair_token, pair_token_hash, pair_expires_at)
 }
 
@@ -439,6 +444,20 @@ fn created_payload(
         "pair_expires_at": pair_expires_at,
         "install_hint": install_hint(&api, pair_token),
     })
+}
+
+/// Display name on a host or plane card. DNS hostnames are at most 255 bytes.
+const HOST_NAME_MAX: usize = 255;
+
+fn validate_host_name(raw: &str) -> AppResult<String> {
+    let name = raw.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::bad_request("name is required"));
+    }
+    if name.len() > HOST_NAME_MAX {
+        return Err(AppError::bad_request("name is too long"));
+    }
+    Ok(name)
 }
 
 fn validate_max_concurrent(n: i32) -> AppResult<()> {
@@ -462,6 +481,38 @@ fn validate_max_job_timeout_s(n: i32) -> AppResult<()> {
 fn validate_isolation(raw: &str) -> AppResult<&'static str> {
     parse_worker_host_isolation(raw)
         .ok_or_else(|| AppError::bad_request("isolation must be native or sandboxed"))
+}
+
+/// `cluster` is reserved for `http_bootstrap`. Labels are informational
+/// (gpu, linux, …) and must not promote a paired box onto every workspace.
+fn label_is_cluster(raw: &str) -> bool {
+    raw.trim().eq_ignore_ascii_case("cluster")
+}
+
+fn validate_patch_labels(labels: &[String]) -> AppResult<()> {
+    if labels.iter().any(|l| label_is_cluster(l)) {
+        return Err(AppError::bad_request(
+            "cluster is bootstrap-only; labels are informational",
+        ));
+    }
+    Ok(())
+}
+
+/// Cloud / public-cloud / Partners are placeholders. HTTP must not create them.
+/// Omitted `kind` is the self-hosted native create path.
+fn validate_create_kind(raw: Option<&str>) -> AppResult<()> {
+    let Some(slug) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    match slug.to_ascii_lowercase().as_str() {
+        "host" => Ok(()),
+        "cloud" | "aws" | "gcp" | "azure" | "partners" => Err(AppError::bad_request(format!(
+            "cannot create a {slug} host; cloud and partners are placeholders"
+        ))),
+        other => Err(AppError::bad_request(format!(
+            "kind must be host; {other} cannot be created"
+        ))),
+    }
 }
 
 const RUNTIME_KEYS: &[&str] = &[
@@ -499,15 +550,28 @@ fn validate_runtime_path(key: &str, raw: &str) -> AppResult<String> {
     Ok(s.to_string())
 }
 
-fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+fn is_secret_runtime_key(k: &str) -> bool {
+    matches!(
+        k,
+        "extra_env" | "machine_token" | "pair_token" | "FLEET_WORKER_TOKEN"
+    ) || k.starts_with("FLEET_")
+}
+
+/// Shared allowlist for desired (`runtime_settings`) and reported runtime.
+/// `reject_unsafe` 400s on ;|& / control / >512 path values (PATCH). Heartbeat
+/// omits those keys so the raw object is never persisted.
+fn sanitize_runtime_object(v: Value, reject_unsafe: bool) -> AppResult<Value> {
     let Some(obj) = v.as_object() else {
-        return Err(AppError::bad_request(
-            "runtime_settings must be an object".to_string(),
-        ));
+        if reject_unsafe {
+            return Err(AppError::bad_request(
+                "runtime_settings must be an object".to_string(),
+            ));
+        }
+        return Ok(json!({}));
     };
     let mut out = serde_json::Map::new();
     for (k, val) in obj {
-        if !RUNTIME_KEYS.contains(&k.as_str()) {
+        if is_secret_runtime_key(k) || !RUNTIME_KEYS.contains(&k.as_str()) {
             continue;
         }
         match k.as_str() {
@@ -535,17 +599,38 @@ fn validate_runtime_settings(v: Value) -> AppResult<Value> {
             }
             other => {
                 let s = val.as_str().unwrap_or("");
-                out.insert(other.to_string(), json!(validate_runtime_path(other, s)?));
+                match validate_runtime_path(other, s) {
+                    Ok(clean) => {
+                        out.insert(other.to_string(), json!(clean));
+                    }
+                    Err(e) if reject_unsafe => return Err(e),
+                    Err(_) => {}
+                }
             }
         }
     }
     Ok(Value::Object(out))
 }
 
+fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+    sanitize_runtime_object(v, true)
+}
+
+fn sanitize_runtime_reported(v: Value) -> Value {
+    sanitize_runtime_object(v, false).unwrap_or_else(|_| json!({}))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkerHostBody {
     #[serde(default)]
     pub name: Option<String>,
+    /// Product kind. Omitted → self-hosted native. Cloud / aws / gcp / azure /
+    /// partners are placeholders and must 400 (not silently become native).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Same vocabulary as PATCH. Cloud slugs are not native/sandboxed → 400.
+    #[serde(default)]
+    pub isolation: Option<String>,
     #[serde(default)]
     pub allow_host: Option<bool>,
     #[serde(default)]
@@ -693,16 +778,21 @@ async fn http_create(
     Json(body): Json<CreateWorkerHostBody>,
 ) -> AppResult<Json<Value>> {
     let user = require_owner(&state, &jar, workspace_id).await?;
+    validate_create_kind(body.kind.as_deref())?;
+    if let Some(raw) = body.isolation.as_deref() {
+        let isolation = validate_isolation(raw)?;
+        if isolation != fleet_db::models::WORKER_HOST_ISOLATION_NATIVE {
+            return Err(AppError::bad_request(
+                "create is native-only; isolation must be native",
+            ));
+        }
+    }
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
-    let name = body
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+    // Same bound as PATCH rename. Empty / whitespace / omitted used to
+    // insert a pending row with name "" and a flp_ pair token.
+    let name = validate_host_name(body.name.as_deref().unwrap_or(""))?;
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name, Some(user.id));
     if let Some(v) = body.allow_host {
         new.allow_host = v;
@@ -723,6 +813,27 @@ async fn http_create(
         &pair_token,
         pair_expires_at,
     )))
+}
+
+/// Paired at least once: consume-pair or a heartbeat/identity report.
+/// Unused pending leftovers have none of these (Cancel / revoke discard).
+fn host_ever_paired(host: &WorkerHost) -> bool {
+    host.paired_at.is_some()
+        || host.last_seen_at.is_some()
+        || host
+            .hostname
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        || host
+            .platform
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// GET list omits revoke leftovers that never paired. Cancel discards those
+/// unused pending rows. A box that paired stays listed as removed.
+fn include_in_workspace_host_list(host: &WorkerHost) -> bool {
+    host.status != fleet_db::WORKER_HOST_STATUS_DISABLED || host_ever_paired(host)
 }
 
 async fn http_list(
@@ -760,6 +871,9 @@ async fn http_list(
     }
     let mut seen = std::collections::HashSet::new();
     for h in rows.iter().chain(cluster_fresh.iter()) {
+        if !include_in_workspace_host_list(h) {
+            continue;
+        }
         if seen.insert(h.id) {
             hosts.push(host_json_for_viewer(&state, h, viewer_loopback));
         }
@@ -791,6 +905,7 @@ async fn load_in_workspace(
 }
 
 /// Workspace-owned, or a cluster host listed on every workspace.
+/// GET / chat visibility only — PATCH / DELETE / pair-token use `load_mutable_host`.
 pub(crate) async fn load_visible_host(
     state: &AppState,
     workspace_id: Uuid,
@@ -800,13 +915,26 @@ pub(crate) async fn load_visible_host(
         return Ok(host);
     }
     match host_repo::get(&state.db, host_id).await? {
-        Some(host) if host.labels.iter().any(|l| l == "cluster") => Ok(host),
-        Some(host) => Err(AppError::not_found(format!(
-            "worker belongs to another workspace ({})",
-            host.workspace_id
-        ))),
-        None => Err(AppError::not_found("worker host not found")),
+        Some(host) if host.is_cluster_host() => Ok(host),
+        // Same 404 as a missing id — do not name the other workspace.
+        _ => Err(AppError::not_found("worker host not found")),
     }
+}
+
+/// PATCH / DELETE / pair-token: home workspace only. Cluster guests stay
+/// visible on every workspace but must not be paused or revoked there.
+async fn load_mutable_host(
+    state: &AppState,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorkerHost> {
+    let host = load_visible_host(state, workspace_id, host_id).await?;
+    if host.workspace_id != workspace_id {
+        return Err(AppError::forbidden(
+            "host can only be mutated from its home workspace",
+        ));
+    }
+    Ok(host)
 }
 
 async fn http_get(
@@ -829,21 +957,22 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
+    let name = match body.name {
+        Some(raw) => Some(validate_host_name(&raw)?),
+        None => None,
+    };
     if is_control_plane_runner_id(workspace_id, host_id) {
         if let Some(n) = body.max_concurrent {
             validate_max_concurrent(n)?;
         }
-        // TODO: pause/drain/auto_update/request_update/isolation column are
+        // pause/drain/enabled/auto_update/request_update/isolation are
         // paired-host settings. Plane uses allow_host/allow_container only.
         let row = plane_runners::upsert(
             &state.db,
             workspace_id,
             &plane_runners::PlaneRunnerPatch {
-                name: body
-                    .name
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
-                allow_host: body.allow_host.or(body.enabled).or(body.paused.map(|p| !p)),
+                name,
+                allow_host: body.allow_host,
                 allow_container: body.allow_container,
                 max_concurrent: body.max_concurrent,
             },
@@ -857,7 +986,7 @@ async fn http_patch(
             .unwrap_or(0);
         return Ok(Json(row.as_public_with_jobs(Utc::now(), jobs)));
     }
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = load_mutable_host(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -868,11 +997,11 @@ async fn http_patch(
         None => None,
         Some(raw) => Some(validate_isolation(raw)?.to_string()),
     };
+    if let Some(ref labels) = body.labels {
+        validate_patch_labels(labels)?;
+    }
     let patch = HostCpSettings {
-        name: body
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        name,
         enabled: body.enabled,
         paused: body.paused,
         drain: body.drain,
@@ -931,19 +1060,7 @@ async fn http_delete(
             "the control plane runner cannot be removed",
         ));
     }
-    match load_in_workspace(&state, workspace_id, host_id).await {
-        Ok(_) => {}
-        Err(e) => {
-            // Already gone from this workspace.
-            if let Ok(Some(existing)) = host_repo::get(&state.db, host_id).await {
-                return Err(AppError::not_found(format!(
-                    "worker belongs to another workspace ({})",
-                    existing.workspace_id
-                )));
-            }
-            return Err(e);
-        }
-    }
+    let _ = load_mutable_host(&state, workspace_id, host_id).await?;
     let host = host_repo::revoke(&state.db, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -959,7 +1076,7 @@ async fn http_new_pair_token(
             "the control plane runner does not pair",
         ));
     }
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = load_mutable_host(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
         .await?;
@@ -1167,18 +1284,19 @@ async fn http_heartbeat(
         host
     };
     let host = if let Some(ack) = body.install_ack.as_ref() {
-        host_repo::clear_install_request_if(
-            &state.db,
-            host.id,
-            ack.spec.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-        )
-        .await
-        .unwrap_or(host)
+        match ack.spec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(spec) => host_repo::clear_install_request_if(&state.db, host.id, Some(spec))
+                .await
+                .unwrap_or(host),
+            // Omitted/empty/whitespace spec: keep the queued install.
+            None => host,
+        }
     } else {
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, rt).await;
+        let _ = host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_reported(rt))
+            .await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1191,22 +1309,32 @@ async fn http_heartbeat(
 }
 
 fn host_accepts_leases(host: &WorkerHost) -> bool {
-    host.enabled
-        && !host.paused
-        && !host.drain
-        && host.is_native_isolation()
-        && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && (host.effective_host() || host.effective_container())
+    // software_updating must not take new leases; list_assignable still shows the host.
+    host.accepts_v1_leases() && !host.software_updating && !host_repo::at_job_cap(host)
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
     let host = require_machine(&state, &headers).await?;
+    // `claim_next_spawn_for_host` only sees `status=ready`. A host that leased
+    // and died (or never completed) must not leave spawn_session / chat_turn
+    // leased forever — reclaim before this poll claims.
+    work_claims::reclaim_expired_leases(&state.db, RECLAIM_EXPIRED_LIMIT).await?;
     if !host_accepts_leases(&host) {
         return Ok(Json(json!({ "claim": null })));
     }
-    let claim =
+    // Cluster/bootstrap hosts lease any workspace; paired boxes stay home-only.
+    let claim = if host.is_cluster_host() {
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
-            .await?;
+            .await?
+    } else {
+        work_claims::claim_next_spawn_for_host_in_workspace(
+            &state.db,
+            host.workspace_id,
+            host.id,
+            LEASE_FOR,
+        )
+        .await?
+    };
     match claim {
         None => Ok(Json(json!({ "claim": null }))),
         Some(c) => Ok(Json(json!({
@@ -1226,6 +1354,9 @@ async fn http_complete(
     Json(body): Json<CompleteBody>,
 ) -> AppResult<Json<Value>> {
     let host = require_machine(&state, &headers).await?;
+    // Held leases still complete when paused/drain/enabled=false. Gating
+    // this on host_accepts_leases would 409 a running spawn_session /
+    // chat_turn after Stop taking jobs; the claim would sit until expiry.
     let lease_token = Uuid::parse_str(body.lease_token.trim())
         .map_err(|_| AppError::bad_request("lease_token must be a UUID"))?;
     let claim = work_claims::get(&state.db, claim_id)
@@ -1322,6 +1453,47 @@ async fn http_complete(
         }
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod host_name_tests {
+    use super::{validate_host_name, HOST_NAME_MAX};
+
+    #[test]
+    fn empty_and_whitespace_are_required() {
+        for raw in ["", "   ", "\t\n", " \u{00a0} "] {
+            let err = validate_host_name(raw).expect_err(raw);
+            assert!(
+                err.to_string().contains("required"),
+                "empty/whitespace must be 400 name is required: {raw:?} → {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn too_long_is_rejected() {
+        let err = validate_host_name(&"x".repeat(HOST_NAME_MAX + 1)).expect_err("256");
+        assert!(
+            err.to_string().contains("too long"),
+            "256-byte name must be 400: {err}"
+        );
+        let huge = validate_host_name(&"x".repeat(10_000)).expect_err("10k");
+        assert!(
+            huge.to_string().contains("too long"),
+            "10k name must be 400: {huge}"
+        );
+    }
+
+    #[test]
+    fn trims_and_accepts_at_max() {
+        assert_eq!(validate_host_name("  studio  ").expect("trim"), "studio");
+        let at_max = "x".repeat(HOST_NAME_MAX);
+        assert_eq!(
+            validate_host_name(&at_max).expect("255"),
+            at_max,
+            "exactly 255 bytes must be accepted"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1469,5 +1641,468 @@ mod plane_bake_tests {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
         assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+    }
+}
+
+#[cfg(test)]
+mod worker_public_base_tests {
+    use super::worker_public_base;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_public_bases<T>(
+        worker: Option<&str>,
+        api_env: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev_worker = std::env::var("WORKER_PUBLIC_BASE").ok();
+        let prev_api = std::env::var("API_PUBLIC_BASE").ok();
+        // SAFETY: held under env_lock; restored before unlock / panic resume.
+        unsafe {
+            match worker {
+                Some(v) => std::env::set_var("WORKER_PUBLIC_BASE", v),
+                None => std::env::remove_var("WORKER_PUBLIC_BASE"),
+            }
+            match api_env {
+                Some(v) => std::env::set_var("API_PUBLIC_BASE", v),
+                None => std::env::remove_var("API_PUBLIC_BASE"),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match prev_worker {
+                Some(v) => std::env::set_var("WORKER_PUBLIC_BASE", v),
+                None => std::env::remove_var("WORKER_PUBLIC_BASE"),
+            }
+            match prev_api {
+                Some(v) => std::env::set_var("API_PUBLIC_BASE", v),
+                None => std::env::remove_var("API_PUBLIC_BASE"),
+            }
+        }
+        match result {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Env preference only. HTTP create/pair (`created_payload` /
+    /// `worker_api_base`) is locked in worker_hosts_http — do not treat a
+    /// hand-built `install_hint(worker)` as that lock.
+    #[test]
+    fn install_scripts_use_worker_public_base_not_api_fallback() {
+        let worker = "http://pair.example.test:9443";
+        let api = "http://oauth.example.test:8080";
+        assert_ne!(worker, api);
+
+        with_public_bases(Some(worker), Some(api), || {
+            assert_eq!(
+                worker_public_base(api),
+                worker,
+                "worker_api_base must prefer WORKER_PUBLIC_BASE over API_PUBLIC_BASE"
+            );
+            assert_ne!(
+                worker_public_base(api),
+                api,
+                "WORKER_PUBLIC_BASE must win over the API_PUBLIC_BASE fallback"
+            );
+        });
+
+        with_public_bases(None, Some(api), || {
+            assert_eq!(
+                worker_public_base(api),
+                api,
+                "unset WORKER_PUBLIC_BASE falls back to API_PUBLIC_BASE"
+            );
+        });
+        with_public_bases(Some("   "), Some(api), || {
+            assert_eq!(
+                worker_public_base(api),
+                api,
+                "blank WORKER_PUBLIC_BASE falls back to API_PUBLIC_BASE"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod pair_token_once_tests {
+    use super::create_pair_material;
+    use chrono::{Duration, Utc};
+    use fleet_db::repos::worker_hosts as host_repo;
+
+    /// Catalog TTL is one hour. HTTP create/rotate use `create_pair_material`.
+    #[test]
+    fn pair_token_ttl_is_one_hour() {
+        assert_eq!(host_repo::PAIR_TTL, Duration::hours(1));
+        assert_eq!(host_repo::PAIR_TTL.num_seconds(), 3600);
+        let before = Utc::now();
+        let (_token, _hash, expires) = create_pair_material();
+        let after = Utc::now();
+        assert!(
+            expires >= before + host_repo::PAIR_TTL && expires <= after + host_repo::PAIR_TTL,
+            "create_pair_material must issue now + 1h, got {expires} (before={before} after={after})"
+        );
+    }
+
+    /// Hash material only. HTTP create/GET/list contract lives in
+    /// `tests/worker_hosts_http.rs` (`pair_token_plaintext_*`).
+    #[test]
+    fn pair_token_material_hash_is_not_plaintext() {
+        let (pair_token, pair_token_hash, _pair_expires_at) = create_pair_material();
+        assert!(
+            pair_token.starts_with(host_repo::PAIR_TOKEN_PREFIX),
+            "pair_token prefix: {pair_token}"
+        );
+        assert_ne!(
+            pair_token, pair_token_hash,
+            "at rest must be the hash, not plaintext"
+        );
+        assert_eq!(pair_token_hash, host_repo::hash_token(&pair_token));
+        assert!(
+            !pair_token_hash.contains(&pair_token),
+            "hash must not embed plaintext"
+        );
+        assert!(
+            !pair_token_hash.contains(host_repo::PAIR_TOKEN_PREFIX),
+            "hash must not embed {}: {pair_token_hash}",
+            host_repo::PAIR_TOKEN_PREFIX
+        );
+    }
+}
+
+#[cfg(test)]
+mod cancel_unused_pending_tests {
+    use super::{host_accepts_leases, host_ever_paired, include_in_workspace_host_list};
+    use fleet_db::{WorkerHost, WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE};
+    use serde_json::json;
+
+    pub fn unused_pending() -> WorkerHost {
+        let now = chrono::Utc::now();
+        WorkerHost {
+            id: uuid::Uuid::now_v7(),
+            workspace_id: uuid::Uuid::now_v7(),
+            name: "cancel-me".into(),
+            status: "pending".into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            isolation: "native".into(),
+            allow_host: true,
+            allow_container: false,
+            max_concurrent: 2,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: None,
+            advertised_host: true,
+            advertised_container: false,
+            platform: None,
+            hostname: None,
+            last_seen_at: None,
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: None,
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            agent_runtimes: json!([]),
+            settings_gen: 0,
+            settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: json!({}),
+            runtime_reported: json!({}),
+            created_by: None,
+            created_at: now,
+            paired_at: None,
+            updated_at: now,
+        }
+    }
+
+    /// Columns `list_assignable` SQL requires (enabled, not paused/drain,
+    /// native, online, machine token, last_seen). This is the gate *shape*
+    /// for the no-Postgres helper — the product lock is HTTP
+    /// `cancel_unused_pending_http_discards_never_paired_hidden_not_assignable`
+    /// which calls `fleet_db::repos::worker_hosts::list_assignable`.
+    fn list_assignable_sql_gates_open(host: &WorkerHost) -> bool {
+        host.enabled
+            && !host.paused
+            && !host.drain
+            && host.is_native_isolation()
+            && host.status == WORKER_HOST_STATUS_ONLINE
+            && host.machine_token_hash.is_some()
+            && host.last_seen_at.is_some()
+    }
+
+    fn production_src() -> &'static str {
+        let src = include_str!("worker_hosts.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    /// Catalog: Cancel discards the unused worker. Revoke never-paired stays
+    /// hidden. Must not appear in list_assignable.
+    #[test]
+    fn cancel_unused_pending_revokes_hidden_not_in_list_assignable() {
+        let src = production_src();
+        let delete = fn_src(src, "async fn http_delete");
+        assert!(
+            delete.contains("require_owner"),
+            "Cancel/DELETE is owner-only; other-ws must be 403/404:\n{delete}"
+        );
+        assert!(
+            delete.contains("host_repo::revoke"),
+            "Cancel is HTTP DELETE → revoke; unused pending must be discarded:\n{delete}"
+        );
+        assert!(
+            !delete.contains("host_repo::delete") && !delete.contains("DELETE FROM worker_hosts"),
+            "Cancel is revoke (row stays), not a hard delete:\n{delete}"
+        );
+        let list = fn_src(src, "async fn http_list");
+        assert!(
+            list.contains("if !include_in_workspace_host_list(h)"),
+            "GET list must drop revoke leftovers via include_in_workspace_host_list:\n{list}"
+        );
+
+        let pending = unused_pending();
+        assert!(
+            include_in_workspace_host_list(&pending),
+            "unused pending stays on the list until Cancel (Done keeps it)"
+        );
+        assert!(
+            !host_ever_paired(&pending),
+            "create-only pending has never paired"
+        );
+        assert!(
+            !list_assignable_sql_gates_open(&pending),
+            "pending must not satisfy list_assignable SQL gates (no token / last_seen / online)"
+        );
+        assert!(!host_accepts_leases(&pending));
+
+        let mut leftover = pending.clone();
+        leftover.status = WORKER_HOST_STATUS_DISABLED.into();
+        leftover.machine_token_hash = None;
+        leftover.paired_at = None;
+        leftover.last_seen_at = None;
+        leftover.hostname = None;
+        leftover.platform = None;
+        leftover.machine_id = None;
+        assert!(
+            !include_in_workspace_host_list(&leftover),
+            "revoke never-paired leftover must stay hidden from GET list"
+        );
+        leftover.hostname = Some("   ".into());
+        leftover.platform = Some("".into());
+        assert!(
+            !host_ever_paired(&leftover),
+            "blank hostname/platform is still never-paired"
+        );
+        assert!(
+            !include_in_workspace_host_list(&leftover),
+            "blank identity must not un-hide a Cancel leftover"
+        );
+        leftover.hostname = None;
+        leftover.platform = None;
+        assert!(
+            !host_ever_paired(&leftover),
+            "Cancel leftover is still never-paired"
+        );
+        assert_ne!(
+            leftover.status, WORKER_HOST_STATUS_ONLINE,
+            "revoke leftover is not online"
+        );
+        assert!(
+            leftover.machine_token_hash.is_none(),
+            "revoke clears the machine token"
+        );
+        assert!(
+            leftover.last_seen_at.is_none(),
+            "never-paired leftover has no last_seen"
+        );
+        assert!(
+            !list_assignable_sql_gates_open(&leftover),
+            "Cancel leftover must not satisfy list_assignable SQL gates"
+        );
+        assert!(
+            !host_accepts_leases(&leftover),
+            "disabled leftover must not take leases"
+        );
+
+        let mut paired_removed = leftover.clone();
+        paired_removed.paired_at = Some(chrono::Utc::now());
+        assert!(
+            include_in_workspace_host_list(&paired_removed),
+            "revoke of a paired box stays listed (Show removed); only never-paired hides"
+        );
+        assert!(
+            !list_assignable_sql_gates_open(&paired_removed),
+            "removed paired box is still not assignable"
+        );
+
+        let mut online = pending;
+        online.status = WORKER_HOST_STATUS_ONLINE.into();
+        online.machine_token_hash = Some("hashed".into());
+        online.last_seen_at = Some(chrono::Utc::now());
+        online.hostname = Some("box.local".into());
+        online.platform = Some("linux-x86_64".into());
+        online.paired_at = Some(chrono::Utc::now());
+        assert!(include_in_workspace_host_list(&online));
+        assert!(
+            list_assignable_sql_gates_open(&online),
+            "control: a live paired host does satisfy list_assignable SQL gates"
+        );
+        assert!(host_accepts_leases(&online));
+
+        let mut container_only = online.clone();
+        container_only.advertised_host = false;
+        container_only.advertised_container = true;
+        container_only.allow_container = true;
+        assert!(
+            !host_accepts_leases(&container_only),
+            "paired container-only must not take host-runtime /me/lease"
+        );
+        let mut cluster_container = container_only.clone();
+        cluster_container.labels = vec!["cluster".into()];
+        assert!(
+            host_accepts_leases(&cluster_container),
+            "container-only cluster hosts lease so they can create FleetSandbox CRs"
+        );
+        let mut both_off = online;
+        both_off.advertised_host = false;
+        both_off.advertised_container = false;
+        assert!(
+            !host_accepts_leases(&both_off),
+            "both advertised flags false must not take leases"
+        );
+    }
+}
+
+#[cfg(test)]
+mod done_keeps_pending_tests {
+    use super::cancel_unused_pending_tests::unused_pending;
+    use super::include_in_workspace_host_list;
+
+    /// Catalog: Done keeps the unused pending worker (no DELETE). Cancel
+    /// discard is the sibling `cancel_unused_*` lock — do not re-clone it.
+    #[test]
+    fn done_keeps_unused_pending_in_list_without_revoke() {
+        let src = include_str!("worker_hosts.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("worker_hosts.rs production source");
+        let create = fn_src(prod, "async fn http_create");
+        assert!(
+            create.contains("host_repo::create_pending") && !create.contains("host_repo::revoke"),
+            "Add worker / Done must not revoke on create:\n{create}"
+        );
+        assert!(
+            !prod.contains("async fn http_done") && !prod.contains("fn http_dismiss"),
+            "there is no Done HTTP that DELETE/revokes the unused pending host"
+        );
+        let list = fn_src(prod, "async fn http_list");
+        assert!(
+            list.contains("if !include_in_workspace_host_list(h)"),
+            "GET list (reload) must keep unused pending via include_in_workspace_host_list:\n{list}"
+        );
+        let delete = fn_src(prod, "async fn http_delete");
+        assert!(
+            delete.contains("host_repo::revoke"),
+            "DELETE is Cancel / Remove, not Done:\n{delete}"
+        );
+
+        // UI Done is on_dismiss only. just test excludes fleet-ui, so lock the
+        // live PairPanel here — swapping Done onto revoke_host cannot go green.
+        let ui = include_str!("../../fleet-ui/src/pages/runners/self_hosted/page.rs");
+        let ui_prod = ui
+            .split("#[cfg(test)]")
+            .next()
+            .expect("self_hosted page.rs production source");
+        let pair_at = ui_prod.find("fn PairPanel").expect("PairPanel");
+        let pair_after = &ui_prod[pair_at..];
+        let pair_end = pair_after[1..]
+            .find("#[component]")
+            .map(|i| i + 1)
+            .unwrap_or(pair_after.len());
+        let pair = &pair_after[..pair_end];
+        let done_at = pair.find("\"Done\"").expect("Done label");
+        let done_start = pair[..done_at].rfind("button {").expect("Done button");
+        let done_rest = &pair[done_at + 6..];
+        let done_end = done_rest.find("button {").unwrap_or(done_rest.len());
+        let done = &pair[done_start..done_at + 6 + done_end];
+        assert!(
+            done.contains("on_dismiss.call(e)"),
+            "Done must dismiss the pair panel, not DELETE:\n{done}"
+        );
+        assert!(
+            !done.contains("revoke_host") && !done.contains("on_revoked"),
+            "Done must not revoke the unused pending host:\n{done}"
+        );
+        assert!(
+            ui_prod.contains("on_dismiss: move |_| pair_result.set(None),"),
+            "Done clears the overlay only; the pending card stays in hosts"
+        );
+        assert!(
+            pair.contains("revoke_host(&ws, &id)"),
+            "Cancel (not Done) is the revoke/DELETE path"
+        );
+
+        let pending = unused_pending();
+        assert!(
+            include_in_workspace_host_list(&pending),
+            "Done keeps unused pending on GET list / after reload"
+        );
+        assert_eq!(pending.status, "pending");
+        assert!(pending.paired_at.is_none());
+        assert!(pending.machine_token_hash.is_none());
+        assert!(pending.last_seen_at.is_none());
+        assert!(
+            pending
+                .hostname
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+                && pending
+                    .platform
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty()),
+            "Done host is still never-paired (unused)"
+        );
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
     }
 }

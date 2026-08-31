@@ -27,8 +27,8 @@ framework.
 | Units (no Postgres) | `just test` → workspace `--lib --exclude fleet-ui` + `cargo test -p fleet-driver` + host markdown / runners-view crates |
 | Postgres integration | `just test-integration` → orch + auth + server + fleet-db |
 | Lab + optional browser | `run-full-suite.sh` (browser only if `ENABLE_BROWSER_E2E=1`) |
-| Human walkthrough | `./scripts/human-test.sh` |
-| Agent MR demo | `./scripts/human-test.sh record [scenes…]` |
+| Human walkthrough | `./scripts/human-test.sh` — **HUMAN_TEST_SCOPE.md** only (not the full catalog every time) |
+| Agent MR demo | `./scripts/human-test.sh record` on the **final merge tree**; scope scenes, not a random walk; then **review the film** for bugs |
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not add jobs.
 

@@ -93,10 +93,7 @@ pub async fn dispatch(
         "teams" => teams::invoke(http, access_token, operation, args).await,
         "discord" => discord::invoke(http, access_token, operation, args).await,
         "trello" => {
-            let api_key = config
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let api_key = config.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
             trello::invoke(http, access_token, api_key, operation, args).await
         }
         "asana" => asana::invoke(http, access_token, operation, args).await,

@@ -69,11 +69,7 @@ pub async fn list_for_workspace(
     .map_err(map_query_err)
 }
 
-pub async fn get(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    persona_id: Uuid,
-) -> DbResult<Option<Persona>> {
+pub async fn get(pool: &PgPool, workspace_id: Uuid, persona_id: Uuid) -> DbResult<Option<Persona>> {
     sqlx::query_as::<_, Persona>(&format!(
         r#"
         SELECT {COLS}

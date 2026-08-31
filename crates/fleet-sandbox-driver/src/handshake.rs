@@ -5,7 +5,7 @@
 //! we also `PR_SET_DUMPABLE=0` so a same-uid child cannot read `/proc/1/environ`
 //! (that file still shows the *initial* execve environment).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
@@ -132,7 +132,8 @@ pub fn canonical_json(v: &Value) -> String {
 }
 
 pub fn sign_value(mut body: Value) -> Result<Value> {
-    let secret = handshake_secret().context("FLEET_HANDSHAKE_SECRET is required to sign volume requests")?;
+    let secret =
+        handshake_secret().context("FLEET_HANDSHAKE_SECRET is required to sign volume requests")?;
     if let Value::Object(ref mut map) = body {
         map.remove("hmac");
     }
@@ -147,11 +148,9 @@ pub fn sign_value(mut body: Value) -> Result<Value> {
 }
 
 pub fn verify_value(body: &Value) -> Result<()> {
-    let secret = handshake_secret().context("FLEET_HANDSHAKE_SECRET is not set; refusing volume request")?;
-    let got = body
-        .get("hmac")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let secret =
+        handshake_secret().context("FLEET_HANDSHAKE_SECRET is not set; refusing volume request")?;
+    let got = body.get("hmac").and_then(|v| v.as_str()).unwrap_or("");
     let mut unsigned = body.clone();
     if let Value::Object(ref mut map) = unsigned {
         map.remove("hmac");
@@ -170,7 +169,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 #[cfg(test)]
@@ -184,10 +186,7 @@ mod tests {
     #[test]
     fn canonical_matches_python_style() {
         let v = json!({"b": 1, "a": {"z": true, "y": [1, "x"]}});
-        assert_eq!(
-            canonical_json(&v),
-            r#"{"a":{"y":[1,"x"],"z":true},"b":1}"#
-        );
+        assert_eq!(canonical_json(&v), r#"{"a":{"y":[1,"x"],"z":true},"b":1}"#);
     }
 
     #[test]
@@ -231,7 +230,9 @@ mod tests {
         {
             let blob = std::fs::read("/proc/self/environ").unwrap_or_default();
             assert!(
-                !blob.windows(b"init-secret".len()).any(|w| w == b"init-secret"),
+                !blob
+                    .windows(b"init-secret".len())
+                    .any(|w| w == b"init-secret"),
                 "secret must not remain in /proc/self/environ"
             );
         }

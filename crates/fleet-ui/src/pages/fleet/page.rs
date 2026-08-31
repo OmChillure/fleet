@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use super::api::{
-    cancel_run, ensure_fleet, kill_session, list_runs, list_sessions, list_tasks, resume_task,
+    cancel_run, ensure_fleet, list_runs, list_sessions, list_tasks, resume_task,
     run_tick, start_fixture,
 };
 use crate::Route;
@@ -184,7 +184,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                         sandbox_backend.set(b.to_string());
                     }
                     status_line.set(format!(
-                        "Fleet ready · {} sandbox · project {}",
+                        "Fleet ready · sandbox {} · project {}",
                         v["sandbox_backend"].as_str().unwrap_or("stub"),
                         v["project_id"].as_str().unwrap_or(&ws)
                     ));
@@ -502,37 +502,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                                         class: "rounded-full border px-2 py-0.5 text-xs font-medium {status_pill_class(&s.status)}",
                                         "{s.status}"
                                     }
-                                    if matches!(s.status.as_str(), "spawning" | "healthy" | "stuck" | "killing") {
-                                        button {
-                                            class: "rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50",
-                                            r#type: "button",
-                                            disabled: busy(),
-                                            onclick: {
-                                                let workspace_id = workspace_id.clone();
-                                                let sid = s.id.clone();
-                                                move |_| {
-                                                    if busy() { return; }
-                                                    busy.set(true);
-                                                    let ws = workspace_id.clone();
-                                                    let sid = sid.clone();
-                                                    spawn(async move {
-                                                        match kill_session(&ws, &sid).await {
-                                                            Ok(_) => status_line.set(format!("Killed sandbox {sid}")),
-                                                            Err(e) => status_line.set(e.message()),
-                                                        }
-                                                        if let Ok(s) = list_sessions(&ws).await {
-                                                            sessions.set(parse_sessions(&s));
-                                                        }
-                                                        if let Ok(t) = list_tasks(&ws).await {
-                                                            tasks.set(parse_tasks(&t));
-                                                        }
-                                                        busy.set(false);
-                                                    });
-                                                }
-                                            },
-                                            "Kill"
-                                        }
-                                    }
+
                                 }
                             }
                         }
@@ -651,5 +621,84 @@ pub fn Fleet(workspace_id: String) -> Element {
                 " (process, container, or kube pod)."
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // catalog:list-fleet-ui-fixture-is-chain-not-diamond
+    // Docs §6.5: Start 2-task run calls start_fixture (kind=chain).
+    // UI never sends diamond. Does not tick.
+    // Host: cargo test -p fleet-ui --locked -- chain
+
+    fn production_page() -> &'static str {
+        include_str!("page.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("fleet page.rs production source")
+    }
+
+    fn production_api() -> &'static str {
+        include_str!("api.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("fleet api.rs production source")
+    }
+
+    fn button_named<'a>(src: &'a str, label: &str) -> &'a str {
+        let at = src.find(label).unwrap_or_else(|| panic!("missing {label}"));
+        let before = &src[..at];
+        let start = before
+            .rfind("button {")
+            .unwrap_or_else(|| panic!("{label} must sit on a button {{ ... }}"));
+        let after = &src[at + label.len()..];
+        let end = after.find("button {").unwrap_or(after.len());
+        &src[start..at + label.len() + end]
+    }
+
+    #[test]
+    fn start_2_task_button_posts_chain_fixture_and_does_not_tick() {
+        let page = production_page();
+        let api = production_api();
+        assert!(
+            page.contains("\"Start 2-task run\""),
+            "Fleet must expose Start 2-task run"
+        );
+        let start_btn = button_named(page, "\"Start 2-task run\"");
+        assert!(
+            start_btn.contains("start_fixture"),
+            "Start 2-task run must call start_fixture:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.contains("run_tick") && !start_btn.contains("/tick"),
+            "docs §6.5: Start 2-task must not tick:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.to_ascii_lowercase().contains("diamond"),
+            "Start 2-task must never send diamond:\n{start_btn}"
+        );
+        assert!(
+            !page.to_ascii_lowercase().contains("diamond"),
+            "Fleet page must never send or offer diamond"
+        );
+
+        let tick_btn = button_named(page, "\"Run tick\"");
+        assert!(
+            tick_btn.contains("run_tick"),
+            "Run tick is the separate tick control:\n{tick_btn}"
+        );
+        assert!(
+            !tick_btn.contains("start_fixture") && !tick_btn.contains("/runs/fixture"),
+            "Run tick must not start a fixture:\n{tick_btn}"
+        );
+
+        assert!(
+            api.contains("pub async fn start_fixture"),
+            "page start_fixture must be the fleet API helper"
+        );
+        assert!(
+            api.contains("fn start_fixture_body"),
+            "Start 2-task must post start_fixture_body (kind=chain)"
+        );
     }
 }

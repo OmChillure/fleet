@@ -1,9 +1,9 @@
 //! Linear issue tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let first = args
@@ -36,19 +36,20 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
         return upstream_err("list_issues", status, &body);
     }
     if let Some(errs) = body.get("errors").and_then(|v| v.as_array())
-        && !errs.is_empty() {
-            let msg = errs[0]
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("GraphQL error");
-            return ProxyResult::err(
-                "linear",
-                "list_issues",
-                "upstream",
-                format!("Linear GraphQL: {msg}"),
-                Some(status),
-            );
-        }
+        && !errs.is_empty()
+    {
+        let msg = errs[0]
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GraphQL error");
+        return ProxyResult::err(
+            "linear",
+            "list_issues",
+            "upstream",
+            format!("Linear GraphQL: {msg}"),
+            Some(status),
+        );
+    }
     let nodes = body
         .pointer("/data/issues/nodes")
         .and_then(|v| v.as_array())
@@ -65,11 +66,7 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
     )
 }
 
-pub(crate) async fn get_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn get_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let id = args
         .get("id")
         .and_then(|v| v.as_str())
@@ -211,4 +208,3 @@ pub(crate) async fn get_issue(
         Some(status),
     )
 }
-

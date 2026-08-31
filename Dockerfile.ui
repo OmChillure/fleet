@@ -1,23 +1,30 @@
+# syntax=docker/dockerfile:1
 # fleet-ui — Dioxus WASM build served by nginx (proxies /api → api service)
 #
-#   docker build --build-arg FLEET_GIT_SHA=$(git rev-parse HEAD) -f Dockerfile.ui -t agent-fleet-ui:local .
+#   docker build --build-arg FLEET_GIT_SHA=$(./scripts/tree-id.sh) -f Dockerfile.ui -t agent-fleet-ui:local .
 #   docker compose up -d --build ui
+#
+# dioxus-cli install stays before ARG so a dirty tree-id does not reinstall dx.
+# cargo fetch warms the registry before ARG. dx build sees FLEET_GIT_SHA.
 
-# -----------------------------------------------------------------------------
-# Builder: install dx + wasm target, release-build the web app
-# -----------------------------------------------------------------------------
 FROM rust:1.88-bookworm AS builder
 
 RUN rustup target add wasm32-unknown-unknown \
-    && cargo install dioxus-cli --version 0.7.3 --locked
+    && cargo install dioxus-cli --version 0.7.3 --locked \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends binaryen \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Workspace (UI depends on workspace Cargo.toml / lock)
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# SHA after dx install so a dirty tree-id does not bust the cargo-install layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked
+
+# SHA after dx install + fetch so a dirty tree-id does not bust those layers.
 ARG FLEET_GIT_SHA
 RUN test -n "${FLEET_GIT_SHA}" || (echo "ERROR: --build-arg FLEET_GIT_SHA=\$(git rev-parse HEAD) is required" && exit 1)
 ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
@@ -25,7 +32,10 @@ ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
 # Release web build (static assets under target/dx/.../web/public)
 # Same-origin /api via nginx — do NOT set FLEET_AUTH_URL so the browser uses page origin.
 # /fleet-git-sha.txt is a static identity probe (no WASM). Old images 404 / SPA-fallback.
-RUN mkdir -p crates/fleet-ui/public \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    mkdir -p crates/fleet-ui/public \
     && printf '%s\n' "${FLEET_GIT_SHA}" > crates/fleet-ui/public/fleet-git-sha.txt \
     && dx build --package fleet-ui --release --platform web \
     && PUBLIC="$(find target -type f -path '*/web/public/index.html' | head -1 | xargs dirname)" \
@@ -36,9 +46,6 @@ RUN mkdir -p crates/fleet-ui/public \
     && printf '%s\n' "${FLEET_GIT_SHA}" > /out/fleet-git-sha.txt \
     && test "$(tr -d '[:space:]' < /out/fleet-git-sha.txt)" = "${FLEET_GIT_SHA}"
 
-# -----------------------------------------------------------------------------
-# Runtime: nginx on :3030
-# -----------------------------------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
 
 ARG FLEET_GIT_SHA

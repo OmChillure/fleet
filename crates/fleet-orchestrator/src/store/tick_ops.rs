@@ -250,7 +250,9 @@ impl Store {
         Ok(())
     }
 
-    /// Terminal success/fail from worker report; clears claim (caller destroys runtime).
+    /// Worker terminal (`done_success` / `done_failed` / `blocked`) CAS from
+    /// assigned/in_progress with matching claimed_session_id. Blocked HITL is
+    /// not a from-status. Success/fail clear the claim (caller destroys runtime).
     pub async fn apply_task_terminal(
         &self,
         task_id: Uuid,
@@ -269,7 +271,7 @@ impl Store {
                     last_report_seq = GREATEST(last_report_seq, $3),
                     updated_at = now()
                 WHERE id = $1
-                  AND status IN ('assigned', 'in_progress', 'blocked')
+                  AND status IN ('assigned', 'in_progress')
                   AND claimed_session_id = $4
                 "#,
             )
@@ -796,49 +798,6 @@ impl Store {
         Ok(())
     }
 
-    /// Workspace custom persona (Agents page) by slug. Same DB, project_id == workspace_id.
-    pub async fn find_workspace_persona(
-        &self,
-        workspace_id: Uuid,
-        slug: &str,
-    ) -> Result<Option<(String, String)>> {
-        let key = slug.trim();
-        if key.is_empty() {
-            return Ok(None);
-        }
-        let row = sqlx::query_as::<_, (String, String, String)>(
-            r#"
-            SELECT name, role_prompt, COALESCE(description, '')
-            FROM personas
-            WHERE workspace_id = $1 AND status = 'active'
-              AND (slug = $2 OR lower(name) = lower($2))
-            LIMIT 1
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await;
-        match row {
-            Ok(Some((name, role, desc))) => {
-                let mut body = format!("# {name}\n\n");
-                if !desc.trim().is_empty() {
-                    body.push_str(desc.trim());
-                    body.push_str("\n\n");
-                }
-                body.push_str("## Role\n\n");
-                body.push_str(role.trim());
-                body.push('\n');
-                Ok(Some((name, body)))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                tracing::debug!(error = %e, "workspace persona lookup skipped");
-                Ok(None)
-            }
-        }
-    }
-
     /// HITL resume intent only (Model A). Returns false if task not blocked.
     pub async fn request_hitl_resume(
         &self,
@@ -1006,5 +965,99 @@ impl Store {
         .execute(&self.pool)
         .await?;
         self.get_project_config(project_id).await
+    }
+}
+
+#[cfg(test)]
+mod set_max_agents_tests {
+    /// Docs §7.1 / store: chat launch `set_max_agents` is GREATEST
+    /// (raise-only). Settings `update_fleet_settings` is a SET and may
+    /// lower. Persist after a real launch is `set_max_agents_never_lowers`
+    /// in fleet-server http_api — this is not the only lock.
+    #[test]
+    fn set_max_agents_is_greatest_raise_only() {
+        let src = include_str!("tick_ops.rs");
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("tick_ops.rs production source");
+
+        let set_fn = fn_src(prod, "pub async fn set_max_agents");
+        assert!(
+            set_fn.contains("GREATEST(max_agents, $2)"),
+            "set_max_agents must raise-only via GREATEST, not SET max_agents=$2:\n{set_fn}"
+        );
+        assert!(
+            !set_fn.contains("SET max_agents = $2"),
+            "SET max_agents=$2 would drop Settings 32 on a later FLEET_MAX_AGENTS=16 launch:\n{set_fn}"
+        );
+        assert!(
+            set_fn.contains("MAX_PROJECT_AGENTS"),
+            "set_max_agents must clamp to MAX_PROJECT_AGENTS before GREATEST:\n{set_fn}"
+        );
+
+        let settings_fn = fn_src(prod, "pub async fn update_fleet_settings");
+        assert!(
+            settings_fn.contains("SET max_agents = $2"),
+            "Settings must be able to lower (SET), unlike chat GREATEST:\n{settings_fn}"
+        );
+        assert!(
+            !settings_fn.contains("GREATEST(max_agents, $2)"),
+            "Settings PATCH is a set, not raise-only GREATEST:\n{settings_fn}"
+        );
+
+        // What GREATEST(existing, requested) must do — SET max_agents=$2 fails these.
+        assert_eq!(
+            apply_set_max_agents(32, 16),
+            32,
+            "default FLEET_MAX_AGENTS (16) must not drop Settings 32"
+        );
+        assert_eq!(
+            apply_set_max_agents(32, 1),
+            32,
+            "args.max_agents=1 must not drop Settings 32"
+        );
+        assert_eq!(
+            apply_set_max_agents(2, 16),
+            16,
+            "Settings 2 + launch with a higher max may raise"
+        );
+        assert_eq!(
+            apply_set_max_agents(2, 1),
+            2,
+            "launch 1 against Settings 2 stays 2"
+        );
+        assert_eq!(
+            apply_set_max_agents(8, 8),
+            8,
+            "equal requested cap is a no-op"
+        );
+    }
+
+    fn apply_set_max_agents(existing: i32, requested: i32) -> i32 {
+        existing.max(requested.clamp(1, crate::domain::MAX_PROJECT_AGENTS))
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let rest = &src[start..];
+        let mut depth = 0i32;
+        let mut seen_body = false;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    seen_body = true;
+                }
+                '}' => {
+                    depth -= 1;
+                    if seen_body && depth == 0 {
+                        return &rest[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{sig} body not closed");
     }
 }

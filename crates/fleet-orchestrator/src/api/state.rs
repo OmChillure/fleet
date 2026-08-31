@@ -1,7 +1,7 @@
 use crate::config::{AuthMode, Config};
 use crate::orch::TickRunner;
-use crate::sandbox::{build_runtime, RuntimeBuildOpts};
-use crate::store::{connect, migrate, Store};
+use crate::sandbox::{RuntimeBuildOpts, build_runtime};
+use crate::store::{Store, connect, migrate};
 use crate::sync::LogBoardSync;
 use anyhow::Context;
 use sqlx::PgPool;
@@ -60,6 +60,9 @@ pub async fn build_app_state_with_pool_io(
     } else {
         Arc::new(crate::notify::LogNotify)
     };
+    // Catalog: remote native under cap wins; else local SANDBOX_BACKEND when
+    // the plane is taking jobs. TickRunner::new() stays off so unit tests can
+    // isolate the picker; this production path must spawn.
     let mut runner = TickRunner::with_board_sync(
         store.clone(),
         runtime,
@@ -67,6 +70,7 @@ pub async fn build_app_state_with_pool_io(
         cfg.data_dir.clone(),
         orch_url,
     )
+    .with_local_spawn()
     .with_notify(notify);
     if let Some(inv) = io {
         runner = runner.with_integrations(inv);
