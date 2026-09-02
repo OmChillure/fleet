@@ -1,13 +1,13 @@
-//! PR5 tick integration tests (materialize, deps, spawn stub, cancel, rollup).
+//! Tick integration: materialize, deps, host assign, inbox, cancel, rollup.
 
+use chrono::{Duration as ChronoDuration, Utc};
+use fleet_db::models::NewWorkerHost;
+use fleet_db::repos::worker_hosts::{self, generate_pair_token, hash_token};
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::sandbox::StubRuntime;
-use fleet_orchestrator::store::{connect, migrate, Store};
-use std::sync::Arc;
-use std::time::Duration;
+use fleet_orchestrator::store::{Store, connect, migrate};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -26,12 +26,70 @@ async fn setup() -> Store {
     let url = require_database_url();
     let pool = connect(&url).await.expect("connect");
     migrate(&pool).await.expect("migrate");
+    fleet_db::migrate(&pool).await.expect("fleet-db migrate");
     Store::new(pool)
 }
 
-fn runner(store: Store, stub_ms: u64) -> TickRunner {
-    let rt = Arc::new(StubRuntime::new(Duration::from_millis(stub_ms)));
-    TickRunner::with_store_and_runtime(store, rt)
+fn runner(store: Store) -> TickRunner {
+    TickRunner::with_store(store)
+}
+
+async fn seed_workspace(store: &Store, project_id: Uuid) {
+    let slug = format!("ti{}", project_id.as_simple());
+    sqlx::query(
+        r#"
+        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
+        VALUES ($1, $2, $3, now(), now())
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(project_id)
+    .bind(&slug)
+    .bind("tick-int")
+    .execute(store.pool())
+    .await
+    .expect("insert workspace");
+}
+
+async fn pair_online_host(store: &Store, workspace_id: Uuid) -> Uuid {
+    let token = generate_pair_token();
+    let host = worker_hosts::create_pending(
+        store.pool(),
+        &NewWorkerHost::new(Uuid::now_v7(), workspace_id, "tick-host".to_string(), None),
+        &hash_token(&token),
+        Utc::now() + ChronoDuration::hours(1),
+    )
+    .await
+    .expect("create_pending");
+    worker_hosts::consume_pair_token(
+        store.pool(),
+        &token,
+        "tick-host",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair");
+    worker_hosts::heartbeat(
+        store.pool(),
+        host.id,
+        true,
+        false,
+        Some("linux-x86_64"),
+        Some("tick-host"),
+        None,
+        0,
+        Some(4),
+        Some("abc"),
+        None,
+        Some(false),
+        None,
+    )
+    .await
+    .expect("heartbeat");
+    host.id
 }
 
 fn chain_plan(project_id: Uuid) -> WorkPlanBody {
@@ -80,7 +138,7 @@ fn chain_plan(project_id: Uuid) -> WorkPlanBody {
 }
 
 #[tokio::test]
-async fn tick_materializes_and_promotes_root_to_ready() {
+async fn tick_materializes_and_holds_ready_without_host() {
     let store = setup().await;
     let project = store
         .create_project(&format!("tick-{}", Uuid::new_v4()), 3)
@@ -91,74 +149,100 @@ async fn tick_materializes_and_promotes_root_to_ready() {
         .await
         .unwrap();
 
-    // Long stub duration so we don't complete before assertions
-    let r = runner(store.clone(), 60_000)
+    let r = runner(store.clone())
         .tick_project(project.id)
         .await
         .unwrap();
     assert_eq!(r.plans_materialized, 1);
     assert_eq!(r.tasks_materialized, 2);
     assert_eq!(r.dep_updates, 1);
-    assert_eq!(r.spawned, 1); // root only
+    assert_eq!(r.spawned, 0, "no host → do not spawn: {r:?}");
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
     let t2 = snap.tasks.iter().find(|t| t.plan_task_id == "t2").unwrap();
-    assert_eq!(t1.status, "in_progress");
+    assert_eq!(t1.status, "ready");
     assert_eq!(t2.status, "queued");
-    assert_eq!(snap.sessions.len(), 1);
+    assert!(snap.sessions.is_empty());
 }
 
 #[tokio::test]
-async fn tick_stub_completes_chain_end_to_end() {
+async fn tick_host_assign_and_inbox_completes_chain() {
     let store = setup().await;
     let project = store
         .create_project(&format!("tick-e2e-{}", Uuid::new_v4()), 3)
         .await
         .unwrap();
+    seed_workspace(&store, project.id).await;
+    pair_online_host(&store, project.id).await;
     let body = chain_plan(project.id);
     let run_id = body.run_id;
     store.insert_accepted_plan(project.id, body).await.unwrap();
 
-    // Duration 0: process_sessions treats stub as exited in the same tick after spawn.
-    // Tick N deps run before spawn, so a two-task chain needs two ticks minimum:
-    //   tick1: t1 ready→spawn→done; tick2: t2 ready→spawn→done→run completed.
-    let runner = runner(store.clone(), 0);
-    let r1 = runner.tick_project(project.id).await.unwrap();
+    let tick = runner(store.clone());
+    let r1 = tick.tick_project(project.id).await.unwrap();
     assert!(r1.spawned >= 1, "r1={r1:?}");
-    assert!(
-        r1.completed_via_runtime >= 1,
-        "t1 should complete same tick: r1={r1:?}"
-    );
 
-    let r2 = runner.tick_project(project.id).await.unwrap();
-    assert!(
-        r2.spawned >= 1 || r2.runs_terminated >= 1 || r2.completed_via_runtime >= 1,
-        "r2={r2:?}"
-    );
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    let session = snap
+        .sessions
+        .iter()
+        .find(|s| s.board_task_id == t1.id)
+        .expect("t1 session");
+    assert_eq!(session.runtime_backend, "remote");
+    store
+        .append_worker_report(
+            project.id,
+            session.id,
+            t1.id,
+            1,
+            "status",
+            serde_json::json!({
+                "status": "success",
+                "result_md": "Task completed successfully with artifacts.",
+                "files": {"work/out.txt": "ok"}
+            }),
+        )
+        .await
+        .unwrap();
 
-    // Extra tick for rollup if t2 completed at end of r2 without rollup edge case
-    let r3 = runner.tick_project(project.id).await.unwrap();
+    let r2 = tick.tick_project(project.id).await.unwrap();
+    assert!(r2.inbox_applied >= 1, "r2={r2:?}");
+    assert!(r2.spawned >= 1, "t2 should assign: r2={r2:?}");
+
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let t2 = snap.tasks.iter().find(|t| t.plan_task_id == "t2").unwrap();
+    let s2 = snap
+        .sessions
+        .iter()
+        .find(|s| s.board_task_id == t2.id)
+        .expect("t2 session");
+    store
+        .append_worker_report(
+            project.id,
+            s2.id,
+            t2.id,
+            1,
+            "status",
+            serde_json::json!({
+                "status": "success",
+                "result_md": "Task completed successfully with artifacts.",
+                "files": {"work/out.txt": "ok"}
+            }),
+        )
+        .await
+        .unwrap();
+
+    let _ = tick.tick_project(project.id).await.unwrap();
+    let _ = tick.tick_project(project.id).await.unwrap();
 
     let row: (String,) = sqlx::query_as("SELECT status FROM work_runs WHERE id = $1")
         .bind(run_id)
         .fetch_one(store.pool())
         .await
         .unwrap();
-    assert_eq!(
-        row.0, "completed",
-        "r1={r1:?} r2={r2:?} r3={r3:?}"
-    );
-
-    let snap = store.load_board_snapshot(project.id).await.unwrap();
-    assert!(
-        snap.tasks.iter().all(|t| t.status == "done_success"),
-        "tasks={:?}",
-        snap.tasks
-            .iter()
-            .map(|t| (&t.plan_task_id, &t.status))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(row.0, "completed");
 }
 
 #[tokio::test]
@@ -173,7 +257,7 @@ async fn tick_cancel_before_materialize_terminates_run() {
     store.insert_accepted_plan(project.id, body).await.unwrap();
     store.request_cancel(project.id, run_id).await.unwrap();
 
-    let r = runner(store.clone(), 1000)
+    let r = runner(store.clone())
         .tick_project(project.id)
         .await
         .unwrap();
@@ -196,7 +280,8 @@ async fn tick_cancel_mid_run_drains_tasks() {
         .create_project(&format!("tick-mid-{}", Uuid::new_v4()), 3)
         .await
         .unwrap();
-    // Set kill_grace to 0 via raw SQL after create for immediate cancel drain
+    seed_workspace(&store, project.id).await;
+    pair_online_host(&store, project.id).await;
     let body = chain_plan(project.id);
     let run_id = body.run_id;
     store.insert_accepted_plan(project.id, body).await.unwrap();
@@ -207,16 +292,15 @@ async fn tick_cancel_mid_run_drains_tasks() {
         .await
         .unwrap();
 
-    let runner = runner(store.clone(), 60_000); // long-running stub
-    let r1 = runner.tick_project(project.id).await.unwrap();
+    let tick = runner(store.clone());
+    let r1 = tick.tick_project(project.id).await.unwrap();
     assert_eq!(r1.spawned, 1);
 
     store.request_cancel(project.id, run_id).await.unwrap();
-    let r2 = runner.tick_project(project.id).await.unwrap();
+    let r2 = tick.tick_project(project.id).await.unwrap();
     assert!(r2.cancel_tasks + r2.killed + r2.runs_terminated >= 1);
 
-    // Another tick to finish rollup if needed
-    let _ = runner.tick_project(project.id).await.unwrap();
+    let _ = tick.tick_project(project.id).await.unwrap();
 
     let row: (String,) = sqlx::query_as("SELECT status FROM work_runs WHERE id = $1")
         .bind(run_id)
@@ -233,15 +317,21 @@ async fn tick_inbox_status_success() {
         .create_project(&format!("tick-inbox-{}", Uuid::new_v4()), 3)
         .await
         .unwrap();
+    seed_workspace(&store, project.id).await;
+    pair_online_host(&store, project.id).await;
     let body = chain_plan(project.id);
     store.insert_accepted_plan(project.id, body).await.unwrap();
 
-    let runner = runner(store.clone(), 60_000);
-    runner.tick_project(project.id).await.unwrap();
+    let tick = runner(store.clone());
+    tick.tick_project(project.id).await.unwrap();
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
-    let session = snap.sessions.iter().find(|s| s.board_task_id == t1.id).unwrap();
+    let session = snap
+        .sessions
+        .iter()
+        .find(|s| s.board_task_id == t1.id)
+        .unwrap();
 
     store
         .append_worker_report(
@@ -250,12 +340,16 @@ async fn tick_inbox_status_success() {
             t1.id,
             1,
             "status",
-            serde_json::json!({"status": "success"}),
+            serde_json::json!({
+                "status": "success",
+                "result_md": "Task completed successfully with artifacts.",
+                "files": {"work/out.txt": "ok"}
+            }),
         )
         .await
         .unwrap();
 
-    let r = runner.tick_project(project.id).await.unwrap();
+    let r = tick.tick_project(project.id).await.unwrap();
     assert!(r.inbox_applied >= 1);
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();

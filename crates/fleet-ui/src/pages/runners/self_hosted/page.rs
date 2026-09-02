@@ -3,21 +3,20 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
+    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
     identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    not_taking_reason, provider_install_command, runtime_line,
-    settings_draft_dirty, shows_software_line, software_bin_rows, stale_package_warning,
-    sort_hosts_for_list, specs_line, status_label, update_now_label, update_requested,
-    widgets_locked, worker_id_label, BEHAVIOR_LABEL,
+    not_taking_reason, provider_install_command, runtime_line, settings_draft_dirty,
+    shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
+    status_label, update_now_label, update_requested, widgets_locked, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    create_host, fetch_local_model_tags, fetch_local_models, install_commands, list_workers_page,
-    patch_host, revoke_host, windows_install_command, CreateHostBody, CreateHostResponse,
-    HostPatch, HostPublic, LocalModelCatalog, LocalModelTag, LocalModelTags, PackageInventory,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTag,
+    LocalModelTags, PackageInventory, create_host, fetch_local_model_tags, fetch_local_models,
+    install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
 };
 use crate::clipboard::copy_text;
 use crate::components::side_panel::SidePanel;
@@ -58,7 +57,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
     let mut show_removed = use_signal(|| false);
     let mut packages = use_signal(PackageInventory::default);
-    let mut sandbox_backend = use_signal(|| "stub".to_string());
     let mut selected_id = use_signal(|| read_runner_query());
 
     // Do not read `hosts` / `loading` here — a write-triggered effect loops
@@ -70,12 +68,9 @@ pub fn SelfHosted(workspace_id: String) -> Element {
             let mut first = true;
             loop {
                 match list_workers_page(&ws).await {
-                    Ok((list, inv, backend)) => {
+                    Ok((list, inv)) => {
                         hosts.set(list);
                         packages.set(inv);
-                        if !backend.trim().is_empty() {
-                            sandbox_backend.set(backend);
-                        }
                         error.set(None);
                     }
                     Err(e) => {
@@ -214,7 +209,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                             for host in active {
                                 HostListRow {
                                     key: "{host.id}",
-                                    sandbox_backend: sandbox_backend(),
                                     selected: selected_id().as_deref() == Some(host.id.as_str()),
                                     host: host.clone(),
                                     on_open: move |id: String| {
@@ -241,7 +235,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                                 for host in removed {
                                     HostListRow {
                                         key: "rm-{host.id}",
-                                        sandbox_backend: sandbox_backend(),
                                         selected: selected_id().as_deref() == Some(host.id.as_str()),
                                         host: host.clone(),
                                         on_open: move |id: String| {
@@ -265,7 +258,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                 },
                 HostDetailPanel {
                     workspace_id: workspace_id.clone(),
-                    sandbox_backend: sandbox_backend(),
                     host,
                     on_updated: move |updated: HostPublic| {
                         let mut list = hosts();
@@ -485,14 +477,9 @@ fn btn_class() -> &'static str {
 }
 
 #[component]
-fn HostListRow(
-    sandbox_backend: String,
-    selected: bool,
-    host: HostPublic,
-    on_open: EventHandler<String>,
-) -> Element {
+fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) -> Element {
     let extra_pills = extra_status_pills(&host);
-    let runtime = runtime_line(&host, &sandbox_backend);
+    let runtime = runtime_line(&host);
     let pill = status_pill_class(&host.status);
     let last_seen = last_seen_label(&host, js_sys::Date::now());
     let title = display_name(&host);
@@ -546,7 +533,6 @@ fn HostListRow(
 #[component]
 fn HostDetailPanel(
     workspace_id: String,
-    sandbox_backend: String,
     host: HostPublic,
     on_updated: EventHandler<HostPublic>,
     on_revoked: EventHandler<String>,
@@ -605,7 +591,7 @@ fn HostDetailPanel(
     let pending = widgets_locked(&host, false);
     let extra_pills = extra_status_pills(&host);
     let draft_holding = draft_holding_new_jobs(d_accepting());
-    let runtime = runtime_line(&host, &sandbox_backend);
+    let runtime = runtime_line(&host);
     let revoked = host.status == "disabled";
     let pill = status_pill_class(&host.status);
     let last_seen = last_seen_label(&host, js_sys::Date::now());

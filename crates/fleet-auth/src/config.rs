@@ -11,13 +11,14 @@ pub struct AuthConfig {
     pub refresh_ttl: Duration,
     pub cookie_secure: bool,
     pub cookie_samesite: cookie::SameSite,
+    /// When set, POST /api/auth/signup requires this shared token.
+    pub signup_token: Option<String>,
 }
 
 impl AuthConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| {
-            "dev-change-me-to-a-long-random-secret-at-least-32-chars".into()
-        });
+        let jwt_secret = env::var("JWT_SECRET")
+            .unwrap_or_else(|_| "dev-change-me-to-a-long-random-secret-at-least-32-chars".into());
         if jwt_secret.len() < 32 {
             bail!("JWT_SECRET must be at least 32 characters");
         }
@@ -49,12 +50,18 @@ impl AuthConfig {
             _ => cookie::SameSite::Lax,
         };
 
+        let signup_token = env::var("SIGNUP_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Ok(Self {
             jwt_secret,
             access_ttl,
             refresh_ttl,
             cookie_secure,
             cookie_samesite,
+            signup_token,
         })
     }
 }
@@ -123,8 +130,25 @@ mod tests {
             refresh_ttl: Duration::from_secs(3600),
             cookie_secure: false,
             cookie_samesite: cookie::SameSite::Lax,
+            signup_token: None,
         };
         assert!(cfg.jwt_secret.len() >= 32);
         assert!(!cfg.cookie_secure);
+        assert!(cfg.signup_token.is_none());
+    }
+
+    #[test]
+    fn from_env_reads_signup_token() {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = env::var("SIGNUP_TOKEN").ok();
+        unsafe { env::set_var("SIGNUP_TOKEN", "  invite-abc  ") };
+        let cfg = AuthConfig::from_env().expect("from_env");
+        unsafe {
+            match previous {
+                Some(v) => env::set_var("SIGNUP_TOKEN", v),
+                None => env::remove_var("SIGNUP_TOKEN"),
+            }
+        }
+        assert_eq!(cfg.signup_token.as_deref(), Some("invite-abc"));
     }
 }

@@ -9,6 +9,7 @@ mod cookies;
 mod error;
 mod models;
 mod password;
+mod rate_limit;
 mod routes;
 mod tokens;
 

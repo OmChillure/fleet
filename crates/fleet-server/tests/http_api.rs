@@ -47,6 +47,7 @@ fn test_auth_config() -> AuthConfig {
         refresh_ttl: Duration::from_secs(604_800),
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
+        signup_token: None,
     }
 }
 
@@ -96,10 +97,6 @@ async fn app_with_state() -> (axum::Router, AppState) {
         retry_backoff: Duration::from_secs(10),
         on_task_fail: "fail_run".into(),
         auto_sync_external: false,
-        sandbox_backend: "stub".into(),
-        stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-driver".into()],
-        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),
@@ -2110,7 +2107,9 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
     assert_eq!(hosts.status, StatusCode::OK, "hosts: {}", hosts.body);
     let host_list = hosts.body["hosts"].as_array().cloned().unwrap_or_default();
     assert!(
-        host_list.iter().all(|h| h.get("kind").and_then(|k| k.as_str()) != Some("control_plane")),
+        host_list
+            .iter()
+            .all(|h| h.get("kind").and_then(|k| k.as_str()) != Some("control_plane")),
         "ack must not create a plane host: {}",
         hosts.body
     );
@@ -3013,12 +3012,14 @@ async fn session_live_comes_from_worker_ingest_not_plane_file() {
         "t1 queued→ready"
     );
     let sid = Uuid::new_v4();
-    assert!(state
-        .orch
-        .store
-        .cas_assign_task(task.id, sid, 1)
-        .await
-        .expect("cas"));
+    assert!(
+        state
+            .orch
+            .store
+            .cas_assign_task(task.id, sid, 1)
+            .await
+            .expect("cas")
+    );
     let token = "live-worker-token";
     state
         .orch

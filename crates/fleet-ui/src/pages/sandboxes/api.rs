@@ -49,8 +49,6 @@ pub struct SandboxRow {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxesResponse {
     #[serde(default)]
-    pub sandbox_backend: String,
-    #[serde(default)]
     pub sandboxes: Vec<SandboxRow>,
 }
 

@@ -565,39 +565,21 @@ class BrowserE2ETests(unittest.TestCase):
         if fleet.ok:
             self.assertTrue(fleet.ok, "GET fleet")
 
-    def test_16b_fleet_header_matches_backend_and_k8s_run(self) -> None:
-        """Fleet chrome shows the live backend; in-cluster k8s can start a run."""
+    def test_16b_fleet_header_says_paired_hosts(self) -> None:
+        """Fleet chrome says jobs run on paired hosts; the plane is not a runner."""
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         ws = base.rstrip("/").rsplit("/", 1)[-1]
         res = self.page.request.get(f"{API}/api/workspaces/{ws}/fleet")
         self.assertEqual(res.status, 200, res.text()[:400])
-        backend = (res.json() or {}).get("sandbox_backend")
-        self.assertTrue(backend, f"GET fleet missing sandbox_backend: {res.text()[:400]}")
 
         page = self.page
         page.goto(f"{base}/fleet", wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertEqual(page.inner_text("h1").strip(), "Fleet")
         body = page.inner_text("body")
-        self.assertIn(f"sandbox {backend}", body)
-        if backend != "k8s":
-            return
-
-        page.get_by_role("button", name="Start 2-task run").click()
-        page.get_by_text("Started run").wait_for(timeout=15_000)
-        page.get_by_text("Root task").wait_for(timeout=15_000)
-        tick = page.get_by_role("button", name="Run tick")
-        if tick.count():
-            tick.first.click()
-            page.wait_for_timeout(800)
-        body = page.inner_text("body")
-        self.assertIn("k8s", body.lower())
-        cancel = page.get_by_role("button", name="Cancel latest")
-        self.assertTrue(cancel.count(), "Cancel latest missing after fixture")
-        if cancel.first.is_enabled():
-            cancel.first.click()
-            page.get_by_text("Cancel requested").wait_for(timeout=10_000)
+        self.assertIn("paired hosts", body.lower())
+        self.assertIn("plane is not a runner", body.lower())
 
     def test_17_apply_changes_when_dirty(self) -> None:
         base = getattr(type(self), "workspace_url", None)
@@ -1696,7 +1678,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must unlock after ack")
 
     def test_14l_plane_sandboxed(self) -> None:
-        # catalog:e2e-plane-runtime — plane uses SANDBOX_BACKEND, no isolation checkboxes.
+        # catalog:e2e-plane-runtime — API is not a runner; no isolation checkboxes.
         page = self.page
         base = getattr(type(self), "workspace_url", None)
         if base:

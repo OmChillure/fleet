@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::sandbox::K8sOpts;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     Token,
@@ -49,12 +47,6 @@ pub struct Config {
     pub retry_backoff: Duration,
     pub on_task_fail: String,
     pub auto_sync_external: bool,
-    pub sandbox_backend: String,
-    pub stub_duration: Duration,
-    /// Process backend worker argv (`PROCESS_WORKER_BIN`, whitespace-split).
-    pub process_worker_argv: Vec<String>,
-    /// Kubernetes backend (`SANDBOX_BACKEND=k8s`). Snapshotted at Config build.
-    pub k8s: K8sOpts,
     pub lock_wait_timeout: Duration,
     pub log_level: String,
     pub leadership_mode: String,
@@ -110,10 +102,6 @@ impl Config {
             retry_backoff: duration_secs("RETRY_BACKOFF_S", 10),
             on_task_fail: env_or("ON_TASK_FAIL", "fail_run"),
             auto_sync_external: bool_env("AUTO_SYNC_EXTERNAL", false),
-            sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
-            stub_duration: duration_secs("STUB_DURATION_S", 3),
-            process_worker_argv: process_worker_argv_from_env(),
-            k8s: K8sOpts::from_env(),
             lock_wait_timeout: tick_interval,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),
@@ -176,22 +164,11 @@ impl Config {
             retry_backoff: duration_secs("RETRY_BACKOFF_S", 10),
             on_task_fail: env_or("ON_TASK_FAIL", "fail_run"),
             auto_sync_external: bool_env("AUTO_SYNC_EXTERNAL", false),
-            sandbox_backend: env_or("SANDBOX_BACKEND", "stub"),
-            stub_duration: duration_secs("STUB_DURATION_S", 3),
-            process_worker_argv: process_worker_argv_from_env(),
-            k8s: K8sOpts::from_env(),
             lock_wait_timeout: lock_wait,
             log_level: env_or("LOG_LEVEL", "info"),
             leadership_mode: "single_process".into(),
             project_filter: env::var("PROJECT_ID").ok().filter(|s| !s.trim().is_empty()),
         })
-    }
-}
-
-fn process_worker_argv_from_env() -> Vec<String> {
-    match env::var("PROCESS_WORKER_BIN") {
-        Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(|p| p.to_string()).collect(),
-        _ => vec!["fleet-driver".into()],
     }
 }
 
@@ -232,19 +209,11 @@ fn env_or(k: &str, def: &str) -> String {
 }
 
 fn int_env(k: &str, def: i32) -> i32 {
-    env::var(k)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(def)
+    env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
 
 fn duration_secs(k: &str, def: u64) -> Duration {
-    Duration::from_secs(
-        env::var(k)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def),
-    )
+    Duration::from_secs(env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def))
 }
 
 fn bool_env(k: &str, def: bool) -> bool {
@@ -259,9 +228,8 @@ fn resolve_data_dir(data_dir_raw: &str) -> Result<PathBuf, ConfigError> {
         return Ok(p);
     }
     let p = PathBuf::from(data_dir_raw);
-    std::fs::create_dir_all(&p).map_err(|e| {
-        ConfigError::Message(format!("DATA_DIR create {}: {e}", p.display()))
-    })?;
+    std::fs::create_dir_all(&p)
+        .map_err(|e| ConfigError::Message(format!("DATA_DIR create {}: {e}", p.display())))?;
     std::fs::canonicalize(&p).map_err(|e| ConfigError::Message(format!("DATA_DIR: {e}")))
 }
 
@@ -293,7 +261,6 @@ mod tests {
             "DATA_DIR",
             "TICK_INTERVAL_S",
             "MAX_AGENTS",
-            "SANDBOX_BACKEND",
             "LOCK_WAIT_TIMEOUT_S",
             "API_PUBLIC_BASE",
             "ORCHESTRATOR_PUBLIC_URL",
@@ -307,17 +274,18 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { env::set_var(
-            "DATABASE_URL",
-            "postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable",
-        ) };
+        unsafe {
+            env::set_var(
+                "DATABASE_URL",
+                "postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable",
+            )
+        };
         unsafe { env::set_var("ADMIN_TOKEN", "test-admin-token") };
         unsafe { env::set_var("DATA_DIR", dir.path()) };
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.tick_interval, Duration::from_secs(5));
         assert_eq!(cfg.max_agents, 3);
         assert_eq!(cfg.auth_mode, AuthMode::Token);
-        assert_eq!(cfg.sandbox_backend, "stub");
         assert_eq!(cfg.leadership_mode, "single_process");
         assert!(cfg.data_dir.is_absolute());
     }
@@ -365,10 +333,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
         unsafe { env::remove_var("API_PUBLIC_BASE") };
-        assert_eq!(
-            public_orchestrator_url(":8080"),
-            "http://127.0.0.1:8080"
-        );
+        assert_eq!(public_orchestrator_url(":8080"), "http://127.0.0.1:8080");
         assert_eq!(
             public_orchestrator_url("0.0.0.0:8080"),
             "http://127.0.0.1:8080"

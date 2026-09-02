@@ -5,7 +5,6 @@ pub mod chats;
 pub mod control_plane_events;
 pub mod integrations;
 pub mod personas;
-pub mod plane_runners;
 pub mod sessions;
 pub mod tickets;
 pub mod users;

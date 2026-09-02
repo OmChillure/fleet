@@ -199,7 +199,10 @@ pub async fn patch_cp_settings(
     let (install_request, install_requested_at) = if let Some(spec) = patch.install_model.as_ref() {
         (Some(spec.clone()), Some(Utc::now()))
     } else {
-        (current.install_request.clone(), current.install_requested_at)
+        (
+            current.install_request.clone(),
+            current.install_requested_at,
+        )
     };
     let runtime_settings = if let Some(incoming) = patch.runtime_settings.as_ref() {
         merge_json_objects(&current.runtime_settings, incoming)
@@ -998,7 +1001,8 @@ pub async fn list_assignable(
 }
 
 /// Paired hosts mid host-bin restart (`software_updating`) seen within `seen_within`.
-/// Tick uses this so a brief restart does not fail over to local `SANDBOX_BACKEND`.
+/// Tick uses this so a brief restart does not assign elsewhere while the
+/// paired host is swapping its binary. No host → task stays ready.
 /// Does not change pause/drain meaning.
 pub async fn list_updating_recent(
     pool: &PgPool,

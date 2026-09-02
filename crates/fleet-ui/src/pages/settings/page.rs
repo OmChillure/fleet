@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    fetch_settings, invite_member, list_invites, list_members, remove_member, revoke_invite,
-    save_settings, set_member_role, FleetSettingsPatch, InviteRow, MemberRow,
+    FleetSettingsPatch, InviteRow, MemberRow, fetch_settings, invite_member, list_invites,
+    list_members, remove_member, revoke_invite, save_settings, set_member_role,
 };
 use crate::components::toast::show_toast;
 use crate::pages::chat::{ChatModelInfo, fetch_chat_status};
@@ -23,7 +23,6 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut fleet_llm = use_signal(|| "off".to_string());
     let mut fleet_model = use_signal(String::new);
     let mut grok_env = use_signal(|| false);
-    let mut sandbox_backend = use_signal(|| "stub".to_string());
     let mut min_isolation = use_signal(|| "process".to_string());
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
@@ -46,9 +45,6 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm.set(s.fleet_llm);
                     fleet_model.set(s.fleet_llm_model);
                     grok_env.set(s.grok_env);
-                    if !s.sandbox_backend.trim().is_empty() {
-                        sandbox_backend.set(s.sandbox_backend);
-                    }
                     if !s.min_isolation.trim().is_empty() {
                         min_isolation.set(s.min_isolation);
                     }
@@ -178,9 +174,6 @@ pub fn Settings(workspace_id: String) -> Element {
                         option { value: "process", "Process" }
                         option { value: "container", "Container" }
                         option { value: "vm", "VM" }
-                    }
-                    p { class: "mt-3 text-xs text-[var(--app-muted)]",
-                        "SANDBOX_BACKEND={sandbox_backend} is display-only (API is not a runner)."
                     }
                 }
 

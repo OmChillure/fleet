@@ -118,9 +118,9 @@ TBD. The switch does not need payouts or KYC to work.
 
 ## Assignment
 
-Today the wrapper picks a paired **Native** `fleet-host`, else tick
-falls back to local `SANDBOX_BACKEND`. Partners stay off that list
-until a later MR extends assignable kinds.
+Today the wrapper picks a paired **Native** `fleet-host`, else the
+task stays ready. Partners stay off that list until a later MR
+extends assignable kinds.
 
 When they join the list:
 

@@ -2232,7 +2232,6 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
         .count();
 
     let content = json!({
-        "sandbox_backend": cfg.sandbox_backend,
         "max_agents": cfg.max_agents,
         "fleet_llm": cfg.fleet_llm,
         "fleet_llm_model": cfg.fleet_llm_model,

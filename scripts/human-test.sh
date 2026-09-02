@@ -210,8 +210,8 @@ cmd_guide() {
 
   pause_step "Fleet" \
     "Start 2-task run → Run tick (or Run until done)." \
-    "Tick enqueues work_claims. A paired fleet-host runs the job. Header may still show SANDBOX_BACKEND as display-only." \
-    "Default backend is stub — board should move. Ticker may also tick on its own." \
+    "Tick enqueues work_claims. A paired fleet-host runs the job. No host → task stays ready." \
+    "The API is not a runner. Ticker may also tick on its own." \
     "With Fleet LLM on, live agents message each other (TEAM_CHAT.md / chat read_team_chat)." || return 0
 
   pause_step "Sandboxes" \
@@ -221,7 +221,7 @@ cmd_guide() {
     "Kind/k3d API is stub (not a runner). After signup, fleet-host bootstrap-pairs; Start 2-task run + tick enqueues a claim; fleet-host creates the FleetSandbox CR." \
     "kubectl -n agent-fleet get deploy fleet-host,zenohd — cluster runner + bus." \
     "kubectl -n agent-fleet get fsb,pods — operator makes the pod. Cancel deletes the CR." \
-    "SessionDetail may be empty (no pod live.jsonl pull yet). Host .env stays stub/process." \
+    "SessionDetail may be empty (no pod live.jsonl pull yet)." \
     "Host API + cluster: KUBECONFIG + K8S_WORKER_API_URL a pod can reach (not 127.0.0.1)." || return 0
 
   pause_step "Cases" \

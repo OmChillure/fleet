@@ -1,6 +1,6 @@
 //! Tick must not local-spawn while a paired host is mid host-bin restart.
-//! Kill mid-swap + auto_update on holds ready; no local SANDBOX_BACKEND, no token rotate.
-//! Offline without `software_updating` keeps today's local fallback.
+//! Kill mid-swap + auto_update on holds ready; no in-process fallback, no token rotate.
+//! Offline without `software_updating` still leaves the task ready.
 //! Requires DATABASE_URL.
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -10,10 +10,7 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::sandbox::StubRuntime;
 use fleet_orchestrator::store::{Store, connect, migrate};
-use std::sync::Arc;
-use std::time::Duration;
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -37,13 +34,7 @@ async fn setup() -> Store {
 }
 
 fn runner(store: Store) -> TickRunner {
-    let rt = Arc::new(StubRuntime::new(Duration::from_secs(60)));
-    TickRunner::new(
-        store,
-        rt,
-        std::env::temp_dir().join("fleet-orch-data"),
-        "http://127.0.0.1:8080",
-    )
+    TickRunner::with_store(store)
 }
 
 fn one_task_plan(project_id: Uuid) -> WorkPlanBody {
@@ -103,9 +94,17 @@ async fn pair_host(store: &Store, workspace_id: Uuid, name: &str) -> Uuid {
     )
     .await
     .expect("create_pending");
-    worker_hosts::consume_pair_token(store.pool(), &token, name, "linux-x86_64", true, false, None)
-        .await
-        .expect("pair");
+    worker_hosts::consume_pair_token(
+        store.pool(),
+        &token,
+        name,
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair");
     host.id
 }
 
@@ -222,8 +221,8 @@ async fn tick_offline_host_without_updating_leaves_ready() {
 }
 
 /// Guest killed mid host-bin swap (`software_updating`, last_seen stale but
-/// inside the 2 min hold). `auto_update` on must not fail over to the test
-/// local SANDBOX_BACKEND (`with_local_spawn`) and must not rotate the token.
+/// inside the 2 min hold). `auto_update` on must not fail over to the
+/// in-process fallback and must not rotate the token.
 #[tokio::test]
 async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
     let store = setup().await;
@@ -256,14 +255,10 @@ async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
         .unwrap();
 
     let r = runner(store.clone())
-        .with_local_spawn()
         .tick_project(project.id)
         .await
         .unwrap();
-    assert_eq!(
-        r.spawned, 0,
-        "must not local-spawn SANDBOX_BACKEND mid-swap: {r:?}"
-    );
+    assert_eq!(r.spawned, 0, "must not local-spawn mid-swap: {r:?}");
     assert_eq!(r.spawn_failed, 0, "{r:?}");
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
@@ -275,7 +270,7 @@ async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
     );
     assert!(
         snap.sessions.is_empty(),
-        "no local SANDBOX_BACKEND session: {:?}",
+        "no local in-process session: {:?}",
         snap.sessions
     );
 

@@ -13,10 +13,7 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::sandbox::StubRuntime;
 use fleet_orchestrator::store::{Store, connect, migrate, select_assignable_host};
-use std::sync::Arc;
-use std::time::Duration;
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -40,10 +37,8 @@ async fn setup() -> Store {
 }
 
 fn runner(store: Store, orch_url: &str) -> TickRunner {
-    let rt = Arc::new(StubRuntime::new(Duration::from_secs(60)));
     TickRunner::new(
         store,
-        rt,
         std::env::temp_dir().join("fleet-orch-picker-product"),
         orch_url,
     )

@@ -146,7 +146,6 @@ COOKIE_SECURE=false
 API_PUBLIC_BASE=http://localhost:8080
 UI_PUBLIC_BASE=http://localhost:3030
 DATA_DIR=./data
-SANDBOX_BACKEND=stub
 ```
 
 | Variable | Notes |
@@ -155,10 +154,9 @@ SANDBOX_BACKEND=stub
 | `CORS_ORIGINS` | Needed if the browser calls the API origin directly |
 | `API_PUBLIC_BASE` | OAuth callbacks, absolute API links |
 | `UI_PUBLIC_BASE` | OAuth return / UI links |
-| `SANDBOX_BACKEND` | `stub` (default), `process`, `docker`, or `k8s` |
-| `PROCESS_WORKER_BIN` | e.g. `/usr/local/bin/fleet-driver` in the API image |
-| `K8S_*` | Only when `SANDBOX_BACKEND=k8s`. See [`docs/components/orchestrator/PLAY.md`](docs/components/orchestrator/PLAY.md). Worker callback must not be loopback. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
+
+The API does not run jobs. Pair a `fleet-host`.
 
 ---
 
@@ -172,42 +170,27 @@ No LLM is called yet; personas store role prompts and model preferences for a fu
 
 ---
 
-## Process sandbox + real worker (optional)
+## Real worker (paired `fleet-host`)
+
+The control plane does not spawn `fleet-driver`. Add a worker in the UI,
+install `fleet-host` on that machine, and pair it. Tick enqueues
+`work_claims`; no host → the task stays ready.
 
 ```bash
-# Host
-cargo build -p fleet-driver --bins
-export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
-export FLEET_HARNESS=mock
 export API_PUBLIC_BASE=http://127.0.0.1:8080
 cargo run -p fleet-server
+# On the worker machine (this box is fine):
+# curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 sh
+# fleet-host pair --url http://127.0.0.1:8080 --token <one-time>
 ```
 
-Then in the UI: **Fleet → Start 2-task run → Run until done**. Sessions appear on Fleet and **Sandboxes**. Artifacts land under `$DATA_DIR/projects/<workspace_id>/sessions/<session_id>/artifacts/`.
-
-In Compose, set on `api`:
-
-```yaml
-SANDBOX_BACKEND: process
-PROCESS_WORKER_BIN: /usr/local/bin/fleet-driver
-```
+Then in the UI: **Fleet → Start 2-task run → Run until done**. Sessions appear on Fleet and **Sandboxes**. Artifacts land under the host work dir (and `$DATA_DIR/projects/<workspace_id>/sessions/<session_id>/` for session metadata).
 
 ### Kubernetes sandboxes
 
-In-cluster API is `SANDBOX_BACKEND=stub` (not a runner). `fleet-host`
-creates `FleetSandbox` CRs; the operator must be running
-([`infra/README.md`](infra/README.md)). Host `.env` is unchanged. Optional
-host API against a cluster is no longer the spawn path — pair `fleet-host`
-instead.
-
-```bash
-export SANDBOX_BACKEND=k8s
-export K8S_WORKER_API_URL=http://api.agent-fleet.svc.cluster.local:8080
-# Host API + cluster: a host IP pods can route — not 127.0.0.1, not DNS
-# export K8S_WORKER_API_URL=http://172.18.0.1:8080
-cargo run -p fleet-server
-```
+In-cluster API is not a runner. `fleet-host` creates `FleetSandbox` CRs;
+the operator must be running ([`infra/README.md`](infra/README.md)).
+Pair `fleet-host`. The API does not spawn workers.
 
 ---
 

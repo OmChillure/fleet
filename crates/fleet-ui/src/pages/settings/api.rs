@@ -9,8 +9,6 @@ pub struct FleetSettings {
     pub max_agents: i32,
     #[serde(default = "default_cap")]
     pub max_agents_cap: i32,
-    #[serde(default)]
-    pub sandbox_backend: String,
     #[serde(default = "default_process")]
     pub min_isolation: String,
     #[serde(default = "default_off")]
@@ -215,8 +213,10 @@ pub async fn list_invites(workspace_id: &str) -> Result<Vec<InviteRow>, String> 
 }
 
 pub async fn revoke_invite(workspace_id: &str, invite_id: &str) -> Result<(), String> {
-    let res =
-        authorized_delete(&format!("/api/workspaces/{workspace_id}/invites/{invite_id}")).await?;
+    let res = authorized_delete(&format!(
+        "/api/workspaces/{workspace_id}/invites/{invite_id}"
+    ))
+    .await?;
     let _: serde_json::Value = parse_json(res).await?;
     Ok(())
 }

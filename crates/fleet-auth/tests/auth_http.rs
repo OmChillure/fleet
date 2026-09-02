@@ -115,7 +115,12 @@ async fn signup_duplicate_email_409() {
 
     let mixed = format!("Auth.DUP.{}@Example.TEST", Uuid::new_v4());
     let first_mixed = signup(&app, &mixed, TEST_PASSWORD).await;
-    assert_eq!(first_mixed.status, StatusCode::CREATED, "{}", first_mixed.body);
+    assert_eq!(
+        first_mixed.status,
+        StatusCode::CREATED,
+        "{}",
+        first_mixed.body
+    );
     let again_lower = signup(&app, &mixed.to_ascii_lowercase(), TEST_PASSWORD).await;
     assert_eq!(
         again_lower.status,
@@ -572,7 +577,12 @@ async fn invite_adds_existing_user_and_member_cannot_invite() {
         Some(json!({ "email": unique_email(), "role": "member" })),
     )
     .await;
-    assert_eq!(forbidden.status, StatusCode::FORBIDDEN, "{}", forbidden.body);
+    assert_eq!(
+        forbidden.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        forbidden.body
+    );
 }
 
 #[tokio::test]
@@ -614,7 +624,10 @@ async fn pending_invite_joins_on_signup() {
         .iter()
         .filter_map(|w| w["id"].as_str())
         .collect();
-    assert!(ids.contains(&ws.as_str()), "guest should join invited workspace: {ids:?}");
+    assert!(
+        ids.contains(&ws.as_str()),
+        "guest should join invited workspace: {ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -673,9 +686,7 @@ async fn login_accepts_pending_invites() {
         .filter_map(|m| m["email"].as_str())
         .collect();
     assert!(
-        !before_emails
-            .iter()
-            .any(|e| e.eq_ignore_ascii_case(&guest)),
+        !before_emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
         "pending invite must not add the user before login: {before_emails:?}"
     );
 
@@ -1238,4 +1249,65 @@ async fn admin_cannot_delete_owner_or_patch_roles() {
             .any(|(id, role)| *id == owner_id && *role == "owner"),
         "owner must remain owner: {roles:?}"
     );
+}
+
+#[tokio::test]
+async fn login_rate_limited_by_forwarded_ip() {
+    let app = app().await;
+    let email = unique_email();
+    let created = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let ip = format!("203.0.113.{}", (Uuid::new_v4().as_u128() % 200) + 1);
+    for i in 0..10 {
+        let out = call_with_xff(
+            &app,
+            "POST",
+            "/api/auth/login",
+            &ip,
+            Some(json!({ "email": email, "password": "wrong-password-xx" })),
+        )
+        .await;
+        assert_eq!(
+            out.status,
+            StatusCode::UNAUTHORIZED,
+            "attempt {i}: {}",
+            out.body
+        );
+    }
+    let blocked = call_with_xff(
+        &app,
+        "POST",
+        "/api/auth/login",
+        &ip,
+        Some(json!({ "email": email, "password": "wrong-password-xx" })),
+    )
+    .await;
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
+    assert_eq!(blocked.error(), "too many attempts — try again later");
+}
+
+#[tokio::test]
+async fn signup_open_when_token_unset() {
+    let app = app().await;
+    let out = signup_with_token(&app, &unique_email(), TEST_PASSWORD, None).await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+}
+
+#[tokio::test]
+async fn signup_requires_token_when_configured() {
+    let app = app_with_signup_token("shared-invite").await;
+    let missing = signup_with_token(&app, &unique_email(), TEST_PASSWORD, None).await;
+    assert_eq!(missing.status, StatusCode::FORBIDDEN, "{}", missing.body);
+    assert_eq!(missing.error(), "valid signup token is required");
+
+    let wrong = signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("nope")).await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN, "{}", wrong.body);
+
+    let ok = signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("shared-invite")).await;
+    assert_eq!(ok.status, StatusCode::CREATED, "{}", ok.body);
 }

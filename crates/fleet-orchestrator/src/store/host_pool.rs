@@ -272,7 +272,7 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
 
 /// Today's host picker, then Native-only. No second list/query.
 /// Cloud / Partners / public-cloud cannot be chosen.
-/// Production tick does not fall back to a local SANDBOX_BACKEND.
+/// Production tick does not fall back to an in-process runtime.
 pub fn pick_assignable_runner_for(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,
@@ -615,7 +615,8 @@ mod tests {
     fn pick_equal_load_prefers_oldest_not_newest_first() {
         let newer = host(Uuid::new_v4(), true, false, true, false, 4);
         let older = host(Uuid::new_v4(), true, false, true, false, 4);
-        let chosen = pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new()).unwrap();
+        let chosen =
+            pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new()).unwrap();
         assert_eq!(
             chosen.id(),
             older.id,

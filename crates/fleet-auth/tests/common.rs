@@ -43,6 +43,7 @@ fn test_auth_config() -> AuthConfig {
         refresh_ttl: Duration::from_secs(604_800),
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
+        signup_token: None,
     }
 }
 
@@ -63,11 +64,18 @@ pub async fn connect_and_migrate() -> fleet_db::PgPool {
 }
 
 pub async fn app() -> axum::Router {
+    app_with_config(test_auth_config()).await
+}
+
+pub async fn app_with_signup_token(token: &str) -> axum::Router {
+    let mut config = test_auth_config();
+    config.signup_token = Some(token.to_string());
+    app_with_config(config).await
+}
+
+async fn app_with_config(config: AuthConfig) -> axum::Router {
     let db = connect_and_migrate().await;
-    let state = AuthState {
-        db,
-        config: test_auth_config(),
-    };
+    let state = AuthState { db, config };
     fleet_auth::router().with_state(state)
 }
 
@@ -216,6 +224,29 @@ pub async fn call(
             builder = builder.header(header::COOKIE, h);
         }
     }
+    call_finish(app, builder, body).await
+}
+
+pub async fn call_with_xff(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    xff: &str,
+    body: Option<Value>,
+) -> HttpOut {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    builder = builder.header("x-forwarded-for", xff);
+    call_finish(app, builder, body).await
+}
+
+async fn call_finish(
+    app: &axum::Router,
+    builder: axum::http::request::Builder,
+    body: Option<Value>,
+) -> HttpOut {
     let req = builder
         .body(match body {
             Some(b) => Body::from(serde_json::to_vec(&b).unwrap()),
@@ -252,6 +283,19 @@ pub async fn signup_with(
     let mut body = json!({ "email": email, "password": password });
     if let Some(name) = display_name {
         body["display_name"] = json!(name);
+    }
+    call(app, "POST", "/api/auth/signup", None, Some(body)).await
+}
+
+pub async fn signup_with_token(
+    app: &axum::Router,
+    email: &str,
+    password: &str,
+    token: Option<&str>,
+) -> HttpOut {
+    let mut body = json!({ "email": email, "password": password });
+    if let Some(token) = token {
+        body["token"] = json!(token);
     }
     call(app, "POST", "/api/auth/signup", None, Some(body)).await
 }

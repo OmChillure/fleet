@@ -10,6 +10,8 @@ pub struct SignupRequest {
     pub email: String,
     pub password: String,
     pub display_name: Option<String>,
+    /// Required when the server has `SIGNUP_TOKEN` set.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

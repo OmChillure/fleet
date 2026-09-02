@@ -12,6 +12,7 @@ use crate::cookies::{clear_auth_cookies, set_auth_cookies};
 use crate::error::{AppError, AppResult};
 use crate::models::{AuthResponse, LoginRequest, MeResponse, SignupRequest};
 use crate::password::{hash_password, verify_password};
+use crate::rate_limit;
 use crate::routes::workspaces::{
     default_workspace_name, ensure_default_workspace, workspace_slug_for_user,
 };
@@ -94,9 +95,8 @@ async fn create_session_and_tokens(
     let refresh = generate_refresh_token();
     let refresh_hash = hash_refresh_token(&refresh);
     let now = Utc::now();
-    let expires_at = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
+    let expires_at =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
     let absolute_expires_at = expires_at;
     let (ua, ip) = client_meta(headers);
 
@@ -138,11 +138,27 @@ fn auth_json_response(
     (status, headers, Json(body)).into_response()
 }
 
+fn signup_token_ok(expected: Option<&str>, got: Option<&str>) -> bool {
+    match expected.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(want) => got.is_some_and(|s| s.trim() == want),
+    }
+}
+
 pub async fn signup(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<SignupRequest>,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "signup",
+        &headers,
+        5,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
+    if !signup_token_ok(state.config.signup_token.as_deref(), body.token.as_deref()) {
+        return Err(AppError::forbidden("valid signup token is required"));
+    }
     validate_credentials(&body.email, &body.password)?;
     let email = body.email.trim().to_string();
     let email_normalized = normalize_email(&email);
@@ -158,8 +174,7 @@ pub async fn signup(
 
     let workspace_id = Uuid::now_v7();
     let slug = workspace_slug_for_user(&email_normalized, user_id);
-    let workspace_name =
-        default_workspace_name(display_name.as_deref(), &email_normalized);
+    let workspace_name = default_workspace_name(display_name.as_deref(), &email_normalized);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
@@ -188,13 +203,9 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
-    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
-        &state.db,
-        user_id,
-        &email_normalized,
-        now,
-    )
-    .await
+    if let Err(e) =
+        workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
+            .await
     {
         tracing::warn!(
             user_id = %user_id,
@@ -232,6 +243,12 @@ pub async fn login(
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "login",
+        &headers,
+        10,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
     validate_credentials(&body.email, &body.password)?;
     let email_normalized = normalize_email(&body.email);
     tracing::debug!(email = %email_normalized, "login attempt");
@@ -270,13 +287,9 @@ pub async fn login(
         );
     }
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     tracing::info!(
         user_id = %user.id,
@@ -298,10 +311,7 @@ pub async fn login(
     ))
 }
 
-pub async fn logout(
-    State(state): State<AuthState>,
-    jar: CookieJar,
-) -> AppResult<Response> {
+pub async fn logout(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Response> {
     if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
         let hash = hash_refresh_token(&refresh);
         let now = Utc::now();
@@ -323,6 +333,12 @@ pub async fn refresh(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "refresh",
+        &headers,
+        30,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
     let refresh = jar
         .get(REFRESH_COOKIE)
         .map(|c| c.value().to_string())
@@ -358,15 +374,13 @@ pub async fn refresh(
     let new_session_id = Uuid::now_v7();
     let new_refresh = generate_refresh_token();
     let new_hash = hash_refresh_token(&new_refresh);
-    let new_expires = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
+    let new_expires =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
     let (ua, ip) = client_meta(&headers);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
-    let revoked =
-        session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
+    let revoked = session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
 
     if revoked != 1 {
         tx.rollback().await.ok();
@@ -400,13 +414,9 @@ pub async fn refresh(
         state.config.access_ttl,
     )?;
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     Ok(auth_json_response(
         &state,
@@ -424,13 +434,8 @@ pub async fn refresh(
 pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Json<MeResponse>> {
     let user = require_user(&state, &jar).await?;
     // Ensure a default workspace exists for older accounts / edge cases.
-    let _ = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let _ = ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+        .await?;
     let workspaces = workspace_repo::list_for_user(&state.db, user.id)
         .await?
         .into_iter()

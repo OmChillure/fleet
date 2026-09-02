@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode};
 use fleet_orchestrator::api::{build_app_state, router};
 use fleet_orchestrator::config::{AuthMode, Config};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -42,10 +42,6 @@ async fn app() -> axum::Router {
         retry_backoff: Duration::from_secs(10),
         on_task_fail: "fail_run".into(),
         auto_sync_external: false,
-        sandbox_backend: "stub".into(),
-        stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-driver".into()],
-        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),
@@ -210,7 +206,10 @@ async fn fixture_and_tick_happy_path() {
     assert_eq!(st, StatusCode::OK);
     let list = tasks["tasks"].as_array().unwrap();
     assert_eq!(list.len(), 2);
-    assert!(list.iter().all(|t| t["status"] == "done_success"), "{tasks}");
+    assert!(
+        list.iter().all(|t| t["status"] == "done_success"),
+        "{tasks}"
+    );
 
     let (st, runs) = json_req(
         app,

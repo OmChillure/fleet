@@ -3,8 +3,8 @@
 Process worker that **drives a coding agent over ACP** and reports to the
 orchestrator using the existing `FLEET_*` / heartbeat / status contract.
 
-Drop-in for `PROCESS_WORKER_BIN` when `SANDBOX_BACKEND=process`.
-Does **not** use Docker Compose or Redis.
+Guest of a paired `fleet-host` (and of orchestrator tests that enable
+local spawn). Does **not** use Docker Compose or Redis.
 
 | Harness | How | Tokens |
 | --- | --- | --- |
@@ -29,19 +29,10 @@ cargo test -p fleet-driver
 FLEET_GROK_ACP_E2E=1 cargo test -p fleet-driver grok_tiny_prompt_over_acp -- --nocapture
 ```
 
-## Run with the orchestrator
+## Run with a paired host
 
-```bash
-cargo build -p fleet-driver --bins
-export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
-export FLEET_HARNESS=mock          # or grok
-# export FLEET_MODEL=…             # grok -m
-# export FLEET_TASK_TIMEOUT_S=600
-cargo run -p fleet-server
-```
-
-Then Fleet UI → Start run → Run until done. Artifacts:
+`fleet-host` starts this binary for each leased job. Pair a host, then
+Fleet UI → Start run → Run until done. Artifacts:
 
 ```
 $DATA_DIR/projects/<id>/sessions/<session>/artifacts/

@@ -6,9 +6,8 @@ reachable (IP or domain). Workers only make outbound HTTPS. This is
 registration token and not inbound SSH.
 
 Do not replace `fleet-driver`, `fleet-operator`,
-`FleetSandbox`, `work_claims`, session `FLEET_*` tokens, or the local
-`SANDBOX_BACKEND` path. Those stay. This layer is a durable **machine**
-in front of them.
+`FleetSandbox`, `work_claims`, or session `FLEET_*` tokens. This layer
+is a durable **machine** in front of them. The API is not a runner.
 
 Contract for implementers. Exclusive file owners are listed at the bottom.
 
@@ -65,8 +64,7 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
 ### Fallback
 
 - If no paired host is `online` with a matching effective run mode,
-  tick keeps today's local `SANDBOX_BACKEND` (`stub` / `process` /
-  `local` / `docker`). Existing tests must stay green.
+  leave the task `ready`. The API does not local-spawn.
 
 ---
 
@@ -443,11 +441,11 @@ token **unchanged**):
    backend `remote`. Do **not** `ProcessRuntime::spawn` on the API box.
 5. If none: leave the task `ready`. The control plane is not a host and
    is not listed on `GET …/worker-hosts`. Production does not local-spawn
-   on the API box. Tests may set `allow_local_spawn`.
+   on the API box.
 6. **Exception:** if no assignable host but a paired host in this workspace
    is `software_updating` and `last_seen` within ~2 minutes, **do not**
-   local-spawn. Leave the task `ready`. Offline without that flag keeps
-   today's fallback.
+   assign elsewhere. Leave the task `ready`. Offline without that flag
+   still leaves the task ready.
 
 `fleet-orchestrator` may depend on `fleet-db` for `work_claims::enqueue`
 and `worker_hosts` list. Do not invent a second claims table.
@@ -494,7 +492,7 @@ Job child still POSTs `/v1/.../heartbeat|status` with the **job** token.
 
 Manual (`fleet-host update`) and auto share one path. **Never set CP
 `paused` / `drain` for an update** — those flags drop the host from
-`list_assignable` and tick would run local `SANDBOX_BACKEND`.
+`list_assignable` and the task would stay ready with no runner.
 
 Heartbeat response (host client parses even if an older CP omits it):
 
@@ -588,7 +586,7 @@ Fail closed: missing `DATABASE_URL` panics. No `SKIP_*`.
 | --- | --- |
 | **db** | `crates/fleet-db/migrations/009_worker_hosts.sql`, `crates/fleet-db/migrations/010_worker_host_software.sql`, `crates/fleet-db/migrations/011_worker_host_hardware.sql`, `crates/fleet-db/src/models/worker_host.rs`, `crates/fleet-db/src/repos/worker_hosts.rs`, `crates/fleet-db/src/models/mod.rs` (export only), `crates/fleet-db/src/repos/mod.rs` (mod only), `crates/fleet-db/tests/worker_hosts_repos.rs` |
 | **api** | `crates/fleet-server/src/worker_hosts.rs`, `crates/fleet-server/src/install_routes.rs`, `crates/fleet-server/src/lib.rs` (merge + `/api` index links only), `crates/fleet-server/src/main.rs` (only if needed), `crates/fleet-server/tests/worker_hosts_http.rs`, `.env.example` (new keys only) |
-| **orch** | `crates/fleet-orchestrator/Cargo.toml` (add `fleet-db`), `crates/fleet-orchestrator/src/orch/spawn.rs`, `crates/fleet-orchestrator/src/sandbox/remote.rs` (new), `crates/fleet-orchestrator/src/sandbox/mod.rs` (`remote` is **not** a SANDBOX_BACKEND env value), `crates/fleet-orchestrator/src/store/host_pool.rs` (new), orch tests you add as new files |
+| **orch** | `crates/fleet-orchestrator/Cargo.toml` (add `fleet-db`), `crates/fleet-orchestrator/src/orch/spawn.rs`, `crates/fleet-orchestrator/src/sandbox/remote.rs` (new), `crates/fleet-orchestrator/src/sandbox/mod.rs` (`remote` is the production backend), `crates/fleet-orchestrator/src/store/host_pool.rs` (new), orch tests you add as new files |
 | **host** | `crates/fleet-host/**`, root `Cargo.toml` `members` + `workspace.dependencies.fleet-host` only |
 | **ui** | `crates/fleet-ui/src/pages/workers/**`, `pages/mod.rs`, `main.rs` route, `components/sidebar.rs` link |
 | **docs** | `docs/human-testing.md`, `scripts/human-test.sh` (one step), `tests/browser/record_demo.py` scene `workers`, `README.md` (workers row), `docs/architecture/README.md` one paragraph, `.env.example` only if api left a placeholder |

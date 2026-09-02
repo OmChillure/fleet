@@ -113,7 +113,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| One runtime: `SANDBOX_BACKEND` on the plane; process on a paired host | `runtime_line` | No Native/Sandboxed checkboxes; plane shows `Runtime: … (SANDBOX_BACKEND)` | Plane jobs use env backend |
+| One runtime: paired `fleet-host`; plane is not a runner | `runtime_line` | No Native/Sandboxed checkboxes; cards say `Runtime: fleet-host` | Jobs run on the host |
 | Stop taking new jobs | `holding_new_jobs` / `accepting_jobs` | Behavior button only | Guest gets no new lease |
 
 ### Behavior (jobs, update, cap)
