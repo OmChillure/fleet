@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use fleet_db::PgPool;
 use fleet_integrations::CredentialsKey;
-use fleet_integrations::proxy::{self, ProxyCaller, ProxyRequest};
+use fleet_integrations::proxy::ProxyCaller;
 use fleet_orchestrator::sandbox::io::{IntegrationInvoker, IntegrationResult};
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,16 +23,14 @@ impl IntegrationInvoker for ControlPlaneIo {
         operation: String,
         args: Value,
     ) -> IntegrationResult {
-        let res = proxy::invoke(
+        let res = crate::workforce::gated_invoke_pool(
             &self.db,
             &self.key,
-            ProxyRequest {
-                workspace_id,
-                provider,
-                operation,
-                args,
-                caller: ProxyCaller::System,
-            },
+            workspace_id,
+            ProxyCaller::System,
+            &provider,
+            &operation,
+            args,
         )
         .await;
         IntegrationResult {

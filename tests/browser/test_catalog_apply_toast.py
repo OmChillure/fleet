@@ -183,9 +183,7 @@ class CatalogApplyToastPendingTests(unittest.TestCase):
         gen_before = int(row.get("settings_gen") or 0)
 
         goto_self_hosted(page, workspace_url)
-        page.get_by_text("Control plane", exact=True).first.wait_for(
-            state="attached", timeout=90_000
-        )
+        page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         wait_dx_ready(page)
         card = _card(page, name)
         self.assertIn("online", card.inner_text().lower())

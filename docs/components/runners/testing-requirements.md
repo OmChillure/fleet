@@ -95,7 +95,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
 | Poll list ~10s | — | Card updates after pair / heartbeat | Guest heartbeat moves last-seen + online |
-| Control plane always first, then status, then name | Sort helper | First card is Control plane | n/a |
+| Paired hosts only, then status, then name | Sort helper | Empty list is No workers yet; no plane card | n/a |
 | Rename (click name, Enter / Escape) | PATCH name | Rename a card | n/a |
 | Pills: online, offline, pending, removed, error | `public_status`; 90s offline | Pending card; offline after guest stop | Stop/start guest: offline after 90s, online on heartbeat |
 | Extra pills: pending apply, outdated | `extra_status_pills` | After Apply, pending apply until ack | Guest ack clears pending apply; behind package shows outdated |
@@ -137,17 +137,14 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 | Old host that never acks stays pending apply | gen ≠ ack | — | Old `fleet-host` binary never clears the pill |
 | Remove worker (confirm / cancel) | Revoke → disabled | Confirm removes; Cancel aborts | Revoked guest cannot lease; re-pair required |
 
-### Control plane runner
+### Control plane is not a runner
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Always first; `kind=control_plane`; stable per-ws id | `control_plane_runner_id`; list prepend | First card name Control plane, “this process” | n/a |
-| Not a `worker_hosts` row (no pair / lease / heartbeat) | GET/PATCH plane id; DELETE 400; no pair-token | No Remove; no pair panel on the plane | Must **not** appear in `list_assignable` |
-| Settings persist (`workspace_plane_runners`) | upsert + default-on | Apply on plane is immediate (no pending apply) | n/a |
-| No software line on the plane card | `as_public` software = none | Plane card has no `software …` | n/a |
-| Stop taking jobs on plane → no local `SANDBOX_BACKEND` | `taking_native_jobs`; spawn skip | Stop + Apply on plane | With no remote host, a ready task stays ready |
-| Plane taking jobs + no remote → local spawn | Default allow_host true | — | Ready task runs locally when plane is on |
-| Local job count vs max / jobs on the plane card | **required when implemented** (TODO today) | same | same |
+| Not in `GET …/worker-hosts` | list has no `kind=control_plane` | Empty state: No workers yet; API is not a runner | n/a |
+| Synthetic plane id is not a host | GET/PATCH/DELETE/pair-token → 404 | No Control plane card | Must **not** appear in `list_assignable` |
+| No host → task stays ready | spawn skip when no assignable host | Ready column does not move | Same |
+| Same-box install is a normal pair | Add worker → pair `fleet-host` | That card is a host, not the API | Pair on the API machine works |
 
 ### Package banner (header)
 

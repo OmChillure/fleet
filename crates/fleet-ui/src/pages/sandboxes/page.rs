@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{kill_sandbox, list_sandboxes, SandboxRow};
+use crate::Route;
 
 fn short_id(id: &str) -> String {
     id.get(..8).unwrap_or(id).to_string()
@@ -200,6 +201,14 @@ fn SandboxCard(
                 div { class: "flex items-center gap-2",
                     span { class: "text-xs text-[var(--app-muted)]",
                         "{row.progress_pct}%"
+                    }
+                    Link {
+                        to: Route::SessionDetail {
+                            workspace_id: workspace_id.clone(),
+                            session_id: row.id.clone(),
+                        },
+                        class: "text-[11px] text-[var(--app-accent)] underline",
+                        "Watch"
                     }
                     if live {
                         button {

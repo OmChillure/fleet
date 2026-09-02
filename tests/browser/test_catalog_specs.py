@@ -142,19 +142,16 @@ class CatalogSpecsE2ETests(unittest.TestCase):
         wait_dx_ready(page)
         page.wait_for_selector("h1", state="attached", timeout=60_000)
 
-        plane = page.locator("article").first
-        plane.wait_for(timeout=10_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertNotIn("i7-10610U", plane_text)
-        self.assertNotIn("Intel UHD Graphics", plane_text)
+        self.assertEqual(
+            page.locator("article").filter(has_text="Control plane").count(),
+            0,
+        )
 
         card = page.locator("article").filter(has_text=name)
         self.assertGreater(
             card.count(),
             0,
-            f"host card {name!r} missing (not Control plane). "
-            f"body={page.inner_text('body')[:800]!r}",
+            f"host card {name!r} missing. body={page.inner_text('body')[:800]!r}",
         )
         card.first.get_by_text("i7-10610U").wait_for(timeout=15_000)
         text = card.first.inner_text()

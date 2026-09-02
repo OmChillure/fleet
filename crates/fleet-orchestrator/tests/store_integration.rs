@@ -247,3 +247,184 @@ async fn update_fleet_settings_ollama_and_rejects_unknown_as_off() {
     assert_eq!(again.fleet_llm, "off");
     assert_eq!(again.max_agents, 1);
 }
+
+#[tokio::test]
+async fn live_events_persist_and_duplicate_seq_is_noop() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("live-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let body = sample_body(project.id);
+    let plan_id = body.plan_id;
+    let run_id = body.run_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
+        .bind(task.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let session_id = Uuid::new_v4();
+    assert!(store.cas_assign_task(task.id, session_id, 1).await.unwrap());
+    store
+        .insert_session_spawning(&fleet_orchestrator::store::NewWorkerSession {
+            id: session_id,
+            project_id: project.id,
+            run_id,
+            board_task_id: task.id,
+            attempt: 1,
+            runtime_backend: "remote".into(),
+            worker_token: "tok-live".into(),
+            worker_profile: "coding".into(),
+            work_dir: Some("/plane/only".into()),
+        })
+        .await
+        .unwrap();
+
+    let ts = chrono::Utc::now();
+    let n = store
+        .insert_live_events(
+            session_id,
+            7,
+            &[(ts, "update".into(), "built calculator".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let n2 = store
+        .insert_live_events(
+            session_id,
+            7,
+            &[(ts, "update".into(), "should not appear twice".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n2, 0, "duplicate report_seq must not append");
+
+    let live = store.list_live_events(session_id, 50).await.unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0]["text"], "built calculator");
+    assert_eq!(live[0]["kind"], "update");
+
+    let n3 = store
+        .insert_live_events(
+            session_id,
+            8,
+            &[
+                (ts, "update".into(), "the".into()),
+                (ts, "update".into(), "the".into()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n3, 2);
+    let act = store
+        .list_recent_live_activity(&[session_id], 40)
+        .await
+        .unwrap();
+    assert_eq!(act.len(), 3);
+    let keys: std::collections::HashSet<String> = act
+        .iter()
+        .map(|e| {
+            format!(
+                "{}-{}-{}",
+                e["session_id"], e["report_seq"], e["idx"]
+            )
+        })
+        .collect();
+    assert_eq!(keys.len(), act.len(), "activity rows must be uniquely keyed");
+}
+
+#[tokio::test]
+async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("repl-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let body = sample_body(project.id);
+    let plan_id = body.plan_id;
+    let run_id = body.run_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
+        .bind(task.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let first = store
+        .begin_spawn_assignment(
+            task.id,
+            project.id,
+            run_id,
+            "coding",
+            "remote",
+            Some("/tmp/a"),
+        )
+        .await
+        .unwrap()
+        .expect("first spawn");
+    store
+        .apply_heartbeat(first.session_id, task.id, 1, Some(40))
+        .await
+        .unwrap();
+
+    let retired = store
+        .retire_live_sessions(task.id, None, "worker_replaced")
+        .await
+        .unwrap();
+    assert_eq!(retired.len(), 1);
+    assert!(!store
+        .complete_spawn_failure(first.session_id)
+        .await
+        .unwrap());
+
+    sqlx::query("UPDATE board_tasks SET status = 'ready', claimed_session_id = NULL WHERE id = $1")
+        .bind(task.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let second = store
+        .begin_spawn_assignment(
+            task.id,
+            project.id,
+            run_id,
+            "coding",
+            "remote",
+            Some("/tmp/b"),
+        )
+        .await
+        .unwrap()
+        .expect("second spawn");
+    let retired2 = store
+        .retire_live_sessions(task.id, Some(second.session_id), "superseded")
+        .await
+        .unwrap();
+    assert!(retired2.is_empty(), "first session already exited");
+
+    store
+        .apply_heartbeat(first.session_id, task.id, 9, Some(99))
+        .await
+        .unwrap();
+    let old = store.get_session(first.session_id).await.unwrap().unwrap();
+    assert_eq!(old.status, "exited");
+    assert_eq!(old.exit_reason.as_deref(), Some("worker_replaced"));
+
+    let task_now = store.get_task(project.id, task.id).await.unwrap().unwrap();
+    assert_eq!(task_now.claimed_session_id, Some(second.session_id));
+    assert_ne!(task_now.progress_pct, 99);
+
+    assert!(
+        store
+            .live_claim_is_other_attempt(task.id, first.attempt)
+            .await
+            .unwrap()
+    );
+    assert!(store.task_has_live_session(task.id).await.unwrap());
+}

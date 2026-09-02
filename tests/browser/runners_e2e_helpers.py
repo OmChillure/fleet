@@ -184,9 +184,26 @@ def goto_self_hosted(page, workspace_url: str) -> None:
         wait_dx_ready(page)
         try:
             page.wait_for_selector("h1", state="attached", timeout=20_000)
+            page.get_by_role("button", name="Add worker").wait_for(timeout=10_000)
             return
         except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
             last_err = e
             time.sleep(1)
     if last_err is not None:
         raise last_err
+
+
+def assert_no_control_plane_card(page) -> None:
+    """The API process is not a runner and must not render a host card."""
+    n = page.locator("article").filter(has_text="Control plane").count()
+    if n:
+        raise AssertionError(
+            f"synthetic Control plane card must not appear ({n}). "
+            f"body={page.inner_text('body')[:400]!r}"
+        )
+
+
+def assert_hosts_have_no_plane(listed: dict[str, Any]) -> None:
+    for h in listed.get("hosts") or []:
+        if h.get("kind") == "control_plane":
+            raise AssertionError(f"list must not include a plane host: {h!r}"[:800])

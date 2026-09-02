@@ -150,6 +150,10 @@ pub async fn schedule_and_spawn(
         let Some(assignment) = assignment else {
             continue;
         };
+        let retired = store
+            .retire_live_sessions(task.id, Some(assignment.session_id), "superseded")
+            .await?;
+        signal_retired_sessions(store, project_id, &retired).await;
 
         let session_work = data_dir
             .join("projects")
@@ -361,6 +365,31 @@ fn worker_url_is_loopback(url: &str) -> bool {
     agent_fleet_contracts::url_is_loopback(url)
 }
 
+pub async fn signal_retired_sessions(
+    store: &Store,
+    project_id: Uuid,
+    sessions: &[crate::store::WorkerSessionRow],
+) {
+    for s in sessions {
+        if s.runtime_backend != remote::BACKEND {
+            continue;
+        }
+        let Some(host_id) =
+            remote::host_id_from_handle(s.runtime_handle.as_deref().unwrap_or(""))
+        else {
+            continue;
+        };
+        let _ = crate::store::enqueue_signal_session(
+            store,
+            project_id,
+            s.id,
+            host_id,
+            "kill",
+        )
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +422,13 @@ pub async fn apply_retry_after_failure(
     exit_reason: crate::domain::ExitReason,
 ) -> Result<(), TickError> {
     use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
+
+    if store
+        .live_claim_is_other_attempt(task_id, attempt)
+        .await?
+    {
+        return Ok(());
+    }
 
     // load approximate status as in_progress for policy
     let decision = should_retry(

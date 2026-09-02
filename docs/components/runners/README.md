@@ -23,10 +23,10 @@ Testing (required three layers + how to run):
 | Fleet Cloud | Our paid pool | Sandboxed | **MR 3** — placeholder |
 | Partners | Other people’s unused capacity | Sandboxed | **MR 3** — placeholder + [design](partners.md) |
 
-Tick already prefers an assignable remote host, else local
-`SANDBOX_BACKEND` (the workspace **control plane** runner — always first
-on Self-hosted, enable/disable like the others). Later MRs extend *who*
-can be assignable. Do not invent a second spawn path.
+Tick assigns to a paired `fleet-host`. The API process is not a runner
+and does not appear on Self-hosted. No host → the task stays ready.
+Same-machine install is **Add worker** then pair. Do not invent a
+second spawn path.
 
 ---
 

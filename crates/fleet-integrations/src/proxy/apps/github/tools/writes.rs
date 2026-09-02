@@ -771,3 +771,73 @@ pub(crate) async fn add_comment(
     )
 }
 
+pub(crate) async fn merge_pr(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let (owner, repo) = match require_owner_repo(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("github", "merge_pr", "bad_args", e, None),
+    };
+    let number = match args
+        .get("number")
+        .or_else(|| args.get("pr"))
+        .or_else(|| args.get("pull_number"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        Some(n) => n,
+        None => {
+            return ProxyResult::err(
+                "github",
+                "merge_pr",
+                "bad_args",
+                "number (PR) is required",
+                None,
+            );
+        }
+    };
+    let method = args
+        .get("merge_method")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("squash");
+    if !matches!(method, "merge" | "squash" | "rebase") {
+        return ProxyResult::err(
+            "github",
+            "merge_pr",
+            "bad_args",
+            "merge_method must be merge, squash, or rebase",
+            None,
+        );
+    }
+    let mut payload = json!({ "merge_method": method });
+    if let Some(title) = args
+        .get("commit_title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        payload["commit_title"] = json!(title);
+    }
+    let (status, body) = github_put(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}/merge"),
+        &payload,
+    )
+    .await;
+    if !(200..300).contains(&status) {
+        return upstream_err("merge_pr", status, &body);
+    }
+    ProxyResult::ok_result(
+        "github",
+        "merge_pr",
+        format!("Merged PR #{number} on {owner}/{repo} ({method})"),
+        json!({
+            "merged": body.get("merged"),
+            "sha": body.get("sha"),
+            "message": body.get("message"),
+            "html_url": format!("https://github.com/{owner}/{repo}/pull/{number}"),
+        }),
+        Some(status),
+    )
+}
+

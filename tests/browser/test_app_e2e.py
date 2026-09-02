@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
+    assert_no_control_plane_card,
     create_host,
     goto_self_hosted,
     heartbeat,
@@ -343,13 +344,23 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_url("**/dashboard", timeout=20_000)
         self.assertRegex(self.page.url, r"/[0-9a-f-]{36}/dashboard")
         self.page.wait_for_selector("h1")
-        self.assertEqual(self.page.inner_text("h1").strip(), "Dashboard")
+        self.assertEqual(self.page.inner_text("h1").strip(), "Workforce")
         type(self).workspace_url = self.page.url.rsplit("/dashboard", 1)[0]
 
     def test_04_sidebar_app_pages(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
+
+        page.get_by_role("link", name="Workforce", exact=True).click()
+        page.wait_for_url("**/dashboard", timeout=10_000)
+        page.wait_for_selector("h1")
+        self.assertEqual(page.inner_text("h1").strip(), "Workforce")
+        self.assertGreater(
+            page.get_by_text("Set a goal").count(),
+            0,
+            "Workforce page missing Set a goal",
+        )
 
         page.get_by_role("link", name="Fleet", exact=True).click()
         page.wait_for_url("**/fleet", timeout=10_000)
@@ -427,13 +438,10 @@ class BrowserE2ETests(unittest.TestCase):
             page.get_by_role("button", name="Add worker").count() > 0,
             "Self-hosted runners page missing Add worker",
         )
-        # Plane is always first and is not a worker_hosts heartbeat row, so it
-        # shows "this process" instead of "last seen". Empty-state copy applies
-        # to worker hosts and stays hidden while the plane card is listed.
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=10_000)
+        assert_no_control_plane_card(page)
         runners_body = page.inner_text("body")
-        self.assertIn("Control plane", runners_body)
-        self.assertIn("this process", runners_body)
+        self.assertIn("No workers yet", runners_body)
+        self.assertIn("The API is not a runner", runners_body)
         cloud = nav.get_by_role("link", name="Cloud", exact=True)
         self.assertTrue(cloud.first.is_visible(), "sidebar missing Cloud")
         partners = nav.get_by_role("link", name="Partners", exact=True)
@@ -496,8 +504,7 @@ class BrowserE2ETests(unittest.TestCase):
         )
         self.assertIn("pending", card.lower())
         self.assertIn("Waiting to pair", card)
-        self.assertIn("this process", card)
-        self.assertIn("Control plane", card)
+        assert_no_control_plane_card(page)
         self.assertNotIn("heartbeating", card.lower())
         self.assertNotIn("Served packages", card)
         self.assertNotIn("Current runner build", card)
@@ -550,28 +557,9 @@ class BrowserE2ETests(unittest.TestCase):
         page = self.page
         page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        text = first.inner_text()
-        self.assertIn("Control plane", text)
-        self.assertIn("this process", text.lower())
-        self.assertNotIn("software ", text.lower())
-        self.assertFalse(
-            first.get_by_role("button", name="Remove worker").count()
-            and first.get_by_role("button", name="Remove worker").first.is_visible(),
-            "control plane must not have Remove worker",
-        )
-        self.assertEqual(
-            first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
-            0,
-            "plane must not show a Native isolation checkbox",
-        )
-        self.assertEqual(
-            first.locator("label").filter(has_text="Sandboxed").count(),
-            0,
-            "plane must not show a Sandboxed isolation checkbox",
-        )
-        self.assertIn("does not run sandboxes", text)
+        assert_no_control_plane_card(page)
+        body = page.inner_text("body")
+        self.assertNotIn("does not run sandboxes", body.lower())
         ws = base.rstrip("/").rsplit("/", 1)[-1]
         fleet = self.page.request.get(f"{API}/api/workspaces/{ws}/fleet")
         if fleet.ok:
@@ -940,8 +928,6 @@ class BrowserE2ETests(unittest.TestCase):
             name,
             heartbeat_extra={"hardware": SPECS_HARDWARE},
         )
-        # Fresh navigation (not the 10s poll). dx rebuild overlay can cover
-        # h1; wait for Control plane as attached, retry once.
         last_err: Exception | None = None
         for _attempt in range(2):
             page.goto(
@@ -949,10 +935,7 @@ class BrowserE2ETests(unittest.TestCase):
                 wait_until="domcontentloaded",
             )
             try:
-                page.get_by_text("Control plane", exact=True).first.wait_for(
-                    state="attached",
-                    timeout=45_000,
-                )
+                page.get_by_role("button", name="Add worker").wait_for(timeout=45_000)
                 last_err = None
                 break
             except Exception as e:
@@ -960,22 +943,14 @@ class BrowserE2ETests(unittest.TestCase):
         if last_err is not None:
             raise last_err
 
-        plane = page.locator("article").first
-        plane.wait_for(timeout=10_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertNotIn("i7-10610U", plane_text)
-        self.assertNotIn("Intel UHD Graphics", plane_text)
-
+        assert_no_control_plane_card(page)
         card = page.locator("article").filter(has_text=name)
         self.assertGreater(
             card.count(),
             0,
-            f"host card {name!r} missing (not Control plane). "
-            f"body={page.inner_text('body')[:800]!r}",
+            f"host card {name!r} missing. body={page.inner_text('body')[:800]!r}",
         )
         text = card.first.inner_text()
-        self.assertNotIn("Control plane", text)
 
         # clean_cpu_model strips (R)/(TM); model fragment stays.
         self.assertIn("i7-10610U", text)
@@ -1078,9 +1053,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(machine, f"pair missing machine_token: {paired!r}"[:400])
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
-        page.get_by_text("Control plane", exact=True).first.wait_for(
-            state="attached", timeout=90_000
-        )
+        page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         card = page.locator("article").filter(has_text=name)
         card.first.wait_for(state="attached", timeout=30_000)
         card = card.first
@@ -1289,12 +1262,7 @@ class BrowserE2ETests(unittest.TestCase):
             )
         card = workers.first
         card.wait_for(timeout=10_000)
-        first = page.locator("article").first
-        self.assertIn(
-            "Control plane",
-            first.inner_text(),
-            "control plane must stay first; rename a worker card",
-        )
+        assert_no_control_plane_card(page)
 
         card.get_by_title("Rename").click()
         inp = page.locator("input[autofocus]")
@@ -1329,7 +1297,6 @@ class BrowserE2ETests(unittest.TestCase):
     def test_14j_last_seen(self) -> None:
         """Pending card: last seen never. After pair+heartbeat: just now / relative.
 
-        Plane uses "this process" — do not require last-seen there.
         Self-contained so this method can run alone.
         """
         page = self.page
@@ -1346,14 +1313,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-
-        plane = page.locator("article").first
-        plane.wait_for(timeout=10_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertIn("this process", plane_text.lower())
-        # Plane is this process, not a last-seen heartbeat row.
-        self.assertNotIn("last seen", plane_text.lower())
+        assert_no_control_plane_card(page)
 
         pending = page.locator("article").filter(has_text=name)
         pending.first.wait_for(timeout=15_000)
@@ -1387,11 +1347,7 @@ class BrowserE2ETests(unittest.TestCase):
             r"last seen (just now|\d+[smhd] ago)",
             "live card must show just now or relative last seen after pair+heartbeat",
         )
-
-        plane_after = page.locator("article").first.inner_text()
-        self.assertIn("Control plane", plane_after)
-        self.assertIn("this process", plane_after.lower())
-        self.assertNotIn("last seen", plane_after.lower())
+        assert_no_control_plane_card(page)
 
 
 
@@ -1429,16 +1385,10 @@ class BrowserE2ETests(unittest.TestCase):
         )
         # Poll ~10s would hang networkidle; reload from the list.
         goto_self_hosted(page, base)
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=30_000)
         page.reload(wait_until="domcontentloaded")
         _wait_dx_ready(page)
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=30_000)
-
-        plane = page.locator("article").first
-        plane.wait_for(timeout=10_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertNotIn("software ", plane_text.lower())
+        page.get_by_role("button", name="Add worker").wait_for(timeout=30_000)
+        assert_no_control_plane_card(page)
 
         card = page.locator("article").filter(has_text=name)
         card.first.wait_for(timeout=15_000)
@@ -1470,18 +1420,7 @@ class BrowserE2ETests(unittest.TestCase):
         create_host(page, ws, name)
         goto_self_hosted(page, base)
 
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        self.assertIn(
-            "Control plane",
-            first.inner_text(),
-            "control plane must stay first before remove",
-        )
-        self.assertFalse(
-            first.get_by_role("button", name="Remove worker").count()
-            and first.get_by_role("button", name="Remove worker").first.is_visible(),
-            "control plane must not have Remove worker",
-        )
+        assert_no_control_plane_card(page)
 
         card = page.locator("article").filter(has_text=name)
         card.wait_for(timeout=10_000)
@@ -1515,19 +1454,7 @@ class BrowserE2ETests(unittest.TestCase):
             "Confirm must drop the worker from the active list",
         )
         self.assertNotIn(name, page.inner_text("body"))
-
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        self.assertIn(
-            "Control plane",
-            first.inner_text(),
-            "control plane must stay first after confirm",
-        )
-        self.assertFalse(
-            first.get_by_role("button", name="Remove worker").count()
-            and first.get_by_role("button", name="Remove worker").first.is_visible(),
-            "must not remove the control plane",
-        )
+        assert_no_control_plane_card(page)
 
 
     def test_14b_pending_apply_outdated(self) -> None:
@@ -1545,12 +1472,12 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         page.wait_for_selector("h1", timeout=30_000)
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=20_000)
+        page.get_by_role("button", name="Add worker").wait_for(timeout=20_000)
         card = page.locator("article").filter(has_text=name)
         if card.count() == 0:
             page.wait_for_timeout(1500)
             page.reload(wait_until="domcontentloaded")
-            page.get_by_text("Control plane", exact=True).first.wait_for(timeout=20_000)
+            page.get_by_role("button", name="Add worker").wait_for(timeout=20_000)
             card = page.locator("article").filter(has_text=name)
         try:
             card.first.wait_for(timeout=20_000)
@@ -1779,21 +1706,10 @@ class BrowserE2ETests(unittest.TestCase):
             type(self).workspace_url = workspace_url
 
         goto_self_hosted(page, workspace_url)
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        text = first.inner_text()
-        self.assertIn("Control plane", text)
-        self.assertIn("does not run sandboxes", text)
-        self.assertEqual(
-            first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
-            0,
-            "plane must not show Native isolation",
-        )
-        self.assertEqual(
-            first.locator("label").filter(has_text="Sandboxed").count(),
-            0,
-            "plane must not show Sandboxed isolation",
-        )
+        assert_no_control_plane_card(page)
+        body = page.inner_text("body")
+        self.assertIn("No workers yet", body)
+        self.assertIn("The API is not a runner", body)
 
     def test_14d_update_now(self) -> None:
         # catalog:e2e-update-now — Auto-update off + Update now when behind.
@@ -1845,20 +1761,8 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         _wait_dx_ready(page)
-        plane_label = page.get_by_text("Control plane", exact=True)
-        try:
-            plane_label.first.wait_for(state="attached", timeout=90_000)
-        except Exception:
-            self.fail(
-                "Control plane missing after pair. "
-                f"url={page.url} body={page.inner_text('body')[:1500]!r}"
-            )
-        plane = page.locator("article").filter(has_text="Control plane").first
-        self.assertEqual(
-            plane.get_by_role("button", name="Update now").count(),
-            0,
-            "Control plane must not show Update now",
-        )
+        page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
+        assert_no_control_plane_card(page)
 
         card = page.locator("article").filter(has_text=name)
         card.first.wait_for(state="attached", timeout=30_000)
@@ -1999,7 +1903,8 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=10_000)
+        page.get_by_role("button", name="Add worker").wait_for(timeout=10_000)
+        assert_no_control_plane_card(page)
         self.assertIn("/runners/self-hosted", page.url)
         url_before = page.url
 

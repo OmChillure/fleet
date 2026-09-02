@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use super::api::{
-    cancel_run, ensure_fleet, kill_session, list_runs, list_sessions, list_tasks, resume_task,
-    run_tick, start_fixture,
+    cancel_run, ensure_fleet, kill_session, list_runs, list_sessions, list_tasks, replace_session,
+    resume_task, run_tick, start_fixture,
 };
 use crate::Route;
 use gloo_timers::future::TimeoutFuture;
@@ -22,6 +22,7 @@ struct TaskCard {
     worker_profile: String,
     block_reason: String,
     hitl_notes: String,
+    session_id: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -62,6 +63,7 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                             .to_string(),
                         block_reason: t["block_reason"].as_str().unwrap_or("").to_string(),
                         hitl_notes: t["hitl_notes"].as_str().unwrap_or("").to_string(),
+                        session_id: t["claimed_session_id"].as_str().unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -504,6 +506,35 @@ pub fn Fleet(workspace_id: String) -> Element {
                                     }
                                     if matches!(s.status.as_str(), "spawning" | "healthy" | "stuck" | "killing") {
                                         button {
+                                            class: "rounded-md border border-[var(--app-border)] px-2 py-0.5 text-[11px] text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                                            r#type: "button",
+                                            disabled: busy(),
+                                            onclick: {
+                                                let workspace_id = workspace_id.clone();
+                                                let sid = s.id.clone();
+                                                move |_| {
+                                                    if busy() { return; }
+                                                    busy.set(true);
+                                                    let ws = workspace_id.clone();
+                                                    let sid = sid.clone();
+                                                    spawn(async move {
+                                                        match replace_session(&ws, &sid).await {
+                                                            Ok(_) => status_line.set(format!("Replaced worker {sid} — task stays on the board")),
+                                                            Err(e) => status_line.set(e.message()),
+                                                        }
+                                                        if let Ok(s) = list_sessions(&ws).await {
+                                                            sessions.set(parse_sessions(&s));
+                                                        }
+                                                        if let Ok(t) = list_tasks(&ws).await {
+                                                            tasks.set(parse_tasks(&t));
+                                                        }
+                                                        busy.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Replace"
+                                        }
+                                        button {
                                             class: "rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50",
                                             r#type: "button",
                                             disabled: busy(),
@@ -575,6 +606,16 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "try {t.attempt}" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.progress_pct}%" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.worker_profile}" }
+                                                    if !t.session_id.is_empty() {
+                                                        Link {
+                                                            to: Route::SessionDetail {
+                                                                workspace_id: workspace_id.clone(),
+                                                                session_id: t.session_id.clone(),
+                                                            },
+                                                            class: "text-[10px] text-[var(--app-accent)] underline",
+                                                            "Watch"
+                                                        }
+                                                    }
                                                 }
                                                 if t.status == "blocked" {
                                                     if !t.block_reason.is_empty() {

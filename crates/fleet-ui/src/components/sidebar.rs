@@ -322,7 +322,7 @@ pub fn Sidebar() -> Element {
                     icon: rsx! { IconMonitor {} },
                     NavSubLink {
                         to: Route::Dashboard { workspace_id: workspace_id.clone() },
-                        label: "Dashboard",
+                        label: "Workforce",
                     }
                     NavSubLink {
                         to: Route::Fleet { workspace_id: workspace_id.clone() },

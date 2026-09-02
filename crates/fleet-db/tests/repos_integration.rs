@@ -389,8 +389,72 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
     )
     .await
     .expect("closed upsert");
-    assert_eq!(after_close.state, "launched");
+    assert_eq!(
+        after_close.state, "done",
+        "closed on the board while launched must mark the inbox row done"
+    );
     assert_eq!(after_close.summary, "second");
+}
+
+#[tokio::test]
+async fn ticket_reopen_after_failed_run_and_mark_done() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let _ = tickets::upsert_monitor(
+        &pool,
+        &tickets::UpsertMonitor {
+            workspace_id,
+            enabled: true,
+            providers: vec!["jira".into()],
+            github_repos: vec![],
+            jira_jql: Some("project = ENG AND status != Done".into()),
+            slack_channels: vec![],
+            notion_databases: vec![],
+            auto_launch: true,
+            started_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("monitor");
+
+    let item = tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "jira".into(),
+            external_key: "ENG-9".into(),
+            title: "Broken login".into(),
+            url: None,
+            summary: "fix it".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox");
+    assert_eq!(item.state, "open");
+    assert!(item.run_id.is_none());
+
+    let run = Uuid::now_v7();
+    tickets::mark_launched(&pool, workspace_id, "jira", "ENG-9", run)
+        .await
+        .expect("launch")
+        .expect("row");
+
+    let reopened = tickets::reopen_ticket(&pool, workspace_id, "jira", "ENG-9")
+        .await
+        .expect("reopen")
+        .expect("row");
+    assert_eq!(reopened.state, "open");
+    assert!(reopened.run_id.is_none(), "failed run must clear run_id");
+
+    tickets::mark_launched(&pool, workspace_id, "jira", "ENG-9", Uuid::now_v7())
+        .await
+        .expect("relaunch");
+    let done = tickets::mark_inbox_done(&pool, workspace_id, "jira", "ENG-9")
+        .await
+        .expect("done")
+        .expect("row");
+    assert_eq!(done.state, "done");
 }
 
 // cases: create → claim wake → patch complete

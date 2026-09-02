@@ -60,14 +60,16 @@ async fn run() -> Result<()> {
     let client = OrchClient::new(&cfg.api_base, &cfg.project_id, &cfg.session_id, &cfg.token)?;
 
     client.post_status(1, "running", None).await?;
-    client.post_heartbeat(2, Some(5)).await?;
+    client.post_heartbeat(2, Some(5), &[]).await?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let seq = Arc::new(AtomicI32::new(3));
+    let live_out: acp::LiveOut = Arc::new(std::sync::Mutex::new(Vec::new()));
     let hb_stop = stop.clone();
     let hb_seq = seq.clone();
     let hb_client = client.clone();
     let hb_interval = cfg.heartbeat_interval;
+    let hb_live = live_out.clone();
     let hb = tokio::spawn(async move {
         let mut pct = 10i32;
         loop {
@@ -77,20 +79,26 @@ async fn run() -> Result<()> {
             }
             pct = (pct + 15).min(90);
             let s = hb_seq.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = hb_client.post_heartbeat(s, Some(pct)).await {
+            let events = drain_live(&hb_live);
+            if let Err(e) = hb_client.post_heartbeat(s, Some(pct), &events).await {
+                restore_live(&hb_live, events);
                 warn!(error = %e, "heartbeat failed");
             }
         }
     });
 
-    let work = execute_agent(&cfg).await;
+    let work = execute_agent(&cfg, live_out.clone()).await;
     stop.store(true, Ordering::Relaxed);
     let _ = tokio::time::timeout(Duration::from_secs(2), hb).await;
 
     match work {
         Ok(summary) => {
             let s = seq.fetch_add(1, Ordering::Relaxed);
-            let _ = client.post_heartbeat(s, Some(100)).await;
+            let events = drain_live(&live_out);
+            if let Err(e) = client.post_heartbeat(s, Some(100), &events).await {
+                restore_live(&live_out, events);
+                warn!(error = %e, "final heartbeat failed");
+            }
             let s = seq.fetch_add(1, Ordering::Relaxed);
             let proof = std::fs::read_to_string(cfg.work_dir.join("result.md")).ok();
             let files = guest_files(&cfg.work_dir);
@@ -157,7 +165,25 @@ async fn provision_if_needed(cfg: &DriverConfig) -> Result<std::path::PathBuf, W
     }
 }
 
-async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
+fn drain_live(buf: &acp::LiveOut) -> Vec<serde_json::Value> {
+    buf.lock().map(|mut g| g.drain(..).collect()).unwrap_or_default()
+}
+
+fn restore_live(buf: &acp::LiveOut, mut events: Vec<serde_json::Value>) {
+    if events.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = buf.lock() {
+        events.append(&mut *g);
+        if events.len() > acp::LIVE_BUF_CAP {
+            let overflow = events.len() - acp::LIVE_BUF_CAP;
+            events.drain(..overflow);
+        }
+        *g = events;
+    }
+}
+
+async fn execute_agent(cfg: &DriverConfig, live_out: acp::LiveOut) -> Result<String, WorkError> {
     let agent_cwd = provision_if_needed(cfg).await?;
     let prompt = prompt::load_prompt(&cfg.work_dir);
     let mut spec = harness::resolve(
@@ -193,6 +219,7 @@ async fn execute_agent(cfg: &DriverConfig) -> Result<String, WorkError> {
         auto_approve: cfg.auto_approve,
         timeout: cfg.timeout,
         extra_env,
+        live_out: Some(live_out),
     })
     .await
     .map_err(|e| WorkError::Failed(format!("acp: {e:#}")))?;

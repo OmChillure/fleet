@@ -165,7 +165,7 @@ Workspace membership is checked on every scoped route. Non-member → `403 not a
 | Toggle rail | Collapse to 14-wide (brand + toggle only) or expand to 64-wide. Closing also closes the workspace menu. |
 | Click brand “Agent Fleet” | Navigate to marketing `/` (still logged in). |
 | Expand/collapse Chat | Sub: **New chat**, **Chat history**. |
-| Expand/collapse Monitoring | Sub: **Dashboard**, **Fleet**, **Sandboxes**. |
+| Expand/collapse Monitoring | Sub: **Workforce**, **Fleet**, **Sandboxes**. |
 | Expand/collapse Agents | Sub: **All agents**, **Live sessions** (this last one is the *same route* as Chat history: `/{ws}/sessions`). |
 | Expand/collapse Workspace | Sub: **Integrations**, **Settings**. |
 | Navigate | Active section auto-expands. |
@@ -190,7 +190,7 @@ Toasts: success / error / info from forms and API failures.
 | `/login` | Login | Public |
 | `/signup` | Signup | Public |
 | `/oauth/done` | Popup closer (no shell) | Public (query/localStorage) |
-| `/:ws/dashboard` | Dashboard stub | Cookie |
+| `/:ws/dashboard` | Workforce (goals + board; writes run immediately) | Cookie |
 | `/:ws/chat` | New chat | Cookie |
 | `/:ws/chat/:id` | Existing thread | Cookie |
 | `/:ws/fleet` | Fleet board | Cookie |
@@ -205,13 +205,12 @@ Toasts: success / error / info from forms and API failures.
 
 ## 6. Pages — user × app
 
-### 6.1 Dashboard
+### 6.1 Dashboard (Workforce)
 
 | User does | App does |
 | --- | --- |
-| Open page | Renders `EmptyPage`: title “Dashboard”, “Fleet overview will live here.” **No API calls.** |
-
-This is the post-login landing page. It does not show runs, KPIs, or charts.
+| Open page | Title **Workforce**. Polls `GET …/fleet/overview` and `GET …/workforce`. Shows set-a-goal, open goals, team board, team chat. |
+| Set a goal | `POST …/workforce/goals`. Creates a durable goal + case so it still exists tomorrow. Writes (merge, Slack, Notion) run immediately. |
 
 ### 6.2 Chat
 
@@ -364,8 +363,8 @@ If a provider is not connected, the tool returns an error; the system prompt tel
 
 | Provider | Operations |
 | --- | --- |
-| github | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits`, `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
-| gitlab | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment` |
+| github | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits`, `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment`, `merge_pr` |
+| gitlab | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment`, `merge_mr` |
 | jira | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
 | linear | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
 | slack | `list_channels`, `list_users`, `post_message`, `get_channel_history` |
@@ -683,7 +682,7 @@ This is the “what happens when A meets B” layer.
 
 These look like product features in vision docs or UI chrome but are **not** implemented as interactions today:
 
-- Dashboard metrics, “fleet overview”, org-wide KPIs.
+- Org-wide KPIs beyond the Workforce goal/approval/run counts.
 - Invite users, roles other than owner, delete/rename workspace.
 - Wire personas into spawn (prompt/model/budget/tools are stored only).
 - Pick a persona when launching from chat or Fleet.

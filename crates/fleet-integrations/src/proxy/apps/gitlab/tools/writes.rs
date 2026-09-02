@@ -493,3 +493,44 @@ pub(crate) async fn create_mr(http: &reqwest::Client, token: &str, args: &Value)
         Some(status),
     )
 }
+
+pub(crate) async fn merge_mr(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let project = match require_project(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("gitlab", "merge_mr", "bad_args", e, None),
+    };
+    let iid = match args
+        .get("iid")
+        .or_else(|| args.get("number"))
+        .or_else(|| args.get("mr"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        Some(n) => n,
+        None => {
+            return ProxyResult::err(
+                "gitlab",
+                "merge_mr",
+                "bad_args",
+                "iid (merge request) is required",
+                None,
+            );
+        }
+    };
+    let (status, body) = gitlab_put(
+        http,
+        token,
+        &project_url(&project, &format!("/merge_requests/{iid}/merge")),
+        &json!({}),
+    )
+    .await;
+    if !(200..300).contains(&status) {
+        return upstream_err("merge_mr", status, &body);
+    }
+    ProxyResult::ok_result(
+        "gitlab",
+        "merge_mr",
+        format!("Merged MR !{iid} on {project}"),
+        map_mr(&body),
+        Some(status),
+    )
+}

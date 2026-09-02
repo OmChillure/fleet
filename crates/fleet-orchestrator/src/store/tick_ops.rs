@@ -161,20 +161,94 @@ impl Store {
         Ok(())
     }
 
-    pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<()> {
-        sqlx::query(
+    /// Only a still-spawning row may become `failed_spawn`. Replace/kill already
+    /// mark `exited`; a late host "spawn failed" must not overwrite that or the
+    /// retry path will reopen the task under a living sibling.
+    pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<bool> {
+        let res = sqlx::query(
             r#"
             UPDATE worker_sessions
             SET status = 'failed_spawn',
                 exit_reason = 'spawn_failed',
                 exited_at = now()
-            WHERE id = $1
+            WHERE id = $1 AND status = 'spawning'
             "#,
         )
         .bind(session_id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Exit every live session on a task except `keep` (the replacement).
+    /// Returns the rows that were still live so the caller can signal kill.
+    pub async fn retire_live_sessions(
+        &self,
+        task_id: Uuid,
+        keep: Option<Uuid>,
+        reason: &str,
+    ) -> Result<Vec<WorkerSessionRow>> {
+        let rows = sqlx::query_as::<_, WorkerSessionRow>(
+            r#"
+            UPDATE worker_sessions
+            SET status = 'exited',
+                exit_reason = $2,
+                exited_at = COALESCE(exited_at, now())
+            WHERE board_task_id = $1
+              AND status IN ('spawning', 'healthy', 'stuck', 'killing')
+              AND ($3::uuid IS NULL OR id <> $3)
+            RETURNING id, project_id, run_id, board_task_id, attempt, status,
+                      runtime_backend, runtime_handle, worker_token_hash,
+                      worker_profile, last_heartbeat_at, progress_pct, exit_reason,
+                      kill_grace_deadline, work_dir, started_at, exited_at, created_at
+            "#,
+        )
+        .bind(task_id)
+        .bind(reason)
+        .bind(keep)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn task_has_live_session(&self, task_id: Uuid) -> Result<bool> {
+        let row = sqlx::query_as::<_, (bool,)>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM worker_sessions
+                WHERE board_task_id = $1
+                  AND status IN ('spawning', 'healthy', 'stuck', 'killing')
+            )
+            "#,
+        )
+        .bind(task_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// True when the task is claimed by a still-live session from a later attempt.
+    /// A stale spawn-failed retry must not bounce that claim back to `ready`.
+    pub async fn live_claim_is_other_attempt(
+        &self,
+        task_id: Uuid,
+        attempt: i32,
+    ) -> Result<bool> {
+        let row = sqlx::query_as::<_, (i32, String)>(
+            r#"
+            SELECT s.attempt, s.status
+            FROM board_tasks t
+            JOIN worker_sessions s ON s.id = t.claimed_session_id
+            WHERE t.id = $1
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some_and(|(a, st)| {
+            a != attempt
+                && matches!(st.as_str(), "spawning" | "healthy" | "stuck" | "killing")
+        }))
     }
 
     pub async fn repair_assigned_to_in_progress(&self, project_id: Uuid) -> Result<u64> {
@@ -224,6 +298,7 @@ impl Store {
                 status = CASE WHEN status = 'spawning' THEN 'healthy' ELSE status END,
                 started_at = COALESCE(started_at, now())
             WHERE id = $1
+              AND status IN ('spawning', 'healthy', 'stuck')
             "#,
         )
         .bind(session_id)
@@ -240,11 +315,13 @@ impl Store {
                 started_at = COALESCE(started_at, now()),
                 updated_at = now()
             WHERE id = $1
+              AND claimed_session_id = $4
             "#,
         )
         .bind(task_id)
         .bind(seq)
         .bind(progress_pct)
+        .bind(session_id)
         .execute(&self.pool)
         .await?;
         Ok(())

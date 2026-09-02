@@ -344,8 +344,12 @@ class Demo:
             raise RuntimeError(
                 f"self-hosted runners page missing heading or text: {body[:300]}"
             )
-        if "Control plane" not in body and p.locator("button").filter(has_text="online").count() == 0:
-            raise RuntimeError("self-hosted page missing control plane or cards")
+        if (
+            "No workers yet" not in body
+            and p.locator("article").count() == 0
+            and p.locator("button").filter(has_text="online").count() == 0
+        ):
+            raise RuntimeError("self-hosted page missing empty state or cards")
         add = p.get_by_role("button", name="Add worker")
         if add.count():
             add.first.click()
@@ -367,7 +371,7 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
         card = p.locator("button").filter(has_text="last seen").or_(
-            p.locator("button").filter(has_text="Control plane")
+            p.locator("article").filter(has_text="Waiting to pair")
         )
         if card.count() and card.first.is_visible():
             card.first.click()
@@ -488,8 +492,9 @@ class Demo:
         base = self.ensure_session()
         p = self.page
         p.goto(f"{base}/dashboard", wait_until="networkidle")
-        p.get_by_text("Dashboard", exact=True).first.wait_for(timeout=15_000)
+        p.get_by_text("Workforce", exact=True).first.wait_for(timeout=15_000)
         p.get_by_text("Open runs").first.wait_for(timeout=10_000)
+        p.get_by_text("Set a goal").first.wait_for(timeout=10_000)
         pause(p, 1500)
 
     def scene_lab(self) -> None:

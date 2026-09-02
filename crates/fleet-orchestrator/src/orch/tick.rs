@@ -28,6 +28,14 @@ pub struct KillSessionReport {
     pub signaled: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReplaceSessionReport {
+    pub session_id: Uuid,
+    pub task_id: Uuid,
+    pub replaced: bool,
+    pub already_dead: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TickReport {
     pub tick_id: Uuid,
@@ -207,6 +215,80 @@ impl TickRunner {
             session_id,
             already_dead: false,
             signaled,
+        })
+    }
+
+    /// Kill a live sandbox and put its board task back to `ready` so a new
+    /// agent can pick it up. The workflow survives; the process does not.
+    pub async fn replace_session(
+        &self,
+        project_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<ReplaceSessionReport, TickError> {
+        let session = self
+            .store
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| TickError::Other("session not found".into()))?;
+        if session.project_id != project_id {
+            return Err(TickError::Other("session not found".into()));
+        }
+        let task_id = session.board_task_id;
+        if matches!(session.status.as_str(), "exited" | "failed_spawn") {
+            // A later attempt may already own the task. Do not unclaim it.
+            if !self.store.task_has_live_session(task_id).await? {
+                let _ = self
+                    .store
+                    .reopen_task_for_changes(
+                        task_id,
+                        "worker_replaced",
+                        "Previous worker already gone — task is ready for a new agent.",
+                    )
+                    .await;
+            }
+            return Ok(ReplaceSessionReport {
+                session_id,
+                task_id,
+                replaced: false,
+                already_dead: true,
+            });
+        }
+
+        let retired = self
+            .store
+            .retire_live_sessions(task_id, None, "worker_replaced")
+            .await?;
+        super::spawn::signal_retired_sessions(&self.store, project_id, &retired).await;
+        if session.runtime_backend != crate::sandbox::remote::BACKEND {
+            if let Some(ref hid) = session.runtime_handle {
+                let handle = crate::sandbox::RuntimeHandle {
+                    backend: session.runtime_backend.clone(),
+                    id: hid.clone(),
+                };
+                let _ = self
+                    .runtime
+                    .signal(&handle, crate::sandbox::Signal::Term)
+                    .await;
+                let _ = self
+                    .runtime
+                    .signal(&handle, crate::sandbox::Signal::Kill)
+                    .await;
+                let _ = self.runtime.destroy(&handle).await;
+            }
+        }
+        self.store
+            .reopen_task_for_changes(
+                task_id,
+                "worker_replaced",
+                "Worker replaced — task stays on the board for the next agent.",
+            )
+            .await?;
+
+        Ok(ReplaceSessionReport {
+            session_id,
+            task_id,
+            replaced: true,
+            already_dead: false,
         })
     }
 

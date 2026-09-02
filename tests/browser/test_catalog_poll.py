@@ -167,15 +167,13 @@ class CatalogPollTests(unittest.TestCase):
         goto_self_hosted(page, workspace_url)
         _wait_dx_ready(page)
         try:
-            page.get_by_text("Control plane", exact=True).first.wait_for(
-                timeout=30_000
-            )
+            page.get_by_role("button", name="Add worker").wait_for(timeout=30_000)
         except Exception as e:
             raise AssertionError(
-                f"Control plane card missing after landing: {e}. "
+                f"Self-hosted page missing after landing: {e}. "
                 f"url={page.url} body={page.inner_text('body')[:1200]!r}"
             ) from e
-        # First list_workers_page has landed (plane card). Stay on this URL.
+        # First list_workers_page has landed. Stay on this URL.
         self.assertIn("/runners/self-hosted", page.url)
         url_before = page.url
 

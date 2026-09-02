@@ -441,13 +441,9 @@ token **unchanged**):
 4. If a host is chosen: enqueue `work_claims` `spawn_session` with the
    payload above; `complete_spawn_success` with handle `host:{id}` and
    backend `remote`. Do **not** `ProcessRuntime::spawn` on the API box.
-5. If none: existing local `runtime.spawn` (stub/process/local/docker),
-   unless the workspace **control plane runner** is not taking native jobs
-   (`workspace_plane_runners.allow_host = false`). That runner is always
-   first on `GET …/worker-hosts` (`kind=control_plane`); it is not a
-   `worker_hosts` row and has no lease/heartbeat.
-   TODO: count local sessions against plane `max_concurrent`; show them
-   on the card; do not invent a claim for the plane.
+5. If none: leave the task `ready`. The control plane is not a host and
+   is not listed on `GET …/worker-hosts`. Production does not local-spawn
+   on the API box. Tests may set `allow_local_spawn`.
 6. **Exception:** if no assignable host but a paired host in this workspace
    is `software_updating` and `last_seen` within ~2 minutes, **do not**
    local-spawn. Leave the task `ready`. Offline without that flag keeps

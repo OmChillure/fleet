@@ -81,6 +81,10 @@ pub fn key_for_message(tenant: impl AsRef<str>, msg: &crate::BusMessage) -> Opti
         let id = msg.envelope.sandbox_id?;
         return Some(key_for_sandbox_event(tenant, id, typ));
     }
+    if msg.type_name() == "agent.event" {
+        let id = msg.envelope.session_id?;
+        return Some(key_for_session_event(tenant, id, "agent"));
+    }
     None
 }
 
@@ -143,6 +147,30 @@ mod tests {
         assert_eq!(
             key_for_message("default", &msg).unwrap(),
             format!("fleet/default/session/{sid}/event/completed")
+        );
+    }
+
+    #[test]
+    fn key_for_message_agent_event() {
+        use agent_fleet_contracts::{
+            AgentEvent, BusMessage, MessageBody, Producer, Redaction, SessionId, TurnId,
+        };
+        let sid = SessionId::new();
+        let msg = BusMessage::new(
+            Producer::Driver,
+            MessageBody::AgentEvent(AgentEvent {
+                session_id: sid,
+                turn_id: TurnId::new(),
+                seq: 1,
+                kind: "batch".into(),
+                acp_method: None,
+                payload: None,
+                redaction: Redaction::None,
+            }),
+        );
+        assert_eq!(
+            key_for_message("default", &msg).unwrap(),
+            format!("fleet/default/session/{sid}/event/agent")
         );
     }
 
