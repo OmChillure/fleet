@@ -4,9 +4,9 @@ Creates, observes, and destroys sandboxes on hosting backends. Emits async lifec
 
 **Kubernetes hosting** is implemented as `FleetSandbox` CRs reconciled by
 [`fleet-operator`](../../../crates/fleet-operator/) (see [`infra/`](../../../infra/)).
-The orchestrator uses `SANDBOX_BACKEND` (`stub` / `process` / `docker` / `k8s`).
-In-cluster API defaults to `k8s` (creates/deletes CRs); the operator still
-turns them into pods. Host `.env` stays `stub`/`process`.
+Production tick assigns to a paired `fleet-host`. In-cluster, that host
+creates/deletes `FleetSandbox` CRs; the operator still turns them into
+pods. The API does not select a sandbox backend.
 
 This folder will hold the component-level design. Until then, the system-wide
 architecture and event catalogue live in:

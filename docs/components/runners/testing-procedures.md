@@ -39,7 +39,7 @@ plus driver/host. It never talks to a browser. `fleet-runners-view`
 | Crate | What |
 | --- | --- |
 | `fleet-db` `tests/worker_hosts_repos.rs` | pair consume-once, revoke, heartbeat, assignable, reclaim |
-| `fleet-db` `tests/plane_runners_repos.rs` | plane default-on, upsert, taking_native_jobs |
+| `fleet-db` `control_plane_runner_id` | plane id is stable and is never a paired host |
 | `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; plane first; plane DELETE 400 |
 | `fleet-orchestrator` `tests/assignable_runner.rs` | picker ignores cloud/partners; native-only |
 | `fleet-orchestrator` `tests/host_update_tick.rs` | hold ready while updating |
@@ -182,9 +182,8 @@ Do this on each id in the matrix
 11. **Reclaim.** Remove worker. Re-run install (or pair) on the **same**
     guest. `machine.id` (or hostname+platform) reclaims the same 8-hex
     id. The old disabled clone is hidden.
-12. **Plane gate.** With **no** assignable guest, turn the control plane
-    off (Stop taking jobs → Apply). A ready task stays ready (no local
-    `SANDBOX_BACKEND`). Turn the plane back on → local spawn works.
+12. **No host.** With **no** assignable guest, a ready task stays ready.
+    The API does not local-spawn.
 13. **Sandboxed.** Checking Sandboxed on the guest must **not** start a
     container/k3d job.
 14. **SHA reuse.** Second install of the same package skips matching

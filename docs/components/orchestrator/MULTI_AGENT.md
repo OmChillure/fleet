@@ -14,16 +14,14 @@ Hermes Kanban / Vibe Kanban / OpenHands pattern, on one host:
 Chat: small plans (≤8 tasks) wait until done in the HTTP turn. Larger plans start the first wave and return; the ticker drains the rest. Watch Fleet / Sandboxes / `get_fleet_status`.
 
 ```bash
-# .env
-SANDBOX_BACKEND=process   # or docker; local = bash fences via fleet_worker.sh
-# SANDBOX_BACKEND=local
+# .env — API is not a runner. Pair fleet-host for real jobs.
 FLEET_MAX_AGENTS=16       # hard ceiling; UI Settings sets the live count
 TICK_INTERVAL_S=5
 # Grok workers only (host/env — not in Settings):
 # FLEET_AGENT_BACKEND=grok
 ```
 
-`local` / `docker` workers run ```bash``` from the task spec. `process` is the fleet-worker binary.
+Paired `fleet-host` starts `fleet-driver`. Isolation is on that machine.
 
 ## True multi-agent (personas + LLM loop)
 

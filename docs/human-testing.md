@@ -170,7 +170,7 @@ Pick every scene that your diff can break. When unsure, record `all`.
 | `crates/fleet-db` chats repo | `chat` + `sessions` | new thread appears under Chat history |
 | `crates/fleet-orchestrator` tick, plans, store, team chat | `fleet` | Start 2-task run, Run tick, cards change column. LLM workers use TEAM_CHAT.md |
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
-| `crates/fleet-driver`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
+| `crates/fleet-driver` on a paired `fleet-host` | `fleet` then `sandboxes` | session card, host runtime, work dir. Pair a host before launch |
 | `fleet-host` + operator + CRD | `k8s` then `fleet` | CRD + operator + fleet-host present; Start run + tick → host creates a CR |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
 | `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | list (empty OK) + sidebar Cases; detail if a case exists |

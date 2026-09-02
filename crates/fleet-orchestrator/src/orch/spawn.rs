@@ -2,14 +2,13 @@
 
 use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
 use crate::sandbox::remote::{self, RemoteHostHandle};
-use crate::sandbox::{SandboxRuntime, SpawnRequest, fleet_worker_env};
+use crate::sandbox::{SpawnRequest, fleet_worker_env};
 use crate::store::{
     BoardSnapshot, Store, enqueue_remote_spawn, hold_ready_for_host_update,
     select_assignable_runner_preferring, workspace_has_updating_host,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -22,7 +21,6 @@ pub struct SpawnOutcome {
 
 pub async fn schedule_and_spawn(
     store: &Store,
-    runtime: &Arc<dyn SandboxRuntime>,
     project_id: Uuid,
     snap: &BoardSnapshot,
     max_agents: i32,
@@ -32,7 +30,6 @@ pub async fn schedule_and_spawn(
     fleet_llm: &str,
     fleet_llm_model: &str,
     integrations: crate::sandbox::io::IntegrationHandle,
-    allow_local_spawn: bool,
 ) -> Result<SpawnOutcome, TickError> {
     let active_runs: HashSet<Uuid> = store
         .list_active_run_ids_not_cancelling(project_id)
@@ -64,15 +61,6 @@ pub async fn schedule_and_spawn(
         spawn_failed: 0,
     };
     let mut plan_llms: HashMap<Uuid, crate::sandbox::agent_loop::WorkerLlm> = HashMap::new();
-    let mut local_in_use = snap
-        .sessions
-        .iter()
-        .filter(|s| {
-            s.runtime_backend != remote::BACKEND
-                && crate::domain::WorkerSessionStatus::from_db(&s.status)
-                    .is_some_and(|st| st.holds_capacity())
-        })
-        .count() as i32;
 
     for task in ready {
         if free <= 0 {
@@ -80,11 +68,8 @@ pub async fn schedule_and_spawn(
         }
         // Missing worker_hosts must not fail the tick.
         let plan_hint = store.get_plan_body(task.plan_id).await.ok().flatten();
-        let preferred = plan_hint
-            .as_ref()
-            .and_then(|p| p.policy.preferred_host_id);
-        let remote_host =
-            select_assignable_runner_preferring(store, project_id, preferred).await;
+        let preferred = plan_hint.as_ref().and_then(|p| p.policy.preferred_host_id);
+        let remote_host = select_assignable_runner_preferring(store, project_id, preferred).await;
         let updating = workspace_has_updating_host(store, project_id).await;
         if hold_ready_for_host_update(remote_host.is_some(), updating) {
             tracing::info!(
@@ -93,49 +78,13 @@ pub async fn schedule_and_spawn(
             );
             continue;
         }
-        // Production: control plane is not a runner. No host → leave ready.
-        if remote_host.is_none() && !allow_local_spawn {
+        // Control plane is not a runner. No host → leave ready.
+        let Some(chosen) = remote_host else {
             tracing::info!(
                 task_id = %task.id,
                 "no assignable host; leaving task ready"
             );
             continue;
-        }
-        // Test-only: allow_local_spawn uses the in-process sandbox runtime.
-        if remote_host.is_none() {
-            match fleet_db::repos::plane_runners::get_or_default(store.pool(), project_id).await {
-                Ok(plane) if !plane.taking_native_jobs() => {
-                    tracing::info!(
-                        task_id = %task.id,
-                        "control plane runner is not taking jobs; leaving task ready"
-                    );
-                    continue;
-                }
-                Ok(plane) => {
-                    let cap = plane.max_concurrent.clamp(1, 256);
-                    if local_in_use >= cap {
-                        tracing::info!(
-                            task_id = %task.id,
-                            local_in_use,
-                            cap,
-                            "control plane at max concurrent; leaving task ready"
-                        );
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        project_id = %project_id,
-                        "plane runner settings unavailable; no local spawn"
-                    );
-                }
-            }
-        }
-        let backend = if remote_host.is_some() {
-            remote::BACKEND
-        } else {
-            runtime.backend_name()
         };
         let assignment = store
             .begin_spawn_assignment(
@@ -143,7 +92,7 @@ pub async fn schedule_and_spawn(
                 project_id,
                 task.run_id,
                 &task.worker_profile,
-                backend,
+                remote::BACKEND,
                 None,
             )
             .await?;
@@ -263,86 +212,53 @@ pub async fn schedule_and_spawn(
         }
 
         let work_dir_str = req.work_dir.to_string_lossy().into_owned();
-        if let Some(chosen) = remote_host {
-            if worker_url_is_loopback(orchestrator_url)
-                && chosen.runtime == crate::store::HostRuntime::Container
-            {
-                tracing::warn!(
-                    url = %orchestrator_url,
-                    host_id = %chosen.id(),
-                    "refusing container assign: orchestrator URL is loopback"
-                );
-                store.complete_spawn_failure(assignment.session_id).await?;
-                apply_retry_after_failure(
-                    store,
-                    task.id,
-                    assignment.attempt,
-                    task.max_retries,
-                    false,
-                    crate::domain::ExitReason::SpawnFailed,
-                )
-                .await?;
-                outcome.spawn_failed += 1;
-                continue;
-            }
-            if worker_url_is_loopback(orchestrator_url) {
-                tracing::warn!(
-                    url = %orchestrator_url,
-                    "assigning a paired host while orchestrator URL is loopback; off-box workers cannot heartbeat"
-                );
-            }
-            let handle = RemoteHostHandle::new(chosen.id()).as_str();
-            match enqueue_remote_spawn(store, &chosen, &req, orchestrator_url).await {
-                Ok(()) => {
-                    store
-                        .record_remote_enqueued(
-                            assignment.session_id,
-                            &handle,
-                            Some(work_dir_str.as_str()),
-                        )
-                        .await?;
-                    outcome.spawned += 1;
-                    free -= 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        task_id = %task.id,
-                        host_id = %chosen.id(),
-                        "remote spawn enqueue failed"
-                    );
-                    store.complete_spawn_failure(assignment.session_id).await?;
-                    apply_retry_after_failure(
-                        store,
-                        task.id,
-                        assignment.attempt,
-                        task.max_retries,
-                        false,
-                        crate::domain::ExitReason::SpawnFailed,
-                    )
-                    .await?;
-                    outcome.spawn_failed += 1;
-                }
-            }
+        if worker_url_is_loopback(orchestrator_url)
+            && chosen.runtime == crate::store::HostRuntime::Container
+        {
+            tracing::warn!(
+                url = %orchestrator_url,
+                host_id = %chosen.id(),
+                "refusing container assign: orchestrator URL is loopback"
+            );
+            store.complete_spawn_failure(assignment.session_id).await?;
+            apply_retry_after_failure(
+                store,
+                task.id,
+                assignment.attempt,
+                task.max_retries,
+                false,
+                crate::domain::ExitReason::SpawnFailed,
+            )
+            .await?;
+            outcome.spawn_failed += 1;
             continue;
         }
-        match runtime.spawn(req).await {
-            Ok(handle) => {
+        if worker_url_is_loopback(orchestrator_url) {
+            tracing::warn!(
+                url = %orchestrator_url,
+                "assigning a paired host while orchestrator URL is loopback; off-box workers cannot heartbeat"
+            );
+        }
+        let handle = RemoteHostHandle::new(chosen.id()).as_str();
+        match enqueue_remote_spawn(store, &chosen, &req, orchestrator_url).await {
+            Ok(()) => {
                 store
-                    .complete_spawn_success(
+                    .record_remote_enqueued(
                         assignment.session_id,
-                        task.id,
-                        task.run_id,
-                        &handle.id,
+                        &handle,
                         Some(work_dir_str.as_str()),
                     )
                     .await?;
                 outcome.spawned += 1;
-                local_in_use += 1;
                 free -= 1;
             }
             Err(e) => {
-                tracing::warn!(error = %e, task_id = %task.id, "spawn failed");
+                tracing::warn!(
+                    error = %e,
+                    task_id = %task.id,
+                    host_id = %chosen.id(),
+                    "remote spawn enqueue failed"
+                );
                 store.complete_spawn_failure(assignment.session_id).await?;
                 apply_retry_after_failure(
                     store,
@@ -354,7 +270,6 @@ pub async fn schedule_and_spawn(
                 )
                 .await?;
                 outcome.spawn_failed += 1;
-                // free slot not consumed by failed_spawn (does not hold capacity)
             }
         }
     }
@@ -374,19 +289,12 @@ pub async fn signal_retired_sessions(
         if s.runtime_backend != remote::BACKEND {
             continue;
         }
-        let Some(host_id) =
-            remote::host_id_from_handle(s.runtime_handle.as_deref().unwrap_or(""))
+        let Some(host_id) = remote::host_id_from_handle(s.runtime_handle.as_deref().unwrap_or(""))
         else {
             continue;
         };
-        let _ = crate::store::enqueue_signal_session(
-            store,
-            project_id,
-            s.id,
-            host_id,
-            "kill",
-        )
-        .await;
+        let _ =
+            crate::store::enqueue_signal_session(store, project_id, s.id, host_id, "kill").await;
     }
 }
 
@@ -423,10 +331,7 @@ pub async fn apply_retry_after_failure(
 ) -> Result<(), TickError> {
     use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
 
-    if store
-        .live_claim_is_other_attempt(task_id, attempt)
-        .await?
-    {
+    if store.live_claim_is_other_attempt(task_id, attempt).await? {
         return Ok(());
     }
 

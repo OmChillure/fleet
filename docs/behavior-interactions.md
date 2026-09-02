@@ -55,14 +55,14 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 
  Tick → SandboxRuntime
     ├── stub      in-process timer
-    ├── process   spawn fleet-driver (or PROCESS_WORKER_BIN)
+    ├── process   fleet-host starts fleet-driver
     ├── local     bash commands.sh / fleet_worker.sh (Om path)
     ├── docker    docker run (no --rm; exit file)
     └── k8s       work_claims → fleet-host → FleetSandbox CR (operator → pod)
 
  Process worker/driver ──HTTP──▶ /v1/.../heartbeat|status
 
- Lab (separate from UI unless you point SANDBOX_BACKEND at it)
+ Lab (separate from the UI tick; pair fleet-host for product jobs)
     publish-job → Redis → fleet-sandbox-driver → HMAC workspace-agent
                                               → ACP harness
 
@@ -388,7 +388,7 @@ All require a valid member cookie. Most call `ensure_project(workspace_id, name,
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| GET | `/` | Project + config (`max_agents`, `sandbox_backend`, `repo_url`, `git_ref`) + runtime backend name + role. |
+| GET | `/` | Project + config (`max_agents`, `repo_url`, `git_ref`) + role. Plane is not a runner. |
 | PATCH | `/config` | Set/clear git remote. |
 | POST | `/runs/fixture` | Insert accepted plan (`chain` or `diamond`). |
 | POST | `/tick` | One locked tick. `409` if project lock held. |
@@ -511,26 +511,26 @@ OAuth start issues a signed state JWT (user, workspace, provider). Callback veri
 
 ## 11. Sandbox backends
 
-Set `SANDBOX_BACKEND` on the server (not per user).
+The API is not a runner. Tick assigns to a paired `fleet-host` or
+leaves the task ready. Isolation is process / container / vm **on that
+host**. Session `runtime_backend` is `remote`.
 
-| Value | Runtime name | What spawn does | What “done” means |
-| --- | --- | --- | --- |
-| `stub` (default) | stub | In-memory entry; no process. | After ~3s (configurable) state is Exited 0. Tick marks task success. |
-| `process` | process | `fleet-driver` (or `PROCESS_WORKER_BIN`) as a process group. Workdir + `FLEET_*`. Optional git clone via isolate. | Process exit + last worker status. |
-| `local` / `shell` | process (Om) | Writes `commands.sh` from bash fences, runs `fleet_worker.sh` / bash. | Script exit. |
-| `docker` / `container` | docker | `docker run` **without** `--rm`; wait on `.fleet_exit`. | Exit file / container state. |
-| `k8s` / `kubernetes` | k8s | Tick enqueues a claim; `fleet-host` creates a `FleetSandbox` CR. Operator makes a pod + NetworkPolicy. Guest is `fleet-driver` (image `K8S_WORKER_IMAGE`, `FLEET_HARNESS=mock\|grok`). Spec rides in `FLEET_SPEC_MD`. Callback URL must not be loopback. | Driver HTTP status + CR phase (`Succeeded`/`Failed`). Host `DATA_DIR` has prompt/spec; pod writes stay in `emptyDir` (no live.jsonl pull yet). |
-| anything else | — | Server fails to start runtime. | |
+`fleet-host` starts `fleet-driver` (ACP). In-cluster it may create a
+`FleetSandbox` CR; the operator makes the pod. Done means the guest
+POSTs status and leaves `result.md` (and acceptance) where the plane
+can read it.
 
-**Git isolate (process/docker):** if Settings has `repo_url`, spawn clones (or worktree) into the session dir before the worker starts. No OAuth token is passed; clone uses whatever the host/container git can see (deploy key, public HTTPS, etc.).
+Git isolate: if Settings has `repo_url`, the guest clones into the
+session dir. No OAuth token is passed.
 
-**Destroy:** tick reap / cancel / 15-minute wipe. Docker containers are stopped/removed on destroy; stub is idempotent.
+Cancel / kill enqueue a host signal. Finished workdirs wipe after 15
+minutes.
 
 ---
 
 ## 12. Workers and drivers
 
-### 12.1 `fleet-driver` (`SANDBOX_BACKEND=process` / guest of `fleet-host`)
+### 12.1 `fleet-driver` (guest of `fleet-host`)
 
 Same HTTP contract. Extra: provision clone from `FLEET_REPO_URL` + ref; ACP session with `FLEET_HARNESS=mock` (`mock-acp-agent`) or `grok`. Writes `prompt.md`, `live.jsonl`, `artifacts/transcript.md`, `artifacts/result.json` (what SessionDetail reads).
 
@@ -562,7 +562,7 @@ Invalid HMAC / path escape / unknown bin → signed error result.
 
 ## 13. Kubernetes operator
 
-Independent of `SANDBOX_BACKEND`. Used on kind / in-cluster.
+Used on kind / in-cluster. Independent of any plane env.
 
 | Event | Operator does |
 | --- | --- |
@@ -578,7 +578,7 @@ Independent of `SANDBOX_BACKEND`. Used on kind / in-cluster.
 
 Labels: `fleet.agentfleet.io/sandbox`, `session-id`, `workspace-id`, `project-id`.
 
-In-cluster API is `SANDBOX_BACKEND=stub`. Tick enqueues claims; `fleet-host` creates/deletes CRs. Host `.env` stays `stub`/`process`. Sample YAML (`infra/samples/fleetsandbox.yaml`) is still valid for a cluster-admin CR without a Fleet run.
+In-cluster API is not a runner. Tick enqueues claims; `fleet-host` creates/deletes CRs. Sample YAML (`infra/samples/fleetsandbox.yaml`) is still valid for a cluster-admin CR without a Fleet run.
 
 ---
 
@@ -666,9 +666,9 @@ This is the “what happens when A meets B” layer.
 | User logs out in one tab | Cookies cleared; other tabs fail `me` on next navigation and redirect to login. |
 | Refresh reuse (stolen cookie replay) | Whole session family dead; user must log in again. |
 | Persona archived | Disappears from default list; in-flight workers do not change (they never read personas today). |
-| `SANDBOX_BACKEND=stub` + “Run until done” | Tasks complete in a few ticks (~3s fake work). |
-| `SANDBOX_BACKEND=process` without worker bin | Spawn fails → `failed_spawn` → run fails (`fail_run`). |
-| Docker host full / daemon down | Spawn fail same path. |
+| No paired host + “Run until done” | Tasks stay ready. |
+| Paired host offline / spawn enqueue fail | `failed_spawn` → retry or `fail_run`. |
+| Docker / k8s on the **host** full or down | Host reports error; plane does not local-spawn. |
 | SessionDetail open past 15 min after exit | Tick wipe removes files; stream becomes empty. |
 | HITL: worker/status or inbox sets task `blocked` | Stays blocked until `POST …/tasks/{id}/resume` (admin API). UI cannot resume. Fleet column “Blocked”. |
 | Slack `post_message` via chat | Message sent with workspace Slack token; sandbox never sees the token. |
@@ -687,7 +687,7 @@ These look like product features in vision docs or UI chrome but are **not** imp
 - Wire personas into spawn (prompt/model/budget/tools are stored only).
 - Pick a persona when launching from chat or Fleet.
 - Multi-repo projects; per-task repo override in the UI.
-- Change `SANDBOX_BACKEND` or `max_agents` from the UI.
+- Make the API a runner. `max_agents` is Settings.
 - Destroy/kill a sandbox from the UI (only cancel the run).
 - Resume HITL from the UI.
 - Start a `diamond` fixture from the UI (API only).
@@ -745,7 +745,7 @@ Signup → login → Dashboard (empty) → Settings (optional git URL) → Integ
 
 ### B. Local fleet demo
 
-Settings optional → Fleet → Start 2-task run → Run until done → kanban t1 then t2 → Sandboxes show exited stub sessions → click session (may already be empty if stub wrote no files).
+Pair a `fleet-host` (this machine is fine) → Fleet → Start 2-task run → Run until done → kanban t1 then t2 → Sandboxes show host sessions. No host → tasks stay ready.
 
 ### C. Chat-launched agents
 
@@ -753,7 +753,7 @@ Chat “fan out a 5-task plan to scaffold X” → `launch_agent_plan` → first
 
 ### D. Process worker
 
-Operator sets `SANDBOX_BACKEND=process`, `PROCESS_WORKER_BIN=fleet-driver`. Same UI. Sessions have workdirs; SessionDetail tails `live.jsonl` until 15-minute wipe.
+Paired `fleet-host` starts `fleet-driver`. Same UI. Sessions have workdirs; SessionDetail tails `live.jsonl` until 15-minute wipe.
 
 ### E. Lab invoices (not the web app)
 

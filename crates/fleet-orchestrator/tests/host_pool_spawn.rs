@@ -1,9 +1,9 @@
 //! Host selection and spawn payload shape (no Postgres).
 
+use fleet_orchestrator::sandbox::SpawnRequest;
 use fleet_orchestrator::sandbox::remote::{
     BACKEND, host_id_from_handle, runtime_handle, spawn_payload,
 };
-use fleet_orchestrator::sandbox::{RuntimeBuildOpts, SpawnRequest, build_runtime};
 use fleet_orchestrator::store::{
     AssignableHost, HostRuntime, RunnerIsolation, host_at_capacity, pick_assignable_host,
 };
@@ -174,19 +174,7 @@ fn spawn_payload_shape_matches_contract() {
 }
 
 #[test]
-fn remote_is_not_a_sandbox_backend_env_value() {
-    let opts = RuntimeBuildOpts {
-        backend: "remote".into(),
-        stub_duration: Duration::from_secs(1),
-        data_dir: PathBuf::from("/tmp"),
-        worker_argv: vec![],
-        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
-    };
-    let err = match build_runtime(&opts) {
-        Ok(_) => panic!("remote must not be a SANDBOX_BACKEND"),
-        Err(e) => e.to_string(),
-    };
-    assert!(err.contains("unknown sandbox backend"), "{err}");
+fn remote_handle_roundtrips_host_id() {
     assert_eq!(BACKEND, "remote");
     let id = Uuid::new_v4();
     assert_eq!(host_id_from_handle(&runtime_handle(id)), Some(id));

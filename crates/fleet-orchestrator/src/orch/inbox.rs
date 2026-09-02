@@ -1,17 +1,14 @@
 //! Step 1 — apply worker_reports inbox.
 
-use crate::sandbox::{RuntimeHandle, SandboxRuntime};
 use crate::store::Store;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
 use uuid::Uuid;
 
 use super::tick::TickError;
 
 pub async fn apply_inbox(
     store: &Store,
-    runtime: &Arc<dyn SandboxRuntime>,
     project_id: Uuid,
     data_dir: &Path,
 ) -> Result<usize, TickError> {
@@ -20,7 +17,11 @@ pub async fn apply_inbox(
     for r in &reports {
         match r.kind.as_str() {
             "heartbeat" => {
-                let pct = r.payload.get("progress_pct").and_then(|v| v.as_i64()).map(|n| n as i32);
+                let pct = r
+                    .payload
+                    .get("progress_pct")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32);
                 store
                     .apply_heartbeat(r.session_id, r.board_task_id, r.seq, pct)
                     .await?;
@@ -39,7 +40,6 @@ pub async fn apply_inbox(
                             .await?;
                     }
                     "success" => {
-                        destroy_session_runtime(store, runtime, r.session_id).await?;
                         if let Some(session) = store.get_session(r.session_id).await? {
                             if let Some(task) = store
                                 .load_board_snapshot(project_id)
@@ -66,7 +66,8 @@ pub async fn apply_inbox(
                                             .join("sessions")
                                             .join(session.id.to_string())
                                     });
-                                let payload = merge_session_proof(&r.payload, &reports, r.session_id);
+                                let payload =
+                                    merge_session_proof(&r.payload, &reports, r.session_id);
                                 if let Err(e) = materialize_guest_proof(&work, &payload) {
                                     tracing::warn!(
                                         error = %e,
@@ -141,7 +142,6 @@ pub async fn apply_inbox(
                             .get("reason")
                             .and_then(|v| v.as_str())
                             .unwrap_or("worker_failed");
-                        destroy_session_runtime(store, runtime, r.session_id).await?;
                         store
                             .apply_task_terminal(
                                 r.board_task_id,
@@ -182,22 +182,6 @@ pub async fn apply_inbox(
     Ok(applied)
 }
 
-pub async fn destroy_session_runtime(
-    store: &Store,
-    runtime: &Arc<dyn SandboxRuntime>,
-    session_id: Uuid,
-) -> Result<(), TickError> {
-    if let Some(s) = store.get_session(session_id).await?
-        && let Some(h) = s.runtime_handle {
-            let handle = RuntimeHandle {
-                backend: s.runtime_backend,
-                id: h,
-            };
-            let _ = runtime.destroy(&handle).await;
-        }
-    Ok(())
-}
-
 /// Write `result.md` / `work/` from a guest status payload onto the plane
 /// session dir so `validate_done` can see proof the guest actually produced.
 pub fn materialize_guest_proof(work_dir: &Path, payload: &Value) -> std::io::Result<()> {
@@ -229,7 +213,11 @@ pub fn materialize_guest_proof(work_dir: &Path, payload: &Value) -> std::io::Res
     Ok(())
 }
 
-fn merge_session_proof(base: &Value, reports: &[crate::store::WorkerReportRow], session_id: Uuid) -> Value {
+fn merge_session_proof(
+    base: &Value,
+    reports: &[crate::store::WorkerReportRow],
+    session_id: Uuid,
+) -> Value {
     let mut out = base.clone();
     let missing_md = out
         .get("result_md")

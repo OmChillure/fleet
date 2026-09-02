@@ -240,7 +240,10 @@ pub fn software_flag(host: &HostPublic) -> Option<&'static str> {
         return Some("updating");
     }
     let rows = software_bin_rows(host);
-    if rows.iter().any(|r| r.status == "behind" || r.status == "missing") {
+    if rows
+        .iter()
+        .any(|r| r.status == "behind" || r.status == "missing")
+    {
         return Some("outdated");
     }
     if !rows.is_empty() && rows.iter().all(|r| r.status == "current") {
@@ -312,11 +315,7 @@ pub fn served_platforms(inv: &PackageInventory) -> Vec<ServedPlatform> {
 
 fn short_sha(sha: &str) -> &str {
     let s = sha.trim();
-    if s.len() > 12 {
-        &s[..12]
-    } else {
-        s
-    }
+    if s.len() > 12 { &s[..12] } else { s }
 }
 
 /// The two files the plane serves and the box must report. Not `fleet-worker`.
@@ -419,8 +418,8 @@ pub fn software_bin_rows(host: &HostPublic) -> Vec<SoftwareBinRow> {
         .iter()
         .map(|name| {
             let got_ver = reported_bin_version(host, name);
-            let want_ver = desired_bin_version(host, name)
-                .or_else(|| current_pkg_version(host, name));
+            let want_ver =
+                desired_bin_version(host, name).or_else(|| current_pkg_version(host, name));
             let got = reported_bin_sha(host, name);
             let want = desired_bin_sha(host, name);
             let status = match (
@@ -1030,10 +1029,9 @@ pub fn draft_holding_new_jobs(accepting: bool) -> bool {
     !accepting
 }
 
-/// How this runner executes. Isolation is process < container < vm, not SANDBOX_BACKEND.
-pub fn runtime_line(host: &HostPublic, sandbox_backend: &str) -> String {
+/// How this runner executes. Isolation is process < container < vm on the host.
+pub fn runtime_line(host: &HostPublic) -> String {
     if is_control_plane(host) {
-        let _ = sandbox_backend;
         "Control plane does not run sandboxes".into()
     } else {
         "Runtime: fleet-host".into()
@@ -1603,11 +1601,13 @@ mod tests {
     #[test]
     fn effort_picker_hidden_when_model_has_no_menu() {
         let details = vec![detail("sxs-claude-opus-4-6", &[], "high")];
-        assert!(pick_effort_value(
-            find_model_detail(&details, "sxs-claude-opus-4-6"),
-            Some("high")
-        )
-        .is_none());
+        assert!(
+            pick_effort_value(
+                find_model_detail(&details, "sxs-claude-opus-4-6"),
+                Some("high")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2578,18 +2578,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_line_is_sandbox_backend_not_isolation_modes() {
+    fn runtime_line_is_host_not_plane_backend() {
         let mut host = sample_host();
-        assert_eq!(runtime_line(&host, "docker"), "Runtime: fleet-host");
+        assert_eq!(runtime_line(&host), "Runtime: fleet-host");
         host.kind = "control_plane".into();
-        assert_eq!(
-            runtime_line(&host, "process"),
-            "Control plane does not run sandboxes"
-        );
-        assert_eq!(
-            runtime_line(&host, ""),
-            "Control plane does not run sandboxes"
-        );
+        assert_eq!(runtime_line(&host), "Control plane does not run sandboxes");
         assert_eq!(BEHAVIOR_LABEL, "Behavior");
     }
 

@@ -145,7 +145,6 @@ fn status_pill_class(status: &str) -> &'static str {
 pub fn Fleet(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading workspace fleet…".to_string());
     let mut project_name = use_signal(|| String::new());
-    let mut sandbox_backend = use_signal(|| "stub".to_string());
     let mut tasks = use_signal(|| Vec::<TaskCard>::new());
     let mut runs = use_signal(|| Vec::<RunCard>::new());
     let mut sessions = use_signal(|| Vec::<SessionCard>::new());
@@ -167,9 +166,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                 }
                 if let Ok(s) = list_sessions(&ws).await {
                     sessions.set(parse_sessions(&s));
-                    if let Some(b) = s["sandbox_backend"].as_str() {
-                        sandbox_backend.set(b.to_string());
-                    }
                 }
             });
         }
@@ -182,12 +178,8 @@ pub fn Fleet(workspace_id: String) -> Element {
             match ensure_fleet(&ws).await {
                 Ok(v) => {
                     project_name.set(v["name"].as_str().unwrap_or("Workspace fleet").to_string());
-                    if let Some(b) = v["sandbox_backend"].as_str() {
-                        sandbox_backend.set(b.to_string());
-                    }
                     status_line.set(format!(
-                        "Fleet ready · {} sandbox · project {}",
-                        v["sandbox_backend"].as_str().unwrap_or("stub"),
+                        "Fleet ready · jobs run on paired hosts · project {}",
                         v["project_id"].as_str().unwrap_or(&ws)
                     ));
                     ready.set(true);
@@ -244,9 +236,6 @@ pub fn Fleet(workspace_id: String) -> Element {
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
                         "workspace {workspace_id} · jobs run on paired hosts · plane is not a runner"
-                    }
-                    p { class: "mt-0.5 text-xs text-[var(--app-muted)]",
-                        "SANDBOX_BACKEND={sandbox_backend} is display-only."
                     }
                 }
                 div { class: "flex flex-wrap gap-2",

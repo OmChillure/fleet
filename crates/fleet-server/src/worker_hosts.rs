@@ -727,11 +727,6 @@ async fn http_list(
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
-    let sandbox_backend = std::env::var("SANDBOX_BACKEND")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "stub".into());
     Ok(Json(json!({
         "hosts": hosts,
         "packages": packages,
@@ -740,7 +735,6 @@ async fn http_list(
             "fleet-host": crate::package_versions::fleet_host_version(),
             "fleet-driver": crate::package_versions::fleet_driver_version(),
         },
-        "sandbox_backend": sandbox_backend,
     })))
 }
 

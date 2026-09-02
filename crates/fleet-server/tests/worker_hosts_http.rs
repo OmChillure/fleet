@@ -48,6 +48,7 @@ fn test_auth_config() -> AuthConfig {
         refresh_ttl: Duration::from_secs(604_800),
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
+        signup_token: None,
     }
 }
 
@@ -111,10 +112,6 @@ async fn app_with_state_dist(worker_dist_dir: Option<PathBuf>) -> (axum::Router,
         retry_backoff: Duration::from_secs(10),
         on_task_fail: "fail_run".into(),
         auto_sync_external: false,
-        sandbox_backend: "stub".into(),
-        stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-driver".into()],
-        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),
@@ -684,7 +681,12 @@ async fn list_has_no_synthetic_control_plane() {
         Some(json!({ "allow_host": false, "allow_container": false })),
     )
     .await;
-    assert_eq!(patched.status, StatusCode::NOT_FOUND, "patch: {}", patched.body);
+    assert_eq!(
+        patched.status,
+        StatusCode::NOT_FOUND,
+        "patch: {}",
+        patched.body
+    );
 
     let denied = call(
         &app,

@@ -22,8 +22,6 @@ impl DashError {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Overview {
     #[serde(default)]
-    pub sandbox_backend: String,
-    #[serde(default)]
     pub open_runs: u64,
     #[serde(default)]
     pub total_runs: u64,
@@ -92,7 +90,11 @@ pub async fn fetch_workforce(workspace_id: &str) -> Result<WorkforceSnapshot, Da
     serde_json::from_str(&text).map_err(|e| DashError::Network(format!("invalid JSON: {e}")))
 }
 
-pub async fn create_goal(workspace_id: &str, title: &str, goal_md: &str) -> Result<Value, DashError> {
+pub async fn create_goal(
+    workspace_id: &str,
+    title: &str,
+    goal_md: &str,
+) -> Result<Value, DashError> {
     let url = format!(
         "{}/api/workspaces/{workspace_id}/workforce/goals",
         auth_base_url().trim_end_matches('/')

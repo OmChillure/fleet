@@ -9,6 +9,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY scripts/install-worker ./scripts/install-worker
+COPY runner-packages.toml ./
 # Bake HEAD into the binary (option_env!). Empty ARG is a failed build, not a
 # null /health that live tests could then "fix" with kubectl set env.
 ARG FLEET_GIT_SHA

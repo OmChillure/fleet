@@ -53,11 +53,8 @@ services:
       API_PUBLIC_BASE: http://localhost:8080
       UI_PUBLIC_BASE: http://localhost:3030
       DATA_DIR: /data
-      SANDBOX_BACKEND: stub
-      # process backend (worker is in the API image):
-      # SANDBOX_BACKEND: process
-      # PROCESS_WORKER_BIN: /usr/local/bin/fleet-driver
       FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-dev-bootstrap-secret-change-me}
+      SIGNUP_TOKEN: ${SIGNUP_TOKEN:-}
       ZENOH_LOCATOR: tcp/zenohd:7447
       RUST_LOG: info,sqlx=warn,tower_http=info
       # ADMIN_TOKEN: dev-admin-token-change-me

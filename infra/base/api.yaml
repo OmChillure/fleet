@@ -47,12 +47,7 @@ spec:
             - name: DATA_DIR
               value: /data
             # Tick enqueues work_claims only. fleet-host creates FleetSandbox CRs.
-            # Guest binary is fleet-driver. Harness comes from the spawn claim
-            # (plane LLM → mock|grok), not from this process env.
-            - name: SANDBOX_BACKEND
-              value: stub
-            - name: PROCESS_WORKER_BIN
-              value: /usr/local/bin/fleet-driver
+            # Guest binary is fleet-driver. Harness comes from the spawn claim.
             - name: API_PUBLIC_BASE
               value: http://localhost:8080
             - name: UI_PUBLIC_BASE

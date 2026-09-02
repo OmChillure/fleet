@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{kill_sandbox, list_sandboxes, SandboxRow};
+use super::api::{SandboxRow, kill_sandbox, list_sandboxes};
 use crate::Route;
 
 fn short_id(id: &str) -> String {
@@ -33,7 +33,6 @@ fn format_ts(ts: &Option<String>) -> String {
 #[component]
 pub fn Sandboxes(workspace_id: String) -> Element {
     let mut rows = use_signal(|| Vec::<SandboxRow>::new());
-    let mut backend = use_signal(|| String::new());
     let mut status_line = use_signal(|| "Loading sandboxes…".to_string());
     let mut busy = use_signal(|| false);
     let mut ready = use_signal(|| false);
@@ -45,11 +44,6 @@ pub fn Sandboxes(workspace_id: String) -> Element {
         spawn(async move {
             match list_sandboxes(&ws).await {
                 Ok(resp) => {
-                    backend.set(if resp.sandbox_backend.is_empty() {
-                        "stub".into()
-                    } else {
-                        resp.sandbox_backend
-                    });
                     let n = resp.sandboxes.len();
                     rows.set(resp.sandboxes);
                     status_line.set(format!("{n} sandbox session(s)"));
@@ -72,11 +66,6 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                 TimeoutFuture::new(2500).await;
                 if let Ok(resp) = list_sandboxes(&ws).await {
                     rows.set(resp.sandboxes);
-                    backend.set(if resp.sandbox_backend.is_empty() {
-                        "stub".into()
-                    } else {
-                        resp.sandbox_backend
-                    });
                 }
             }
         }
@@ -90,13 +79,10 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                         "Sandboxes"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Worker sessions spawned by fleet ticks (chat launch or Fleet fixture)."
+                        "Worker sessions on paired hosts (chat launch or Fleet fixture)."
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
-                        "workspace {workspace_id}"
-                        if !backend().is_empty() {
-                            " · backend {backend}"
-                        }
+                        "workspace {workspace_id} · plane is not a runner"
                     }
                 }
                 div { class: "flex flex-wrap gap-2",
@@ -112,11 +98,6 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                                 spawn(async move {
                                     match list_sandboxes(&ws).await {
                                         Ok(resp) => {
-                                            backend.set(if resp.sandbox_backend.is_empty() {
-                                                "stub".into()
-                                            } else {
-                                                resp.sandbox_backend
-                                            });
                                             let n = resp.sandboxes.len();
                                             rows.set(resp.sandboxes);
                                             status_line.set(format!("{n} sandbox session(s)"));

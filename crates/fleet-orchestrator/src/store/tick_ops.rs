@@ -229,11 +229,7 @@ impl Store {
 
     /// True when the task is claimed by a still-live session from a later attempt.
     /// A stale spawn-failed retry must not bounce that claim back to `ready`.
-    pub async fn live_claim_is_other_attempt(
-        &self,
-        task_id: Uuid,
-        attempt: i32,
-    ) -> Result<bool> {
+    pub async fn live_claim_is_other_attempt(&self, task_id: Uuid, attempt: i32) -> Result<bool> {
         let row = sqlx::query_as::<_, (i32, String)>(
             r#"
             SELECT s.attempt, s.status
@@ -246,8 +242,7 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.is_some_and(|(a, st)| {
-            a != attempt
-                && matches!(st.as_str(), "spawning" | "healthy" | "stuck" | "killing")
+            a != attempt && matches!(st.as_str(), "spawning" | "healthy" | "stuck" | "killing")
         }))
     }
 
@@ -940,7 +935,7 @@ impl Store {
         Ok(res.rows_affected() == 1)
     }
 
-    /// Local SANDBOX_BACKEND sessions that still hold a plane slot.
+    /// In-process test sessions that still hold a plane slot.
     pub async fn count_local_capacity(&self, project_id: Uuid) -> Result<i32> {
         let rows = self.list_sessions_for_project(project_id).await?;
         Ok(rows

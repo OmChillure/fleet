@@ -1,7 +1,7 @@
 //! Agent Fleet orchestration service library.
 //!
 //! Pure-logic control plane after a `WorkPlan` is accepted.
-//! Stack: Rust + PostgreSQL 16 + abstract `SandboxRuntime`.
+//! Stack: Rust + PostgreSQL 16. Tick assigns to a paired `fleet-host`.
 
 pub mod api;
 pub mod config;

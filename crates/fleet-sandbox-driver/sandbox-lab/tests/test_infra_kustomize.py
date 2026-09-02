@@ -114,9 +114,7 @@ class InfraKustomizeTests(unittest.TestCase):
     def _assert_in_cluster_k8s_path(self, out: str) -> None:
         self.assertIn("name: fleet-api", out)
         self.assertIn("serviceAccountName: fleet-api", out)
-        self.assertIn("SANDBOX_BACKEND", out)
-        self.assertIn("value: stub", out)
-        self.assertNotRegex(out, r"SANDBOX_BACKEND\n\s+value: k8s")
+        self.assertNotIn("SANDBOX_BACKEND", out)
         self.assertIn(
             "http://api.agent-fleet.svc.cluster.local:8080",
             out,
@@ -131,7 +129,7 @@ class InfraKustomizeTests(unittest.TestCase):
         self.assertIn("name: zenohd", out)
         self.assertIn("FLEET_HARNESS", out)
         self.assertRegex(out, r"FLEET_HARNESS\n\s+value: mock")
-        self.assertIn("/usr/local/bin/fleet-driver", out)
+        self.assertIn("fleet-driver", out)
         self.assertIn("FLEET_BOOTSTRAP_SECRET", out)
         host_role = _role_named(out, "fleet-host")
         self.assertIsNotNone(host_role, "fleet-host Role missing from built YAML")

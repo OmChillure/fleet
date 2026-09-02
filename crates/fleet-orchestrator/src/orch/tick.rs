@@ -12,7 +12,6 @@ use crate::orch::reap::orphan_reap;
 use crate::orch::rollup::{RollupAction, RunRollupInput, rollup_run};
 use crate::orch::spawn::schedule_and_spawn;
 use crate::orch::stuck::process_sessions;
-use crate::sandbox::SandboxRuntime;
 use crate::store::Store;
 use crate::sync::{ExternalBoardSync, NoopBoardSync};
 use std::collections::HashMap;
@@ -68,62 +67,41 @@ pub enum TickError {
 
 pub struct TickRunner {
     store: Store,
-    runtime: Arc<dyn SandboxRuntime>,
     board_sync: Arc<dyn ExternalBoardSync>,
     notify: Arc<dyn NotificationSink>,
     data_dir: PathBuf,
     orchestrator_url: String,
     integrations: crate::sandbox::io::IntegrationHandle,
-    /// Test helper only. Production never local-spawns.
-    allow_local_spawn: std::sync::atomic::AtomicBool,
 }
 
 impl TickRunner {
-    pub fn new(
-        store: Store,
-        runtime: Arc<dyn SandboxRuntime>,
-        data_dir: PathBuf,
-        orchestrator_url: impl Into<String>,
-    ) -> Self {
-        Self::with_board_sync(
-            store,
-            runtime,
-            Arc::new(NoopBoardSync),
-            data_dir,
-            orchestrator_url,
-        )
+    pub fn new(store: Store, data_dir: PathBuf, orchestrator_url: impl Into<String>) -> Self {
+        Self::with_board_sync(store, Arc::new(NoopBoardSync), data_dir, orchestrator_url)
     }
 
     pub fn with_board_sync(
         store: Store,
-        runtime: Arc<dyn SandboxRuntime>,
         board_sync: Arc<dyn ExternalBoardSync>,
         data_dir: PathBuf,
         orchestrator_url: impl Into<String>,
     ) -> Self {
         Self {
             store,
-            runtime,
             board_sync,
             notify: Arc::new(LogNotify),
             data_dir,
             orchestrator_url: orchestrator_url.into(),
             integrations: crate::sandbox::io::IntegrationHandle::none(),
-            allow_local_spawn: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// Orchestrator integration tests that still drive local spawn.
-    pub fn with_local_spawn(self) -> Self {
-        self.allow_local_spawn
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self
-    }
-
-    /// Enable after `Arc` wrap (integration tests that use `build_app_state`).
-    pub fn enable_local_spawn(&self) {
-        self.allow_local_spawn
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Convenience for tests: temp data dir, noop board sync.
+    pub fn with_store(store: Store) -> Self {
+        Self::new(
+            store,
+            std::env::temp_dir().join("fleet-orch-data"),
+            "http://127.0.0.1:8080",
+        )
     }
 
     pub fn with_notify(mut self, notify: Arc<dyn NotificationSink>) -> Self {
@@ -135,12 +113,8 @@ impl TickRunner {
         &self.data_dir
     }
 
-    pub fn runtime_backend(&self) -> &'static str {
-        self.runtime.backend_name()
-    }
-
-    /// Stop one live sandbox (UI / cookie kill). Signals TERM+KILL, destroys
-    /// the runtime handle, frees the claim, and cancels the board task.
+    /// Stop one live sandbox (UI / cookie kill). Signals the paired host,
+    /// frees the claim, and cancels the board task.
     pub async fn kill_session(
         &self,
         project_id: Uuid,
@@ -185,21 +159,6 @@ impl TickRunner {
                     signaled = true;
                 }
             }
-        } else if let Some(ref hid) = session.runtime_handle {
-            let handle = crate::sandbox::RuntimeHandle {
-                backend: session.runtime_backend.clone(),
-                id: hid.clone(),
-            };
-            let _ = self
-                .runtime
-                .signal(&handle, crate::sandbox::Signal::Term)
-                .await;
-            let _ = self
-                .runtime
-                .signal(&handle, crate::sandbox::Signal::Kill)
-                .await;
-            let _ = self.runtime.destroy(&handle).await;
-            signaled = true;
         } else {
             let _ = self.store.complete_spawn_failure(session.id).await;
         }
@@ -259,23 +218,6 @@ impl TickRunner {
             .retire_live_sessions(task_id, None, "worker_replaced")
             .await?;
         super::spawn::signal_retired_sessions(&self.store, project_id, &retired).await;
-        if session.runtime_backend != crate::sandbox::remote::BACKEND {
-            if let Some(ref hid) = session.runtime_handle {
-                let handle = crate::sandbox::RuntimeHandle {
-                    backend: session.runtime_backend.clone(),
-                    id: hid.clone(),
-                };
-                let _ = self
-                    .runtime
-                    .signal(&handle, crate::sandbox::Signal::Term)
-                    .await;
-                let _ = self
-                    .runtime
-                    .signal(&handle, crate::sandbox::Signal::Kill)
-                    .await;
-                let _ = self.runtime.destroy(&handle).await;
-            }
-        }
         self.store
             .reopen_task_for_changes(
                 task_id,
@@ -299,17 +241,6 @@ impl TickRunner {
     ) -> Self {
         self.integrations = crate::sandbox::io::IntegrationHandle::new(inv);
         self
-    }
-
-    /// Convenience for tests: stub runtime, temp data dir, noop board sync.
-    pub fn with_store_and_runtime(store: Store, runtime: Arc<dyn SandboxRuntime>) -> Self {
-        Self::new(
-            store,
-            runtime,
-            std::env::temp_dir().join("fleet-orch-data"),
-            "http://127.0.0.1:8080",
-        )
-        .with_local_spawn()
     }
 
     pub async fn tick_project(&self, project_id: Uuid) -> Result<TickReport, TickError> {
@@ -340,8 +271,7 @@ impl TickRunner {
         let cfg = self.store.get_project_config(project_id).await?;
 
         // Step 1 — inbox
-        report.inbox_applied =
-            apply_inbox(&self.store, &self.runtime, project_id, &self.data_dir).await?;
+        report.inbox_applied = apply_inbox(&self.store, project_id, &self.data_dir).await?;
         notify_new_blocks(&self.store, &self.notify, project_id).await;
 
         // Step 1b — repair assigned+healthy
@@ -354,14 +284,7 @@ impl TickRunner {
         let mut snap = self.store.load_board_snapshot(project_id).await?;
 
         // Step 2 — cancel drain
-        let c = cancel_drain(
-            &self.store,
-            &self.runtime,
-            project_id,
-            &snap,
-            cfg.kill_grace_s,
-        )
-        .await?;
+        let c = cancel_drain(&self.store, project_id, &snap, cfg.kill_grace_s).await?;
         report.cancel_tasks += c.tasks_cancelled;
 
         // Step 2b — HITL resume (skip if cancelling handled in SQL)
@@ -434,7 +357,6 @@ impl TickRunner {
         // Step 6–7 — spawn
         let spawn_out = schedule_and_spawn(
             &self.store,
-            &self.runtime,
             project_id,
             &snap,
             cfg.max_agents,
@@ -444,8 +366,6 @@ impl TickRunner {
             &cfg.fleet_llm,
             &cfg.fleet_llm_model,
             self.integrations.clone(),
-            self.allow_local_spawn
-                .load(std::sync::atomic::Ordering::SeqCst),
         )
         .await?;
         report.spawned = spawn_out.spawned;
@@ -467,7 +387,6 @@ impl TickRunner {
 
         let stuck_out = process_sessions(
             &self.store,
-            &self.runtime,
             project_id,
             &snap,
             cfg.heartbeat_stale_s,
@@ -541,7 +460,7 @@ impl TickRunner {
         // Step 13 — orphan reap
         snap = self.store.load_board_snapshot(project_id).await?;
         crate::sandbox::team::sync_team_boards(&self.data_dir, project_id, &snap).await;
-        report.reaped = orphan_reap(&self.store, &self.runtime, project_id, &snap).await?;
+        report.reaped = orphan_reap(&self.store, project_id, &snap).await?;
 
         // Step 14 — external board sync (PR10), gated by project config
         snap = self.store.load_board_snapshot(project_id).await?;

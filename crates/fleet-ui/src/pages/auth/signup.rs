@@ -11,6 +11,7 @@ pub fn Signup() -> Element {
     let mut display_name = use_signal(|| String::new());
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
+    let mut token = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
     let navigator = use_navigator();
 
@@ -23,6 +24,7 @@ pub fn Signup() -> Element {
         let email_val = email.read().trim().to_string();
         let password_val = password.read().clone();
         let name_val = display_name.read().trim().to_string();
+        let token_val = token.read().trim().to_string();
 
         if email_val.is_empty() || password_val.is_empty() {
             show_toast().error("Email and password are required.");
@@ -43,6 +45,11 @@ pub fn Signup() -> Element {
                     None
                 } else {
                     Some(name_val)
+                },
+                token: if token_val.is_empty() {
+                    None
+                } else {
+                    Some(token_val)
                 },
             })
             .await
@@ -92,6 +99,19 @@ pub fn Signup() -> Element {
                     autocomplete: "username",
                     value: "{email}",
                     oninput: move |e| email.set(e.value()),
+                }
+            }
+            div { class: "flex flex-col gap-1.5",
+                label { class: "text-sm font-semibold text-neutral-400", r#for: "token", "Signup token" }
+                input {
+                    class: "rounded-lg border border-neutral-800 bg-black px-3.5 py-2.5 text-[0.95rem] text-white outline-none transition focus:border-neutral-500",
+                    id: "token",
+                    r#type: "text",
+                    name: "token",
+                    placeholder: "Required if the operator set SIGNUP_TOKEN",
+                    autocomplete: "off",
+                    value: "{token}",
+                    oninput: move |e| token.set(e.value()),
                 }
             }
             div { class: "flex flex-col gap-1.5",

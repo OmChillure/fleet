@@ -30,12 +30,12 @@ second spawn path.
 
 ---
 
-## Isolation is SANDBOX_BACKEND (once)
+## Isolation is on the host (once)
 
 Do not add Native / Sandboxed checkboxes on runner cards. How a job is
-isolated is `SANDBOX_BACKEND` (`stub` / `process` / `local` / `docker`)
-on the control plane. Paired `fleet-host` boxes run a process on that
-machine. Pause / “Stop taking new jobs” is not isolation.
+isolated is the host’s process / container / vm class (workspace
+`min_isolation`). The API does not run sandboxes. Pause / “Stop taking
+new jobs” is not isolation.
 
 Sidebar: **Runners** accordion (same rank as Monitoring and Agents).
 Children: **Self-hosted** (live), **Cloud** and **Partners**
@@ -75,6 +75,6 @@ job). **Workers** as a nav section collides with the per-job
 | [`testing-procedures.md`](testing-procedures.md) | How to run those three layers |
 | [`docs/components/runners/partners.md`](partners.md) | Partners credit, trust, kill-switch (design) |
 | [`docs/components/worker-host/README.md`](../worker-host/README.md) | Pair, install, heartbeat, lease, `fleet-host` |
-| [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick fallback |
+| [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick assignment |
 | [`docs/components/sandbox-manager/README.md`](../sandbox-manager/README.md) | Sandbox create / observe / destroy |
 | [`docs/components/ui/README.md`](../ui/README.md) | App shell and routes |

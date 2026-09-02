@@ -1536,19 +1536,10 @@ async fn tick_until_run_settled(
 ) -> AppResult<(Vec<Value>, bool)> {
     let mut ticks = Vec::new();
     let mut terminal = false;
-    let stub_sleep = std::env::var("STUB_DURATION_S")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
 
     for i in 0..max_ticks {
         if i > 0 {
-            let wait = if stub_sleep > 0 {
-                Duration::from_secs(stub_sleep.min(3))
-            } else {
-                Duration::from_millis(20)
-            };
-            tokio::time::sleep(wait).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
         let report = state
@@ -1592,6 +1583,15 @@ async fn tick_until_run_settled(
             .list_tasks(workspace_id, Some(run_id), None)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
+        // The plane does not complete work. Stop once materialize/assign
+        // has nothing more to do this request — inbox arrives from a host.
+        if i >= 1
+            && report.spawned == 0
+            && report.completed_via_runtime == 0
+            && report.inbox_applied == 0
+        {
+            break;
+        }
         let active = tasks.iter().any(|t| {
             matches!(
                 t.status.as_str(),
@@ -2232,7 +2232,6 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
         .count();
 
     let content = json!({
-        "sandbox_backend": cfg.sandbox_backend,
         "max_agents": cfg.max_agents,
         "fleet_llm": cfg.fleet_llm,
         "fleet_llm_model": cfg.fleet_llm_model,
@@ -2529,8 +2528,16 @@ async fn accept_and_drive_plan(
         })
         .collect();
 
+    let spawned_any = ticks.iter().any(|t| t["spawned"].as_u64().unwrap_or(0) > 0);
+    let host_assignable =
+        fleet_orchestrator::store::select_assignable_host(&state.orch.store, workspace_id)
+            .await
+            .is_some();
+    let waiting_for_host = !terminal && !spawned_any && !host_assignable;
     let hint = if terminal {
         "Sandboxes are ephemeral. Integration tokens stay on the control plane."
+    } else if waiting_for_host {
+        "No paired host — task left ready. Pair a fleet-host to run this work."
     } else {
         "Fleet is running. Do NOT ask the user to continue. Plan outputs fire when the run completes. Watch Fleet."
     };
@@ -2559,6 +2566,11 @@ async fn accept_and_drive_plan(
     let summary = if terminal {
         format!(
             "Fleet finished «{label}» · {task_count} task(s) · run {} · terminal",
+            short_id(&run_id.to_string()),
+        )
+    } else if waiting_for_host {
+        format!(
+            "No paired host — «{label}» left ready · {task_count} task(s) · run {}",
             short_id(&run_id.to_string()),
         )
     } else {

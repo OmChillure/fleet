@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -6,12 +8,15 @@ use axum_extra::extract::CookieJar;
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::repos::{sessions as session_repo, users as user_repo, workspaces as workspace_repo};
 use fleet_db::{NewAuthSession, User, UserPublic, WorkspacePublic};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::cookies::{clear_auth_cookies, set_auth_cookies};
 use crate::error::{AppError, AppResult};
 use crate::models::{AuthResponse, LoginRequest, MeResponse, SignupRequest};
 use crate::password::{hash_password, verify_password};
+use crate::rate_limit;
 use crate::routes::workspaces::{
     default_workspace_name, ensure_default_workspace, workspace_slug_for_user,
 };
@@ -62,24 +67,15 @@ fn validate_credentials(email: &str, password: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn client_meta(headers: &HeaderMap) -> (Option<String>, Option<String>) {
+fn client_meta(
+    headers: &HeaderMap,
+    connect: Option<SocketAddr>,
+) -> (Option<String>, Option<String>) {
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(512).collect());
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|s| s.parse::<std::net::IpAddr>().is_ok());
-    (ua, ip)
+    (ua, rate_limit::client_ip(headers, connect))
 }
 
 /// Create session row + JWT access + opaque refresh. Single-row insert only
@@ -88,17 +84,17 @@ async fn create_session_and_tokens(
     state: &AuthState,
     user: &User,
     headers: &HeaderMap,
+    connect: Option<SocketAddr>,
 ) -> AppResult<(String, String, Uuid)> {
     let session_id = Uuid::now_v7();
     let family_id = Uuid::now_v7();
     let refresh = generate_refresh_token();
     let refresh_hash = hash_refresh_token(&refresh);
     let now = Utc::now();
-    let expires_at = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
+    let expires_at =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
     let absolute_expires_at = expires_at;
-    let (ua, ip) = client_meta(headers);
+    let (ua, ip) = client_meta(headers, connect);
 
     session_repo::insert(
         &state.db,
@@ -138,11 +134,36 @@ fn auth_json_response(
     (status, headers, Json(body)).into_response()
 }
 
+fn signup_token_ok(expected: Option<&str>, got: Option<&str>) -> bool {
+    match expected.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(want) => match got.map(str::trim).filter(|s| !s.is_empty()) {
+            None => false,
+            Some(got) => {
+                let want_h = Sha256::digest(want.as_bytes());
+                let got_h = Sha256::digest(got.as_bytes());
+                want_h.ct_eq(&got_h).into()
+            }
+        },
+    }
+}
+
 pub async fn signup(
     State(state): State<AuthState>,
+    rate_limit::ClientAddr(connect): rate_limit::ClientAddr,
     headers: HeaderMap,
     Json(body): Json<SignupRequest>,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "signup",
+        &headers,
+        connect,
+        5,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
+    if !signup_token_ok(state.config.signup_token.as_deref(), body.token.as_deref()) {
+        return Err(AppError::forbidden("valid signup token is required"));
+    }
     validate_credentials(&body.email, &body.password)?;
     let email = body.email.trim().to_string();
     let email_normalized = normalize_email(&email);
@@ -158,8 +179,7 @@ pub async fn signup(
 
     let workspace_id = Uuid::now_v7();
     let slug = workspace_slug_for_user(&email_normalized, user_id);
-    let workspace_name =
-        default_workspace_name(display_name.as_deref(), &email_normalized);
+    let workspace_name = default_workspace_name(display_name.as_deref(), &email_normalized);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
@@ -188,13 +208,9 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
-    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
-        &state.db,
-        user_id,
-        &email_normalized,
-        now,
-    )
-    .await
+    if let Err(e) =
+        workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
+            .await
     {
         tracing::warn!(
             user_id = %user_id,
@@ -229,9 +245,17 @@ pub async fn signup(
 
 pub async fn login(
     State(state): State<AuthState>,
+    rate_limit::ClientAddr(connect): rate_limit::ClientAddr,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "login",
+        &headers,
+        connect,
+        10,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
     validate_credentials(&body.email, &body.password)?;
     let email_normalized = normalize_email(&body.email);
     tracing::debug!(email = %email_normalized, "login attempt");
@@ -253,7 +277,8 @@ pub async fn login(
         return Err(AppError::unauthorized("invalid email or password"));
     }
 
-    let (access, refresh, sid) = create_session_and_tokens(&state, &user, &headers).await?;
+    let (access, refresh, sid) =
+        create_session_and_tokens(&state, &user, &headers, connect).await?;
 
     if let Err(e) = workspace_repo::accept_pending_invites_for_user(
         &state.db,
@@ -270,13 +295,9 @@ pub async fn login(
         );
     }
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     tracing::info!(
         user_id = %user.id,
@@ -298,10 +319,7 @@ pub async fn login(
     ))
 }
 
-pub async fn logout(
-    State(state): State<AuthState>,
-    jar: CookieJar,
-) -> AppResult<Response> {
+pub async fn logout(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Response> {
     if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
         let hash = hash_refresh_token(&refresh);
         let now = Utc::now();
@@ -320,9 +338,17 @@ pub async fn logout(
 
 pub async fn refresh(
     State(state): State<AuthState>,
+    rate_limit::ClientAddr(connect): rate_limit::ClientAddr,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> AppResult<Response> {
+    rate_limit::check(
+        "refresh",
+        &headers,
+        connect,
+        30,
+        std::time::Duration::from_secs(15 * 60),
+    )?;
     let refresh = jar
         .get(REFRESH_COOKIE)
         .map(|c| c.value().to_string())
@@ -358,15 +384,13 @@ pub async fn refresh(
     let new_session_id = Uuid::now_v7();
     let new_refresh = generate_refresh_token();
     let new_hash = hash_refresh_token(&new_refresh);
-    let new_expires = now
-        + ChronoDuration::from_std(state.config.refresh_ttl)
-            .unwrap_or(ChronoDuration::days(7));
-    let (ua, ip) = client_meta(&headers);
+    let new_expires =
+        now + ChronoDuration::from_std(state.config.refresh_ttl).unwrap_or(ChronoDuration::days(7));
+    let (ua, ip) = client_meta(&headers, connect);
 
     let mut tx = state.db.begin().await.map_err(fleet_db::DbError::from)?;
 
-    let revoked =
-        session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
+    let revoked = session_repo::revoke_for_rotation_tx(&mut tx, session.id, &hash, now).await?;
 
     if revoked != 1 {
         tx.rollback().await.ok();
@@ -400,13 +424,9 @@ pub async fn refresh(
         state.config.access_ttl,
     )?;
 
-    let default_ws = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let default_ws =
+        ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+            .await?;
 
     Ok(auth_json_response(
         &state,
@@ -424,13 +444,8 @@ pub async fn refresh(
 pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Json<MeResponse>> {
     let user = require_user(&state, &jar).await?;
     // Ensure a default workspace exists for older accounts / edge cases.
-    let _ = ensure_default_workspace(
-        &state,
-        user.id,
-        &user.email,
-        user.display_name.as_deref(),
-    )
-    .await?;
+    let _ = ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())
+        .await?;
     let workspaces = workspace_repo::list_for_user(&state.db, user.id)
         .await?
         .into_iter()
@@ -441,4 +456,25 @@ pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Jso
         user: UserPublic::from(user),
         workspaces,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signup_token_ok;
+
+    #[test]
+    fn signup_token_unset_is_open() {
+        assert!(signup_token_ok(None, None));
+        assert!(signup_token_ok(Some(""), Some("anything")));
+        assert!(signup_token_ok(Some("   "), None));
+    }
+
+    #[test]
+    fn signup_token_required_when_configured() {
+        assert!(!signup_token_ok(Some("invite"), None));
+        assert!(!signup_token_ok(Some("invite"), Some("")));
+        assert!(!signup_token_ok(Some("invite"), Some("nope")));
+        assert!(signup_token_ok(Some("invite"), Some("invite")));
+        assert!(signup_token_ok(Some(" invite "), Some("invite")));
+    }
 }

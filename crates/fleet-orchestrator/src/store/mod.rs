@@ -85,7 +85,7 @@ impl Store {
             SELECT project_id, max_agents, tick_interval_s, heartbeat_stale_s,
                    spawn_timeout_s, kill_grace_s, default_task_timeout_s,
                    default_max_retries, retry_backoff_s, on_task_fail,
-                   auto_sync_external, sandbox_backend, repo_url, git_ref,
+                   auto_sync_external, repo_url, git_ref,
                    fleet_llm, fleet_llm_model, updated_at
             FROM project_configs
             WHERE project_id = $1

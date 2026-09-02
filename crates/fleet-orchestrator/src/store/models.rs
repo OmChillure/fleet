@@ -23,7 +23,6 @@ pub struct ProjectConfigRow {
     pub retry_backoff_s: i32,
     pub on_task_fail: String,
     pub auto_sync_external: bool,
-    pub sandbox_backend: String,
     /// Clone URL for the project's single git remote. None = no clone.
     pub repo_url: Option<String>,
     /// Branch, tag, or commit checked out after clone. Default `main`.
@@ -48,7 +47,6 @@ impl ProjectConfigRow {
             "retry_backoff_s": self.retry_backoff_s,
             "on_task_fail": self.on_task_fail,
             "auto_sync_external": self.auto_sync_external,
-            "sandbox_backend": self.sandbox_backend,
             "repo_url": self.repo_url,
             "git_ref": self.git_ref,
             "fleet_llm": self.fleet_llm,

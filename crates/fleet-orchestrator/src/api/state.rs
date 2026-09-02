@@ -1,7 +1,6 @@
 use crate::config::{AuthMode, Config};
 use crate::orch::TickRunner;
-use crate::sandbox::{build_runtime, RuntimeBuildOpts};
-use crate::store::{connect, migrate, Store};
+use crate::store::{Store, connect, migrate};
 use crate::sync::LogBoardSync;
 use anyhow::Context;
 use sqlx::PgPool;
@@ -37,14 +36,6 @@ pub async fn build_app_state_with_pool_io(
     tokio::fs::create_dir_all(&cfg.data_dir)
         .await
         .with_context(|| format!("create DATA_DIR {}", cfg.data_dir.display()))?;
-    let runtime = build_runtime(&RuntimeBuildOpts {
-        backend: cfg.sandbox_backend.clone(),
-        stub_duration: cfg.stub_duration,
-        data_dir: cfg.data_dir.clone(),
-        worker_argv: cfg.process_worker_argv.clone(),
-        k8s: cfg.k8s.clone(),
-    })
-    .map_err(|e| anyhow::anyhow!(e))?;
     let orch_url = cfg.orchestrator_public_url.clone();
     let io_handle = io
         .clone()
@@ -60,14 +51,9 @@ pub async fn build_app_state_with_pool_io(
     } else {
         Arc::new(crate::notify::LogNotify)
     };
-    let mut runner = TickRunner::with_board_sync(
-        store.clone(),
-        runtime,
-        board_sync,
-        cfg.data_dir.clone(),
-        orch_url,
-    )
-    .with_notify(notify);
+    let mut runner =
+        TickRunner::with_board_sync(store.clone(), board_sync, cfg.data_dir.clone(), orch_url)
+            .with_notify(notify);
     if let Some(inv) = io {
         runner = runner.with_integrations(inv);
     }

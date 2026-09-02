@@ -140,7 +140,6 @@ async fn get_fleet_project(
         "name": project.name,
         "workspace_id": workspace_id,
         "role": role,
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "config": settings_json(&state, workspace_id, &cfg).await,
     })))
 }
@@ -161,7 +160,6 @@ async fn settings_json(
     json!({
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
-        "sandbox_backend": cfg.sandbox_backend,
         "min_isolation": min_isolation,
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
@@ -337,7 +335,6 @@ async fn patch_fleet_config(
         "project_id": workspace_id,
         "config": {
             "max_agents": cfg.max_agents,
-            "sandbox_backend": cfg.sandbox_backend,
             "repo_url": cfg.repo_url,
             "git_ref": cfg.git_ref,
         }
@@ -616,7 +613,6 @@ async fn get_overview(
     }
 
     Ok(Json(json!({
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "open_runs": runs.iter().filter(|r| {
             !matches!(r.status.as_str(), "completed" | "failed" | "cancelled")
         }).count(),
@@ -704,7 +700,6 @@ async fn get_sessions(
         .await
         .map_err(|e| map_orch_err("list_sessions", e))?;
     Ok(Json(json!({
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "sessions": sessions.iter().map(|s| json!({
             "id": s.id,
             "run_id": s.run_id,
@@ -839,14 +834,7 @@ async fn get_workers(
         .list_sessions_for_project(workspace_id)
         .await
         .map_err(|e| map_orch_err("list_sessions_for_project", e))?;
-    let cfg = state
-        .orch
-        .store
-        .get_project_config(workspace_id)
-        .await
-        .map_err(|e| map_orch_err("get_project_config", e))?;
     Ok(Json(json!({
-        "sandbox_backend": cfg.sandbox_backend,
         "sandboxes": sessions.iter().map(|s| json!({
             "id": s.id,
             "run_id": s.run_id,

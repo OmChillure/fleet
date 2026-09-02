@@ -47,9 +47,7 @@ fn append_set_cookie(headers: &mut HeaderMap, cookie: &Cookie<'_>) {
 /// Prefer explicit SameSite::None only when secure (browsers require it).
 pub fn validate_cookie_policy(cfg: &AuthConfig) {
     if matches!(cfg.cookie_samesite, SameSite::None) && !cfg.cookie_secure {
-        tracing::warn!(
-            "COOKIE_SAMESITE=None requires COOKIE_SECURE=true in modern browsers"
-        );
+        tracing::warn!("COOKIE_SAMESITE=None requires COOKIE_SECURE=true in modern browsers");
     }
 }
 
@@ -67,6 +65,7 @@ mod tests {
             refresh_ttl: Duration::from_secs(604_800),
             cookie_secure,
             cookie_samesite: SameSite::Lax,
+            signup_token: None,
         }
     }
 
@@ -89,14 +88,8 @@ mod tests {
 
         for raw in &cookies {
             let lower = raw.to_ascii_lowercase();
-            assert!(
-                lower.contains("httponly"),
-                "missing HttpOnly: {raw}"
-            );
-            assert!(
-                lower.contains("path=/"),
-                "missing Path=/: {raw}"
-            );
+            assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
+            assert!(lower.contains("path=/"), "missing Path=/: {raw}");
             assert!(
                 !lower.contains("secure"),
                 "Secure must follow config=false: {raw}"
@@ -104,7 +97,9 @@ mod tests {
         }
 
         assert!(
-            cookies.iter().any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
+            cookies
+                .iter()
+                .any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
             "missing access cookie: {cookies:?}"
         );
         assert!(
@@ -130,14 +125,8 @@ mod tests {
                 lower.contains("max-age=0"),
                 "clear cookie must set Max-Age=0: {raw}"
             );
-            assert!(
-                lower.contains("httponly"),
-                "missing HttpOnly: {raw}"
-            );
-            assert!(
-                lower.contains("path=/"),
-                "missing Path=/: {raw}"
-            );
+            assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
+            assert!(lower.contains("path=/"), "missing Path=/: {raw}");
         }
     }
 }
