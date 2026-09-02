@@ -1,7 +1,4 @@
 //! Workforce OS: durable goals + replace-worker.
-//!
-//! Agents and sandboxes die. The goal row and the board stay. Writes run
-//! immediately on the control plane — no human approval gate.
 
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
@@ -100,7 +97,7 @@ pub async fn gated_invoke_pool(
     .await
 }
 
-/// Attach a launched run to the open goal, or start a new goal from the label.
+/// Attach a launched run to the matching goal, or start a new goal from the label.
 pub async fn attach_run_to_goal(
     state: &AppState,
     workspace_id: Uuid,
@@ -108,15 +105,18 @@ pub async fn attach_run_to_goal(
     title: &str,
     goal_md: &str,
     run_id: Uuid,
+    case_id: Option<Uuid>,
 ) -> AppResult<WorkforceGoal> {
-    if let Some(existing) = wf::latest_open_goal(&state.db, workspace_id)
+    if let Some(existing) = wf::pick_goal_for_new_run(&state.db, workspace_id, run_id, case_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
     {
-        return wf::attach_run(&state.db, workspace_id, existing.id, run_id)
+        if let Some(g) = wf::attach_run(&state.db, workspace_id, existing.id, run_id)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?
-            .ok_or_else(|| AppError::not_found("goal vanished"));
+        {
+            return Ok(g);
+        }
     }
     let goal = wf::insert_goal(
         &state.db,
@@ -126,7 +126,7 @@ pub async fn attach_run_to_goal(
             title: title.chars().take(200).collect(),
             goal_md: goal_md.to_string(),
             run_id: Some(run_id),
-            case_id: None,
+            case_id,
             created_by: user_id,
         },
     )
@@ -147,14 +147,22 @@ pub async fn attach_case_to_goal(
     goal_md: &str,
     case_id: Uuid,
 ) -> AppResult<WorkforceGoal> {
-    if let Some(existing) = wf::latest_open_goal(&state.db, workspace_id)
+    if let Some(existing) = wf::goal_by_case(&state.db, workspace_id, case_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
     {
-        return wf::attach_case(&state.db, workspace_id, existing.id, case_id)
-            .await
-            .map_err(|e| AppError::internal(e.to_string()))?
-            .ok_or_else(|| AppError::not_found("goal vanished"));
+        return Ok(existing);
+    }
+    if let Some(existing) = wf::latest_open_goal_without_run(&state.db, workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+    {
+        if existing.case_id.is_none() || existing.case_id == Some(case_id) {
+            return wf::attach_case(&state.db, workspace_id, existing.id, case_id)
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?
+                .ok_or_else(|| AppError::not_found("goal vanished"));
+        }
     }
     let goal = wf::insert_goal(
         &state.db,
@@ -203,7 +211,11 @@ async fn get_workforce(
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(Json(json!({
-        "open_goals": goals.iter().map(goal_json).collect::<Vec<_>>(),
+        "open_goals": goals
+            .iter()
+            .filter(|g| matches!(g.status.as_str(), "open" | "acting" | "waiting_approval"))
+            .map(goal_json)
+            .collect::<Vec<_>>(),
         "goals": all_goals.iter().map(goal_json).collect::<Vec<_>>(),
     })))
 }
@@ -234,7 +246,6 @@ async fn post_goal(
         .unwrap_or(title)
         .to_string();
 
-    // A case is the overnight owner: wake loop keeps deciding after the tab closes.
     let case = crate::cases::create_case(
         &state,
         workspace_id,
@@ -281,6 +292,16 @@ async fn post_cancel_goal(
     Path((workspace_id, goal_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
+    let existing = wf::get_goal(&state.db, workspace_id, goal_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::not_found("goal not found"))?;
+    if let Some(case_id) = existing.case_id {
+        let _ = crate::cases::cancel_case(&state, workspace_id, case_id).await;
+    }
+    if let Some(run_id) = existing.run_id {
+        let _ = state.orch.store.request_cancel(workspace_id, run_id).await;
+    }
     let goal = wf::set_goal_status(&state.db, workspace_id, goal_id, "cancelled", None)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?

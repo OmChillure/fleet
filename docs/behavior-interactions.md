@@ -190,7 +190,7 @@ Toasts: success / error / info from forms and API failures.
 | `/login` | Login | Public |
 | `/signup` | Signup | Public |
 | `/oauth/done` | Popup closer (no shell) | Public (query/localStorage) |
-| `/:ws/dashboard` | Workforce (goals + approvals + board) | Cookie |
+| `/:ws/dashboard` | Workforce (goals + board; writes run immediately) | Cookie |
 | `/:ws/chat` | New chat | Cookie |
 | `/:ws/chat/:id` | Existing thread | Cookie |
 | `/:ws/fleet` | Fleet board | Cookie |
@@ -364,7 +364,7 @@ If a provider is not connected, the tool returns an error; the system prompt tel
 | Provider | Operations |
 | --- | --- |
 | github | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits`, `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment`, `merge_pr` |
-| gitlab | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment` |
+| gitlab | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment`, `merge_mr` |
 | jira | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
 | linear | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
 | slack | `list_channels`, `list_users`, `post_message`, `get_channel_history` |

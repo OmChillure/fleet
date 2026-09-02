@@ -1,4 +1,4 @@
-//! Workspace control-plane runner (always first on the Self-hosted list).
+//! Leftover workspace_plane_runners row. Not listed as a host.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

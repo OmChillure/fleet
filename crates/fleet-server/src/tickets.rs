@@ -222,7 +222,6 @@ pub async fn monitor_tickets(
             .map(|m| m.notion_databases.clone())
             .unwrap_or_default(),
     };
-    // Start monitor without the flag still works the tickets — default on.
     let auto_launch = args
         .auto_launch
         .unwrap_or_else(|| existing.as_ref().map(|m| m.auto_launch).unwrap_or(true));
@@ -1876,6 +1875,7 @@ pub async fn finish_and_launch(
         &prep.item.title,
         &prep.item.title,
         run.id,
+        None,
     )
     .await;
     mark_ticket_launched(

@@ -2099,7 +2099,6 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         posted.body
     );
 
-    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
     let hosts = call(
         &app,
         "GET",
@@ -2110,21 +2109,14 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
     .await;
     assert_eq!(hosts.status, StatusCode::OK, "hosts: {}", hosts.body);
     let host_list = hosts.body["hosts"].as_array().cloned().unwrap_or_default();
-    assert_eq!(
-        host_list.len(),
-        1,
-        "ack must not create worker_hosts beyond the control plane: {}",
+    assert!(
+        host_list.iter().all(|h| h.get("kind").and_then(|k| k.as_str()) != Some("control_plane")),
+        "ack must not create a plane host: {}",
         hosts.body
     );
-    assert_eq!(
-        host_list[0]["kind"], "control_plane",
-        "only the plane row may exist: {}",
-        hosts.body
-    );
-    assert_eq!(
-        host_list[0]["id"].as_str(),
-        Some(plane_id.to_string().as_str()),
-        "{}",
+    assert!(
+        host_list.is_empty(),
+        "ack must not create worker_hosts for this workspace: {}",
         hosts.body
     );
 
@@ -2947,4 +2939,146 @@ async fn workforce_goal_survives_and_slack_post_runs_directly() {
         "writes must run immediately, not wait for approve: {:?}",
         posted
     );
+}
+
+#[tokio::test]
+async fn session_live_comes_from_worker_ingest_not_plane_file() {
+    use fleet_orchestrator::domain::{
+        OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
+    };
+    use fleet_orchestrator::store::NewWorkerSession;
+
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("ws");
+    let _ = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+
+    let run_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let body = WorkPlanBody {
+        plan_id,
+        project_id: ws_id,
+        run_id,
+        version: 1,
+        status: WorkPlanStatus::Accepted,
+        source: "test".into(),
+        tasks: vec![PlanTask {
+            plan_task_id: "t1".into(),
+            title: "Build".into(),
+            summary: String::new(),
+            spec_md: String::new(),
+            depends_on: vec![],
+            worker_profile: "generalist".into(),
+            acceptance: vec![],
+            priority: 100,
+            external_ref: None,
+            timeout_s: None,
+            max_retries: None,
+        }],
+        policy: PlanPolicy {
+            on_task_fail: OnTaskFailPolicy::FailRun,
+            ..Default::default()
+        },
+    };
+    state
+        .orch
+        .store
+        .insert_accepted_plan(ws_id, body)
+        .await
+        .expect("plan");
+    state
+        .orch
+        .store
+        .materialize_plan(ws_id, plan_id)
+        .await
+        .expect("materialize");
+    let snap = state
+        .orch
+        .store
+        .load_board_snapshot(ws_id)
+        .await
+        .expect("snap");
+    let task = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "t1")
+        .expect("t1");
+    assert!(
+        state
+            .orch
+            .store
+            .update_task_status(task.id, "queued", "ready", None)
+            .await
+            .expect("ready"),
+        "t1 queued→ready"
+    );
+    let sid = Uuid::new_v4();
+    assert!(state
+        .orch
+        .store
+        .cas_assign_task(task.id, sid, 1)
+        .await
+        .expect("cas"));
+    let token = "live-worker-token";
+    state
+        .orch
+        .store
+        .insert_session_spawning(&NewWorkerSession {
+            id: sid,
+            project_id: ws_id,
+            run_id,
+            board_task_id: task.id,
+            attempt: 1,
+            runtime_backend: "remote".into(),
+            worker_token: token.into(),
+            worker_profile: "generalist".into(),
+            work_dir: Some("/this/plane/path/has/no/live.jsonl".into()),
+        })
+        .await
+        .expect("session");
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{sid}/heartbeat"),
+        token,
+        Some(json!({
+            "seq": 3,
+            "progress_pct": 40,
+            "events": [{
+                "kind": "update",
+                "text": "hello from driver",
+                "ts": "2026-09-02T17:00:00Z"
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::ACCEPTED, "{}", hb.body);
+
+    let again = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{sid}/heartbeat"),
+        token,
+        Some(json!({
+            "seq": 3,
+            "progress_pct": 40,
+            "events": [{ "kind": "update", "text": "duplicate seq must not land" }]
+        })),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::ACCEPTED, "{}", again.body);
+
+    let detail = call(
+        &app,
+        "GET",
+        &fleet(&ws, &format!("/sessions/{sid}")),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let live = detail.body["live"].as_array().cloned().unwrap_or_default();
+    assert_eq!(live.len(), 1, "live: {}", detail.body);
+    assert_eq!(live[0]["text"], "hello from driver");
 }

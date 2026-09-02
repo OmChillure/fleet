@@ -10,13 +10,11 @@ use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
 use fleet_auth::{AppError, AppResult, AuthState, require_user};
-use fleet_db::repos::plane_runners;
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, is_control_plane_runner_id,
-    parse_worker_host_isolation,
+    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, parse_worker_host_isolation,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -361,17 +359,6 @@ fn plane_git_sha() -> Option<&'static str> {
     option_env!("FLEET_GIT_SHA")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-async fn plane_public(state: &AppState, workspace_id: Uuid) -> AppResult<WorkerHostPublic> {
-    let row = plane_runners::get_or_default(&state.db, workspace_id).await?;
-    let jobs = state
-        .orch
-        .store
-        .count_local_capacity(workspace_id)
-        .await
-        .unwrap_or(0);
-    Ok(row.as_public_with_jobs(Utc::now(), jobs))
 }
 
 fn api_base(state: &AppState) -> String {
@@ -734,36 +721,11 @@ async fn http_list(
     let _ = require_member(&state, &jar, workspace_id).await?;
     let viewer_loopback = origin_is_loopback(&headers);
     let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    let cluster = host_repo::list_cluster(&state.db).await?;
-    let plane = plane_public(&state, workspace_id).await?;
-    let now = Utc::now();
-    let cluster_fresh: Vec<_> = cluster
-        .into_iter()
-        .filter(|h| {
-            h.workspace_id == workspace_id
-                || h.last_seen_at
-                    .is_some_and(|t| now.signed_duration_since(t) < chrono::Duration::minutes(30))
-        })
-        .collect();
-    let local = local_hostname();
-    let this_machine_present = rows
+    // Paired rows in this workspace only. Do not merge other workspaces' cluster hosts.
+    let hosts: Vec<_> = rows
         .iter()
-        .chain(cluster_fresh.iter())
-        .any(|h| host_is_this_machine(h, &local));
-    let mut hosts = Vec::with_capacity(rows.len() + cluster_fresh.len() + 1);
-    // Same box as the API: that fleet-host *is* the control plane runner.
-    // The leftover synthetic card is hidden.
-    if !this_machine_present {
-        let mut plane = plane;
-        plane.is_this_machine = viewer_loopback;
-        hosts.push(plane);
-    }
-    let mut seen = std::collections::HashSet::new();
-    for h in rows.iter().chain(cluster_fresh.iter()) {
-        if seen.insert(h.id) {
-            hosts.push(host_json_for_viewer(&state, h, viewer_loopback));
-        }
-    }
+        .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
+        .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
     let sandbox_backend = std::env::var("SANDBOX_BACKEND")
         .ok()
@@ -815,9 +777,6 @@ async fn http_get(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
-    if is_control_plane_runner_id(workspace_id, host_id) {
-        return Ok(Json(plane_public(&state, workspace_id).await?));
-    }
     let host = load_in_workspace(&state, workspace_id, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -829,34 +788,6 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    if is_control_plane_runner_id(workspace_id, host_id) {
-        if let Some(n) = body.max_concurrent {
-            validate_max_concurrent(n)?;
-        }
-        // TODO: pause/drain/auto_update/request_update/isolation column are
-        // paired-host settings. Plane uses allow_host/allow_container only.
-        let row = plane_runners::upsert(
-            &state.db,
-            workspace_id,
-            &plane_runners::PlaneRunnerPatch {
-                name: body
-                    .name
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
-                allow_host: body.allow_host.or(body.enabled).or(body.paused.map(|p| !p)),
-                allow_container: body.allow_container,
-                max_concurrent: body.max_concurrent,
-            },
-        )
-        .await?;
-        let jobs = state
-            .orch
-            .store
-            .count_local_capacity(workspace_id)
-            .await
-            .unwrap_or(0);
-        return Ok(Json(row.as_public_with_jobs(Utc::now(), jobs)));
-    }
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
@@ -926,11 +857,6 @@ async fn http_delete(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    if is_control_plane_runner_id(workspace_id, host_id) {
-        return Err(AppError::bad_request(
-            "the control plane runner cannot be removed",
-        ));
-    }
     match load_in_workspace(&state, workspace_id, host_id).await {
         Ok(_) => {}
         Err(e) => {
@@ -954,11 +880,6 @@ async fn http_new_pair_token(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    if is_control_plane_runner_id(workspace_id, host_id) {
-        return Err(AppError::bad_request(
-            "the control plane runner does not pair",
-        ));
-    }
     let _ = load_in_workspace(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
@@ -1301,23 +1222,25 @@ async fn http_complete(
             } else {
                 2
             };
-            state
+            let applied = state
                 .orch
                 .store
                 .complete_spawn_failure(sid)
                 .await
                 .map_err(|e| AppError::internal(e.to_string()))?;
-            if let Some(tid) = tid {
-                fleet_orchestrator::orch::apply_retry_after_failure(
-                    &state.orch.store,
-                    tid,
-                    attempt,
-                    max_retries,
-                    false,
-                    fleet_orchestrator::domain::ExitReason::SpawnFailed,
-                )
-                .await
-                .map_err(|e| AppError::internal(e.to_string()))?;
+            if applied {
+                if let Some(tid) = tid {
+                    fleet_orchestrator::orch::apply_retry_after_failure(
+                        &state.orch.store,
+                        tid,
+                        attempt,
+                        max_retries,
+                        false,
+                        fleet_orchestrator::domain::ExitReason::SpawnFailed,
+                    )
+                    .await
+                    .map_err(|e| AppError::internal(e.to_string()))?;
+                }
             }
         }
     }

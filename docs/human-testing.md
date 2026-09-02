@@ -77,7 +77,8 @@ same change. The walkthrough is allowed to go stale only if the product did.
 2. **Signup** — valid account; you land on login, not inside the app.
 3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Title is
    **Workforce**. Shows set-a-goal, open goals, open runs, live
-   agents, team board, and team chat (empty until a run).
+   agents, team board, and team chat (empty until a run). An in-progress
+   card has **Watch** → Live session.
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
 5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Workforce, Fleet,
@@ -86,12 +87,12 @@ same change. The walkthrough is allowed to go stale only if the product did.
    sections. `/workers` still redirects.
 6. **Workspace switcher** — list; create a second workspace; switch.
 7. **Settings** — concurrent agents + Fleet LLM (Ollama). No git URL.
-8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
-   paste the install command on the machine (Linux/macOS or Windows). Copy
-   Unix, Windows, and token (works on HTTP LAN). Token panel is success —
-   do not require a second machine. On a runner with Ollama: disk free, a
-   searchable current top-50 popular-model list, and an Unlisted field for
-   any name/URL. `/{ws}/workers` redirects here (`workers` scene is an alias).
+8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Empty is **No
+   workers yet** (the API is not a runner). Add a worker; paste the
+   install command on the machine (this one is fine). Token panel is
+   success — do not require a second machine. On a runner with Ollama:
+   disk free, a searchable current top-50 popular-model list, and an
+   Unlisted field for any name/URL. `/{ws}/workers` redirects here.
 9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
    (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
 10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;

@@ -162,6 +162,7 @@ pub async fn attach_run(
             END,
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2
+          AND (run_id IS NULL OR run_id = $3)
         RETURNING {GOAL_COLS}
         "#
     );
@@ -249,6 +250,93 @@ pub async fn latest_open_goal(
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)
+}
+
+pub async fn goal_by_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<Option<WorkforceGoal>> {
+    let q = format!(
+        r#"
+        SELECT {GOAL_COLS}
+        FROM workforce_goals
+        WHERE workspace_id = $1 AND run_id = $2
+        ORDER BY updated_at DESC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, WorkforceGoal>(&q)
+        .bind(workspace_id)
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn goal_by_case(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    case_id: Uuid,
+) -> DbResult<Option<WorkforceGoal>> {
+    let q = format!(
+        r#"
+        SELECT {GOAL_COLS}
+        FROM workforce_goals
+        WHERE workspace_id = $1 AND case_id = $2
+        ORDER BY updated_at DESC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, WorkforceGoal>(&q)
+        .bind(workspace_id)
+        .bind(case_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn latest_open_goal_without_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Option<WorkforceGoal>> {
+    let q = format!(
+        r#"
+        SELECT {GOAL_COLS}
+        FROM workforce_goals
+        WHERE workspace_id = $1
+          AND status IN ('open', 'acting', 'waiting_approval')
+          AND run_id IS NULL
+          AND case_id IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, WorkforceGoal>(&q)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Goal that should own a newly launched run. Never steals a run onto a
+/// different open goal that already has its own run.
+pub async fn pick_goal_for_new_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    case_id: Option<Uuid>,
+) -> DbResult<Option<WorkforceGoal>> {
+    if let Some(g) = goal_by_run(pool, workspace_id, run_id).await? {
+        return Ok(Some(g));
+    }
+    if let Some(cid) = case_id {
+        if let Some(g) = goal_by_case(pool, workspace_id, cid).await? {
+            return Ok(Some(g));
+        }
+        return Ok(None);
+    }
+    latest_open_goal_without_run(pool, workspace_id).await
 }
 
 pub async fn insert_approval(pool: &PgPool, spec: &NewApproval) -> DbResult<PolicyApproval> {
@@ -528,14 +616,20 @@ pub async fn reconcile_goal(
     }
 
     if let Some(case_id) = goal.case_id {
-        let st: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM cases WHERE id = $1 AND workspace_id = $2")
-                .bind(case_id)
-                .bind(workspace_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(map_query_err)?;
-        if let Some((status,)) = st {
+        let st: Option<(String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT status, run_id FROM cases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(case_id)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?;
+        if let Some((status, case_run)) = st {
+            if let Some(rid) = case_run {
+                if goal.run_id != Some(rid) {
+                    let _ = attach_run(pool, workspace_id, goal.id, rid).await?;
+                }
+            }
             let mapped = match status.as_str() {
                 "completed" => Some("completed"),
                 "failed" => Some("failed"),

@@ -167,15 +167,13 @@ def _signup_api(page) -> tuple[str, str]:
     return ws, f"{UI}/{ws}"
 
 
-def _wait_control_plane(page, workspace_url: str) -> None:
+def _wait_self_hosted(page, workspace_url: str) -> None:
     last_err: Exception | None = None
     for _ in range(8):
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page, timeout_ms=30_000)
         try:
-            page.get_by_text("Control plane", exact=True).first.wait_for(
-                state="attached", timeout=15_000
-            )
+            page.get_by_role("button", name="Add worker").wait_for(timeout=15_000)
             return
         except Exception as e:  # noqa: BLE001 — dx mid-rebuild / list still loading
             last_err = e
@@ -186,7 +184,7 @@ def _wait_control_plane(page, workspace_url: str) -> None:
     except Exception:
         pass
     raise AssertionError(
-        f"Control plane missing after pair. url={page.url} body={body!r}"
+        f"Self-hosted page not ready after pair. url={page.url} body={body!r}"
     ) from last_err
 
 
@@ -268,13 +266,10 @@ class CatalogUpdateNowTests(unittest.TestCase):
         if gen:
             heartbeat(page, machine, {"settings_ack_gen": int(gen)})
 
-        _wait_control_plane(page, workspace_url)
-
-        plane = page.locator("article").filter(has_text="Control plane").first
+        _wait_self_hosted(page, workspace_url)
         self.assertEqual(
-            plane.get_by_role("button", name="Update now").count(),
+            page.locator("article").filter(has_text="Control plane").count(),
             0,
-            "Control plane must not show Update now",
         )
 
         card = page.locator("article").filter(has_text=name)

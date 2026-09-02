@@ -4,7 +4,7 @@
 mod common;
 
 use fleet_db::repos::users::NewUser;
-use fleet_db::repos::{users, workforce, workspaces};
+use fleet_db::repos::{cases, users, workforce, workspaces};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -96,4 +96,98 @@ async fn goal_and_approval_round_trip() {
         .await
         .expect("open goals");
     assert_eq!(open.len(), 1);
+}
+
+#[tokio::test]
+async fn pick_goal_for_new_run_does_not_steal() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let run_a = Uuid::new_v4();
+    let run_b = Uuid::new_v4();
+    let case_a = cases::insert(
+        &pool,
+        &cases::NewCase {
+            id: Uuid::now_v7(),
+            workspace_id,
+            kind: "workforce".into(),
+            title: "Goal A".into(),
+            policy_md: String::new(),
+            stage: "start".into(),
+            context: json!({}),
+            next_wake_at: None,
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("case a");
+    let first = workforce::insert_goal(
+        &pool,
+        &workforce::NewGoal {
+            id: Uuid::now_v7(),
+            workspace_id,
+            title: "Goal A".into(),
+            goal_md: "A".into(),
+            run_id: Some(run_a),
+            case_id: Some(case_a.id),
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("goal a");
+    workforce::set_goal_status(&pool, workspace_id, first.id, "acting", None)
+        .await
+        .expect("acting a");
+    let second = workforce::insert_goal(
+        &pool,
+        &workforce::NewGoal {
+            id: Uuid::now_v7(),
+            workspace_id,
+            title: "Goal B".into(),
+            goal_md: "B".into(),
+            run_id: None,
+            case_id: None,
+            created_by: Some(user_id),
+        },
+    )
+    .await
+    .expect("goal b");
+    workforce::set_goal_status(&pool, workspace_id, second.id, "acting", None)
+        .await
+        .expect("acting b");
+
+    let picked = workforce::pick_goal_for_new_run(&pool, workspace_id, run_b, None)
+        .await
+        .expect("pick")
+        .expect("a free goal");
+    assert_eq!(picked.id, second.id, "must not attach run B to goal A");
+
+    let by_case = workforce::pick_goal_for_new_run(&pool, workspace_id, run_b, Some(case_a.id))
+        .await
+        .expect("pick by case")
+        .expect("case owner");
+    assert_eq!(by_case.id, first.id);
+
+    let by_run = workforce::pick_goal_for_new_run(&pool, workspace_id, run_a, None)
+        .await
+        .expect("pick by run")
+        .expect("run owner");
+    assert_eq!(by_run.id, first.id);
+
+    let inbox_run = Uuid::new_v4();
+    let inbox_pick = workforce::pick_goal_for_new_run(&pool, workspace_id, inbox_run, None)
+        .await
+        .expect("inbox pick");
+    assert_eq!(
+        inbox_pick.as_ref().map(|g| g.id),
+        Some(second.id),
+        "inbox/chat may bind a runless goalless row, not a case-backed goal"
+    );
+    workforce::attach_run(&pool, workspace_id, first.id, inbox_run)
+        .await
+        .expect("cas");
+    let first_now = workforce::get_goal(&pool, workspace_id, first.id)
+        .await
+        .expect("reload")
+        .expect("first");
+    assert_eq!(first_now.run_id, Some(run_a), "attach_run must not overwrite");
 }

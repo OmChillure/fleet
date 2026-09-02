@@ -654,7 +654,7 @@ async fn owner_can_rename_host() {
 }
 
 #[tokio::test]
-async fn list_starts_with_control_plane_runner() {
+async fn list_has_no_synthetic_control_plane() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
@@ -663,11 +663,18 @@ async fn list_starts_with_control_plane_runner() {
     let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(list.status, StatusCode::OK, "list: {}", list.body);
     let hosts = list.body["hosts"].as_array().expect("hosts");
-    assert!(!hosts.is_empty(), "expected plane row: {}", list.body);
-    assert_eq!(hosts[0]["kind"], "control_plane", "{}", list.body);
-    assert_eq!(hosts[0]["id"].as_str(), Some(plane_id.to_string().as_str()));
-    assert_eq!(hosts[0]["name"], "Control plane");
-    assert_eq!(hosts[0]["status"], "online");
+    assert!(
+        hosts.iter().all(|h| h["kind"] != "control_plane"),
+        "API process is not a runner: {}",
+        list.body
+    );
+    assert!(
+        hosts
+            .iter()
+            .all(|h| h["workspace_id"].as_str() != Some(ws.as_str())),
+        "fresh workspace has no worker_hosts of its own: {}",
+        list.body
+    );
 
     let patched = call(
         &app,
@@ -677,9 +684,7 @@ async fn list_starts_with_control_plane_runner() {
         Some(json!({ "allow_host": false, "allow_container": false })),
     )
     .await;
-    assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
-    assert_eq!(patched.body["allow_host"], false);
-    assert_eq!(patched.body["kind"], "control_plane");
+    assert_eq!(patched.status, StatusCode::NOT_FOUND, "patch: {}", patched.body);
 
     let denied = call(
         &app,
@@ -689,7 +694,7 @@ async fn list_starts_with_control_plane_runner() {
         None,
     )
     .await;
-    assert_eq!(denied.status, StatusCode::BAD_REQUEST, "{}", denied.body);
+    assert_eq!(denied.status, StatusCode::NOT_FOUND, "{}", denied.body);
 }
 
 #[tokio::test]
@@ -707,7 +712,7 @@ async fn control_plane_does_not_pair_or_appear_assignable() {
         Some(json!({})),
     )
     .await;
-    assert_eq!(pair.status, StatusCode::BAD_REQUEST, "{}", pair.body);
+    assert_eq!(pair.status, StatusCode::NOT_FOUND, "{}", pair.body);
 
     let listed = worker_hosts_assignable(&state, &ws).await;
     assert!(
@@ -1206,16 +1211,14 @@ async fn heartbeat_without_software_leaves_public_software_null() {
         listed.body
     );
     assert_ne!(listed.body["package_versions"]["fleet-host"], "0.0.0");
-    assert_eq!(
-        listed.body["hosts"][0]["kind"], "control_plane",
-        "plane is always first: {}",
-        listed.body
-    );
     assert!(
-        listed.body["hosts"][0].get("software").is_none()
-            || listed.body["hosts"][0]["software"].is_null(),
-        "plane must not have a software line: {}",
-        listed.body["hosts"][0]
+        listed.body["hosts"]
+            .as_array()
+            .expect("hosts")
+            .iter()
+            .all(|h| h["kind"] != "control_plane"),
+        "list must not synthesize a plane runner: {}",
+        listed.body
     );
     let host = listed_host(&listed.body, &hid);
     assert!(
@@ -1241,12 +1244,6 @@ async fn heartbeat_without_software_leaves_public_software_null() {
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     let host = listed_host(&listed.body, &hid);
     assert_eq!(host["software"]["git_sha"], "abc123def456", "{}", host);
-    assert!(
-        listed.body["hosts"][0].get("software").is_none()
-            || listed.body["hosts"][0]["software"].is_null(),
-        "plane software stays none after a host report: {}",
-        listed.body["hosts"][0]
-    );
 
     let hb = call_bearer(
         &app,
@@ -2223,11 +2220,10 @@ async fn request_update_marks_host() {
         Some(json!({ "request_update": true })),
     )
     .await;
-    assert_eq!(plane.status, StatusCode::OK, "plane: {}", plane.body);
-    assert!(
-        plane.body.get("update_requested_at").is_none()
-            || plane.body["update_requested_at"].is_null(),
-        "control plane has no Update now: {}",
+    assert_eq!(
+        plane.status,
+        StatusCode::NOT_FOUND,
+        "synthetic plane is not a host: {}",
         plane.body
     );
 }

@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""Layer 2 e2e: plane is not a runner (catalog:e2e-plane-runtime).
+"""Layer 2 e2e: the API is not a runner (catalog:e2e-plane-runtime).
 
-No Native/Sandboxed isolation checkboxes. The plane card shows the workspace
-SANDBOX_BACKEND. Fail closed — no skip.
+Self-hosted lists paired hosts only. Empty workspace shows No workers yet.
+Fail closed — no skip.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import sys
 import time
 import unittest
 import uuid
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
     API,
     UI,
+    assert_hosts_have_no_plane,
+    assert_no_control_plane_card,
     goto_self_hosted,
     list_hosts,
-    wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -33,8 +32,6 @@ BROWSERS = os.environ.get(
     str(REPO / ".tmp" / "ms-playwright"),
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
-
-HINT = "not implemented yet"
 
 
 def _listening(host: str, port: int) -> bool:
@@ -111,49 +108,6 @@ def _require_playwright():
     return sync_playwright
 
 
-def _plane_row(page, workspace_id: str) -> dict[str, Any]:
-    listed = list_hosts(page, workspace_id)
-    hosts = listed.get("hosts") or []
-    if not hosts:
-        raise AssertionError(f"empty host list: {listed!r}"[:800])
-    row = hosts[0]
-    if row.get("kind") != "control_plane":
-        raise AssertionError(f"first host is not the plane: {row!r}"[:800])
-    return row
-
-
-def _plane_card(page):
-    first = page.locator("article").first
-    first.wait_for(timeout=15_000)
-    text = first.inner_text()
-    if "Control plane" not in text:
-        raise AssertionError(f"first card is not Control plane: {text[:400]!r}")
-    return first
-
-
-def _checkbox(card, name: str):
-    # Accessible name for Sandboxed includes the placeholder hint.
-    box = card.get_by_role("checkbox", name=re.compile(rf"^{re.escape(name)}($|\b)"))
-    if box.count() == 0:
-        box = card.locator("label").filter(has_text=re.compile(rf"^{re.escape(name)}($|\b)")).locator(
-            "input"
-        )
-    if box.count() == 0:
-        box = card.locator("label").filter(has_text=name).locator("input")
-    return box
-
-
-def _apply_if_visible(card, page) -> None:
-    apply_btn = card.get_by_role("button", name="Apply changes")
-    for _ in range(25):
-        if apply_btn.count() and apply_btn.first.is_visible():
-            apply_btn.first.click(force=True)
-            apply_btn.first.wait_for(state="hidden", timeout=10_000)
-            return
-        page.wait_for_timeout(200)
-    raise AssertionError("Apply changes never appeared after toggling plane Sandboxed")
-
-
 class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -184,35 +138,21 @@ class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_toggle_sandboxed_on_the_plane_card(self) -> None:
-        # catalog:e2e-plane-runtime — plane is not a runner, no isolation UI.
+        # catalog:e2e-plane-runtime — API is not a runner; empty list + empty state.
         page = self.page
         _ws, workspace_url = _signup_api(page)
 
         goto_self_hosted(page, workspace_url)
-        card = _plane_card(page)
-        text = card.inner_text()
-        self.assertIn("this process", text.lower())
-        self.assertIn("does not run sandboxes", text)
-        self.assertNotIn("not implemented yet", text.lower())
-        self.assertNotIn(
-            "pending apply",
-            text.lower(),
-            "fresh plane must not show pending apply",
-        )
-        self.assertEqual(
-            card.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
-            0,
-            "plane must not show Native isolation",
-        )
-        self.assertEqual(
-            card.locator("label").filter(has_text="Sandboxed").count(),
-            0,
-            "plane must not show Sandboxed isolation",
-        )
-
-        row = _plane_row(page, _ws)
-        self.assertEqual(row.get("kind"), "control_plane", row)
-        self.assertEqual(row.get("name"), "Control plane", row)
+        assert_no_control_plane_card(page)
+        body = page.inner_text("body")
+        self.assertIn("No workers yet", body)
+        self.assertIn("The API is not a runner", body)
+        listed = list_hosts(page, _ws)
+        assert_hosts_have_no_plane(listed)
+        own = listed.get("hosts") or []
+        if not own:
+            self.assertIn("No workers yet", body)
+            self.assertIn("The API is not a runner", body)
 
 
 if __name__ == "__main__":

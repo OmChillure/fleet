@@ -16,6 +16,7 @@ struct TaskRow {
     plan_id: String,
     profile: String,
     status: String,
+    session_id: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -25,6 +26,60 @@ struct ChatRow {
     from: String,
     to: String,
     body: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct ActivityRow {
+    key: String,
+    profile: String,
+    kind: String,
+    text: String,
+    status: String,
+    session_id: String,
+}
+
+/// Collapse token-sized `update` fragments from the same session so the
+/// dashboard list stays readable and Dioxus keys stay unique.
+fn parse_activity(items: &[Value]) -> Vec<ActivityRow> {
+    let mut out: Vec<ActivityRow> = Vec::new();
+    for (i, a) in items.iter().enumerate() {
+        let Some(profile) = a.get("profile").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(kind) = a.get("kind").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(text) = a.get("text").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let status = a
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let session_id = a
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some(last) = out.last_mut() {
+            if last.session_id == session_id && last.kind == "update" && kind == "update" {
+                last.text.push_str(text);
+                continue;
+            }
+        }
+        let seq = a.get("report_seq").and_then(|v| v.as_i64()).unwrap_or(i as i64);
+        let idx = a.get("idx").and_then(|v| v.as_i64()).unwrap_or(0);
+        out.push(ActivityRow {
+            key: format!("{session_id}-{seq}-{idx}-{i}"),
+            profile: profile.to_string(),
+            kind: kind.to_string(),
+            text: text.to_string(),
+            status,
+            session_id,
+        });
+    }
+    out
 }
 
 fn parse_tasks(v: &[Value]) -> Vec<TaskRow> {
@@ -49,6 +104,11 @@ fn parse_tasks(v: &[Value]) -> Vec<TaskRow> {
                     .to_string(),
                 status: t
                     .get("status")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                session_id: t
+                    .get("claimed_session_id")
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -135,21 +195,7 @@ pub fn Dashboard(workspace_id: String) -> Element {
     let waiting = parse_chat(&o.waiting);
     let chat = parse_chat(&o.chat);
 
-    let activity: Vec<(String, String, String, String)> = o
-        .activity
-        .iter()
-        .filter_map(|a| {
-            Some((
-                a.get("profile")?.as_str()?.to_string(),
-                a.get("kind")?.as_str()?.to_string(),
-                a.get("text")?.as_str()?.to_string(),
-                a.get("status")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ))
-        })
-        .collect();
+    let activity = parse_activity(&o.activity);
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-auto p-4 md:p-5",
@@ -290,9 +336,21 @@ pub fn Dashboard(workspace_id: String) -> Element {
                                             "{t.plan_id} · {t.profile}"
                                         }
                                     }
-                                    span {
-                                        class: "shrink-0 text-xs {status_class(&t.status)}",
-                                        "{t.status}"
+                                    div { class: "flex shrink-0 items-center gap-2",
+                                        span {
+                                            class: "text-xs {status_class(&t.status)}",
+                                            "{t.status}"
+                                        }
+                                        if !t.session_id.is_empty() {
+                                            Link {
+                                                to: Route::SessionDetail {
+                                                    workspace_id: workspace_id.clone(),
+                                                    session_id: t.session_id.clone(),
+                                                },
+                                                class: "text-xs text-[var(--app-accent)] underline",
+                                                "Watch"
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -337,14 +395,24 @@ pub fn Dashboard(workspace_id: String) -> Element {
                     }
                 } else {
                     ul { class: "mt-3 m-0 list-none space-y-2 p-0",
-                        for (profile, kind, text, st) in activity {
+                        for row in activity {
                             li {
-                                key: "{profile}-{kind}-{text}",
+                                key: "{row.key}",
                                 p { class: "m-0 text-[11px] text-[var(--app-muted)]",
-                                    "`{profile}` · {kind} · {st}"
+                                    "`{row.profile}` · {row.kind} · {row.status}"
                                 }
                                 p { class: "m-0 mt-0.5 whitespace-pre-wrap text-sm text-[var(--app-fg)]",
-                                    "{text}"
+                                    "{row.text}"
+                                }
+                                if !row.session_id.is_empty() {
+                                    Link {
+                                        to: Route::SessionDetail {
+                                            workspace_id: workspace_id.clone(),
+                                            session_id: row.session_id.clone(),
+                                        },
+                                        class: "mt-1 inline-block text-xs text-[var(--app-accent)] underline",
+                                        "Watch session"
+                                    }
                                 }
                             }
                         }

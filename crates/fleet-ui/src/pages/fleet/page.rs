@@ -22,6 +22,7 @@ struct TaskCard {
     worker_profile: String,
     block_reason: String,
     hitl_notes: String,
+    session_id: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -62,6 +63,7 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                             .to_string(),
                         block_reason: t["block_reason"].as_str().unwrap_or("").to_string(),
                         hitl_notes: t["hitl_notes"].as_str().unwrap_or("").to_string(),
+                        session_id: t["claimed_session_id"].as_str().unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -604,6 +606,16 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "try {t.attempt}" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.progress_pct}%" }
                                                     span { class: "text-[10px] text-[var(--app-muted)]", "{t.worker_profile}" }
+                                                    if !t.session_id.is_empty() {
+                                                        Link {
+                                                            to: Route::SessionDetail {
+                                                                workspace_id: workspace_id.clone(),
+                                                                session_id: t.session_id.clone(),
+                                                            },
+                                                            class: "text-[10px] text-[var(--app-accent)] underline",
+                                                            "Watch"
+                                                        }
+                                                    }
                                                 }
                                                 if t.status == "blocked" {
                                                     if !t.block_reason.is_empty() {

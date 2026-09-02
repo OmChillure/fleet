@@ -145,7 +145,7 @@ cmd_guide() {
 
   pause_step "Login  ${UI_URL}/login" \
     "Same email/password → /{workspace-uuid}/dashboard." \
-    "Workforce page: Set a goal, Open goals / Open runs / Live agents / Team board (empty is OK)." || return 0
+    "Workforce page: Set a goal, Open goals / Open runs / Live agents / Team board (empty is OK). In-progress cards have Watch → Live session." || return 0
 
   pause_step "Login wall" \
     "Log out (user menu) or a private window." \
@@ -168,16 +168,16 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Cards show name, status, last seen, jobs — click a card for the right panel (settings, providers, Apply, Remove). The API box is labeled (control plane). (this machine) only appears when you opened the UI on that box (localhost). Opening the LAN URL from another PC must not tag the plane as this machine. Software: Current fleet-host version / Current fleet-driver version are semver from runner-packages.toml (same on every OS). Amber banner lists any required OS that is not on both current versions. Each card lists those versions, not file hashes. Providers always lists Grok / Claude / OpenAI / Private (Ollama). Not installed: OS-specific copy-paste install. Private (Ollama) installed: disk free, popular list, tag picker (size / RAM when published), models directory, Unlisted name/URL. Disk-too-small refuses install. Sandboxing: Native (work root + process allow), VMs placeholder, Containers (k8s/docker knobs). Add worker — paste the install command (Windows needs the LAN URL, not localhost)." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Empty state is No workers yet — the API is not a runner. Add worker, then paste the install command (this machine is fine). Cards are paired hosts only: name, status, last seen, jobs — click a card for the right panel (settings, providers, Apply, Remove). (this machine) only appears when you opened the UI on that box (localhost). Software: Current fleet-host version / Current fleet-driver version are semver from runner-packages.toml (same on every OS). Amber banner lists any required OS that is not on both current versions. Each card lists those versions, not file hashes. Providers list Grok / Claude / OpenAI / Private (Ollama) after heartbeat. Not installed: OS-specific copy-paste install. Private (Ollama) installed: disk free, popular list, tag picker (size / RAM when published), models directory, Unlisted name/URL. Disk-too-small refuses install. Sandboxing: Native (work root + process allow), VMs placeholder, Containers (k8s/docker knobs). Windows install needs the LAN URL, not localhost." \
     "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
-    "Stop taking jobs does not stop running work; new jobs go to another worker or the control plane. Plane off + no remote host = task stays ready." \
+    "Stop taking jobs does not stop running work; new jobs go to another worker. No paired host = task stays ready." \
     "Workspace Settings still owns min isolation (process < container < vm). Behavior is above Providers. One Apply bar appears only when something changed and stays visible while you scroll. Sandboxing: Native work root, VMs placeholder, Containers as selects plus Advanced. Models directory is pre-filled. Stop taking jobs is the Behavior button. After Apply it says Pending apply until the box acks." \
-    "Auto-update is on by default (not on the plane). Turn it off on a behind box to see Update now; click becomes Update requested." \
+    "Auto-update is on by default. Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
-    "Click a card name (not Control plane) to rename; Enter saves, Escape cancels." \
-    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago). Control plane says this process, not last seen." || return 0
+    "Click a card name to rename; Enter saves, Escape cancels." \
+    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." || return 0
 
   pause_step "Workers" \
     "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \

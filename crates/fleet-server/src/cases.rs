@@ -1531,6 +1531,7 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
         &case.title,
         &case.policy_md,
         run.id,
+        Some(case.id),
     )
     .await;
     Ok(run.id)

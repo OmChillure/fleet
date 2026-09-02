@@ -143,7 +143,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         "{NAV_LABEL_SELF_HOSTED}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine as a self-hosted worker. It phones home; the plane never dials inbound. Jobs run as processes on that machine."
+                        "Pair a machine as a self-hosted worker. It phones home; the API never dials inbound. Jobs run on that machine, not in this process."
                     }
                     if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
@@ -201,7 +201,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                             "No workers yet"
                         }
                         p { class: "mt-2 text-sm text-[var(--app-muted)]",
-                            "Add a worker, then paste the install command in a terminal on that machine."
+                            "The API is not a runner. Add a worker, then paste the install command on that machine — this one is fine."
                         }
                     }
                 } else {

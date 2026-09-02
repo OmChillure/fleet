@@ -29,6 +29,7 @@ async fn grok_tiny_prompt_over_acp() {
         auto_approve: true,
         timeout: Duration::from_secs(120),
         extra_env: HashMap::new(),
+        live_out: None,
     })
     .await
     .expect("run_session");
