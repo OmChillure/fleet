@@ -242,6 +242,23 @@ pub async fn call_with_xff(
     call_finish(app, builder, body).await
 }
 
+pub async fn call_with_proxy_ips(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    xff: &str,
+    real_ip: &str,
+    body: Option<Value>,
+) -> HttpOut {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    builder = builder.header("x-forwarded-for", xff);
+    builder = builder.header("x-real-ip", real_ip);
+    call_finish(app, builder, body).await
+}
+
 async fn call_finish(
     app: &axum::Router,
     builder: axum::http::request::Builder,

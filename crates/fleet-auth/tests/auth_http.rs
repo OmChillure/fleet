@@ -1292,6 +1292,49 @@ async fn login_rate_limited_by_forwarded_ip() {
 }
 
 #[tokio::test]
+async fn login_rate_limit_uses_real_ip_not_spoofed_xff() {
+    let app = app().await;
+    let email = unique_email();
+    let created = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let real = format!("203.0.113.{}", (Uuid::new_v4().as_u128() % 200) + 1);
+    let body = json!({ "email": email, "password": "wrong-password-xx" });
+    for i in 0..10 {
+        let spoof = format!("198.51.100.{i}");
+        let out = call_with_proxy_ips(
+            &app,
+            "POST",
+            "/api/auth/login",
+            &spoof,
+            &real,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(
+            out.status,
+            StatusCode::UNAUTHORIZED,
+            "attempt {i}: {}",
+            out.body
+        );
+    }
+    let blocked = call_with_proxy_ips(
+        &app,
+        "POST",
+        "/api/auth/login",
+        "198.51.100.99",
+        &real,
+        Some(body),
+    )
+    .await;
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
+}
+
+#[tokio::test]
 async fn signup_open_when_token_unset() {
     let app = app().await;
     let out = signup_with_token(&app, &unique_email(), TEST_PASSWORD, None).await;

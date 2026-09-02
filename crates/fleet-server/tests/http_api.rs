@@ -501,7 +501,7 @@ async fn pair_test_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String
     machine
 }
 
-async fn drain_leases(app: &axum::Router, machine: &str) {
+async fn drain_leases(app: &axum::Router, machine: &str, ws: &str) {
     for _ in 0..8 {
         let lease = call_bearer(
             app,
@@ -522,6 +522,23 @@ async fn drain_leases(app: &axum::Router, machine: &str) {
         let tok = claim["lease_token"].as_str().unwrap_or("");
         if id.is_empty() {
             return;
+        }
+        let session_id = claim["payload"]["session_id"].as_str().unwrap_or("");
+        let worker_token = claim["payload"]["worker_token"].as_str().unwrap_or("");
+        if !session_id.is_empty() && !worker_token.is_empty() {
+            let _ = call_bearer(
+                app,
+                "POST",
+                &format!("/v1/projects/{ws}/workers/{session_id}/status"),
+                worker_token,
+                Some(json!({
+                    "seq": 1,
+                    "status": "success",
+                    "result_md": "Task completed successfully with artifacts.",
+                    "files": { "work/out.txt": "ok" }
+                })),
+            )
+            .await;
         }
         let _ = call_bearer(
             app,
@@ -545,7 +562,7 @@ async fn tick_until_tasks_done(
     for i in 0..24 {
         let tick = call(app, "POST", &fleet(ws, "/tick"), Some(jar), None).await;
         assert_eq!(tick.status, StatusCode::OK, "tick {i}: {}", tick.body);
-        drain_leases(app, &machine).await;
+        drain_leases(app, &machine, ws).await;
         tokio::time::sleep(Duration::from_millis(75)).await;
         let tasks = call(app, "GET", &fleet(ws, "/tasks"), Some(jar), None).await;
         assert_eq!(tasks.status, StatusCode::OK, "tasks {i}: {}", tasks.body);
@@ -844,7 +861,7 @@ async fn patch_fleet_config_round_trip_empty_clears_git_ref_only_400() {
     );
 }
 
-// ── 6. workers / sessions after stub run ────────────────────────────────────
+// ── 6. workers / sessions after host inbox ──────────────────────────────────
 
 #[tokio::test]
 async fn workers_sandboxes_match_sessions_and_detail_shape() {
@@ -873,7 +890,7 @@ async fn workers_sandboxes_match_sessions_and_detail_shape() {
         .collect();
     assert!(
         !session_ids.is_empty(),
-        "expected sessions after stub run: {}",
+        "expected sessions after host inbox: {}",
         sessions.body
     );
 
@@ -1456,10 +1473,10 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
     assert_eq!(deleted.body["deleted"], true);
 }
 
-// ── 10. chat tools without live LLM (direct execute_tool + stub sandbox) ────
+// ── 10. chat tools without live LLM (direct execute_tool + host inbox) ──────
 
 #[tokio::test]
-async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
+async fn chat_tool_launch_agent_task_waits_for_host_then_inbox() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
@@ -1479,8 +1496,8 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
         user_id,
         "launch_agent_task",
         &json!({
-            "title": "http_api stub launch",
-            "spec": "Settle under stub sandbox without a live LLM.",
+            "title": "http_api host launch",
+            "spec": "Leave ready until a paired host reports via inbox.",
             "worker_profile": "coding"
         }),
         &fleet_server::chat_tools::ChatLlmContext {
@@ -1494,7 +1511,7 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
 
     assert!(
         action.ok,
-        "launch_agent_task should succeed under stub: action={action:?} content={content}"
+        "launch_agent_task should accept the plan: action={action:?} content={content}"
     );
     assert_eq!(action.tool, "launch_agent_task");
     assert!(
@@ -1502,10 +1519,15 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
         "run_id: {action:?}"
     );
     assert_eq!(
-        content["run_terminal"], true,
-        "stub ticks should settle the single-task run: {content}"
+        content["run_terminal"], false,
+        "no host → run must stay open: {content}"
     );
     assert_eq!(content["task_count"], 1, "{content}");
+    let hint = content["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("No paired host"),
+        "hint must say the task is waiting for a host: {content}"
+    );
     let tasks = content["tasks"]
         .as_array()
         .unwrap_or_else(|| panic!("tasks array: {content}"));
@@ -1514,11 +1536,28 @@ async fn chat_tool_launch_agent_task_builds_plan_and_settles_under_stub() {
         .find(|t| t["plan_task_id"] == "t1")
         .unwrap_or_else(|| panic!("missing t1: {content}"));
     assert_eq!(
-        t1["status"], "done_success",
-        "chat plan t1 should finish under stub: {content}"
+        t1["status"], "ready",
+        "chat plan t1 should stay ready without a host: {content}"
     );
 
-    // Same workspace cookie BFF should see the run the tool materialized.
+    let machine = pair_test_host(&app, &jar, &ws).await;
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "assign tick: {}", tick.body);
+    drain_leases(&app, &machine, &ws).await;
+    let apply = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(apply.status, StatusCode::OK, "inbox tick: {}", apply.body);
+
+    let board = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(board.status, StatusCode::OK, "{}", board.body);
+    let list = board.body["tasks"].as_array().cloned().unwrap_or_default();
+    let done = list.iter().find(|t| t["plan_task_id"] == "t1");
+    assert_eq!(
+        done.and_then(|t| t["status"].as_str()),
+        Some("done_success"),
+        "host inbox should finish t1: {}",
+        board.body
+    );
+
     let runs = call(&app, "GET", &fleet(&ws, "/runs"), Some(&jar), None).await;
     assert_eq!(runs.status, StatusCode::OK, "{}", runs.body);
     let run_id = action.run_id.as_deref().unwrap();
