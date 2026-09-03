@@ -1,10 +1,4 @@
-//! Inbox ingest: Start monitor watches **whatever is connected now**.
-//! Each poll re-reads live OAuth connections. Empty allowlist = all inbox
-//! apps. Auto-launch plan follows the item kind (ticket / message / page).
-//! Failed runs go back to open so the next poll works them again.
-//!
-//! Chat `finish_ticket` still only loads the spec so the model can plan.
-//! Tokens stay on the control plane.
+//! Ticket inbox: poll connected apps, finish into a fleet run.
 
 use std::time::Duration;
 
@@ -19,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::inbox_sources::{self, InboxKind, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT};
+use crate::inbox_sources::{self, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT, InboxKind};
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -205,14 +199,12 @@ pub async fn monitor_tickets(
     let auto_launch = args
         .auto_launch
         .unwrap_or_else(|| existing.as_ref().map(|m| m.auto_launch).unwrap_or(true));
-    let launch_limit = inbox_sources::clamp_launch_limit(
-        args.launch_limit.unwrap_or_else(|| {
-            existing
-                .as_ref()
-                .map(|m| m.launch_limit)
-                .unwrap_or(DEFAULT_LAUNCH_LIMIT)
-        }),
-    );
+    let launch_limit = inbox_sources::clamp_launch_limit(args.launch_limit.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|m| m.launch_limit)
+            .unwrap_or(DEFAULT_LAUNCH_LIMIT)
+    }));
     let poll_limit = inbox_sources::clamp_poll_limit(args.poll_limit.unwrap_or_else(|| {
         existing
             .as_ref()
@@ -288,7 +280,13 @@ pub async fn list_tickets(
         "count": tickets.len(),
     });
     if let Some(m) = monitor.as_ref() {
-        body["monitor"] = monitor_json(m, &connected, &state.integrations.api_public_base, None, None);
+        body["monitor"] = monitor_json(
+            m,
+            &connected,
+            &state.integrations.api_public_base,
+            None,
+            None,
+        );
     } else {
         body["monitor"] = Value::Null;
     }
@@ -355,14 +353,10 @@ pub struct PreparedFinish {
     pub title: String,
 }
 
-/// Inbox finish/monitor are scoped to the route workspace. Missing membership
-/// is 403 — same error the HTTP handlers return from `require_member`.
 fn require_workspace_role(role: Option<String>) -> AppResult<String> {
     role.ok_or_else(|| AppError::forbidden("not a member of this workspace"))
 }
 
-/// Knowing a ticket id from workspace A must not finish or monitor it via B.
-/// Wrong workspace is 403 (or 404); never launch or mutate that row.
 fn require_ticket_workspace(item: &TicketInboxItem, workspace_id: Uuid) -> AppResult<()> {
     if item.workspace_id != workspace_id {
         return Err(AppError::forbidden("ticket is not in this workspace"));
@@ -619,9 +613,7 @@ pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -
                 .await
             }
             "asana" => poll_asana(state, workspace_id, &caller, item_limit).await,
-            "teams" => {
-                poll_teams(state, workspace_id, &caller, item_limit, target_limit).await
-            }
+            "teams" => poll_teams(state, workspace_id, &caller, item_limit, target_limit).await,
             "bitbucket" => {
                 poll_bitbucket(state, workspace_id, &caller, item_limit, target_limit).await
             }
@@ -658,9 +650,7 @@ struct DriveReport {
     errors: Vec<String>,
 }
 
-/// After a poll: retry dead runs, then start work on open tickets.
-/// Webhooks skip launched-row reconcile — that walk is O(inbox) and not needed
-/// to start the item that just arrived.
+/// Retry dead launched runs (poll only), then start open tickets.
 async fn drive_inbox(
     state: &AppState,
     workspace_id: Uuid,
@@ -719,7 +709,13 @@ async fn drive_inbox(
                 }
                 continue;
             };
-            let run = state.orch.store.get_run(workspace_id, run_id).await.ok().flatten();
+            let run = state
+                .orch
+                .store
+                .get_run(workspace_id, run_id)
+                .await
+                .ok()
+                .flatten();
             let status = run.as_ref().map(|r| r.status.as_str()).unwrap_or("missing");
             match status {
                 "failed" | "cancelled" | "missing" => {
@@ -798,22 +794,28 @@ pub struct IngestReport {
     pub launched: usize,
 }
 
-/// Webhook path: upsert items then launch if the monitor is on. Does not
-/// walk every launched row (that is the poll path).
+/// Upsert webhook items and launch if the monitor is on.
 pub async fn ingest_webhook_items(
     state: &AppState,
     workspace_id: Uuid,
     items: Vec<IngestItem>,
 ) -> AppResult<IngestReport> {
     let mut report = IngestReport::default();
-    let monitor = ticket_repo::get_monitor(&state.db, workspace_id)
+    let Some(monitor) = ticket_repo::get_monitor(&state.db, workspace_id)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
-    let filters = monitor
-        .as_ref()
-        .map(|m| m.filters.clone())
-        .unwrap_or_else(|| json!({}));
+        .map_err(|e| AppError::internal(e.to_string()))?
+    else {
+        return Ok(report);
+    };
+    let filters = monitor.filters.clone();
     for item in items {
+        if !inbox_sources::webhook_provider_allowed(
+            monitor.follow_connected,
+            &monitor.providers,
+            &item.provider,
+        ) {
+            continue;
+        }
         if !inbox_sources::item_matches_filters(&filters, &item.provider, &item.key) {
             continue;
         }
@@ -836,7 +838,7 @@ pub async fn ingest_webhook_items(
     if report.ingested == 0 {
         return Ok(report);
     }
-    let drive = drive_inbox(state, workspace_id, monitor.as_ref(), false).await;
+    let drive = drive_inbox(state, workspace_id, Some(&monitor), false).await;
     report.launched = drive.launched;
     Ok(report)
 }
@@ -2004,9 +2006,8 @@ async fn require_member(
         config: state.auth.clone(),
     };
     let user = require_user(&auth, jar).await?;
-    let role = require_workspace_role(
-        workspace_repo::user_role(&state.db, workspace_id, user.id).await?,
-    )?;
+    let role =
+        require_workspace_role(workspace_repo::user_role(&state.db, workspace_id, user.id).await?)?;
     Ok((user, role))
 }
 

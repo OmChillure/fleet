@@ -82,6 +82,29 @@ impl OllamaConfig {
             enabled,
         }
     }
+
+    /// Cookie JSON: scheme/host/port/path only — never `user:pass@`.
+    pub fn public_base_url(&self) -> String {
+        redact_url_userinfo(&self.base_url)
+    }
+}
+
+/// Strip userinfo from an http(s) URL. Keep scheme, host, port, path, query.
+fn redact_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let Some((_, hostport)) = authority.rsplit_once('@') else {
+        return url.to_string();
+    };
+    let mut out = String::with_capacity(url.len() - (authority.len() - hostport.len()));
+    out.push_str(&url[..scheme_end + 3]);
+    out.push_str(hostport);
+    out.push_str(&rest[authority_end..]);
+    out
 }
 
 // ── router ──────────────────────────────────────────────────────────────────
@@ -196,6 +219,7 @@ pub struct ChatStatusResponse {
     /// True if at least one provider can serve chat right now.
     pub available: bool,
     pub enabled: bool,
+    /// Ollama hint for older clients. Userinfo is stripped.
     pub base_url: String,
     pub default_model: Option<String>,
     /// Flat list of Ollama models (same as providers[ollama].models) for older clients.
@@ -309,12 +333,8 @@ async fn create_conversation(
     Json(body): Json<CreateConversationBody>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let user = require_member(&state, &jar, workspace_id).await?;
-    let title = body
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("New chat");
+    // Same 72-char clamp as auto-derived titles (empty/whitespace → "New chat").
+    let title = title_from_user_text(body.title.as_deref().unwrap_or(""));
     let id = Uuid::now_v7();
     let now = Utc::now();
     let conv = chat_repo::create_conversation(
@@ -322,7 +342,7 @@ async fn create_conversation(
         id,
         workspace_id,
         user.id,
-        title,
+        &title,
         body.provider.as_deref(),
         body.model.as_deref(),
         now,
@@ -366,6 +386,36 @@ async fn delete_conversation(
     Ok(Json(json!({ "deleted": true, "id": conversation_id })))
 }
 
+/// 404 when this user+workspace does not own `conversation_id` (missing or foreign).
+async fn require_existing_conversation(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    conversation_id: Uuid,
+) -> AppResult<()> {
+    let exists = chat_repo::get_conversation(&state.db, conversation_id, workspace_id, user_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    if exists.is_none() {
+        return Err(AppError::not_found("conversation"));
+    }
+    Ok(())
+}
+
+/// Resume must 404 a foreign/missing `conversation_id` before plane-disabled 400.
+/// New threads (`None`) skip this so a disabled provider cannot INSERT.
+async fn require_conversation_if_resuming(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    conversation_id: Option<Uuid>,
+) -> AppResult<()> {
+    if let Some(cid) = conversation_id {
+        require_existing_conversation(state, workspace_id, user_id, cid).await?;
+    }
+    Ok(())
+}
+
 /// Ensure conversation exists for this user; create if missing.
 async fn ensure_conversation(
     state: &AppState,
@@ -377,12 +427,7 @@ async fn ensure_conversation(
     first_user_text: &str,
 ) -> AppResult<Uuid> {
     if let Some(cid) = conversation_id {
-        let exists = chat_repo::get_conversation(&state.db, cid, workspace_id, user_id)
-            .await
-            .map_err(|e| AppError::internal(e.to_string()))?;
-        if exists.is_none() {
-            return Err(AppError::not_found("conversation"));
-        }
+        require_existing_conversation(state, workspace_id, user_id, cid).await?;
         return Ok(cid);
     }
     let id = Uuid::now_v7();
@@ -1052,6 +1097,68 @@ fn providers_from_runner_agents(
 }
 
 #[cfg(test)]
+mod chat_tool_scope_tests {
+    use super::*;
+    use crate::chat_tools::require_session_workspace;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn chat_tool_args_preserve_workspace_id_and_foreign_is_forbidden() {
+        let session = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        let parsed = tool_args_value(&json!({
+            "title": "watch",
+            "policy_md": "wake",
+            "workspace_id": foreign.to_string(),
+        }));
+        let err = require_session_workspace(session, &parsed)
+            .expect_err("foreign workspace_id after tool_args_value");
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+
+        let as_string = tool_args_value(&Value::String(format!(
+            r#"{{"provider":"slack","operation":"list_channels","workspace_id":"{foreign}"}}"#
+        )));
+        let err = require_session_workspace(session, &as_string)
+            .expect_err("foreign workspace_id in JSON string args");
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn chat_tool_session_member_cannot_target_another_workspace() {
+        let session = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        for name_args in [
+            json!({ "title": "c", "policy_md": "p", "workspace_id": other }),
+            json!({ "case_id": Uuid::new_v4(), "note": "n", "workspace_id": other }),
+            json!({
+                "provider": "jira",
+                "operation": "search_issues",
+                "workspace_id": other
+            }),
+        ] {
+            let err = require_session_workspace(session, &tool_args_value(&name_args))
+                .expect_err("session membership is not enough");
+            assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
+    fn chat_tool_unparseable_workspace_id_is_forbidden() {
+        let session = Uuid::new_v4();
+        for raw in [
+            json!({ "workspace_id": "not-a-uuid" }),
+            json!({ "workspace_id": 12 }),
+            json!({ "workspace_id": {"id": session.to_string()} }),
+        ] {
+            let err = require_session_workspace(session, &tool_args_value(&raw))
+                .expect_err("unparseable workspace_id must not pass");
+            assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        }
+    }
+}
+
+#[cfg(test)]
 mod inventory_tests {
     use super::*;
     use fleet_db::WorkerAgentRuntime;
@@ -1091,6 +1198,21 @@ mod inventory_tests {
         assert_eq!(p.name, "Private (Ollama)");
         assert!(p.available);
     }
+
+    #[test]
+    fn public_base_url_strips_userinfo() {
+        let mut cfg = OllamaConfig {
+            base_url: "http://ollama-user:UNIQUEPASS@127.0.0.1:11434".into(),
+            default_model: None,
+            timeout: Duration::from_secs(1),
+            enabled: true,
+        };
+        assert_eq!(cfg.public_base_url(), "http://127.0.0.1:11434");
+        cfg.base_url = "https://token:x-oauth-basic@host.example/v1?q=1".into();
+        assert_eq!(cfg.public_base_url(), "https://host.example/v1?q=1");
+        cfg.base_url = "http://127.0.0.1:11434".into();
+        assert_eq!(cfg.public_base_url(), "http://127.0.0.1:11434");
+    }
 }
 
 /// `GET /api/workspaces/:id/chat/status`
@@ -1110,7 +1232,7 @@ async fn chat_status(
         return Ok(Json(ChatStatusResponse {
             available: openai.available,
             enabled: true,
-            base_url: state.ollama.base_url.clone(),
+            base_url: state.ollama.public_base_url(),
             default_model: openai.default_model.clone(),
             models: openai.models.clone(),
             providers: vec![openai],
@@ -1120,6 +1242,18 @@ async fn chat_status(
     };
 
     let host = crate::worker_hosts::load_visible_host(&state, workspace_id, runner_id).await?;
+    if crate::runner_chat::host_is_removed(&host) {
+        return Ok(Json(ChatStatusResponse {
+            available: false,
+            enabled: true,
+            base_url: state.ollama.public_base_url(),
+            default_model: None,
+            models: vec![],
+            providers: vec![],
+            error: Some(format!("runner `{}` is removed", host.name)),
+            hint: format!("{} is removed and is not taking chat.", host.name),
+        }));
+    }
     let public = host.as_public(Utc::now());
     let mut providers = providers_from_runner_agents(&public.agents, state.openai.available());
     if let Some(p) = providers.iter_mut().find(|p| p.id == "openai") {
@@ -1145,7 +1279,7 @@ async fn chat_status(
     Ok(Json(ChatStatusResponse {
         available: any_available,
         enabled: true,
-        base_url: state.ollama.base_url.clone(),
+        base_url: state.ollama.public_base_url(),
         default_model,
         models: ollama_models,
         providers,
@@ -1163,12 +1297,7 @@ async fn chat_complete(
 ) -> AppResult<Json<ChatResponse>> {
     let user = require_member(&state, &jar, workspace_id).await?;
 
-    let provider = body
-        .provider
-        .as_deref()
-        .unwrap_or("ollama")
-        .trim()
-        .to_lowercase();
+    let provider = crate::providers::parse_provider(body.provider.as_deref().unwrap_or("ollama"))?;
 
     if body.messages.is_empty() {
         return Err(AppError::bad_request("messages must not be empty"));
@@ -1187,9 +1316,7 @@ async fn chat_complete(
             continue;
         }
         if content.len() > 32_000 {
-            return Err(AppError::bad_request(
-                "message too long (max 32k characters)",
-            ));
+            return Err(AppError::bad_request("message too long (max 32k bytes)"));
         }
         // System messages from the client are folded into the first user turn context;
         // server always injects its own system prompt for tools.
@@ -1212,6 +1339,8 @@ async fn chat_complete(
         .find(|(r, _)| r == "user")
         .map(|(_, c)| c.clone())
         .ok_or_else(|| AppError::bad_request("last turn must include a user message"))?;
+
+    require_conversation_if_resuming(&state, workspace_id, user.id, body.conversation_id).await?;
 
     // Prefer DB history when resuming a conversation.
     // Cap turns sent to the model so a long thread cannot grow without bound.
@@ -1240,6 +1369,9 @@ async fn chat_complete(
     if pairs_for_llm.len() > MAX_LLM_HISTORY_TURNS {
         pairs_for_llm = pairs_for_llm.split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
     }
+
+    require_plane_chat_enabled(&state, &provider)?;
+    require_openai_configured(&state, &provider)?;
 
     if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
@@ -1298,7 +1430,7 @@ async fn chat_complete(
     }
 
     match provider.as_str() {
-        "grok" | "xai" => {
+        "grok" => {
             chat_complete_grok(
                 &state,
                 workspace_id,
@@ -1334,7 +1466,7 @@ async fn chat_complete(
             )
             .await
         }
-        "claude" | "anthropic" => {
+        "claude" => {
             chat_complete_claude(
                 &state,
                 workspace_id,
@@ -1347,7 +1479,7 @@ async fn chat_complete(
             .await
         }
         other => Err(AppError::bad_request(format!(
-            "provider `{other}` is not available — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, or claude"
         ))),
     }
 }
@@ -1362,13 +1494,20 @@ async fn chat_stream(
     if body.messages.is_empty() {
         return Err(AppError::bad_request("messages must not be empty"));
     }
-    let provider = body
-        .provider
-        .as_deref()
-        .unwrap_or("ollama")
-        .trim()
-        .to_lowercase();
+    let provider = crate::providers::parse_provider(body.provider.as_deref().unwrap_or("ollama"))?;
+    // Resume: 404 foreign/missing conversation_id before plane-disabled 400.
+    // New thread: plane flags / missing OPENAI_API_KEY 400 before NDJSON / INSERT.
+    require_conversation_if_resuming(&state, workspace_id, user.id, body.conversation_id).await?;
+    require_plane_chat_enabled(&state, &provider)?;
+    require_openai_configured(&state, &provider)?;
     let prepared = prepare_chat_pairs(&body)?;
+    // Gate before NDJSON so a revoked leftover runner_id is HTTP 400, not
+    // 200 + type=error after enqueue / the 240s wait starts.
+    if crate::runner_chat::runner_cli_provider(&provider) {
+        if let Some(runner_id) = body.runner_id {
+            crate::runner_chat::require_taking(&state, workspace_id, runner_id).await?;
+        }
+    }
     let (tx, rx) = tokio::sync::mpsc::channel::<ChatProgress>(64);
     let state = state.clone();
     tokio::spawn(async move {
@@ -1428,6 +1567,30 @@ struct PreparedChat {
     last_user: String,
 }
 
+/// GROK_ENABLED=false / OLLAMA_ENABLED=false must 400 before runner_id or INSERT.
+fn require_plane_chat_enabled(state: &AppState, provider: &str) -> AppResult<()> {
+    match provider {
+        "grok" if !state.grok.enabled => Err(AppError::bad_request(
+            "Grok chat is disabled (GROK_ENABLED=false)",
+        )),
+        "ollama" if !state.ollama.enabled => Err(AppError::bad_request(
+            "Ollama chat is disabled (OLLAMA_ENABLED=false)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Missing OPENAI_API_KEY must 400 before runner_id / ensure_conversation.
+/// Claude is runner CLI — do not require a plane ANTHROPIC_API_KEY here.
+fn require_openai_configured(state: &AppState, provider: &str) -> AppResult<()> {
+    if provider == "openai" && !state.openai.available() {
+        return Err(AppError::bad_request(
+            "OpenAI is not configured (set OPENAI_API_KEY)",
+        ));
+    }
+    Ok(())
+}
+
 fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for m in &body.messages {
@@ -1442,9 +1605,7 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
             continue;
         }
         if content.len() > 32_000 {
-            return Err(AppError::bad_request(
-                "message too long (max 32k characters)",
-            ));
+            return Err(AppError::bad_request("message too long (max 32k bytes)"));
         }
         if role == "system" {
             pairs.push(("user".into(), format!("[context]\n{content}")));
@@ -1476,6 +1637,8 @@ async fn run_chat_turn(
     last_user: &str,
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<ChatProgress> {
+    let provider = crate::providers::parse_provider(provider)?;
+    require_conversation_if_resuming(state, workspace_id, user_id, body.conversation_id).await?;
     const MAX_LLM_HISTORY_TURNS: usize = 40;
     let mut pairs_for_llm = if let Some(cid) = body.conversation_id {
         let stored = chat_repo::list_messages(&state.db, cid)
@@ -1502,7 +1665,10 @@ async fn run_chat_turn(
         pairs_for_llm = pairs_for_llm.split_off(pairs_for_llm.len() - MAX_LLM_HISTORY_TURNS);
     }
 
-    if crate::runner_chat::runner_cli_provider(provider) {
+    require_plane_chat_enabled(state, &provider)?;
+    require_openai_configured(state, &provider)?;
+
+    if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
             AppError::bad_request(
                 "select a runner — Grok / Claude / Ollama chat runs on that box's official CLI"
@@ -1520,7 +1686,7 @@ async fn run_chat_turn(
             workspace_id,
             user_id,
             body.conversation_id,
-            provider,
+            &provider,
             &model,
             last_user,
         )
@@ -1529,7 +1695,7 @@ async fn run_chat_turn(
             state,
             workspace_id,
             runner_id,
-            provider,
+            &provider,
             &model,
             body.effort.as_deref(),
             &pairs_for_llm,
@@ -1541,7 +1707,7 @@ async fn run_chat_turn(
             conversation_id,
             last_user,
             &content,
-            provider,
+            &provider,
             &used_model,
             &[],
         )
@@ -1549,14 +1715,14 @@ async fn run_chat_turn(
         return Ok(ChatProgress::Done {
             message: content,
             model: used_model,
-            provider: provider.to_string(),
+            provider,
             conversation_id,
             actions: vec![],
         });
     }
 
-    match provider {
-        "grok" | "xai" => {
+    match provider.as_str() {
+        "grok" => {
             let Json(res) = chat_complete_grok(
                 state,
                 workspace_id,
@@ -1613,7 +1779,7 @@ async fn run_chat_turn(
                 actions: res.actions,
             });
         }
-        "claude" | "anthropic" => {
+        "claude" => {
             let Json(res) = chat_complete_claude(
                 state,
                 workspace_id,
@@ -1633,7 +1799,7 @@ async fn run_chat_turn(
             });
         }
         other => Err(AppError::bad_request(format!(
-            "provider `{other}` is not available — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, or claude"
         ))),
     }
 }
@@ -1647,6 +1813,7 @@ async fn chat_complete_grok(
     last_user: &str,
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
+    require_plane_chat_enabled(state, "grok")?;
     let cfg = &state.grok;
     let model = body
         .model
@@ -1809,6 +1976,7 @@ async fn chat_complete_openai(
     last_user: &str,
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
+    require_openai_configured(state, "openai")?;
     let model = body
         .model
         .as_ref()

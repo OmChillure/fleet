@@ -1119,9 +1119,18 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     if !host_accepts_leases(&host) {
         return Ok(Json(json!({ "claim": null })));
     }
-    let claim =
+    let claim = if host.is_cluster_host() {
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
-            .await?;
+            .await?
+    } else {
+        work_claims::claim_next_spawn_for_host_in_workspace(
+            &state.db,
+            host.workspace_id,
+            host.id,
+            LEASE_FOR,
+        )
+        .await?
+    };
     match claim {
         None => Ok(Json(json!({ "claim": null }))),
         Some(c) => Ok(Json(json!({

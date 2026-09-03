@@ -1,5 +1,4 @@
-//! Full reconcile tick PR5a–c: lock → … → spawn → stuck → cancel → rollup → reap.
-//! PR10: external board sync after status mutations when `auto_sync_external`.
+//! Reconcile tick: lock → materialize → spawn → stuck → cancel → rollup → reap.
 
 use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkPlanStatus, WorkRunStatus};
 use crate::notify::{LogNotify, NotificationSink};
@@ -51,7 +50,7 @@ pub struct TickReport {
     pub retry_promoted: usize,
     pub reaped: usize,
     pub runs_terminated: usize,
-    /// PR10: tasks successfully pushed to ExternalBoardSync this tick.
+    /// Tasks successfully pushed to ExternalBoardSync this tick.
     pub external_synced: usize,
     /// Control-plane write-backs (Slack / Notion / ticket comment) after a run ends.
     pub writebacks: usize,
@@ -142,6 +141,7 @@ impl TickRunner {
             .await?;
 
         let mut signaled = false;
+        let _ = self.store.void_spawn_claims(session.id).await;
         if session.runtime_backend == crate::sandbox::remote::BACKEND {
             if let Some(host_id) = crate::sandbox::remote::host_id_from_handle(
                 session.runtime_handle.as_deref().unwrap_or(""),
@@ -465,7 +465,7 @@ impl TickRunner {
         crate::sandbox::team::sync_team_boards(&self.data_dir, project_id, &snap).await;
         report.reaped = orphan_reap(&self.store, project_id, &snap).await?;
 
-        // Step 14 — external board sync (PR10), gated by project config
+        // External board sync, gated by project config
         snap = self.store.load_board_snapshot(project_id).await?;
         report.external_synced =
             sync_external_board(&self.board_sync, &snap, cfg.auto_sync_external).await;

@@ -161,28 +161,42 @@ impl Store {
         Ok(())
     }
 
-    /// Only a still-spawning row may become `failed_spawn`. Replace/kill already
-    /// mark `exited`; a late host "spawn failed" must not overwrite that or the
-    /// retry path will reopen the task under a living sibling.
-    pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<bool> {
-        // Void claims first so a late lease cannot run this session even if the
-        // session row is no longer spawning.
+    /// Mark ready/leased `spawn_session` claims dead. Leaves `signal_session`
+    /// so a kill can still be leased.
+    pub async fn void_spawn_claims(&self, session_id: Uuid) -> Result<()> {
+        self.void_session_claims(session_id, &["spawn_session"], "session abandoned")
+            .await
+    }
+
+    async fn void_session_claims(
+        &self,
+        session_id: Uuid,
+        kinds: &[&str],
+        last_error: &str,
+    ) -> Result<()> {
         if let Err(e) = sqlx::query(
             r#"
             UPDATE work_claims
             SET status = 'dead',
-                last_error = 'session spawn failed',
+                last_error = $2,
                 lease_owner = NULL,
                 lease_token = NULL,
                 lease_expires_at = NULL,
                 version = version + 1,
                 updated_at = now()
-            WHERE kind IN ('spawn_session', 'signal_session')
+            WHERE kind = ANY($3)
               AND payload->>'session_id' = $1
               AND status IN ('ready', 'leased')
             "#,
         )
         .bind(session_id.to_string())
+        .bind(last_error)
+        .bind(
+            kinds
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<String>>(),
+        )
         .execute(&self.pool)
         .await
         {
@@ -195,6 +209,19 @@ impl Store {
                 return Err(e.into());
             }
         }
+        Ok(())
+    }
+
+    /// Only a still-spawning row may become `failed_spawn`. Replace/kill already
+    /// mark `exited`; a late host "spawn failed" must not overwrite that or the
+    /// retry path will reopen the task under a living sibling.
+    pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<bool> {
+        self.void_session_claims(
+            session_id,
+            &["spawn_session", "signal_session"],
+            "session spawn failed",
+        )
+        .await?;
         let res = sqlx::query(
             r#"
             UPDATE worker_sessions

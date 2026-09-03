@@ -758,6 +758,24 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
     ChatLlmContext::default()
 }
 
+/// Reject a tool `workspace_id` that is not this chat's workspace.
+pub fn require_session_workspace(session: Uuid, arguments: &Value) -> AppResult<()> {
+    let Some(raw) = arguments.get("workspace_id") else {
+        return Ok(());
+    };
+    if raw.is_null() {
+        return Ok(());
+    }
+    let parsed = raw
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .or_else(|| serde_json::from_value::<Uuid>(raw.clone()).ok());
+    match parsed {
+        Some(id) if id == session => Ok(()),
+        _ => Err(AppError::forbidden("workspace_id does not match this chat")),
+    }
+}
+
 pub async fn execute_tool(
     state: &AppState,
     workspace_id: Uuid,
@@ -766,6 +784,20 @@ pub async fn execute_tool(
     arguments: &Value,
     llm: &ChatLlmContext,
 ) -> (Value, ChatAction) {
+    if let Err(e) = require_session_workspace(workspace_id, arguments) {
+        let msg = e.to_string();
+        return (
+            json!({ "error": msg }),
+            ChatAction {
+                tool: name.to_string(),
+                ok: false,
+                summary: msg,
+                run_id: None,
+                sandbox_ids: None,
+                detail: None,
+            },
+        );
+    }
     let result = match name {
         "list_sandboxes" => list_sandboxes(state, workspace_id).await,
         "list_tasks" => {

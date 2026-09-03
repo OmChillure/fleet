@@ -666,7 +666,6 @@ mod tests {
     use super::*;
     use crate::config::AuthMode;
     use crate::orch::TickRunner;
-    use crate::sandbox::StubRuntime;
     use crate::store::Store;
     use axum::body::Body;
     use axum::http::Request;
@@ -685,10 +684,8 @@ mod tests {
         // Closed pool cannot acquire — DB-down without a live server or DATABASE_URL.
         pool.close().await;
         let store = Store::new(pool);
-        let runtime = Arc::new(StubRuntime::new(Duration::from_millis(1)));
         let tick = Arc::new(TickRunner::new(
             store.clone(),
-            runtime,
             std::env::temp_dir().join("fleet-orch-readyz-unacquirable"),
             "http://127.0.0.1:0",
         ));

@@ -9,10 +9,9 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation, HostCpSettings,
-    NewWorkerHost, WorkerHost, WorkerHostPairToken, WORKER_HOST_ISOLATION_SANDBOXED,
-    WORKER_HOST_OFFLINE_AFTER, WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE,
-    WORKER_HOST_STATUS_PENDING,
+    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
+    WorkerHostPairToken, normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
 };
 use crate::pool::map_query_err;
 
@@ -443,9 +442,7 @@ pub async fn consume_pair_token(
         return Err(DbError::Conflict("host is not pending".into()));
     }
 
-    // Same box again: machine.id always reclaims. Hostname+platform only
-    // when the binary omitted machine.id, and only a disabled or stale row —
-    // a live same-hostname box must not have its token rotated.
+    // machine.id always reclaims; hostname only for a disabled/stale row.
     if let Some(prior) = find_reclaim_target(
         &mut tx,
         host.workspace_id,
@@ -576,7 +573,7 @@ async fn find_reclaim_target(
     if hostname.is_empty() || platform.is_empty() {
         return Ok(None);
     }
-    // Prefer a revoked row; otherwise only a box that already looks offline.
+    // Disabled first; otherwise only a box that already looks offline.
     let stale_before = Utc::now() - WORKER_HOST_OFFLINE_AFTER;
     let q = format!(
         r#"

@@ -1,4 +1,4 @@
-//! Ticket monitor + inbox (Inbox UI / chat tools `monitor_tickets` + `finish_ticket`).
+//! Ticket monitor + inbox.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;

@@ -1,9 +1,6 @@
-//! Inbox adapters: which connected apps can feed the watcher, and how.
-//!
-//! A new provider is one [`InboxSource`] row. Polling always re-reads the
-//! live OAuth connections — an empty allowlist means "whatever is connected".
+//! Inbox adapters: which connected apps feed the watcher.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// What kind of work an inbox item is. Drives the auto-launch plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +277,53 @@ fn listed_hit(allow: &[String], value: &str) -> bool {
         .any(|raw| !raw.trim().is_empty() && raw.trim().eq_ignore_ascii_case(v))
 }
 
+/// Linear issue `ENG-123` matches team `ENG`, not a prefix of another team key.
+fn linear_team_hit(allow: &[String], key: &str) -> bool {
+    if allow.is_empty() {
+        return true;
+    }
+    let key = key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    allow.iter().any(|raw| {
+        let team = raw.trim();
+        if team.is_empty() {
+            return false;
+        }
+        if key.eq_ignore_ascii_case(team) {
+            return true;
+        }
+        let (head, rest) = match key.split_once('-') {
+            Some(parts) => parts,
+            None => return false,
+        };
+        head.eq_ignore_ascii_case(team)
+            && !rest.is_empty()
+            && rest.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Webhook ingest: follow-connected (or empty allowlist) accepts any inbox
+/// provider. A pinned allowlist accepts only those providers.
+pub fn webhook_provider_allowed(
+    follow_connected: bool,
+    allowlist: &[String],
+    provider: &str,
+) -> bool {
+    if !is_inbox_provider(provider) {
+        return false;
+    }
+    if follow_connected || allowlist.is_empty() {
+        return true;
+    }
+    let provider = provider.trim().to_ascii_lowercase();
+    allowlist
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .any(|p| p == provider)
+}
+
 /// True when this inbox key is allowed by the monitor filters (empty = allow all).
 pub fn item_matches_filters(filters: &Value, provider: &str, key: &str) -> bool {
     let key = key.trim();
@@ -296,21 +340,7 @@ pub fn item_matches_filters(filters: &Value, provider: &str, key: &str) -> bool 
             let channel = key.split(':').next().unwrap_or(key);
             listed_hit(&slack_channels(filters), channel)
         }
-        "linear" => {
-            let teams = linear_teams(filters);
-            if teams.is_empty() {
-                return true;
-            }
-            teams.iter().any(|t| {
-                let t = t.trim();
-                !t.is_empty()
-                    && (key.eq_ignore_ascii_case(t)
-                        || key.to_ascii_uppercase().starts_with(&format!(
-                            "{}-",
-                            t.to_ascii_uppercase()
-                        )))
-            })
-        }
+        "linear" => linear_team_hit(&linear_teams(filters), key),
         "trello" => {
             let boards = trello_boards(filters);
             boards.is_empty() || listed_hit(&boards, key)
@@ -351,11 +381,7 @@ mod tests {
 
     #[test]
     fn empty_allowlist_means_all_connected() {
-        let watching = resolve_watching(
-            false,
-            &[],
-            &["trello".into(), "github".into()],
-        );
+        let watching = resolve_watching(false, &[], &["trello".into(), "github".into()]);
         assert_eq!(watching, vec!["github", "trello"]);
     }
 
@@ -389,6 +415,10 @@ mod tests {
         assert!(item_matches_filters(&merged, "linear", "ENG-12"));
         assert!(!item_matches_filters(&merged, "linear", "OPS-1"));
         assert!(
+            !item_matches_filters(&merged, "linear", "ENGINEERING-1"),
+            "linear team ENG must not match ENGINEERING-1"
+        );
+        assert!(
             !item_matches_filters(&merged, "github", "acme/api-extra#1"),
             "repo allowlist must be exact, not a prefix of owner/name"
         );
@@ -396,5 +426,22 @@ mod tests {
         assert_eq!(merged["jira"]["jql"], "project = ENG");
         assert_eq!(slack_channels(&merged), vec!["#eng"]);
         assert!(notion_databases(&merged).is_empty());
+    }
+
+    #[test]
+    fn pinned_webhook_rejects_other_providers() {
+        assert!(webhook_provider_allowed(true, &["slack".into()], "github"));
+        assert!(webhook_provider_allowed(false, &[], "jira"));
+        assert!(webhook_provider_allowed(
+            false,
+            &["slack".into(), "linear".into()],
+            "slack"
+        ));
+        assert!(!webhook_provider_allowed(
+            false,
+            &["slack".into()],
+            "github"
+        ));
+        assert!(!webhook_provider_allowed(true, &[], "figma"));
     }
 }

@@ -74,7 +74,11 @@ async fn handle(
 ) -> Response {
     let provider = provider.trim().to_ascii_lowercase();
     if !crate::inbox_sources::is_inbox_provider(&provider) {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "unknown inbox provider" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown inbox provider" })),
+        )
+            .into_response();
     }
 
     if let Some(challenge) = slack_challenge(body) {
@@ -123,11 +127,7 @@ async fn handle(
         Ok(ParsedEvent::Items(items)) => items,
         Err(e) => {
             tracing::warn!(provider = %provider, error = %e, "webhook parse failed");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": e })),
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
         }
     };
 
@@ -173,7 +173,6 @@ async fn resolve_workspace(
         return Ok(None);
     }
 
-    // GitHub App global hook: match HMAC against stored app webhook secrets.
     if provider == "github" {
         if let Some(ws) = match_github_app_signature(state, headers, body).await? {
             return Ok(Some(ws));
@@ -194,7 +193,11 @@ async fn match_github_app_signature(
         .await
         .map_err(|e| e.to_string())?;
     for app in apps {
-        let Ok(plain) = state.integrations.credentials_key.decrypt(&app.client_secret) else {
+        let Ok(plain) = state
+            .integrations
+            .credentials_key
+            .decrypt(&app.client_secret)
+        else {
             continue;
         };
         let Some(secret) = plain
@@ -212,7 +215,12 @@ async fn match_github_app_signature(
     Ok(None)
 }
 
-fn verify_optional_signature(provider: &str, token: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+fn verify_optional_signature(
+    provider: &str,
+    token: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
     match provider {
         "github" => match header_str(headers, "x-hub-signature-256") {
             Some(sig) => github_signature_ok(token, sig, body),
@@ -300,7 +308,11 @@ pub enum ParsedEvent {
     Items(Vec<IngestItem>),
 }
 
-pub fn parse_event(provider: &str, headers: &HeaderMap, body: &[u8]) -> Result<ParsedEvent, String> {
+pub fn parse_event(
+    provider: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<ParsedEvent, String> {
     if body.is_empty() {
         return Ok(ParsedEvent::Ignore);
     }
@@ -335,11 +347,17 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
         if issue.get("pull_request").is_some() {
             return Ok(ParsedEvent::Ignore);
         }
-        let number = issue.get("number").and_then(|n| n.as_u64()).ok_or("no number")?;
+        let number = issue
+            .get("number")
+            .and_then(|n| n.as_u64())
+            .ok_or("no number")?;
         if repo.is_empty() {
             return Err("missing repository.full_name".into());
         }
-        let state = issue.get("state").and_then(|s| s.as_str()).unwrap_or("open");
+        let state = issue
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("open");
         return Ok(ParsedEvent::Items(vec![IngestItem {
             provider: "github".into(),
             key: format!("{repo}#{number}"),
@@ -364,7 +382,10 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
     }
     if event == "pull_request" || v.get("pull_request").is_some() {
         let pr = v.get("pull_request").ok_or("missing pull_request")?;
-        let number = pr.get("number").and_then(|n| n.as_u64()).ok_or("no number")?;
+        let number = pr
+            .get("number")
+            .and_then(|n| n.as_u64())
+            .ok_or("no number")?;
         if repo.is_empty() {
             return Err("missing repository.full_name".into());
         }
@@ -393,7 +414,10 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
     }
     if event == "issue_comment" {
         let issue = v.get("issue").ok_or("missing issue")?;
-        let number = issue.get("number").and_then(|n| n.as_u64()).ok_or("no number")?;
+        let number = issue
+            .get("number")
+            .and_then(|n| n.as_u64())
+            .ok_or("no number")?;
         if repo.is_empty() {
             return Err("missing repository.full_name".into());
         }
@@ -444,7 +468,10 @@ fn parse_gitlab(v: &Value) -> Result<ParsedEvent, String> {
         } else {
             format!("{project}#{iid}")
         };
-        let state = attrs.get("state").and_then(|s| s.as_str()).unwrap_or("opened");
+        let state = attrs
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("opened");
         return Ok(ParsedEvent::Items(vec![IngestItem {
             provider: "gitlab".into(),
             key,
@@ -498,7 +525,8 @@ fn parse_jira(v: &Value) -> Result<ParsedEvent, String> {
 
 fn parse_linear(v: &Value) -> Result<ParsedEvent, String> {
     let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("Issue");
-    if !ty.eq_ignore_ascii_case("issue") && v.get("data").and_then(|d| d.get("identifier")).is_none()
+    if !ty.eq_ignore_ascii_case("issue")
+        && v.get("data").and_then(|d| d.get("identifier")).is_none()
     {
         return Ok(ParsedEvent::Ignore);
     }
@@ -589,7 +617,10 @@ fn parse_trello(v: &Value) -> Result<ParsedEvent, String> {
             .chars()
             .take(4000)
             .collect(),
-        closed: card.get("closed").and_then(|c| c.as_bool()).unwrap_or(false),
+        closed: card
+            .get("closed")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false),
     }]))
 }
 
@@ -603,7 +634,11 @@ fn parse_asana(v: &Value) -> Result<ParsedEvent, String> {
     let key = resource
         .get("gid")
         .or_else(|| resource.get("id"))
-        .and_then(|g| g.as_str().map(ToOwned::to_owned).or_else(|| g.as_u64().map(|n| n.to_string())))
+        .and_then(|g| {
+            g.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| g.as_u64().map(|n| n.to_string()))
+        })
         .ok_or("missing asana gid")?;
     Ok(ParsedEvent::Items(vec![IngestItem {
         provider: "asana".into(),
@@ -652,7 +687,11 @@ fn parse_bitbucket(v: &Value) -> Result<ParsedEvent, String> {
         .unwrap_or("");
     let id = issue
         .get("id")
-        .and_then(|i| i.as_u64().map(|n| n.to_string()).or_else(|| i.as_str().map(ToOwned::to_owned)))
+        .and_then(|i| {
+            i.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| i.as_str().map(ToOwned::to_owned))
+        })
         .ok_or("missing issue id")?;
     let key = if repo.is_empty() {
         id
@@ -709,7 +748,11 @@ fn parse_confluence(v: &Value) -> Result<ParsedEvent, String> {
     let page = v.get("page").unwrap_or(v);
     let id = page
         .get("id")
-        .and_then(|i| i.as_str().map(ToOwned::to_owned).or_else(|| i.as_u64().map(|n| n.to_string())))
+        .and_then(|i| {
+            i.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| i.as_u64().map(|n| n.to_string()))
+        })
         .ok_or("missing confluence id")?;
     Ok(ParsedEvent::Items(vec![IngestItem {
         provider: "confluence".into(),
@@ -760,7 +803,8 @@ mod tests {
 
     #[test]
     fn slack_url_verification_is_challenge() {
-        let bytes = serde_json::to_vec(&json!({"type":"url_verification","challenge":"abc"})).unwrap();
+        let bytes =
+            serde_json::to_vec(&json!({"type":"url_verification","challenge":"abc"})).unwrap();
         assert_eq!(slack_challenge(&bytes).unwrap()["challenge"], "abc");
         let parsed = parse_event("slack", &HeaderMap::new(), &bytes).unwrap();
         assert!(matches!(parsed, ParsedEvent::Ignore));
@@ -772,7 +816,12 @@ mod tests {
             "webhookEvent": "jira:issue_created",
             "issue": { "key": "ENG-9", "fields": { "summary": "Login", "status": { "name": "To Do" } } }
         });
-        let parsed = parse_event("jira", &HeaderMap::new(), &serde_json::to_vec(&jira).unwrap()).unwrap();
+        let parsed = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&jira).unwrap(),
+        )
+        .unwrap();
         match parsed {
             ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-9"),
             other => panic!("{other:?}"),
@@ -782,7 +831,12 @@ mod tests {
             "action": "create",
             "data": { "identifier": "ENG-3", "title": "Ship", "state": { "type": "unstarted" } }
         });
-        let parsed = parse_event("linear", &HeaderMap::new(), &serde_json::to_vec(&linear).unwrap()).unwrap();
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&linear).unwrap(),
+        )
+        .unwrap();
         match parsed {
             ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-3"),
             other => panic!("{other:?}"),

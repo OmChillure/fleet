@@ -1,4 +1,4 @@
-//! Step 6–7 capacity schedule + spawn protocol.
+//! Capacity schedule + spawn protocol.
 
 use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
 use crate::sandbox::remote::{self, RemoteHostHandle};
@@ -286,6 +286,7 @@ pub async fn signal_retired_sessions(
         else {
             continue;
         };
+        let _ = store.void_spawn_claims(s.id).await;
         let _ =
             crate::store::enqueue_signal_session(store, project_id, s.id, host_id, "kill").await;
     }
