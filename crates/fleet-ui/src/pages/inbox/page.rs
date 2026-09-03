@@ -351,7 +351,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                                     }
                                 }
                             }
-                            if t.run_id.is_none() && t.state != "closed" {
+                            if t.run_id.is_none() && t.state == "open" {
                                 button {
                                     class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
                                     r#type: "button",

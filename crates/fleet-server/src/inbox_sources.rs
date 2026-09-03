@@ -341,14 +341,9 @@ pub fn item_matches_filters(filters: &Value, provider: &str, key: &str) -> bool 
             listed_hit(&slack_channels(filters), channel)
         }
         "linear" => linear_team_hit(&linear_teams(filters), key),
-        "trello" => {
-            let boards = trello_boards(filters);
-            boards.is_empty() || listed_hit(&boards, key)
-        }
-        "notion" => {
-            let dbs = notion_databases(filters);
-            dbs.is_empty() || listed_hit(&dbs, key)
-        }
+        // Webhook keys are card/page ids. Board/database allowlists are applied
+        // on the poll path before listing children.
+        "trello" | "notion" => true,
         _ => true,
     }
 }

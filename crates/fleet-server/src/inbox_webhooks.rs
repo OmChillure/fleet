@@ -342,7 +342,7 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
         .pointer("/repository/full_name")
         .and_then(|x| x.as_str())
         .unwrap_or("");
-    if event == "issues" || v.get("issue").is_some() && v.get("pull_request").is_none() {
+    if event == "issues" {
         let issue = v.get("issue").ok_or("missing issue")?;
         if issue.get("pull_request").is_some() {
             return Ok(ParsedEvent::Ignore);
@@ -380,7 +380,7 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
             closed: state == "closed",
         }]));
     }
-    if event == "pull_request" || v.get("pull_request").is_some() {
+    if event == "pull_request" {
         let pr = v.get("pull_request").ok_or("missing pull_request")?;
         let number = pr
             .get("number")
@@ -461,13 +461,11 @@ fn parse_gitlab(v: &Value) -> Result<ParsedEvent, String> {
         .or_else(|| attrs.get("id"))
         .and_then(|n| n.as_u64())
         .or_else(|| attrs.get("iid").and_then(|n| n.as_i64()).map(|n| n as u64));
-    if matches!(kind, "issue" | "merge_request" | "") && iid.is_some() {
-        let iid = iid.unwrap();
-        let key = if project.is_empty() {
-            format!("#{iid}")
-        } else {
-            format!("{project}#{iid}")
-        };
+    if !matches!(kind, "issue" | "merge_request") || iid.is_none() || project.is_empty() {
+        return Ok(ParsedEvent::Ignore);
+    }
+    if let Some(iid) = iid {
+        let key = format!("{project}#{iid}");
         let state = attrs
             .get("state")
             .and_then(|s| s.as_str())
@@ -734,9 +732,19 @@ fn parse_teams(v: &Value) -> Result<ParsedEvent, String> {
     if id.is_empty() || text.is_empty() {
         return Ok(ParsedEvent::Ignore);
     }
+    let chat_id = v
+        .pointer("/conversation/id")
+        .or_else(|| v.get("chatId"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    let key = if chat_id.is_empty() {
+        id.to_string()
+    } else {
+        format!("{chat_id}:{id}")
+    };
     Ok(ParsedEvent::Items(vec![IngestItem {
         provider: "teams".into(),
-        key: id.to_string(),
+        key,
         title: text.chars().take(80).collect(),
         url: None,
         summary: text.chars().take(4000).collect(),
@@ -841,5 +849,37 @@ mod tests {
             ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-3"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn github_issue_comment_is_not_parsed_as_issue_open() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", HeaderValue::from_static("issue_comment"));
+        let body = json!({
+            "action": "created",
+            "issue": { "number": 12, "title": "Bug", "html_url": "https://github.com/acme/app/issues/12", "state": "open" },
+            "comment": { "body": "please look" },
+            "repository": { "full_name": "acme/app" }
+        });
+        let parsed = parse_event("github", &headers, &serde_json::to_vec(&body).unwrap()).unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].key, "acme/app#12");
+                assert_eq!(items[0].summary, "please look");
+            }
+            other => panic!("expected comment items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gitlab_without_project_or_kind_is_ignored() {
+        let bare = json!({ "object_attributes": { "iid": 3, "title": "x" } });
+        let parsed = parse_event(
+            "gitlab",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&bare).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
     }
 }

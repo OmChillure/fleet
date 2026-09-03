@@ -372,6 +372,9 @@ pub async fn prepare_finish(
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
     require_ticket_workspace(&item, workspace_id)?;
+    if item.state != "open" || item.run_id.is_some() {
+        return Err(AppError::conflict("ticket is not open"));
+    }
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
     let spec = format!(
         "{}\n\n# I/O\n\
@@ -499,9 +502,12 @@ pub async fn mark_ticket_launched(
     key: &str,
     run_id: Uuid,
 ) -> AppResult<()> {
-    ticket_repo::mark_launched(&state.db, workspace_id, provider, key, run_id)
+    let claimed = ticket_repo::mark_launched(&state.db, workspace_id, provider, key, run_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
+    if claimed.is_none() {
+        return Err(AppError::conflict("ticket already launched"));
+    }
     Ok(())
 }
 
@@ -807,6 +813,9 @@ pub async fn ingest_webhook_items(
     else {
         return Ok(report);
     };
+    if !monitor.enabled {
+        return Ok(report);
+    }
     let filters = monitor.filters.clone();
     for item in items {
         if !inbox_sources::webhook_provider_allowed(
@@ -1140,80 +1149,76 @@ async fn poll_gitlab(
     item_limit: usize,
     projects: &[String],
 ) -> Result<usize, String> {
-    let listed = proxy_op(
-        state,
-        workspace_id,
-        caller,
-        "gitlab",
-        "list_issues",
-        json!({ "state": "opened", "per_page": item_limit }),
-    )
-    .await;
-    if !listed.ok {
-        return Err(listed.summary);
+    let projects: Vec<String> = projects
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if projects.is_empty() {
+        return Err("gitlab project is required".into());
     }
-    let items = listed
-        .data
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
     let mut n = 0usize;
-    for i in items {
-        let iid = i
-            .get("iid")
-            .or_else(|| i.get("number"))
-            .and_then(|v| v.as_u64())
-            .or_else(|| i.get("iid").and_then(|v| v.as_i64()).map(|n| n as u64));
-        let path = i
-            .get("project")
-            .or_else(|| i.get("project_path"))
-            .or_else(|| i.get("references"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let Some(iid) = iid else {
-            continue;
-        };
-        let key = if path.contains('/') {
-            format!("{path}#{iid}")
-        } else if let Some(p) = i.get("web_url").and_then(|v| v.as_str()) {
-            p.to_string()
-        } else {
-            format!("#{iid}")
-        };
-        let title = i
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("untitled")
-            .to_string();
-        if !inbox_sources::item_matches_filters(
-            &json!({ "gitlab": { "projects": projects } }),
+    for project in &projects {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
             "gitlab",
-            &key,
-        ) {
-            continue;
-        }
-        ticket_repo::upsert_inbox(
-            &state.db,
-            &UpsertInbox {
-                workspace_id,
-                provider: "gitlab".into(),
-                external_key: key,
-                title,
-                url: i.get("web_url").and_then(|v| v.as_str()).map(|s| s.into()),
-                summary: i
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .chars()
-                    .take(4000)
-                    .collect(),
-                provider_closed: i.get("state").and_then(|v| v.as_str()) == Some("closed"),
-            },
+            "list_issues",
+            json!({ "project": project, "state": "opened", "per_page": item_limit }),
         )
-        .await
-        .map_err(|e| e.to_string())?;
-        n += 1;
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        let items = listed
+            .data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for i in items {
+            let iid = i
+                .get("iid")
+                .or_else(|| i.get("number"))
+                .and_then(|v| v.as_u64())
+                .or_else(|| i.get("iid").and_then(|v| v.as_i64()).map(|n| n as u64));
+            let Some(iid) = iid else {
+                continue;
+            };
+            let path = i
+                .get("project")
+                .or_else(|| i.get("project_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(project.as_str());
+            let key = format!("{path}#{iid}");
+            let title = i
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untitled")
+                .to_string();
+            ticket_repo::upsert_inbox(
+                &state.db,
+                &UpsertInbox {
+                    workspace_id,
+                    provider: "gitlab".into(),
+                    external_key: key,
+                    title,
+                    url: i.get("web_url").and_then(|v| v.as_str()).map(|s| s.into()),
+                    summary: i
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(4000)
+                        .collect(),
+                    provider_closed: i.get("state").and_then(|v| v.as_str()) == Some("closed"),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            n += 1;
+        }
     }
     Ok(n)
 }
@@ -2034,11 +2039,6 @@ async fn http_monitor(
     Json(args): Json<MonitorArgs>,
 ) -> AppResult<Json<Value>> {
     let (user, _) = require_member(&state, &jar, workspace_id).await?;
-    let _ = state
-        .orch
-        .store
-        .set_auto_sync_external(workspace_id, true)
-        .await;
     Ok(Json(
         monitor_tickets(&state, workspace_id, user.id, args).await?,
     ))

@@ -188,9 +188,8 @@ pub async fn upsert_inbox(pool: &PgPool, item: &UpsertInbox) -> DbResult<TicketI
             END,
             state = CASE
                 WHEN ticket_inbox.state = 'ignored' THEN 'ignored'
-                WHEN EXCLUDED.state = 'done' THEN 'done'
                 WHEN ticket_inbox.state = 'launched' THEN 'launched'
-                ELSE ticket_inbox.state
+                ELSE EXCLUDED.state
             END,
             last_seen_at = now()
         RETURNING {INBOX_COLS}
@@ -317,6 +316,8 @@ pub async fn mark_launched(
         WHERE workspace_id = $1
           AND lower(provider) = lower($2)
           AND lower(external_key) = lower($3)
+          AND state = 'open'
+          AND run_id IS NULL
         RETURNING {INBOX_COLS}
         "#
     );
@@ -344,7 +345,7 @@ pub async fn reopen_ticket(
         WHERE workspace_id = $1
           AND lower(provider) = lower($2)
           AND lower(external_key) = lower($3)
-          AND state = 'launched'
+          AND state IN ('launched', 'done')
         RETURNING {INBOX_COLS}
         "#
     );
