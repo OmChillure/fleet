@@ -35,7 +35,10 @@ pub async fn invoke(
             "linear",
             other,
             "unknown_op",
-            format!("unknown linear operation `{other}`; valid: {}", OPERATIONS.join(", ")),
+            format!(
+                "unknown linear operation `{other}`; valid: {}",
+                OPERATIONS.join(", ")
+            ),
             None,
         ),
     }

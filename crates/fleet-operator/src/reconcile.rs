@@ -1,8 +1,8 @@
 //! Reconcile FleetSandbox → Pod + NetworkPolicy.
 
 use crate::crd::{
-    pod_name_for, FleetSandbox, FleetSandboxStatus, LABEL_PROJECT, LABEL_SANDBOX, LABEL_SESSION,
-    LABEL_WORKSPACE, FINALIZER,
+    FINALIZER, FleetSandbox, FleetSandboxStatus, LABEL_PROJECT, LABEL_SANDBOX, LABEL_SESSION,
+    LABEL_WORKSPACE, pod_name_for,
 };
 use chrono::Utc;
 use k8s_openapi::api::core::v1::{
@@ -18,7 +18,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
-use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
+use kube::runtime::finalizer::{Event as FinalizerEvent, finalizer};
 use kube::{Api, Client, Resource, ResourceExt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,9 +38,8 @@ impl OperatorConfig {
         Self {
             worker_image_default: std::env::var("WORKER_IMAGE")
                 .unwrap_or_else(|_| "agent-fleet-api:local".into()),
-            api_service_url: std::env::var("API_SERVICE_URL").unwrap_or_else(|_| {
-                "http://api.agent-fleet.svc.cluster.local:8080".into()
-            }),
+            api_service_url: std::env::var("API_SERVICE_URL")
+                .unwrap_or_else(|_| "http://api.agent-fleet.svc.cluster.local:8080".into()),
             api_namespace: std::env::var("API_NAMESPACE").unwrap_or_else(|_| "agent-fleet".into()),
             api_pod_label_name: std::env::var("API_POD_LABEL")
                 .unwrap_or_else(|_| "fleet-api".into()),
@@ -66,7 +65,9 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub async fn reconcile(sb: Arc<FleetSandbox>, ctx: Arc<Context>) -> Result<Action> {
-    let ns = sb.namespace().ok_or_else(|| Error::Other("missing namespace".into()))?;
+    let ns = sb
+        .namespace()
+        .ok_or_else(|| Error::Other("missing namespace".into()))?;
     let api: Api<FleetSandbox> = Api::namespaced(ctx.client.clone(), &ns);
 
     finalizer(&api, FINALIZER, sb, |event| async {
@@ -92,10 +93,13 @@ async fn apply(sb: &FleetSandbox, ctx: &Context) -> Result<Action> {
     let nps: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     let sbs: Api<FleetSandbox> = Api::namespaced(ctx.client.clone(), &ns);
 
-    if ttl_expired(sb) {
-        info!(sandbox = %name, "ttl exceeded; deleting FleetSandbox");
-        sbs.delete(&name, &DeleteParams::default()).await?;
-        return Ok(Action::await_change());
+    match apply_decision(sb) {
+        ApplyDecision::DeleteCr => {
+            info!(sandbox = %name, "ttl exceeded; deleting FleetSandbox");
+            sbs.delete(&name, &DeleteParams::default()).await?;
+            return Ok(Action::await_change());
+        }
+        ApplyDecision::Continue => {}
     }
 
     let desired_pod = build_pod(sb, &pod_name, &ctx.cfg);
@@ -195,7 +199,11 @@ async fn apply_np(api: &Api<NetworkPolicy>, np: &NetworkPolicy) -> Result<()> {
     Ok(())
 }
 
-async fn patch_status(api: &Api<FleetSandbox>, name: &str, status: FleetSandboxStatus) -> Result<()> {
+async fn patch_status(
+    api: &Api<FleetSandbox>,
+    name: &str,
+    status: FleetSandboxStatus,
+) -> Result<()> {
     let patch = serde_json::json!({ "status": status });
     api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
@@ -214,6 +222,23 @@ fn ttl_expired(sb: &FleetSandbox) -> bool {
     age.num_seconds() >= ttl
 }
 
+/// Docs §13: `ttl_seconds` exceeded → delete the FleetSandbox CR.
+/// `Continue` is create-pod / patch-Running — never that after TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyDecision {
+    DeleteCr,
+    Continue,
+}
+
+/// What `apply()` does for this object. Age `>= ttl` is always `DeleteCr`.
+pub(crate) fn apply_decision(sb: &FleetSandbox) -> ApplyDecision {
+    if ttl_expired(sb) {
+        ApplyDecision::DeleteCr
+    } else {
+        ApplyDecision::Continue
+    }
+}
+
 pub fn build_pod(sb: &FleetSandbox, pod_name: &str, cfg: &OperatorConfig) -> Pod {
     let name = sb.name_any();
     let labels = common_labels(sb, &name);
@@ -229,7 +254,10 @@ pub fn build_pod(sb: &FleetSandbox, pod_name: &str, cfg: &OperatorConfig) -> Pod
         env_kv("FLEET_API_BASE", &cfg.api_service_url),
         env_kv("FLEET_SESSION_ID", &sb.spec.session_id),
         env_kv("FLEET_PROJECT_ID", &sb.spec.project_id),
-        env_kv("FLEET_WORKER_PROFILE", sb.spec.worker_profile.as_deref().unwrap_or("generalist")),
+        env_kv(
+            "FLEET_WORKER_PROFILE",
+            sb.spec.worker_profile.as_deref().unwrap_or("generalist"),
+        ),
     ];
     if let Some(v) = &sb.spec.run_id {
         env.push(env_kv("FLEET_RUN_ID", v));
@@ -324,11 +352,11 @@ pub fn build_pod(sb: &FleetSandbox, pod_name: &str, cfg: &OperatorConfig) -> Pod
                 name: "work".into(),
                 empty_dir: Some(EmptyDirVolumeSource {
                     medium: None,
-                    size_limit: sb.spec.resources.as_ref().and_then(|r| {
-                        r.ephemeral_storage
-                            .as_ref()
-                            .map(|s| Quantity(s.clone()))
-                    }),
+                    size_limit: sb
+                        .spec
+                        .resources
+                        .as_ref()
+                        .and_then(|r| r.ephemeral_storage.as_ref().map(|s| Quantity(s.clone()))),
                 }),
                 ..Default::default()
             }]),
@@ -358,10 +386,7 @@ pub fn build_network_policy(
         }),
         ..Default::default()
     };
-    let dns_ports = vec![
-        np_port(53, "UDP"),
-        np_port(53, "TCP"),
-    ];
+    let dns_ports = vec![np_port(53, "UDP"), np_port(53, "TCP")];
 
     let api_peer = NetworkPolicyPeer {
         namespace_selector: Some(LabelSelector {
@@ -421,10 +446,7 @@ pub fn build_network_policy(
         },
         spec: Some(NetworkPolicySpec {
             pod_selector: LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    LABEL_SANDBOX.to_string(),
-                    name,
-                )])),
+                match_labels: Some(BTreeMap::from([(LABEL_SANDBOX.to_string(), name)])),
                 match_expressions: None,
             },
             policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
@@ -542,7 +564,10 @@ mod tests {
         let cfg = OperatorConfig::from_env();
         let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
         let c = &pod.spec.as_ref().unwrap().containers[0];
-        assert_eq!(c.command.as_ref().unwrap(), &vec!["fleet-driver".to_string()]);
+        assert_eq!(
+            c.command.as_ref().unwrap(),
+            &vec!["fleet-driver".to_string()]
+        );
         let env: BTreeMap<_, _> = c
             .env
             .as_ref()
@@ -561,17 +586,271 @@ mod tests {
     #[test]
     fn network_policy_denies_ingress_and_limits_egress() {
         let sb = sample_sb();
-        let cfg = OperatorConfig {
-            worker_image_default: "agent-fleet-api:local".into(),
-            api_service_url: "http://api.agent-fleet.svc:8080".into(),
-            api_namespace: "agent-fleet".into(),
-            api_pod_label_name: "fleet-api".into(),
-        };
+        let cfg = sample_cfg();
         let np = build_network_policy(&sb, "fsb-demo-t1", &cfg);
         let spec = np.spec.as_ref().unwrap();
         assert_eq!(spec.ingress.as_ref().unwrap().len(), 0);
         assert!(spec.egress.as_ref().unwrap().len() >= 2);
         assert_eq!(np.metadata.name.as_deref(), Some("fsb-demo-t1-net"));
+    }
+
+    fn sb_with_net(mode: &str, allowlist: &[&str]) -> FleetSandbox {
+        let mut sb = sample_sb();
+        sb.spec.network = Some(SandboxNetwork {
+            egress_mode: mode.into(),
+            allowlist: allowlist.iter().map(|s| (*s).to_string()).collect(),
+        });
+        sb
+    }
+
+    fn egress_rules(np: &NetworkPolicy) -> &[NetworkPolicyEgressRule] {
+        np.spec
+            .as_ref()
+            .and_then(|s| s.egress.as_deref())
+            .unwrap_or(&[])
+    }
+
+    fn label_value(sel: &Option<LabelSelector>, key: &str) -> Option<String> {
+        sel.as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+            .and_then(|m| m.get(key))
+            .cloned()
+    }
+
+    fn is_dns_peer(peer: &NetworkPolicyPeer) -> bool {
+        label_value(&peer.namespace_selector, "kubernetes.io/metadata.name").as_deref()
+            == Some("kube-system")
+            && peer.ip_block.is_none()
+    }
+
+    fn is_api_peer(peer: &NetworkPolicyPeer, cfg: &OperatorConfig) -> bool {
+        label_value(&peer.namespace_selector, "kubernetes.io/metadata.name").as_deref()
+            == Some(cfg.api_namespace.as_str())
+            && label_value(&peer.pod_selector, "app.kubernetes.io/name").as_deref()
+                == Some(cfg.api_pod_label_name.as_str())
+            && peer.ip_block.is_none()
+    }
+
+    fn rule_ports(rule: &NetworkPolicyEgressRule) -> Vec<(i32, String)> {
+        rule.ports
+            .as_ref()
+            .map(|ps| {
+                ps.iter()
+                    .filter_map(|p| {
+                        let n = match p.port.as_ref()? {
+                            IntOrString::Int(i) => *i,
+                            _ => return None,
+                        };
+                        Some((n, p.protocol.clone().unwrap_or_default()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn has_dns_egress(rules: &[NetworkPolicyEgressRule]) -> bool {
+        rules.iter().any(|r| {
+            let peers = r.to.as_deref().unwrap_or(&[]);
+            let ports = rule_ports(r);
+            peers.iter().any(is_dns_peer)
+                && ports.iter().any(|(p, proto)| *p == 53 && proto == "UDP")
+                && ports.iter().any(|(p, proto)| *p == 53 && proto == "TCP")
+        })
+    }
+
+    fn has_api_egress(rules: &[NetworkPolicyEgressRule], cfg: &OperatorConfig) -> bool {
+        rules.iter().any(|r| {
+            let peers = r.to.as_deref().unwrap_or(&[]);
+            let ports = rule_ports(r);
+            peers.iter().any(|p| is_api_peer(p, cfg))
+                && ports.iter().any(|(p, proto)| *p == 8080 && proto == "TCP")
+        })
+    }
+
+    fn ip_block_cidrs(rules: &[NetworkPolicyEgressRule]) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in rules {
+            for peer in r.to.as_deref().unwrap_or(&[]) {
+                if let Some(block) = &peer.ip_block {
+                    out.push(block.cidr.clone());
+                    if let Some(except) = &block.except {
+                        out.extend(except.iter().cloned());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn peer_identity_strings(peer: &NetworkPolicyPeer) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(block) = &peer.ip_block {
+            out.push(block.cidr.clone());
+            if let Some(except) = &block.except {
+                out.extend(except.iter().cloned());
+            }
+        }
+        for sel in [&peer.namespace_selector, &peer.pod_selector] {
+            if let Some(s) = sel {
+                if let Some(labels) = &s.match_labels {
+                    out.extend(labels.keys().cloned());
+                    out.extend(labels.values().cloned());
+                }
+                if let Some(exprs) = &s.match_expressions {
+                    for e in exprs {
+                        out.push(e.key.clone());
+                        if let Some(vals) = &e.values {
+                            out.extend(vals.iter().cloned());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn assert_no_open_egress(rules: &[NetworkPolicyEgressRule]) {
+        for r in rules {
+            let to = r.to.as_ref();
+            assert!(
+                to.map(|peers| !peers.is_empty()).unwrap_or(false),
+                "omitted or empty egress.to allows all destinations: {r:?}"
+            );
+        }
+    }
+
+    fn assert_dns_plus_api_only(np: &NetworkPolicy, cfg: &OperatorConfig) {
+        let spec = np.spec.as_ref().expect("NetworkPolicy spec");
+        assert_eq!(
+            spec.ingress.as_ref().map(|i| i.len()),
+            Some(0),
+            "ingress must stay deny-all"
+        );
+        let types = spec.policy_types.as_deref().unwrap_or(&[]);
+        assert!(types.iter().any(|t| t == "Egress"), "{types:?}");
+        assert!(types.iter().any(|t| t == "Ingress"), "{types:?}");
+
+        let rules = egress_rules(np);
+        assert_no_open_egress(rules);
+        assert!(
+            has_dns_egress(rules),
+            "missing kube-system DNS :53 TCP/UDP: {rules:?}"
+        );
+        assert!(
+            has_api_egress(rules, cfg),
+            "missing control-plane API peer :8080/TCP: {rules:?}"
+        );
+        assert!(
+            ip_block_cidrs(rules).is_empty(),
+            "none/dns_only (default) must not add IPBlocks; got {:?}",
+            ip_block_cidrs(rules)
+        );
+        for r in rules {
+            for peer in r.to.as_deref().unwrap_or(&[]) {
+                assert!(
+                    is_dns_peer(peer) || is_api_peer(peer, cfg),
+                    "none/dns_only egress peer must be DNS or control-plane API, got {peer:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_hostname_not_a_peer(rules: &[NetworkPolicyEgressRule], host: &str) {
+        for r in rules {
+            for peer in r.to.as_deref().unwrap_or(&[]) {
+                for id in peer_identity_strings(peer) {
+                    assert_ne!(
+                        id, host,
+                        "hostname {host:?} must not become an egress peer ({id:?})"
+                    );
+                    assert!(
+                        !id.contains(host),
+                        "hostname {host:?} must not appear in egress peer identity {id:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Docs §13: `none` / `dns_only` (default) = DNS + control-plane API only.
+    /// `allowlist` adds listed CIDRs, not hostnames. A hostname string must
+    /// not become an egress peer.
+    #[test]
+    fn network_policy_allowlist_cidrs_not_hostnames() {
+        let cfg = sample_cfg();
+        let mixed = [
+            "10.0.0.0/8",
+            "github.com",
+            "172.18.0.1/32",
+            "host.k3d.internal",
+            "2001:db8::/32",
+        ];
+        let cidrs = ["10.0.0.0/8", "172.18.0.1/32", "2001:db8::/32"];
+        let hosts = ["github.com", "host.k3d.internal"];
+
+        for mode in ["none", "dns_only", ""] {
+            let np = build_network_policy(&sb_with_net(mode, &mixed), "fsb-demo-t1", &cfg);
+            assert_dns_plus_api_only(&np, &cfg);
+            for host in hosts {
+                assert_hostname_not_a_peer(egress_rules(&np), host);
+            }
+        }
+
+        let mut default_sb = sample_sb();
+        default_sb.spec.network = None;
+        assert_dns_plus_api_only(
+            &build_network_policy(&default_sb, "fsb-demo-t1", &cfg),
+            &cfg,
+        );
+
+        // Unknown mode is not a hole: only `allowlist` adds CIDRs.
+        let unknown = build_network_policy(&sb_with_net("all", &mixed), "fsb-demo-t1", &cfg);
+        assert_dns_plus_api_only(&unknown, &cfg);
+
+        let np = build_network_policy(&sb_with_net("allowlist", &mixed), "fsb-demo-t1", &cfg);
+        let spec = np.spec.as_ref().expect("NetworkPolicy spec");
+        assert_eq!(spec.ingress.as_ref().map(|i| i.len()), Some(0));
+        let rules = egress_rules(&np);
+        assert_no_open_egress(rules);
+        assert!(has_dns_egress(rules), "allowlist keeps DNS: {rules:?}");
+        assert!(
+            has_api_egress(rules, &cfg),
+            "allowlist keeps control-plane API: {rules:?}"
+        );
+        let mut got = ip_block_cidrs(rules);
+        got.sort();
+        let mut want = cidrs.map(str::to_string).to_vec();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "allowlist must add listed CIDRs only (not hostnames)"
+        );
+        for host in hosts {
+            assert_hostname_not_a_peer(rules, host);
+        }
+        for r in rules {
+            for peer in r.to.as_deref().unwrap_or(&[]) {
+                if let Some(block) = &peer.ip_block {
+                    assert!(
+                        cidrs.contains(&block.cidr.as_str()),
+                        "allowlist IPBlock must be a listed CIDR, got {}",
+                        block.cidr
+                    );
+                } else {
+                    assert!(
+                        is_dns_peer(peer) || is_api_peer(peer, &cfg),
+                        "allowlist non-CIDR peer must be DNS or control-plane API, got {peer:?}"
+                    );
+                }
+            }
+        }
+
+        let hosts_only =
+            build_network_policy(&sb_with_net("allowlist", &hosts), "fsb-demo-t1", &cfg);
+        assert_dns_plus_api_only(&hosts_only, &cfg);
+        for host in hosts {
+            assert_hostname_not_a_peer(egress_rules(&hosts_only), host);
+        }
     }
 
     fn sample_cfg() -> OperatorConfig {
@@ -586,16 +865,127 @@ mod tests {
     fn sandbox_created_ago(ttl_seconds: Option<i64>, age_secs: i64) -> FleetSandbox {
         let mut sb = sample_sb();
         sb.spec.ttl_seconds = ttl_seconds;
-        sb.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-            Utc::now() - chrono::Duration::seconds(age_secs),
-        ));
+        sb.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                Utc::now() - chrono::Duration::seconds(age_secs),
+            ));
         sb
+    }
+
+    fn with_running_phase(mut sb: FleetSandbox) -> FleetSandbox {
+        sb.status = Some(FleetSandboxStatus {
+            phase: Some("Running".into()),
+            pod_name: Some(pod_name_for(&sb.name_any())),
+            ..Default::default()
+        });
+        sb
+    }
+
+    fn apply_src() -> &'static str {
+        let src = include_str!("reconcile.rs");
+        let start = src
+            .find("async fn apply(")
+            .expect("apply() must exist so TTL can delete the CR");
+        let rest = &src[start..];
+        let end = rest
+            .find("\nasync fn cleanup(")
+            .expect("cleanup() follows apply()");
+        &rest[..end]
+    }
+
+    #[test]
+    fn ttl_seconds_exceeded_deletes_the_cr() {
+        // Docs §13: ttl_seconds exceeded → operator deletes the FleetSandbox
+        // CR. This is apply()'s decision, not the ttl_expired helper and not
+        // leftover-Running remapped to Exited. Continue is create-pod /
+        // patch-Running — never that after TTL.
+        let apply = apply_src();
+        assert!(
+            apply.contains("apply_decision"),
+            "apply() must consult apply_decision; helper-only is not this lock:\n{apply}"
+        );
+        let delete_at = apply
+            .find("ApplyDecision::DeleteCr")
+            .expect("apply() must match DeleteCr");
+        let continue_at = apply
+            .find("ApplyDecision::Continue")
+            .expect("apply() must match Continue");
+        assert!(
+            delete_at < continue_at,
+            "DeleteCr must be decided before Continue/create-pod/patch-Running:\n{apply}"
+        );
+        let delete_arm = &apply[delete_at..continue_at];
+        assert!(
+            delete_arm.contains("sbs.delete"),
+            "DeleteCr must delete the FleetSandbox CR:\n{delete_arm}"
+        );
+        assert!(
+            !delete_arm.contains("pods.create"),
+            "DeleteCr must not create a pod:\n{delete_arm}"
+        );
+        assert!(
+            !delete_arm.contains("patch_status"),
+            "DeleteCr must not patch Running:\n{delete_arm}"
+        );
+        let continue_body = &apply[continue_at..];
+        assert!(
+            continue_body.contains("pods.create") && continue_body.contains("patch_status"),
+            "Continue is create-pod / patch-Running, not delete:\n{continue_body}"
+        );
+
+        let at_boundary = with_running_phase(sandbox_created_ago(Some(600), 600));
+        assert_eq!(
+            apply_decision(&at_boundary),
+            ApplyDecision::DeleteCr,
+            "age==ttl must DeleteCr, not Continue/create-pod/patch-Running"
+        );
+
+        let past = with_running_phase(sandbox_created_ago(Some(600), 601));
+        assert_eq!(
+            apply_decision(&past),
+            ApplyDecision::DeleteCr,
+            "age>ttl must DeleteCr, not Continue/create-pod/patch-Running"
+        );
+
+        let missing = with_running_phase(sandbox_created_ago(None, 10_000));
+        assert_eq!(
+            apply_decision(&missing),
+            ApplyDecision::Continue,
+            "missing ttl_seconds must not delete"
+        );
+
+        let zero = with_running_phase(sandbox_created_ago(Some(0), 10_000));
+        assert_eq!(
+            apply_decision(&zero),
+            ApplyDecision::Continue,
+            "ttl_seconds=0 must not delete"
+        );
+
+        let negative = with_running_phase(sandbox_created_ago(Some(-1), 10_000));
+        assert_eq!(
+            apply_decision(&negative),
+            ApplyDecision::Continue,
+            "negative ttl_seconds must not delete"
+        );
+
+        let still_fresh = with_running_phase(sandbox_created_ago(Some(600), 1));
+        assert_eq!(
+            apply_decision(&still_fresh),
+            ApplyDecision::Continue,
+            "age<ttl must not delete"
+        );
+
+        let one_second_left = with_running_phase(sandbox_created_ago(Some(600), 599));
+        assert_eq!(
+            apply_decision(&one_second_left),
+            ApplyDecision::Continue,
+            "age<ttl must not delete"
+        );
     }
 
     #[test]
     fn ttl_expired_deletes_sandbox_session() {
-        // apply() deletes the FleetSandbox CR when this is true; kube then
-        // runs cleanup() which deletes the session pod + NetworkPolicy.
+        // Helper only — apply() delete is ttl_seconds_exceeded_deletes_the_cr.
         let sb = sandbox_created_ago(Some(600), 601);
         assert!(ttl_expired(&sb));
         assert_eq!(sb.spec.session_id, "sess-1");
@@ -641,7 +1031,10 @@ mod tests {
         let cfg = sample_cfg();
         let desired_pod = build_pod(&sb, &pod_name, &cfg);
         let desired_np = build_network_policy(&sb, &pod_name, &cfg);
-        assert_eq!(desired_pod.metadata.name.as_deref(), Some(pod_name.as_str()));
+        assert_eq!(
+            desired_pod.metadata.name.as_deref(),
+            Some(pod_name.as_str())
+        );
         assert_eq!(desired_np.metadata.name.as_deref(), Some(np_name.as_str()));
     }
 }

@@ -1,6 +1,6 @@
 //! Asana HTTP helpers (REST 1.0).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 

@@ -1,6 +1,6 @@
 //! Sanitize proxy responses so secrets never reach chat / agents / logs.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::types::MAX_PROXY_DATA_BYTES;
 
@@ -67,29 +67,30 @@ fn cap_value_size(v: Value, max_bytes: usize) -> Value {
         Ok(bytes) => {
             // Truncate arrays first when possible.
             if let Value::Object(mut map) = v
-                && let Some(Value::Array(items)) = map.get("items").cloned() {
-                    let mut kept = Vec::new();
-                    for item in items {
-                        kept.push(item);
-                        let candidate = {
-                            let mut m = map.clone();
-                            m.insert("items".into(), Value::Array(kept.clone()));
-                            m.insert("truncated".into(), json!(true));
-                            Value::Object(m)
-                        };
-                        if serde_json::to_vec(&candidate)
-                            .map(|b| b.len() <= max_bytes)
-                            .unwrap_or(false)
-                        {
-                            continue;
-                        }
-                        kept.pop();
-                        break;
+                && let Some(Value::Array(items)) = map.get("items").cloned()
+            {
+                let mut kept = Vec::new();
+                for item in items {
+                    kept.push(item);
+                    let candidate = {
+                        let mut m = map.clone();
+                        m.insert("items".into(), Value::Array(kept.clone()));
+                        m.insert("truncated".into(), json!(true));
+                        Value::Object(m)
+                    };
+                    if serde_json::to_vec(&candidate)
+                        .map(|b| b.len() <= max_bytes)
+                        .unwrap_or(false)
+                    {
+                        continue;
                     }
-                    map.insert("items".into(), Value::Array(kept));
-                    map.insert("truncated".into(), json!(true));
-                    return Value::Object(map);
+                    kept.pop();
+                    break;
                 }
+                map.insert("items".into(), Value::Array(kept));
+                map.insert("truncated".into(), json!(true));
+                return Value::Object(map);
+            }
             json!({
                 "truncated": true,
                 "note": format!(
@@ -171,7 +172,10 @@ mod tests {
             "private_key",
             "token",
         ] {
-            assert!(clean.get(key).is_none(), "secret key `{key}` should be stripped");
+            assert!(
+                clean.get(key).is_none(),
+                "secret key `{key}` should be stripped"
+            );
         }
         assert!(clean["items"][0].get("github_access_token").is_none());
         assert!(clean["items"][0].get("secret").is_none());

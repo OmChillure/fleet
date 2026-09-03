@@ -9,7 +9,7 @@
 
 use crate::job::{Job, ModelEntry, ProviderSpec};
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -21,10 +21,9 @@ pub fn setup_opencode(
     child_env: &mut HashMap<String, String>,
 ) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fleet".into());
-    let cfg_dir = Path::new(
-        &std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config")),
-    )
-    .join("opencode");
+    let cfg_dir =
+        Path::new(&std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config")))
+            .join("opencode");
     fs::create_dir_all(&cfg_dir)?;
     let out = cfg_dir.join("opencode.json");
 
@@ -47,7 +46,9 @@ pub fn setup_opencode(
                 warn!(url = %url, error = %e, "provider /models probe failed");
                 child_env.insert(
                     "_FLEET_PROVIDER_PROBE".into(),
-                    serde_json::to_string(&json!({"ok": false, "url": url, "error": e.to_string()}))?,
+                    serde_json::to_string(
+                        &json!({"ok": false, "url": url, "error": e.to_string()}),
+                    )?,
                 );
             }
         }
@@ -56,7 +57,10 @@ pub fn setup_opencode(
     Ok(())
 }
 
-pub(crate) fn build_opencode_config(job: &Job, child_env: &mut HashMap<String, String>) -> Result<Value> {
+pub(crate) fn build_opencode_config(
+    job: &Job,
+    child_env: &mut HashMap<String, String>,
+) -> Result<Value> {
     // 1) Explicit full config object (highest priority)
     if let Some(cfg) = &job.opencode {
         inject_api_keys_from_job(job, child_env);
@@ -105,7 +109,9 @@ pub(crate) fn resolve_provider_spec(job: &Job) -> Option<ProviderSpec> {
     }
 
     // Env-driven custom OpenAI-compatible provider
-    let id = std::env::var("OPENCODE_PROVIDER_ID").ok().filter(|s| !s.is_empty());
+    let id = std::env::var("OPENCODE_PROVIDER_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     let base = std::env::var("OPENCODE_BASE_URL")
         .ok()
         .or_else(|| std::env::var("PROVIDER_BASE_URL").ok())
@@ -121,10 +127,7 @@ pub(crate) fn resolve_provider_spec(job: &Job) -> Option<ProviderSpec> {
             .or_else(|| std::env::var("OPENCODE_MODEL").ok());
         let mut models = std::collections::BTreeMap::new();
         if let Some(m) = &model {
-            let model_id = m
-                .strip_prefix(&format!("{id}/"))
-                .unwrap_or(m)
-                .to_string();
+            let model_id = m.strip_prefix(&format!("{id}/")).unwrap_or(m).to_string();
             models.insert(
                 model_id.clone(),
                 ModelEntry {
@@ -212,9 +215,9 @@ pub(crate) fn config_from_provider_spec(spec: &ProviderSpec, model: Option<&str>
             .strip_prefix(&format!("{}/", spec.id))
             .unwrap_or(m)
             .to_string();
-        models_obj.entry(mid.clone()).or_insert_with(|| {
-            json!({ "name": mid })
-        });
+        models_obj
+            .entry(mid.clone())
+            .or_insert_with(|| json!({ "name": mid }));
     }
 
     let mut options = Map::new();
@@ -302,11 +305,7 @@ fn minimal_builtin_config(prov: &str, model: &str, child_env: &HashMap<String, S
     }
 }
 
-fn inject_provider_key(
-    spec: &ProviderSpec,
-    job: &Job,
-    child_env: &mut HashMap<String, String>,
-) {
+fn inject_provider_key(spec: &ProviderSpec, job: &Job, child_env: &mut HashMap<String, String>) {
     if let Some(k) = &spec.api_key {
         child_env.insert(spec.api_key_env.clone(), k.clone());
     } else if let Ok(k) = std::env::var(&spec.api_key_env) {
@@ -387,7 +386,6 @@ fn probe_models(base_url: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,10 +440,7 @@ mod tests {
         };
         let cfg = config_from_provider_spec(&spec, Some("acme/my-model"));
         assert_eq!(cfg["model"], "acme/my-model");
-        assert_eq!(
-            cfg["provider"]["acme"]["npm"],
-            "@ai-sdk/openai-compatible"
-        );
+        assert_eq!(cfg["provider"]["acme"]["npm"], "@ai-sdk/openai-compatible");
         assert_eq!(
             cfg["provider"]["acme"]["options"]["baseURL"],
             "https://api.acme.test/v1"
@@ -504,7 +499,10 @@ mod tests {
         });
         let mut env = HashMap::new();
         let cfg = build_opencode_config(&job, &mut env).unwrap();
-        assert_eq!(cfg["provider"]["acme"]["options"]["baseURL"], "https://x.test/v1");
+        assert_eq!(
+            cfg["provider"]["acme"]["options"]["baseURL"],
+            "https://x.test/v1"
+        );
         assert_eq!(env.get("OPENCODE_API_KEY").map(String::as_str), Some("k"));
     }
 }

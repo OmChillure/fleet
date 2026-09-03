@@ -85,7 +85,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 | Copy (Unix, Windows, token) | Clipboard helper | Copy buttons work (incl. HTTP LAN fallback) | n/a (browser) |
 | Token expires (1 hour), single use | Repo consume-once + expiry | n/a beyond “shown once” | Expired / reused token fails on the guest |
 | Loopback URL warning | Hint detector | Warning when command is loopback | Off-box guest cannot pair to loopback; LAN/public URL can |
-| Done keeps the pending worker, closes the panel | — | Done hides panel; card still pending | n/a |
+| Done keeps the pending worker, closes the panel | Done does not DELETE; unused pending stays in list | Done hides panel; card still pending | n/a |
 | Cancel discards the unused worker, closes the panel | Revoke never-paired stays hidden | Cancel; leftover not in the list | n/a |
 | Install progress + SHA reuse | Sidecar SHA; reuse only on match | n/a | Second install skips matching bins, refetches mismatch |
 | Daemon starts after pair on every OS | Host start path | n/a | After install, host is online without a second command |

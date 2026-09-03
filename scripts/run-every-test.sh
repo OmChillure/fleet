@@ -65,18 +65,42 @@ host_dx_build() {
   test "$(tr -d '[:space:]' <"${public}/fleet-git-sha.txt")" = "${sha}"
 }
 
+image_label_sha() {
+  docker image inspect -f '{{index .Config.Labels "fleet.git_sha"}}' "$1" 2>/dev/null || true
+}
+
+# Same skip policy as install docker_build_if_needed: label == tree-id.sh.
+# Tag existence, leftover FLEET_GIT_SHA env, or git rev-parse HEAD is not enough.
+docker_build_if_needed() {
+  local tag="$1"
+  shift
+  local sha have
+  sha="$(bash "${ROOT}/scripts/tree-id.sh")"
+  if [[ "${FORCE_REBUILD:-}" != "1" ]] && docker image inspect "${tag}" >/dev/null 2>&1; then
+    have="$(image_label_sha "${tag}")"
+    if [[ "${have}" == "${sha}" ]]; then
+      log "skip ${tag} (fleet.git_sha=${sha})"
+      return 0
+    fi
+    log "rebuild ${tag}: image fleet.git_sha=${have:-unset} != ${sha}"
+  fi
+  log "==== docker build ${tag} FLEET_GIT_SHA=${sha} ===="
+  DOCKER_BUILDKIT=1 docker build -t "${tag}" --build-arg "FLEET_GIT_SHA=${sha}" "$@"
+}
+
 prepare_kind() {
   local sha
   sha="$(bash "${ROOT}/scripts/tree-id.sh")"
   export FLEET_GIT_SHA="${sha}"
+  export DOCKER_BUILDKIT=1
   write_ui_git_sha "${sha}"
-  log "==== docker build api/ui/operator FLEET_GIT_SHA=${sha} ===="
-  docker build --build-arg "FLEET_GIT_SHA=${sha}" \
-    -t agent-fleet-api:local -f "${ROOT}/Dockerfile" "${ROOT}"
-  docker build --build-arg "FLEET_GIT_SHA=${sha}" \
-    -t agent-fleet-ui:local -f "${ROOT}/Dockerfile.ui" "${ROOT}"
-  docker build --build-arg "FLEET_GIT_SHA=${sha}" \
-    -t agent-fleet-operator:local -f "${ROOT}/Dockerfile.operator" "${ROOT}"
+  docker_build_if_needed agent-fleet-api:local -f "${ROOT}/Dockerfile" "${ROOT}"
+  docker_build_if_needed agent-fleet-ui:local -f "${ROOT}/Dockerfile.ui" "${ROOT}"
+  docker_build_if_needed agent-fleet-operator:local -f "${ROOT}/Dockerfile.operator" "${ROOT}"
+  if python3 "${ROOT}/tests/browser/stack_identity.py"; then
+    log "Kind host :8080/:3030 is this tree (API + UI sha) — skip load/rollout"
+    return 0
+  fi
   kind load docker-image agent-fleet-api:local agent-fleet-ui:local agent-fleet-operator:local \
     --name agent-fleet
   kubectl --context kind-agent-fleet apply -k "${ROOT}/infra/overlays/kind"
@@ -154,6 +178,10 @@ run_step fleet-db-tests \
   cargo test -p fleet-db --locked --tests
 run_step record-demo-contract \
   python3 -m unittest tests.browser.test_record_demo_contract -q
+run_step human-surface-contract \
+  python3 -m unittest tests.browser.test_human_surface_contract -q
+run_step human-test-scope \
+  python3 tests/browser/surface_scope.py --check
 run_step workspace-protocol \
   python3 "${LAB}/workspace/tests/test_workspace_agent_protocol.py" -q
 run_step lab-python-discover \
@@ -164,6 +192,12 @@ run_step invoices-opencode \
   env VERBOSE="${VERBOSE:-0}" bash -lc "cd '${LAB}' && ./scripts/run-invoices-example.sh config/job.123-invoices.opencode.json"
 run_step browser-e2e \
   python3 "${ROOT}/tests/browser/test_app_e2e.py" -v
+run_step browser-e2e-cases \
+  python3 -m unittest tests.browser.test_cases_e2e -v
+run_step browser-e2e-inbox \
+  python3 -m unittest tests.browser.test_inbox_e2e -v
+run_step browser-e2e-settings-members \
+  python3 -m unittest tests.browser.test_settings_members_e2e -v
 run_step record-demo-core \
   python3 "${ROOT}/tests/browser/record_demo.py" landing auth api chat
 

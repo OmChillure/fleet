@@ -41,3 +41,4 @@ axum = { workspace = true }
 cookie = { workspace = true }
 fleet-db = { workspace = true }
 sqlx = { workspace = true }
+sha2 = { workspace = true }

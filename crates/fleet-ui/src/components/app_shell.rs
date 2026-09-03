@@ -1,9 +1,19 @@
 use dioxus::prelude::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::Route;
 use crate::components::sidebar::Sidebar;
 use crate::pages::auth::api::{AuthError, me};
 use crate::theme::Theme;
+
+/// Survives AppShell remounts so a route change does not flash
+/// "Checking session…" over the whole chrome.
+static SESSION_OK: AtomicBool = AtomicBool::new(false);
+
+pub fn clear_session_ok() {
+    SESSION_OK.store(false, Ordering::Relaxed);
+}
 
 /// App chrome for dashboard and related pages: sidebar + content (no top bar).
 ///
@@ -14,7 +24,10 @@ pub fn AppShell() -> Element {
     let theme = use_signal(Theme::load_saved);
     use_context_provider(|| theme);
 
-    let mut auth_state = use_signal(|| AuthGate::Checking);
+    // Paint the shell immediately. Full-page "Checking session…" hid every
+    // workspace h1 on Kind full navigations (e2e /runners/self-hosted).
+    // /me still runs; 401 replaces to login.
+    let mut auth_state = use_signal(|| AuthGate::Ok);
     let mut gate_message = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
 
@@ -22,10 +35,12 @@ pub fn AppShell() -> Element {
         spawn(async move {
             match me().await {
                 Ok(_) => {
+                    SESSION_OK.store(true, Ordering::Relaxed);
                     gate_message.set(None);
                     auth_state.set(AuthGate::Ok);
                 }
                 Err(AuthError::Unauthorized(msg)) => {
+                    SESSION_OK.store(false, Ordering::Relaxed);
                     gate_message.set(Some(msg));
                     auth_state.set(AuthGate::Denied);
                     navigator.replace(Route::Login {});
@@ -69,8 +84,12 @@ pub fn AppShell() -> Element {
                         gate_message.set(None);
                         spawn(async move {
                             match me().await {
-                                Ok(_) => auth_state.set(AuthGate::Ok),
+                                Ok(_) => {
+                                    SESSION_OK.store(true, Ordering::Relaxed);
+                                    auth_state.set(AuthGate::Ok);
+                                }
                                 Err(AuthError::Unauthorized(_)) => {
+                                    SESSION_OK.store(false, Ordering::Relaxed);
                                     auth_state.set(AuthGate::Denied);
                                     navigator.replace(Route::Login {});
                                 }

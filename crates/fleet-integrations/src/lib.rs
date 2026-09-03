@@ -16,7 +16,8 @@
 //! | `GET` | `/api/integrations/oauth/callback/:provider` | Code exchange → store → UI |
 //! | `DELETE` | `/api/workspaces/:id/integrations/:provider` | Disconnect |
 
-#![forbid(unsafe_code)]
+// `std::env::set_var` is unsafe on recent Rust; tests may mutate process env.
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 mod catalog;
 mod config;
@@ -34,7 +35,8 @@ pub use models::{
     AuthMethod, DisconnectResponse, IntegrationAvailability, IntegrationCategory,
     IntegrationListResponse, IntegrationView,
 };
-pub use routes::router;
+pub use oauth::{OAuthCallbackError, OAuthStateClaims, issue_oauth_state, verify_oauth_state};
+pub use routes::{OAuthCallbackQuery, oauth_callback_inner, router};
 pub use state::IntegrationsState;
 
 use fleet_auth::{AppError, AppResult};

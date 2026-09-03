@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
+use fleet_driver::orch::OrchClient;
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::tempdir;
@@ -88,7 +90,10 @@ async fn driver_binary_completes_mock_turn() {
         .env("FLEET_WORKER_TOKEN", "tok")
         .env("FLEET_WORK_DIR", dir.path())
         .env("FLEET_HARNESS", "mock")
-        .env("FLEET_WORK_CMD", format!("touch {}", dir.path().join("from_work_cmd").display()))
+        .env(
+            "FLEET_WORK_CMD",
+            format!("touch {}", dir.path().join("from_work_cmd").display()),
+        )
         .env("FLEET_MOCK_ACP_BIN", mock)
         .env("FLEET_TASK_TIMEOUT_S", "15")
         .env("FLEET_HEARTBEAT_INTERVAL_S", "30")
@@ -136,6 +141,70 @@ async fn driver_binary_completes_mock_turn() {
         }),
         "success must ship result.md to the plane: {:?}",
         rec.statuses
+    );
+}
+
+/// OrchClient contract: send `Authorization: Bearer <session token>` and
+/// map plane 401 to Err. This fixture always 401s — it does not implement
+/// the worker-session gate. Product reject is fleet-orchestrator WorkerAuth
+/// + `authenticate_worker_session` (see api_integration).
+#[tokio::test]
+async fn orch_client_sends_bearer_and_maps_401_to_err() {
+    #[derive(Clone, Default)]
+    struct Rec {
+        auths: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn always_unauthorized(State(rec): State<Rec>, headers: HeaderMap) -> StatusCode {
+        let got = headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        rec.auths.lock().unwrap().push(got);
+        StatusCode::UNAUTHORIZED
+    }
+
+    let rec = Rec::default();
+    let auths = rec.auths.clone();
+    let app = Router::new()
+        .route(
+            "/v1/projects/{project_id}/workers/{session_id}/heartbeat",
+            post(always_unauthorized),
+        )
+        .route(
+            "/v1/projects/{project_id}/workers/{session_id}/status",
+            post(always_unauthorized),
+        )
+        .with_state(rec);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let project = uuid_like();
+    let session = uuid_like();
+    let token = "session-worker-token";
+    let client = OrchClient::new(format!("http://{addr}"), &project, &session, token).unwrap();
+
+    let hb = client.post_heartbeat(1, None).await;
+    assert!(hb.is_err(), "plane 401 must be Err: {hb:?}");
+    let st = client.post_status(2, "running", None).await;
+    assert!(st.is_err(), "plane 401 must be Err: {st:?}");
+
+    let posted = auths.lock().unwrap();
+    assert_eq!(
+        posted.len(),
+        2,
+        "heartbeat and status must both hit the plane"
+    );
+    let expected = format!("Bearer {token}");
+    assert!(
+        posted.iter().all(|h| h == &expected),
+        "OrchClient must send Authorization: Bearer <session token>: {posted:?}"
     );
 }
 

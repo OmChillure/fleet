@@ -4,11 +4,11 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    cancel_case, create_case, decide_case, get_case, list_cases, observe_case, wake_case,
-    CaseEventRow, CaseRow,
+    CaseEventRow, CaseRow, cancel_case, create_case, decide_case, get_case, list_cases,
+    observe_case, wake_case,
 };
-use crate::components::toast::show_toast;
 use crate::Route;
+use crate::components::toast::show_toast;
 
 fn short(id: &str) -> String {
     id.get(..8).unwrap_or(id).to_string()
@@ -53,6 +53,25 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
     let mut creating = use_signal(|| false);
     let selected_id = selected.clone();
     let navigator = use_navigator();
+    let mut selected_sig = use_signal(|| selected.clone());
+    if selected_sig() != selected {
+        selected_sig.set(selected.clone());
+        let keep = match (detail(), selected.as_ref()) {
+            (Some(c), Some(id)) if &c.id == id => true,
+            _ => false,
+        };
+        if !keep {
+            if let Some(id) = selected.as_ref() {
+                if let Some(row) = rows().into_iter().find(|c| &c.id == id) {
+                    detail.set(Some(row));
+                } else {
+                    detail.set(None);
+                }
+            } else {
+                detail.set(None);
+            }
+        }
+    }
 
     let ws_list = workspace_id.clone();
     use_future(move || {
@@ -72,21 +91,32 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
         }
     });
 
-    let ws_detail = workspace_id.clone();
-    let sel_detail = selected_id.clone();
+    let ws_effect = workspace_id.clone();
+    use_effect(move || {
+        let ws = ws_effect.clone();
+        let id = selected_sig();
+        spawn(async move {
+            let Some(cid) = id else {
+                return;
+            };
+            if let Ok(c) = get_case(&ws, &cid).await {
+                detail.set(Some(c));
+            }
+        });
+    });
+    let ws_poll = workspace_id.clone();
     use_future(move || {
-        let ws = ws_detail.clone();
-        let id = sel_detail.clone();
+        let ws = ws_poll.clone();
+        let id = selected_sig();
         async move {
             let Some(cid) = id else {
-                detail.set(None);
                 return;
             };
             loop {
+                TimeoutFuture::new(2500).await;
                 if let Ok(c) = get_case(&ws, &cid).await {
                     detail.set(Some(c));
                 }
-                TimeoutFuture::new(2500).await;
             }
         }
     });
@@ -152,9 +182,11 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
                                         new_title.set(String::new());
                                         new_policy.set(String::new());
                                         show_toast().success("Case created.");
+                                        let cid = c.id.clone();
+                                        detail.set(Some(c));
                                         navigator.push(Route::CaseDetail {
                                             workspace_id: ws,
-                                            case_id: c.id,
+                                            case_id: cid,
                                         });
                                     }
                                     Err(e) => {
@@ -213,6 +245,8 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
                             case: c,
                             note: note,
                             busy: busy,
+                            detail: detail,
+                            rows: rows,
                         }
                     } else if selected_id.is_some() {
                         p { class: "m-0 text-sm text-[var(--app-muted)]", "Loading case…" }
@@ -227,12 +261,32 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
     }
 }
 
+async fn reload_case(
+    ws: &str,
+    id: &str,
+    mut detail: Signal<Option<CaseRow>>,
+    mut rows: Signal<Vec<CaseRow>>,
+) {
+    if let Ok(c) = get_case(ws, id).await {
+        let mut list = rows();
+        if let Some(slot) = list.iter_mut().find(|r| r.id == c.id) {
+            slot.status = c.status.clone();
+            slot.stage = c.stage.clone();
+            slot.title = c.title.clone();
+        }
+        rows.set(list);
+        detail.set(Some(c));
+    }
+}
+
 #[component]
 fn CasePanel(
     workspace_id: String,
     case: CaseRow,
     mut note: Signal<String>,
     mut busy: Signal<bool>,
+    detail: Signal<Option<CaseRow>>,
+    rows: Signal<Vec<CaseRow>>,
 ) -> Element {
     let cid = case.id.clone();
     let events: Vec<CaseEventRow> = case.events.clone();
@@ -247,9 +301,15 @@ fn CasePanel(
                         "{case.id} · kind {case.kind} · decisions {case.decision_count}"
                     }
                 }
-                span {
-                    class: "rounded-md border px-2 py-0.5 text-xs uppercase {status_class(&case.status)}",
-                    "{case.status} · {case.stage}"
+                div { class: "flex flex-wrap items-center gap-1.5",
+                    span {
+                        class: "rounded-md border px-2 py-0.5 text-xs uppercase {status_class(&case.status)}",
+                        "{case.status}"
+                    }
+                    span {
+                        class: "rounded-md border border-[var(--app-border)] px-2 py-0.5 text-xs text-[var(--app-muted)]",
+                        "{case.stage}"
+                    }
                 }
             }
 
@@ -289,9 +349,15 @@ fn CasePanel(
                                 let ws = ws.clone();
                                 let id = id.clone();
                                 spawn(async move {
-                                    let _ = observe_case(&ws, &id, &n).await;
+                                    match observe_case(&ws, &id, &n).await {
+                                        Ok(_) => {
+                                            note.set(String::new());
+                                            show_toast().success("Observation recorded.");
+                                            reload_case(&ws, &id, detail, rows).await;
+                                        }
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
                                     busy.set(false);
-                                    note.set(String::new());
                                 });
                             }
                         },
@@ -311,7 +377,10 @@ fn CasePanel(
                                 let id = id.clone();
                                 spawn(async move {
                                     match wake_case(&ws, &id).await {
-                                        Ok(_) => show_toast().success("Decision applied."),
+                                        Ok(_) => {
+                                            show_toast().success("Decision applied.");
+                                            reload_case(&ws, &id, detail, rows).await;
+                                        }
                                         Err(e) => show_toast().error(e.message()),
                                     }
                                     busy.set(false);
@@ -334,7 +403,10 @@ fn CasePanel(
                                 let id = id.clone();
                                 spawn(async move {
                                     match decide_case(&ws, &id, "complete", Some("completed from UI"), None).await {
-                                        Ok(_) => show_toast().success("Case completed."),
+                                        Ok(_) => {
+                                            show_toast().success("Case completed.");
+                                            reload_case(&ws, &id, detail, rows).await;
+                                        }
                                         Err(e) => show_toast().error(e.message()),
                                     }
                                     busy.set(false);
@@ -357,7 +429,10 @@ fn CasePanel(
                                 let id = id.clone();
                                 spawn(async move {
                                     match decide_case(&ws, &id, "fail", Some("failed from UI"), None).await {
-                                        Ok(_) => show_toast().success("Case failed."),
+                                        Ok(_) => {
+                                            show_toast().success("Case failed.");
+                                            reload_case(&ws, &id, detail, rows).await;
+                                        }
                                         Err(e) => show_toast().error(e.message()),
                                     }
                                     busy.set(false);
@@ -379,7 +454,13 @@ fn CasePanel(
                                 let ws = ws.clone();
                                 let id = id.clone();
                                 spawn(async move {
-                                    let _ = cancel_case(&ws, &id).await;
+                                    match cancel_case(&ws, &id).await {
+                                        Ok(_) => {
+                                            show_toast().success("Case cancelled.");
+                                            reload_case(&ws, &id, detail, rows).await;
+                                        }
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
                                     busy.set(false);
                                 });
                             }
@@ -411,5 +492,26 @@ fn CasePanel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detail_status_and_stage_are_separate_pills() {
+        let src = include_str!("page.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("prod");
+        assert!(
+            !prod.contains("\"{case.status} · {case.stage}\""),
+            "detail must not jam status and stage into one uppercase pill"
+        );
+        assert!(
+            prod.contains("\"{case.status}\""),
+            "detail must render status on its own"
+        );
+        assert!(
+            prod.contains("\"{case.stage}\""),
+            "detail must render stage on its own"
+        );
     }
 }

@@ -23,8 +23,8 @@ jobs or a runner. Tests run on a developer or agent host:
 | Lab | `sandbox-lab/**/test_*.py` | `run-full-suite.sh` | Skip only when the matching `ENABLE_*` is off; **fail** if the flag is on and the service is down |
 | Browser | `tests/browser/test_app_e2e.py` | suite stage when `ENABLE_BROWSER_E2E=1` (needs `:3030` + `:8080`; after kind when `ENABLE_KIND=1`) | Off unless enabled; then **fail** if the stack is down |
 | Runner guests | `sandbox-lab/tests/test_runner_guest_e2e.py` | `ENABLE_RUNNER_GUEST_E2E=1` + this tree + a guest per OS | Default **on** for every `PROFILE`. Missing guest/stack is a **fail**. Explicit `0` still wins. Live **skipped for now:** linux ARM, `freebsd-amd64`, Darwin, `windows-arm64` (`LIVE_SKIPPED`). Procedure: [`components/runners/testing-procedures.md`](./components/runners/testing-procedures.md) |
-| Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI |
-| MR demo video | `scripts/human-test.sh record` (agent, Playwright `.webm`) | attach to the GitLab MR | Agent records; never commit the file |
+| Human walkthrough | `scripts/human-test.sh` | interactive; starts the stack | Humans, not CI. For an MR, only the steps that merge can break |
+| MR demo video | `scripts/human-test.sh record <scenes>` (agent, Playwright `.webm`) | attach to the GitLab MR | Final merge tree; affected scenes only; never commit the file |
 | Live LLM / Grok ACP | `#[ignore]` | `cargo test -p fleet-driver -- --ignored` | Ignored by default |
 
 `fleet-ui` is a Dioxus/WASM app; it is excluded from `cargo test --workspace --lib`. Cover chrome with Playwright. Chat markdown units live in `fleet-chat-md` and runner card helpers live in `fleet-runners-view`; both run on `just test`.
@@ -34,14 +34,17 @@ jobs or a runner. Tests run on a developer or agent host:
 Live `:3030`/`:8080` is **this worktree** only when **both** `/health.git_sha`
 and UI `/fleet-git-sha.txt` equal `scripts/tree-id.sh` (HEAD, or
 `HEAD-<dirty>` if you have uncommitted changes). The API sha is baked at
-compile time — `kubectl set env` cannot fake it. After any edit, run the
-install script or `./scripts/run-every-test.sh --prepare-kind` (and host
-`dx`) **before** verification; a run without that rebuild is not valid.
-Kind extraPortMappings often own those ports with **old** images — port-up
-is not enough. `tests/browser/stack_identity.py` fails closed. There is no
-green path via `FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx` is a fail
-(Kind UI is not a substitute). Kind videos filmed without matching API+UI
-ids are not proof. Contract: `tests/browser/test_fail_closed_contract.py`.
+compile time — `kubectl set env` cannot fake it. After any edit, rebuild
+the **sha-consuming** bits (host `dx` + `cargo build -p fleet-server`, or
+`--prepare-kind`). Docker dep compile is cached: tree-id is not the
+crates.io cache key. `:local` images skip rebuild only when label
+`fleet.git_sha` matches `scripts/tree-id.sh`. Kind extraPortMappings often
+own `:8080`/`:3030` with **old** images — port-up is not enough; host
+`fleet-dev` then binds `18080`/`13030` (`FLEET_API_URL` / `FLEET_UI_URL`).
+`tests/browser/stack_identity.py` fails closed. There is no green path via
+`FLEET_ALLOW_FOREIGN_STACK`. Missing host `dx` is a fail (Kind UI is not a
+substitute). Kind videos filmed without matching API+UI ids are not proof.
+Contract: `tests/browser/test_fail_closed_contract.py`.
 
 ## Harvest, not a writer loop
 

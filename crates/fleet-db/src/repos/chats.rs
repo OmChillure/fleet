@@ -9,10 +9,8 @@ use crate::error::DbResult;
 use crate::models::{ChatConversation, ChatConversationSummary, ChatMessage};
 use crate::pool::map_query_err;
 
-const CONV_COLS: &str =
-    "id, workspace_id, user_id, title, provider, model, created_at, updated_at";
-const MSG_COLS: &str =
-    "id, conversation_id, role, content, provider, model, actions, created_at";
+const CONV_COLS: &str = "id, workspace_id, user_id, title, provider, model, created_at, updated_at";
+const MSG_COLS: &str = "id, conversation_id, role, content, provider, model, actions, created_at";
 
 pub async fn create_conversation(
     pool: &PgPool,
@@ -199,10 +197,7 @@ pub async fn touch_conversation(
     Ok(())
 }
 
-pub async fn list_messages(
-    pool: &PgPool,
-    conversation_id: Uuid,
-) -> DbResult<Vec<ChatMessage>> {
+pub async fn list_messages(pool: &PgPool, conversation_id: Uuid) -> DbResult<Vec<ChatMessage>> {
     let q = format!(
         r#"
         SELECT {MSG_COLS}
@@ -272,19 +267,20 @@ pub async fn latest_composer_llm(
     .await
     .map_err(map_query_err)?;
     Ok(row.and_then(|(p, m)| {
-        let provider = p.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty())?;
+        let provider = p
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())?;
         let model = m.unwrap_or_default().trim().to_string();
         Some((provider, model))
     }))
 }
 
 pub async fn count_messages(pool: &PgPool, conversation_id: Uuid) -> DbResult<i64> {
-    let n: (i64,) = sqlx::query_as(
-        r#"SELECT COUNT(*)::bigint FROM chat_messages WHERE conversation_id = $1"#,
-    )
-    .bind(conversation_id)
-    .fetch_one(pool)
-    .await
-    .map_err(map_query_err)?;
+    let n: (i64,) =
+        sqlx::query_as(r#"SELECT COUNT(*)::bigint FROM chat_messages WHERE conversation_id = $1"#)
+            .bind(conversation_id)
+            .fetch_one(pool)
+            .await
+            .map_err(map_query_err)?;
     Ok(n.0)
 }

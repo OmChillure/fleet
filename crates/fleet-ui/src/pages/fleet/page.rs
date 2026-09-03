@@ -240,7 +240,7 @@ pub fn Fleet(workspace_id: String) -> Element {
                 }
                 div { class: "flex flex-wrap gap-2",
                     button {
-                        class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
+                        class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-[var(--app-accent-fg)] disabled:opacity-50",
                         disabled: busy() || !ready(),
                         r#type: "button",
                         onclick: {
@@ -681,5 +681,98 @@ pub fn Fleet(workspace_id: String) -> Element {
                 " (process, container, or kube pod)."
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // catalog:list-fleet-ui-fixture-is-chain-not-diamond
+    // Docs §6.5: Start 2-task run calls start_fixture (kind=chain).
+    // UI never sends diamond. Does not tick.
+    // Host: cargo test -p fleet-ui --locked -- chain
+
+    fn production_page() -> &'static str {
+        include_str!("page.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("fleet page.rs production source")
+    }
+
+    fn production_api() -> &'static str {
+        include_str!("api.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("fleet api.rs production source")
+    }
+
+    fn button_named<'a>(src: &'a str, label: &str) -> &'a str {
+        let at = src.find(label).unwrap_or_else(|| panic!("missing {label}"));
+        let before = &src[..at];
+        let start = before
+            .rfind("button {")
+            .unwrap_or_else(|| panic!("{label} must sit on a button {{ ... }}"));
+        let after = &src[at + label.len()..];
+        let end = after.find("button {").unwrap_or(after.len());
+        &src[start..at + label.len() + end]
+    }
+
+    #[test]
+    fn start_2_task_button_posts_chain_fixture_and_does_not_tick() {
+        let page = production_page();
+        let api = production_api();
+        assert!(
+            page.contains("\"Start 2-task run\""),
+            "Fleet must expose Start 2-task run"
+        );
+        let start_btn = button_named(page, "\"Start 2-task run\"");
+        assert!(
+            start_btn.contains("start_fixture"),
+            "Start 2-task run must call start_fixture:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.contains("run_tick") && !start_btn.contains("/tick"),
+            "docs §6.5: Start 2-task must not tick:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.to_ascii_lowercase().contains("diamond"),
+            "Start 2-task must never send diamond:\n{start_btn}"
+        );
+        assert!(
+            !page.to_ascii_lowercase().contains("diamond"),
+            "Fleet page must never send or offer diamond"
+        );
+
+        let tick_btn = button_named(page, "\"Run tick\"");
+        assert!(
+            tick_btn.contains("run_tick"),
+            "Run tick is the separate tick control:\n{tick_btn}"
+        );
+        assert!(
+            !tick_btn.contains("start_fixture") && !tick_btn.contains("/runs/fixture"),
+            "Run tick must not start a fixture:\n{tick_btn}"
+        );
+
+        assert!(
+            api.contains("pub async fn start_fixture"),
+            "page start_fixture must be the fleet API helper"
+        );
+        assert!(
+            api.contains("fn start_fixture_body"),
+            "Start 2-task must post start_fixture_body (kind=chain)"
+        );
+    }
+
+    #[test]
+    fn start_2_task_button_uses_accent_foreground_not_hardcoded_white() {
+        // Dark theme --app-accent is #ffffff; text-white is invisible.
+        let start_btn = button_named(production_page(), "\"Start 2-task run\"");
+        assert!(
+            start_btn.contains("text-[var(--app-accent-fg)]"),
+            "Start 2-task run must use --app-accent-fg so dark theme is readable:\n{start_btn}"
+        );
+        assert!(
+            !start_btn.contains("text-white"),
+            "Start 2-task run must not hardcode text-white (white-on-white in dark):\n{start_btn}"
+        );
     }
 }

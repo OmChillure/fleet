@@ -9,9 +9,9 @@
 
 use crate::handshake;
 use crate::job::Job;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -101,15 +101,19 @@ pub fn provision(job: &Job) -> Result<Provisioned> {
     match mode.as_str() {
         "local" => provision_local(job, &repo_url, &git_ref, &work_dir),
         _ => {
-            let _guard = PROVISION_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let _guard = PROVISION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             provision_via_workspace_agent(job, &repo_url, &git_ref, &work_dir)
         }
     }
 }
 
-fn setup_commands(job: &Job) -> (Vec<String>, Vec<String>, std::collections::BTreeMap<String, String>) {
+fn setup_commands(
+    job: &Job,
+) -> (
+    Vec<String>,
+    Vec<String>,
+    std::collections::BTreeMap<String, String>,
+) {
     let Some(ps) = &job.project_setup else {
         return (vec![], vec![], Default::default());
     };
@@ -195,7 +199,9 @@ fn provision_via_workspace_agent(
                         last_phase = phase.clone();
                     }
                     if phase == "failed" || st.ok == Some(false) {
-                        let err = st.message.unwrap_or_else(|| "workspace provision failed".into());
+                        let err = st
+                            .message
+                            .unwrap_or_else(|| "workspace provision failed".into());
                         bail!("{err}");
                     }
                 }
@@ -208,10 +214,8 @@ fn provision_via_workspace_agent(
     }
 
     let raw = fs::read_to_string(&result_path).context("read provision result")?;
-    let value: serde_json::Value =
-        serde_json::from_str(&raw).context("parse result.json")?;
-    handshake::verify_value(&value)
-        .context("unsigned or forged provision result (hmac)")?;
+    let value: serde_json::Value = serde_json::from_str(&raw).context("parse result.json")?;
+    handshake::verify_value(&value).context("unsigned or forged provision result (hmac)")?;
     let result: FleetResult = serde_json::from_value(value).context("decode result.json")?;
     if !result.ok {
         bail!(
@@ -272,8 +276,8 @@ fn provision_local(
 ) -> Result<Provisioned> {
     let needs_ssh = repo_url.starts_with("git@") || repo_url.starts_with("ssh://");
     if needs_ssh {
-        let key = std::env::var("GIT_SSH_KEY_PATH")
-            .unwrap_or_else(|_| "/run/secrets/git_ssh_key".into());
+        let key =
+            std::env::var("GIT_SSH_KEY_PATH").unwrap_or_else(|_| "/run/secrets/git_ssh_key".into());
         setup_ssh(Path::new(&key))?;
     } else {
         info!(%repo_url, "HTTPS/local repo — skipping SSH");
@@ -349,9 +353,7 @@ pub fn write_tools_file(
     fs::write(&tools_path, serde_json::to_string_pretty(&value)?)
         .with_context(|| format!("write {}", tools_path.display()))?;
 
-    let mut md = String::from(
-        "# Fleet workspace tools (allowlisted)\n\nUse only:\n\n",
-    );
+    let mut md = String::from("# Fleet workspace tools (allowlisted)\n\nUse only:\n\n");
     for (name, tool) in tools {
         let argv = tool.argv.join(" ");
         md.push_str(&format!("- `fleet-wsexec {name}` -> `{argv}`\n"));
@@ -530,11 +532,8 @@ mod tests {
         let requested = PathBuf::from("/workspace/jobs/j1/repo");
         let got = accept_agent_work_dir(None, &requested).unwrap();
         assert_eq!(got, requested);
-        let got = accept_agent_work_dir(
-            Some("/workspace/jobs/j1/repo".into()),
-            &requested,
-        )
-        .unwrap();
+        let got =
+            accept_agent_work_dir(Some("/workspace/jobs/j1/repo".into()), &requested).unwrap();
         assert_eq!(got, requested);
     }
 

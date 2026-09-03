@@ -1,9 +1,9 @@
 //! Discord identify + guilds (user OAuth; no bot posting).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn get_me(http: &reqwest::Client, token: &str, _args: &Value) -> ProxyResult {
     let (status, body) = discord_get(http, token, "https://discord.com/api/v10/users/@me").await;
@@ -24,11 +24,7 @@ pub(crate) async fn get_me(http: &reqwest::Client, token: &str, _args: &Value) -
     )
 }
 
-pub(crate) async fn list_guilds(
-    http: &reqwest::Client,
-    token: &str,
-    _args: &Value,
-) -> ProxyResult {
+pub(crate) async fn list_guilds(http: &reqwest::Client, token: &str, _args: &Value) -> ProxyResult {
     let (status, body) =
         discord_get(http, token, "https://discord.com/api/v10/users/@me/guilds").await;
     if !(200..300).contains(&status) {

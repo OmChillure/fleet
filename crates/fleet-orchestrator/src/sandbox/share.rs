@@ -133,7 +133,12 @@ pub fn archive_session_tree(
     copy_dir_filtered(&src, &dest);
 }
 
-pub async fn copy_dep_trees(work_dir: &Path, you_deps: &[String], data_dir: &Path, task: &BoardTaskRow) {
+pub async fn copy_dep_trees(
+    work_dir: &Path,
+    you_deps: &[String],
+    data_dir: &Path,
+    task: &BoardTaskRow,
+) {
     if you_deps.is_empty() {
         return;
     }
@@ -251,6 +256,140 @@ mod tests {
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join("README.md").exists());
         assert!(!dest.join("TEAM.md").exists());
+    }
+
+    /// Docs §16: Settings git remote cleared → new tasks skip clone
+    /// (prompt-only). A leftover per-project `source.git` from the previous
+    /// remote must not seed a later run.
+    #[tokio::test]
+    async fn new_spawn_skips_clone_when_remote_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        let old_src = root.path().join("remote-old");
+        std::fs::create_dir_all(&old_src).unwrap();
+        let git_ok = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok();
+        assert!(
+            git_ok,
+            "git is required for share skip-clone tests (install git; see install-full-suite-deps.sh)"
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", old_src.to_str().unwrap(), "init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let _ = std::process::Command::new("git")
+            .current_dir(&old_src)
+            .args(["config", "user.email", "t@t.t"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .current_dir(&old_src)
+            .args(["config", "user.name", "t"])
+            .status();
+        std::fs::write(old_src.join("FROM_OLD.txt"), "alpha-remote").unwrap();
+        std::fs::write(old_src.join("README.md"), "old-remote").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&old_src)
+                .args(["add", "."])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&old_src)
+                .args(["commit", "-qm", "init"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let first_run = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let old_url = old_src.to_str().unwrap();
+        let first =
+            ensure_run_workspace(root.path(), project, first_run, Some(old_url), Some("HEAD"))
+                .await;
+        assert_eq!(
+            std::fs::read_to_string(first.join("FROM_OLD.txt")).unwrap_or_default(),
+            "alpha-remote",
+            "control seed must clone the Settings remote before it is cleared"
+        );
+        assert!(
+            root.path()
+                .join("projects")
+                .join(project.to_string())
+                .join("source.git")
+                .join("HEAD")
+                .exists(),
+            "previous remote must leave a cache the cleared-remote spawn must not reuse"
+        );
+
+        let cleared_run = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let cleared = ensure_run_workspace(root.path(), project, cleared_run, None, None).await;
+        assert!(
+            !cleared.join("FROM_OLD.txt").exists(),
+            "new run after Settings clear must not clone the previous remote (leftover source.git)"
+        );
+        let readme = std::fs::read_to_string(cleared.join("README.md")).unwrap_or_default();
+        assert!(
+            readme.contains("Shared workspace") && !readme.contains("old-remote"),
+            "cleared remote must seed a prompt-only shared workspace, not the previous checkout: {readme:?}"
+        );
+        assert!(
+            !readme.contains("alpha-remote"),
+            "prompt-only workspace must not contain leftover remote contents"
+        );
+
+        let whitespace_run = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let whitespace = ensure_run_workspace(
+            root.path(),
+            project,
+            whitespace_run,
+            Some("   "),
+            Some(old_url),
+        )
+        .await;
+        assert!(
+            !whitespace.join("FROM_OLD.txt").exists(),
+            "whitespace Settings URL is a clear and must not clone leftover remote"
+        );
+        let empty_run = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        let empty =
+            ensure_run_workspace(root.path(), project, empty_run, Some(""), Some("main")).await;
+        assert!(
+            !empty.join("FROM_OLD.txt").exists(),
+            "empty Settings URL is a clear and must not clone leftover remote"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(first.join("FROM_OLD.txt")).unwrap(),
+            "alpha-remote",
+            "skipping clone on a later run must not rewrite the already-seeded workspace"
+        );
+
+        let still_set_run = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        let still = ensure_run_workspace(
+            root.path(),
+            project,
+            still_set_run,
+            Some(old_url),
+            Some("HEAD"),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(still.join("FROM_OLD.txt")).unwrap_or_default(),
+            "alpha-remote",
+            "control: a still-set Settings remote must still clone (not a tautology that every seed skips)"
+        );
+        assert!(
+            !cleared.join("FROM_OLD.txt").exists(),
+            "control clone must not backfill the skipped cleared-remote workspace"
+        );
     }
 
     #[tokio::test]

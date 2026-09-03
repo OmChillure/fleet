@@ -29,6 +29,7 @@ from runners_e2e_helpers import (  # noqa: E402
     pair_host,
     patch_host,
     signup_login,
+    wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -91,6 +92,16 @@ _REMOTE_ENQUEUE_RE = re.compile(
     r"/(?:spawn|enqueue|lease|tick|fleet/runs|worker-hosts|jobs|claims|lend)(?:/|$|\?)",
     re.I,
 )
+# First-send creates POST /chat/conversations then POST /chat or /chat/stream.
+_CHAT_TURN_POST_RE = re.compile(
+    r"/api/workspaces/[^/]+/chat(?:/stream|/conversations)?(?:\?|$)",
+    re.I,
+)
+# Browser or proxy must never phone OpenAI for the coming-soon pick (docs §6.2).
+_OPENAI_URL_RE = re.compile(
+    r"https?://(?:[^/\s]*\.)?openai\.com(?:[:/]|$)",
+    re.I,
+)
 _LEND_CONTROL_RE = re.compile(
     r"^(lend|lend capacity|enable lending|start lending|offer capacity|begin lending)$",
     re.I,
@@ -103,6 +114,53 @@ def _is_remote_enqueue_or_spawn(method: str, url: str) -> bool:
     if "lend" in url.lower():
         return True
     return _REMOTE_ENQUEUE_RE.search(url) is not None
+
+
+def _is_chat_turn_post(method: str, url: str) -> bool:
+    """POST that would create a conversation or an empty-model turn."""
+    if method.upper() != "POST":
+        return False
+    return _CHAT_TURN_POST_RE.search(url) is not None
+
+
+def _is_openai_url(url: str) -> bool:
+    return bool(_OPENAI_URL_RE.search(url or ""))
+
+
+def _json_provider(raw: str | None) -> str:
+    if not raw:
+        return ""
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    p = body.get("provider")
+    return p.strip() if isinstance(p, str) else ""
+
+
+def _first_live_chat_provider(status: dict) -> str:
+    """First ready provider that is not the OpenAI coming-soon placeholder."""
+    for p in status.get("providers") or []:
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id") or "").strip()
+        if not pid or pid == "openai" or p.get("coming_soon"):
+            continue
+        if p.get("available"):
+            return pid
+    raise AssertionError(
+        "no first available chat provider (excluding coming-soon openai): "
+        f"{status!r}"[:800]
+    )
+
+
+def _chat_conversation_ids(page, workspace_id: str) -> list[str]:
+    body = _json_ok(
+        page.request.get(f"{UI}/api/workspaces/{workspace_id}/chat/conversations")
+    )
+    return _list_ids(body, "conversations")
 
 
 # Heartbeat software that will not match a staged linux-x86_64 bake.
@@ -138,6 +196,86 @@ def _wait_dx_ready(page) -> None:
         if not busy:
             return
         page.wait_for_timeout(500)
+
+
+_LIVE_SANDBOX_STATUSES = frozenset({"spawning", "healthy", "stuck", "killing"})
+# Docs §6.6 / §17: cards are status-only. Cancel the run; do not kill here.
+_SANDBOX_DESTROY_BTN = re.compile(
+    r"\b(kill|destroy|terminate|reap|delete sandbox)\b",
+    re.I,
+)
+_SANDBOX_KILL_POST = re.compile(
+    r"/fleet/sessions/[^/]+/kill(?:/|$|\?)",
+    re.I,
+)
+# Docs §6.5: Run until done POSTs this at most 24 times, 400ms apart.
+_FLEET_TICK_POST = re.compile(
+    r"/api/workspaces/[^/]+/fleet/tick(?:/|$|\?)",
+    re.I,
+)
+_RUN_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+_RUN_UNTIL_DONE_MAX_TICKS = 24
+_RUN_UNTIL_DONE_GAP_MS = 400
+
+
+def _json_ok(res) -> dict:
+    text = res.text()
+    if not res.ok:
+        raise RuntimeError(f"{res.status} {res.url}: {text[:500]}")
+    if not text:
+        return {}
+    return json.loads(text)
+
+
+def _goto_ws_page(page, workspace_url: str, path: str) -> None:
+    """Land on a workspace route. dx rebuild overlay can hide h1; retry."""
+    last_err: Exception | None = None
+    for _ in range(12):
+        try:
+            page.goto(
+                f"{workspace_url}{path}",
+                wait_until="domcontentloaded",
+                timeout=15_000,
+            )
+            _wait_dx_ready(page)
+            wait_dx_ready(page)
+            page.locator("h1").first.wait_for(state="visible", timeout=8_000)
+            last_err = None
+            return
+        except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
+            last_err = e
+            time.sleep(2)
+    raise RuntimeError(f"could not open {path}: {last_err}")
+
+
+def _click_enabled(page, name: str) -> None:
+    btn = page.get_by_role("button", name=name)
+    btn.first.wait_for(state="visible", timeout=15_000)
+    page.wait_for_function(
+        """(label) => {
+            const buttons = [...document.querySelectorAll('button')];
+            const b = buttons.find((el) => (el.innerText || '').includes(label));
+            return !!(b && !b.disabled);
+        }""",
+        arg=name,
+        timeout=15_000,
+    )
+    btn.first.click()
+
+
+def _list_ids(body: dict, key: str) -> list[str]:
+    rows = body.get(key) or []
+    if not isinstance(rows, list):
+        return []
+    out: list[str] = []
+    for row in rows:
+        if isinstance(row, dict) and row.get("id"):
+            out.append(str(row["id"]))
+    return out
+
+
+def _short_id(value: str) -> str:
+    return value[:8] if len(value) >= 8 else value
 
 
 def _ensure_workspace(page) -> tuple[str, str]:
@@ -252,6 +390,163 @@ def _poll_clipboard(
     )
 
 
+# HTTP LAN (http://192.168.x.x) has no secure-context clipboard getter.
+# Firefox panics if the getter is read; a silent return looks like a dead
+# Copy button. copy_text must use textarea + execCommand first.
+_INSTALL_EXEC_SPY = """() => {
+  if (window.__fleetCopySpyInstalled) {
+    window.__execCopies = [];
+    return;
+  }
+  window.__execCopies = [];
+  const proto = Document.prototype;
+  const orig = proto.execCommand;
+  proto.execCommand = function (cmd, showUI, value) {
+    if (String(cmd).toLowerCase() === "copy") {
+      const el = document.activeElement;
+      let text = "";
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) {
+        text = el.value || "";
+      } else {
+        text = String(window.getSelection() || "");
+      }
+      window.__execCopies.push(text);
+    }
+    return orig.call(this, cmd, showUI, value);
+  };
+  window.__fleetCopySpyInstalled = true;
+}"""
+
+_STUB_CLIPBOARD_HTTP_LAN = """() => {
+  const nav = window.navigator;
+  if (window.__origClipboard === undefined) {
+    window.__origClipboard = nav.clipboard;
+  }
+  window.__clipboardGets = 0;
+  try {
+    Object.defineProperty(nav, "clipboard", {
+      configurable: true,
+      get() {
+        window.__clipboardGets += 1;
+        throw new Error("clipboard getter forbidden on insecure HTTP LAN");
+      },
+    });
+    return true;
+  } catch (e) {
+    try {
+      delete nav.clipboard;
+      return true;
+    } catch (e2) {
+      return false;
+    }
+  }
+}"""
+
+_RESTORE_CLIPBOARD_API = """() => {
+  const orig = window.__origClipboard;
+  if (orig === undefined) {
+    return false;
+  }
+  try {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      get() {
+        return orig;
+      },
+    });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}"""
+
+
+def _last_exec_copy(page) -> str:
+    copies = page.evaluate("() => window.__execCopies || []")
+    if not copies:
+        raise AssertionError(
+            "HTTP LAN fallback never called document.execCommand('copy')"
+        )
+    last = copies[-1]
+    if not isinstance(last, str):
+        raise AssertionError(f"execCommand copy payload is not text: {last!r}")
+    return last
+
+
+def _exec_copy_count(page) -> int:
+    n = page.evaluate("() => (window.__execCopies || []).length")
+    return int(n or 0)
+
+
+def _clipboard_getter_hits(page) -> int:
+    n = page.evaluate("() => Number(window.__clipboardGets || 0)")
+    return int(n)
+
+
+def _copy_button(page, pre_needle: str, *, last: bool = False):
+    loc = page.locator("pre").filter(has_text=pre_needle)
+    pre = loc.last if last else loc.first
+    return pre.locator("xpath=..").get_by_role("button", name="Copy")
+
+
+def _pair_panel(page):
+    return page.get_by_role("heading", name="Pair this worker").locator(
+        "xpath=ancestor::section[1]"
+    )
+
+
+def _pair_copy_button(page, pre_needle: str, *, token_only: bool = False):
+    """Copy next to a pair-panel pre. Token-only skips the install commands."""
+    loc = _pair_panel(page).locator("pre").filter(has_text=pre_needle)
+    if token_only:
+        loc = loc.filter(has_not_text="install-worker")
+    return loc.first.locator("xpath=..").get_by_role("button", name="Copy")
+
+
+def _dismiss_status_toasts(page) -> None:
+    """Clear leftover status toasts (they stay 4s and match later wait_for)."""
+    for _ in range(8):
+        btn = page.get_by_role("button", name="Dismiss")
+        if btn.count() == 0 or not btn.first.is_visible():
+            return
+        try:
+            btn.first.click(force=True)
+        except Exception:
+            return
+        page.wait_for_timeout(50)
+
+
+def _open_pair_panel(page, workspace_url: str) -> None:
+    add = page.get_by_role("button", name="Add worker")
+    deadline = time.time() + 180
+    last_body = ""
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        if not _listening("127.0.0.1", 3030) or not _listening("127.0.0.1", 8080):
+            raise AssertionError(
+                "stack died while opening pair panel "
+                f"(ui={_listening('127.0.0.1', 3030)} api={_listening('127.0.0.1', 8080)})"
+            )
+        try:
+            if "chrome-error" in (page.url or "") or not add.count():
+                goto_self_hosted(page, workspace_url)
+            wait_dx_ready(page, timeout_ms=3_000)
+            last_body = page.inner_text("body")
+            if add.count() and add.first.is_visible():
+                add.first.click(force=True)
+                page.get_by_role("heading", name="Pair this worker").wait_for(
+                    timeout=20_000
+                )
+                return
+        except Exception as e:
+            last_err = e
+        page.wait_for_timeout(500)
+    raise AssertionError(
+        "Add worker / Pair this worker missing (dx rebuild overlay?). "
+        f"url={page.url} body={last_body[:1500]!r} err={last_err}"
+    )
+
+
 class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -274,6 +569,83 @@ class BrowserE2ETests(unittest.TestCase):
         )
         cls.page = cls._context.new_page()
         cls.page.set_default_timeout(20_000)
+
+    def _assert_lands_on_self_hosted(self, page, workspace_url: str, path: str) -> None:
+        """/{ws}/runners and /{ws}/workers must land on Self-hosted, not a blank accordion."""
+        last_err: Exception | None = None
+        for _ in range(12):
+            try:
+                page.goto(
+                    f"{workspace_url}{path}",
+                    wait_until="domcontentloaded",
+                    timeout=15_000,
+                )
+                _wait_dx_ready(page)
+                wait_dx_ready(page)
+                page.wait_for_url("**/runners/self-hosted", timeout=15_000)
+                page.locator("main h1").first.wait_for(state="visible", timeout=10_000)
+                last_err = None
+                break
+            except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
+                last_err = e
+                time.sleep(2)
+        if last_err is not None:
+            raise AssertionError(
+                f"{path} did not land on Self-hosted (blank accordion?): {last_err}"
+            ) from last_err
+        self.assertRegex(
+            page.url,
+            r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$",
+            f"{path} must replace to /{{ws}}/runners/self-hosted, got {page.url}",
+        )
+        path_only = page.url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        self.assertTrue(
+            path_only.endswith("/runners/self-hosted"),
+            f"{path} stayed on a blank redirect route: {page.url}",
+        )
+        self.assertFalse(
+            path_only.endswith("/workers") or path_only.endswith("/runners"),
+            f"{path} must not remain on the alias/index: {page.url}",
+        )
+        heading = page.locator("main h1").first.inner_text().strip()
+        self.assertEqual(
+            heading,
+            "Self-hosted",
+            f"{path} must land on Self-hosted heading, not a blank accordion: {heading!r}",
+        )
+        main = page.locator("main")
+        self.assertGreater(
+            main.get_by_role("button", name="Add worker").count(),
+            0,
+            f"{path}: Self-hosted page missing Add worker (blank accordion?)",
+        )
+        main.get_by_text("Control plane", exact=True).first.wait_for(timeout=10_000)
+        body = main.inner_text()
+        self.assertIn("Pair a machine as a self-hosted worker", body)
+        self.assertIn("this process", body)
+        # Runners accordion must be expanded with children — not a blank accordion.
+        nav = page.locator("aside nav")
+        self.assertTrue(
+            nav.get_by_text("Runners", exact=True).first.is_visible(),
+            f"{path}: sidebar missing Runners",
+        )
+        self.assertTrue(
+            nav.get_by_role("link", name="Self-hosted", exact=True).first.is_visible(),
+            f"{path}: Runners accordion must show Self-hosted, not stay blank",
+        )
+        self.assertTrue(
+            nav.get_by_role("link", name="Cloud", exact=True).first.is_visible(),
+            f"{path}: Runners accordion missing Cloud",
+        )
+        self.assertTrue(
+            nav.get_by_role("link", name="Partners", exact=True).first.is_visible(),
+            f"{path}: Runners accordion missing Partners",
+        )
+        self.assertEqual(
+            nav.get_by_role("link", name="Workers", exact=True).count(),
+            0,
+            "Workers must not remain a sidebar child",
+        )
 
     def _assert_no_lend_enablement(self, page, where: str) -> None:
         body = page.inner_text("body").lower()
@@ -372,6 +744,28 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         self.assertIn("Sandbox", page.inner_text("h1"))
 
+        page.get_by_role("link", name="Cases", exact=True).click()
+        page.wait_for_url("**/cases", timeout=10_000)
+        page.wait_for_selector("h1")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Cases")
+        self.assertTrue(
+            page.get_by_role("button", name="Create case").count() > 0,
+            "Cases page missing Create case",
+        )
+
+        page.get_by_role("link", name="Inbox", exact=True).click()
+        page.wait_for_url("**/inbox", timeout=10_000)
+        page.wait_for_selector("h1")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Inbox")
+        self.assertTrue(
+            page.get_by_role("button", name="Start monitor").count() > 0,
+            "Inbox page missing Start monitor",
+        )
+        self.assertTrue(
+            page.get_by_role("button", name="Refresh now").count() > 0,
+            "Inbox page missing Refresh now",
+        )
+
         page.get_by_role("link", name="New chat", exact=True).click()
         page.wait_for_url("**/chat", timeout=10_000)
         body = page.inner_text("body")
@@ -427,8 +821,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(self_hosted.first.is_visible(), "sidebar missing Self-hosted")
         self_hosted.first.click()
         page.wait_for_url("**/runners/self-hosted", timeout=10_000)
-        page.wait_for_selector("h1")
-        runners_h1 = page.locator("h1").first.inner_text().strip()
+        page.locator("main h1").first.wait_for(state="visible", timeout=10_000)
+        runners_h1 = page.locator("main h1").first.inner_text().strip()
         self.assertIn(
             runners_h1,
             {"Self-hosted", "Workers"},
@@ -489,15 +883,18 @@ class BrowserE2ETests(unittest.TestCase):
 
         # Token is shown once: dismiss + reload must not repeat the plaintext.
         self.assertTrue(page.get_by_role("button", name="Cancel").is_visible())
-        page.get_by_role("button", name="Done").click()
+        page.get_by_role("button", name="Done", exact=True).click()
         page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
         self.assertNotIn(token, page.inner_text("body"))
         page.reload(wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertNotIn(token, page.inner_text("body"))
+        pending_card = page.locator("article").filter(has_text="Waiting to pair")
+        pending_card.first.wait_for(timeout=10_000)
+        pending_text = pending_card.first.inner_text()
         card = page.inner_text("body")
         self.assertTrue(
-            page.get_by_role("button", name="Remove worker").first.is_visible()
+            pending_card.get_by_role("button", name="Remove worker").first.is_visible()
         )
         self.assertTrue(
             page.get_by_role("button", name="Stop taking new jobs").first.is_visible()
@@ -526,9 +923,9 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("Auto-update", card)
         self.assertRegex(card, r"id [0-9a-f]{8}")
         self.assertRegex(card.lower(), r"jobs\s+0\s*/\s*4")
-        self.assertNotIn("Allow host", card)
-        self.assertNotIn("Allow container", card)
-        self.assertNotIn("Advertised", card)
+        self.assertNotIn("Allow host", pending_text)
+        self.assertNotIn("Allow container", pending_text)
+        self.assertNotIn("Advertised", pending_text)
 
     def test_15_cancel_discards_pending_worker(self) -> None:
         base = getattr(type(self), "workspace_url", None)
@@ -581,6 +978,164 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("paired hosts", body.lower())
         self.assertIn("plane is not a runner", body.lower())
 
+    def test_fleet_run_until_done_caps_24_ticks(self) -> None:
+        # catalog:list-fleet-run-until-done-caps-24-ticks
+        # Docs §6.5: max 24 ticks, 400ms apart. Must not loop forever if a
+        # task stays ready. Own context: signup must not clobber the suite
+        # session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_fleet_run_until_done_caps_24_ticks(page)
+        finally:
+            context.close()
+
+    def _assert_fleet_run_until_done_caps_24_ticks(self, page) -> None:
+        page_rs = (
+            REPO / "crates" / "fleet-ui" / "src" / "pages" / "fleet" / "page.rs"
+        ).read_text()
+        self.assertIn(
+            "let max = 24u32;",
+            page_rs,
+            "docs §6.5: Run until done must cap at 24 ticks",
+        )
+        self.assertIn(
+            "TimeoutFuture::new(400)",
+            page_rs,
+            "docs §6.5: ticks must be 400ms apart",
+        )
+        self.assertIn(
+            "Stopped after {max} ticks",
+            page_rs,
+            "docs §6.5: hitting the cap must stop and say so (not loop forever)",
+        )
+
+        ws, base = signup_login(page, prefix="fleet-cap24")
+        _goto_ws_page(page, base, "/fleet")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Fleet")
+        until = page.get_by_role("button", name="Run until done")
+        self.assertGreater(until.count(), 0, "Fleet page missing Run until done")
+
+        # No paired host: tasks stay ready so the run cannot go terminal.
+        # Fulfill tick locally so a background ticker 409 cannot abort the
+        # loop before the 24-tick cap (docs: concurrent tick → 409 → stop).
+        tick_at: list[float] = []
+
+        def _fulfill_tick(route) -> None:
+            req = route.request
+            if req.method.upper() != "POST":
+                route.continue_()
+                return
+            tick_at.append(time.time())
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "spawned": 0,
+                        "completed_via_runtime": 0,
+                        "runs_terminated": 0,
+                    }
+                ),
+            )
+
+        page.route(_FLEET_TICK_POST, _fulfill_tick)
+        try:
+            _click_enabled(page, "Start 2-task run")
+            page.get_by_text("Started run").wait_for(timeout=15_000)
+
+            runs_body = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/runs")
+            )
+            run_rows = [
+                r
+                for r in (runs_body.get("runs") or [])
+                if isinstance(r, dict) and r.get("id")
+            ]
+            self.assertTrue(run_rows, f"fixture must create a run: {runs_body!r}"[:800])
+            self.assertFalse(
+                all(
+                    str(r.get("status") or "") in _RUN_TERMINAL for r in run_rows
+                ),
+                "cap lock needs an active run (do not pair a host): "
+                f"{runs_body!r}"[:800],
+            )
+
+            _click_enabled(page, "Run until done")
+            page.get_by_text(
+                re.compile(r"Orchestrating… tick \d+/24")
+            ).wait_for(timeout=10_000)
+            # 24 × 400ms ≈ 9.6s plus fetch; leave room for a slow dx box.
+            page.get_by_text("Stopped after 24 ticks").wait_for(timeout=45_000)
+
+            body = page.inner_text("body")
+            self.assertIn(
+                "Stopped after 24 ticks — press Run tick or refresh",
+                body,
+            )
+            self.assertNotRegex(
+                body,
+                r"Run finished after \d+ tick",
+                "must stop on the 24-tick cap, not because the run went "
+                f"terminal: {body[:1200]!r}",
+            )
+
+            self.assertEqual(
+                len(tick_at),
+                _RUN_UNTIL_DONE_MAX_TICKS,
+                "Run until done must POST /fleet/tick exactly 24 times when "
+                f"the run stays active, got {len(tick_at)}",
+            )
+            min_gap = (_RUN_UNTIL_DONE_GAP_MS / 1000) * 0.75
+            gaps = [tick_at[i + 1] - tick_at[i] for i in range(len(tick_at) - 1)]
+            self.assertTrue(
+                gaps and all(g >= min_gap for g in gaps),
+                "docs §6.5: ticks must be 400ms apart (not a tight spin): "
+                f"gaps={gaps!r}",
+            )
+            span = tick_at[-1] - tick_at[0]
+            self.assertGreaterEqual(
+                span,
+                (_RUN_UNTIL_DONE_MAX_TICKS - 1) * min_gap,
+                f"24 ticks must span ~23×400ms, got {span:.3f}s",
+            )
+
+            still = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/runs")
+            )
+            still_rows = [
+                r
+                for r in (still.get("runs") or [])
+                if isinstance(r, dict) and r.get("id")
+            ]
+            self.assertTrue(still_rows, f"run must still exist: {still!r}"[:800])
+            self.assertFalse(
+                all(
+                    str(r.get("status") or "") in _RUN_TERMINAL for r in still_rows
+                ),
+                "run must still be active so the stop is the 24-tick cap: "
+                f"{still!r}"[:800],
+            )
+
+            page.wait_for_timeout(1_500)
+            self.assertEqual(
+                len(tick_at),
+                _RUN_UNTIL_DONE_MAX_TICKS,
+                "must not POST a 25th tick after the cap: "
+                f"got {len(tick_at)}",
+            )
+            until = page.get_by_role("button", name="Run until done")
+            self.assertTrue(
+                until.first.is_enabled(),
+                "Run until done must re-enable after the 24-tick stop",
+            )
+        finally:
+            page.unroute(_FLEET_TICK_POST, _fulfill_tick)
+
     def test_17_apply_changes_when_dirty(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
@@ -591,7 +1146,7 @@ class BrowserE2ETests(unittest.TestCase):
         if auto.count() == 0:
             page.get_by_role("button", name="Add worker").click()
             page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
-            page.get_by_role("button", name="Done").click()
+            page.get_by_role("button", name="Done", exact=True).click()
             page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
             auto = page.locator("label").filter(has_text="Auto-update")
         apply = page.get_by_role("button", name="Apply changes")
@@ -652,20 +1207,16 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(partners.first.is_visible(), "sidebar missing Partners")
 
     def test_08_workers_redirects_to_self_hosted(self) -> None:
-        base = getattr(type(self), "workspace_url", None)
-        self.assertIsNotNone(base, "signup/login must run first")
-        page = self.page
-        page.goto(f"{base}/workers", wait_until="domcontentloaded")
-        page.wait_for_url("**/runners/self-hosted", timeout=15_000)
-        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$")
+        # catalog:e2e-route-nav-redirects — /{ws}/workers → Self-hosted heading.
+        _ws, base = _ensure_workspace(self.page)
+        self._assert_lands_on_self_hosted(self.page, base, "/workers")
 
     def test_09_runners_redirects_to_self_hosted(self) -> None:
-        base = getattr(type(self), "workspace_url", None)
-        self.assertIsNotNone(base, "signup/login must run first")
-        page = self.page
-        page.goto(f"{base}/runners", wait_until="domcontentloaded")
-        page.wait_for_url("**/runners/self-hosted", timeout=15_000)
-        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/self-hosted(?:[?#].*)?$")
+        # catalog:e2e-route-nav-redirects — /{ws}/runners and /{ws}/workers
+        # land on Self-hosted heading, not a blank accordion.
+        _ws, base = _ensure_workspace(self.page)
+        self._assert_lands_on_self_hosted(self.page, base, "/runners")
+        self._assert_lands_on_self_hosted(self.page, base, "/workers")
 
     def test_10_nav_links_to_cloud_and_partners(self) -> None:
         base = getattr(type(self), "workspace_url", None)
@@ -702,6 +1253,50 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_url("**/runners/partners", timeout=10_000)
         self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
 
+    def _assert_cloud_coming_soon_cards(self, page, where: str) -> None:
+        main = page.locator("main")
+        cards = main.locator("article")
+        self.assertEqual(
+            cards.count(),
+            4,
+            f"{where}: cloud page must render four Coming soon cards",
+        )
+        for label in ("AWS", "GCP", "Azure", "Fleet Cloud"):
+            card = cards.filter(has_text=label)
+            self.assertEqual(
+                card.count(),
+                1,
+                f"{where}: expected one {label} card",
+            )
+            self.assertIn(
+                "coming soon",
+                card.first.inner_text().lower(),
+                f"{where}: {label} must show Coming soon",
+            )
+        self.assertEqual(
+            main.get_by_text("Coming soon", exact=True).count(),
+            4,
+            f"{where}: each of the four cloud cards must show Coming soon",
+        )
+        self.assertEqual(
+            main.get_by_role("button").count(),
+            0,
+            f"{where}: cloud page must not render any buttons",
+        )
+        for label in ("Spawn", "Lend", "Add worker", "Enqueue", "Pair"):
+            self.assertEqual(
+                page.get_by_role("button", name=label).count(),
+                0,
+                f"{where}: must not expose {label!r}",
+            )
+        body = main.inner_text().lower()
+        for needle in ("spawn", "lend", "enqueue", "add worker"):
+            self.assertNotIn(
+                needle,
+                body,
+                f"{where}: must not offer {needle}",
+            )
+
     def test_11_cloud_page_coming_soon(self) -> None:
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
@@ -719,19 +1314,26 @@ class BrowserE2ETests(unittest.TestCase):
             body.lower(),
             "cloud providers must be coming-soon placeholders",
         )
+        self._assert_cloud_coming_soon_cards(page, "cloud")
         self._assert_no_lend_enablement(page, "cloud")
 
     def test_12_partners_page_trust_disclaimer(self) -> None:
-        base = getattr(type(self), "workspace_url", None)
-        self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
+        _ws, base = _ensure_workspace(page)
         page.goto(f"{base}/runners/partners", wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
         h1 = page.locator("h1").first.inner_text().strip()
         self.assertIn("Partners", h1, f"unexpected partners heading {h1!r}")
+        main = page.locator("main")
+        self.assertGreater(
+            main.get_by_text("Coming soon", exact=True).count(),
+            0,
+            "partners page must show the Coming soon badge",
+        )
         body = page.inner_text("body")
         body_l = body.lower()
+        self.assertIn("coming soon", body_l, "partners page must stay Coming soon")
         self.assertIn("trust", body_l, "partners page missing trust copy")
         self.assertIn("disclaimer", body_l, "partners page missing disclaimer copy")
         boxes = page.get_by_role("checkbox", name=re.compile(r"disclaimer", re.I))
@@ -753,9 +1355,8 @@ class BrowserE2ETests(unittest.TestCase):
         self._assert_no_lend_enablement(page, "partners")
 
     def test_13_no_remote_enqueue_from_cloud_or_partners(self) -> None:
-        base = getattr(type(self), "workspace_url", None)
-        self.assertIsNotNone(base, "signup/login must run first")
         page = self.page
+        _ws, base = _ensure_workspace(page)
         mutating: list[tuple[str, str]] = []
 
         def on_request(req) -> None:
@@ -774,6 +1375,21 @@ class BrowserE2ETests(unittest.TestCase):
                     0,
                     f"{path} must not pair workers",
                 )
+                if path == "/runners/cloud":
+                    self._assert_cloud_coming_soon_cards(page, path)
+                    for label in ("Spawn", "Lend"):
+                        self.assertEqual(
+                            page.get_by_role("button", name=label).count(),
+                            0,
+                            f"{path} must not expose {label!r}",
+                        )
+                if path == "/runners/partners":
+                    main = page.locator("main")
+                    self.assertGreater(
+                        main.get_by_text("Coming soon", exact=True).count(),
+                        0,
+                        f"{path}: partners page must show the Coming soon badge",
+                    )
         finally:
             page.remove_listener("request", on_request)
 
@@ -1112,9 +1728,13 @@ class BrowserE2ETests(unittest.TestCase):
                 pass
 
 
-    def test_14h_copy_buttons(self) -> None:
+    def test_14h_copy_buttons_http_lan_fallback(self) -> None:
         # Isolated context so clipboard grants do not replace the class page.
         # copy_text tries execCommand first (HTTP LAN fallback), then clipboard API.
+        # A getter that throws is Firefox on http://192.168.x.x: reading
+        # navigator.clipboard panics; a silent no-op looks like a dead button.
+        # Trying the API first via Reflect.get would still increment
+        # __clipboardGets — that is a fail even if execCommand later succeeds.
         ctx = self._browser.new_context(
             base_url=UI,
             viewport={"width": 1400, "height": 900},
@@ -1123,6 +1743,11 @@ class BrowserE2ETests(unittest.TestCase):
         page = ctx.new_page()
         page.set_default_timeout(20_000)
         page.set_default_navigation_timeout(30_000)
+        page_errors: list[str] = []
+        page.on(
+            "pageerror",
+            lambda err: page_errors.append(str(err)),
+        )
         try:
             ctx.grant_permissions(
                 ["clipboard-read", "clipboard-write"], origin=UI
@@ -1161,51 +1786,209 @@ class BrowserE2ETests(unittest.TestCase):
                 ws = str((spaces[0].get("id") if spaces else "") or "")
             self.assertTrue(ws, f"login missing workspace: {body!r}"[:400])
 
-            page.goto(
-                f"{UI}/{ws}/runners/self-hosted",
-                wait_until="domcontentloaded",
-            )
-            page.get_by_role("button", name="Add worker").wait_for(timeout=20_000)
-            page.get_by_role("button", name="Add worker").click()
-            page.get_by_role("heading", name="Pair this worker").wait_for(
-                timeout=15_000
-            )
+            _open_pair_panel(page, f"{UI}/{ws}")
 
+            unix = page.locator("pre").filter(has_text="install-worker.sh").inner_text()
+            win = page.locator("pre").filter(has_text="install-worker.ps1").inner_text()
             token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
+            self.assertIn("FLEET_PAIR_TOKEN=", unix, unix)
+            self.assertIn("install-worker.sh", unix)
+            self.assertIn("FLEET_PAIR_TOKEN=", win, win)
+            self.assertIn("install-worker.ps1", win)
             self.assertTrue(token.startswith("flp_"), token)
+            self.assertIn(token, unix)
+            self.assertIn(token, win)
 
-            unix_btn = (
-                page.locator("pre")
-                .filter(has_text="install-worker.sh")
-                .locator("xpath=..")
-                .get_by_role("button", name="Copy")
+            unix_btn = _pair_copy_button(page, "install-worker.sh")
+            win_btn = _pair_copy_button(page, "install-worker.ps1")
+            token_btn = _pair_copy_button(page, "flp_", token_only=True)
+            self.assertTrue(unix_btn.is_visible(), "Unix Copy missing")
+            self.assertTrue(win_btn.is_visible(), "Windows Copy missing")
+            self.assertTrue(token_btn.is_visible(), "token Copy missing")
+
+            page.evaluate(_INSTALL_EXEC_SPY)
+            self.assertTrue(
+                page.evaluate(_STUB_CLIPBOARD_HTTP_LAN),
+                "must hide navigator.clipboard to exercise HTTP LAN fallback",
             )
-            win_btn = (
-                page.locator("pre")
-                .filter(has_text="install-worker.ps1")
-                .locator("xpath=..")
-                .get_by_role("button", name="Copy")
+            page_errors.clear()
+
+            def assert_lan_copy(btn, toast: str, *needles: str, exclude: str | None = None) -> str:
+                before = _exec_copy_count(page)
+                btn.click(force=True)
+                page.get_by_role("status").filter(has_text=toast).first.wait_for(
+                    timeout=5_000
+                )
+                failed = page.get_by_role("status").filter(has_text="Copy failed.")
+                self.assertEqual(
+                    failed.count(),
+                    0,
+                    "HTTP LAN copy must not toast failure when execCommand wrote",
+                )
+                self.assertEqual(
+                    _exec_copy_count(page),
+                    before + 1,
+                    "each Copy click must call document.execCommand('copy') once",
+                )
+                self.assertEqual(
+                    _clipboard_getter_hits(page),
+                    0,
+                    "HTTP LAN must not read navigator.clipboard "
+                    "(Firefox getter throws; Reflect-then-fallback is still a fail)",
+                )
+                clip_errs = [
+                    e
+                    for e in page_errors
+                    if "clipboard" in e.lower() or "panic" in e.lower()
+                ]
+                self.assertEqual(
+                    clip_errs,
+                    [],
+                    f"HTTP LAN Copy must not panic: {clip_errs}",
+                )
+                fb = _last_exec_copy(page)
+                for needle in needles:
+                    self.assertIn(needle, fb)
+                if exclude is not None:
+                    self.assertNotIn(exclude, fb)
+                return fb
+
+            unix_fb = assert_lan_copy(
+                unix_btn,
+                "Command copied.",
+                "install-worker.sh",
+                "FLEET_PAIR_TOKEN=",
+                token,
             )
-            token_btn = (
-                page.locator("pre")
-                .filter(has_text="flp_")
-                .last.locator("xpath=..")
-                .get_by_role("button", name="Copy")
+            self.assertEqual(
+                unix_fb.strip(),
+                unix.strip(),
+                "Unix Copy must place the shown install-worker.sh command",
             )
 
-            unix_btn.click()
-            unix_clip = _poll_clipboard(page, "install-worker.sh")
-            self.assertIn("install-worker.sh", unix_clip)
+            win_fb = assert_lan_copy(
+                win_btn,
+                "Command copied.",
+                "install-worker.ps1",
+                "FLEET_PAIR_TOKEN=",
+                token,
+                exclude="install-worker.sh",
+            )
+            self.assertEqual(
+                win_fb.strip(),
+                win.strip(),
+                "Windows Copy must place the shown install-worker.ps1 command",
+            )
 
-            win_btn.click()
-            win_clip = _poll_clipboard(page, "install-worker.ps1")
-            self.assertIn("install-worker.ps1", win_clip)
+            tok_fb = assert_lan_copy(
+                token_btn,
+                "Token copied.",
+                token,
+                exclude="install-worker",
+            )
+            self.assertEqual(
+                tok_fb.strip(),
+                token,
+                "token Copy must place only the shown flp_ token",
+            )
 
-            token_btn.click()
-            # Token is also inside the install commands; wait until those are gone.
+            # execCommand already wrote the system clipboard; restore the API
+            # on this same page (no reload — dx rebuild overlay would flake).
+            self.assertTrue(
+                page.evaluate(_RESTORE_CLIPBOARD_API),
+                "must restore navigator.clipboard to read what fallback wrote",
+            )
             tok_clip = _poll_clipboard(page, token, exclude="install-worker")
             self.assertIn("flp_", tok_clip)
             self.assertIn(token, tok_clip)
+
+            # Secure-context still uses execCommand first. Clipboard-API-only
+            # would write via writeText and leave __execCopies unchanged.
+            def assert_secure_copy(
+                btn, toast: str, *needles: str, exclude: str | None = None
+            ) -> str:
+                # LAN "Token copied." stays 4s. A leftover status would make
+                # wait_for pass even when this click never ran execCommand.
+                _dismiss_status_toasts(page)
+                leftover = page.get_by_role("status").filter(has_text=toast)
+                if leftover.count():
+                    leftover.first.wait_for(state="hidden", timeout=6_000)
+                before = _exec_copy_count(page)
+                after = before
+                for _attempt in range(3):
+                    btn.scroll_into_view_if_needed()
+                    btn.click(force=True)
+                    deadline = time.time() + 2
+                    while time.time() < deadline:
+                        after = _exec_copy_count(page)
+                        if after > before:
+                            break
+                        time.sleep(0.05)
+                    if after > before:
+                        break
+                    try:
+                        btn.evaluate("el => el.click()")
+                    except Exception:
+                        pass
+                page.get_by_role("status").filter(has_text=toast).first.wait_for(
+                    timeout=5_000
+                )
+                failed = page.get_by_role("status").filter(has_text="Copy failed.")
+                self.assertEqual(
+                    failed.count(),
+                    0,
+                    "Copy must not toast failure when execCommand wrote",
+                )
+                self.assertGreater(
+                    after,
+                    before,
+                    "Copy must still use execCommand when navigator.clipboard exists",
+                )
+                clip = _poll_clipboard(page, needles[0], exclude=exclude)
+                for needle in needles:
+                    self.assertIn(needle, clip)
+                if exclude is not None:
+                    self.assertNotIn(exclude, clip)
+                return clip
+
+            unix_clip = assert_secure_copy(
+                unix_btn,
+                "Command copied.",
+                "install-worker.sh",
+                "FLEET_PAIR_TOKEN=",
+                token,
+            )
+            self.assertEqual(
+                unix_clip.strip(),
+                unix.strip(),
+                "Unix Copy must place the shown install-worker.sh command",
+            )
+
+            win_clip = assert_secure_copy(
+                win_btn,
+                "Command copied.",
+                "install-worker.ps1",
+                "FLEET_PAIR_TOKEN=",
+                token,
+                exclude="install-worker.sh",
+            )
+            self.assertEqual(
+                win_clip.strip(),
+                win.strip(),
+                "Windows Copy must place the shown install-worker.ps1 command",
+            )
+
+            tok_clip2 = assert_secure_copy(
+                token_btn,
+                "Token copied.",
+                token,
+                exclude="install-worker",
+            )
+            self.assertEqual(
+                tok_clip2.strip(),
+                token,
+                "token Copy must place only the shown flp_ token",
+            )
         finally:
             ctx.close()
 
@@ -1231,17 +2014,15 @@ class BrowserE2ETests(unittest.TestCase):
             type(self).workspace_url = base
         page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-        workers = page.locator("article").filter(
-            has=page.get_by_role("button", name="Remove worker")
-        )
+        # Rename a pending (never-paired) card. A live cluster host heartbeats
+        # its hostname back over a PATCH name.
+        workers = page.locator("article").filter(has_text="Waiting to pair")
         if workers.count() == 0:
             page.get_by_role("button", name="Add worker").click()
             page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
-            page.get_by_role("button", name="Done").click()
+            page.get_by_role("button", name="Done", exact=True).click()
             page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
-            workers = page.locator("article").filter(
-                has=page.get_by_role("button", name="Remove worker")
-            )
+            workers = page.locator("article").filter(has_text="Waiting to pair")
         card = workers.first
         card.wait_for(timeout=10_000)
         assert_no_control_plane_card(page)
@@ -1898,7 +2679,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
         self.assertTrue(token.startswith("flp_"), f"pair token prefix: {token}")
-        page.get_by_role("button", name="Done").click()
+        page.get_by_role("button", name="Done", exact=True).click()
         page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
 
         paired = pair_host(
@@ -1943,6 +2724,1404 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertRegex(text.lower(), r"last seen (just now|\d+s ago|\d+m ago)")
         self.assertIn(hostname, text)
 
+
+    def test_sandboxes_page_matches_sessions(self) -> None:
+        # catalog:e2e-sandboxes-page-matches-sessions
+        # Own context: signup must not clobber the suite session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_sandboxes_page_matches_sessions(page)
+        finally:
+            context.close()
+
+    def _assert_sandboxes_page_matches_sessions(self, page) -> None:
+        ws, base = signup_login(page, prefix="sbx-list")
+
+        _goto_ws_page(page, base, "/sessions")
+        chat_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertEqual(
+            chat_h1,
+            "Chat history",
+            f"/{ws}/sessions must stay Chat history, not worker rows: {chat_h1!r}",
+        )
+        chat_empty = page.inner_text("body")
+        self.assertIn("Saved conversations", chat_empty)
+        self.assertIn("No saved chats yet", chat_empty)
+        self.assertNotIn("No sandboxes yet", chat_empty)
+        self.assertNotIn("sandbox session(s)", chat_empty)
+        self.assertEqual(
+            page.get_by_role("button", name="Kill", exact=True).count(),
+            0,
+            "Chat history must not offer worker Kill",
+        )
+
+        workers_gets: list[str] = []
+
+        def on_response(resp) -> None:
+            if (
+                resp.request.method.upper() == "GET"
+                and f"/api/workspaces/{ws}/fleet/workers" in resp.url
+            ):
+                workers_gets.append(resp.url)
+
+        page.on("response", on_response)
+
+        _goto_ws_page(page, base, "/sandboxes")
+        page.get_by_text("No sandboxes yet").wait_for(timeout=15_000)
+        page.get_by_text("0 sandbox session(s)").wait_for(timeout=15_000)
+        sbx_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertEqual(sbx_h1, "Sandboxes", f"unexpected sandboxes heading {sbx_h1!r}")
+        empty = page.inner_text("body")
+        self.assertIn("Worker sessions spawned by fleet ticks", empty)
+        self.assertIn("No sandboxes yet", empty)
+        self.assertIn("Fleet", empty)
+        self.assertIn("Start 2-task run", empty)
+        self.assertIn("Run tick", empty)
+        self.assertIn("0 sandbox session(s)", empty)
+        self.assertRegex(
+            empty,
+            r"backend\s+\S+",
+            f"sandboxes empty state missing backend line: {empty[:800]!r}",
+        )
+        self.assertGreater(
+            len(workers_gets),
+            0,
+            "Sandboxes page must GET /fleet/workers (not only /fleet/sessions)",
+        )
+
+        # Production never local-spawns (allow_local_spawn is test-only).
+        # A paired host is required so Run tick creates worker sessions.
+        pair_and_heartbeat(page, ws, f"sbx-{uuid.uuid4().hex[:8]}")
+
+        _goto_ws_page(page, base, "/fleet")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Fleet")
+        _click_enabled(page, "Start 2-task run")
+        page.get_by_text("Started run").wait_for(timeout=15_000)
+        _click_enabled(page, "Run tick")
+
+        sessions_body: dict = {}
+        session_rows: list[dict] = []
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            sessions_body = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/sessions")
+            )
+            raw = sessions_body.get("sessions") or []
+            session_rows = [r for r in raw if isinstance(r, dict) and r.get("id")]
+            if session_rows and any(
+                str(r.get("status") or "") in _LIVE_SANDBOX_STATUSES
+                for r in session_rows
+            ):
+                break
+            tick = page.get_by_role("button", name="Run tick")
+            if tick.count() and tick.first.is_enabled():
+                tick.first.click()
+            page.wait_for_timeout(800)
+        self.assertTrue(
+            session_rows,
+            "Start 2-task run + Run tick must create fleet sessions: "
+            f"{sessions_body!r}"[:800],
+        )
+
+        workers_body = _json_ok(
+            page.request.get(f"{UI}/api/workspaces/{ws}/fleet/workers")
+        )
+        session_ids = _list_ids(sessions_body, "sessions")
+        sandbox_ids = _list_ids(workers_body, "sandboxes")
+        self.assertEqual(
+            sandbox_ids,
+            session_ids,
+            "GET /fleet/workers sandboxes ids must match GET /fleet/sessions "
+            f"ids in order\nworkers={workers_body!r}\nsessions={sessions_body!r}"[
+                :1200
+            ],
+        )
+        self.assertTrue(session_ids, "sessions list missing ids")
+
+        workers_gets.clear()
+        _goto_ws_page(page, base, "/sandboxes")
+        _click_enabled(page, "Refresh")
+
+        cards = ""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            sessions_body = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/sessions")
+            )
+            workers_body = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/workers")
+            )
+            session_ids = _list_ids(sessions_body, "sessions")
+            sandbox_ids = _list_ids(workers_body, "sandboxes")
+            raw = sessions_body.get("sessions") or []
+            session_rows = [r for r in raw if isinstance(r, dict) and r.get("id")]
+            cards = page.inner_text("body")
+            want_status = f"{len(session_ids)} sandbox session(s)"
+            if (
+                session_ids
+                and sandbox_ids == session_ids
+                and want_status in cards
+                and all(f"session  {_short_id(sid)}" in cards for sid in session_ids)
+            ):
+                break
+            refresh = page.get_by_role("button", name="Refresh")
+            if refresh.count() and refresh.first.is_enabled():
+                refresh.first.click()
+            page.wait_for_timeout(500)
+        self.assertEqual(
+            sandbox_ids,
+            session_ids,
+            "GET /fleet/workers sandboxes ids must match GET /fleet/sessions "
+            f"ids in order after the fleet run\nworkers={workers_body!r}\n"
+            f"sessions={sessions_body!r}"[:1200],
+        )
+        self.assertTrue(session_ids, "sessions list missing ids after refresh")
+        self.assertEqual(page.locator("h1").first.inner_text().strip(), "Sandboxes")
+        self.assertNotIn("No sandboxes yet", cards)
+        self.assertIn(f"{len(session_ids)} sandbox session(s)", cards)
+        self.assertGreater(
+            len(workers_gets),
+            0,
+            "Sandboxes list must refetch GET /fleet/workers after the fleet run",
+        )
+
+        live_n = 0
+        for sess in session_rows:
+            sid = str(sess["id"])
+            run_id = str(sess.get("run_id") or "")
+            task_id = str(sess.get("board_task_id") or "")
+            self.assertTrue(run_id, f"session missing run_id: {sess}")
+            self.assertTrue(task_id, f"session missing board_task_id: {sess}")
+            sid8, run8, task8 = _short_id(sid), _short_id(run_id), _short_id(task_id)
+            self.assertIn(
+                f"session  {sid8}",
+                cards,
+                f"card missing session short id {sid8}: {cards[:1200]!r}",
+            )
+            self.assertIn(
+                f"run      {run8}",
+                cards,
+                f"card missing run short id {run8}: {cards[:1200]!r}",
+            )
+            self.assertIn(
+                f"task     {task8}",
+                cards,
+                f"card missing task short id {task8}: {cards[:1200]!r}",
+            )
+            status = str(sess.get("status") or "")
+            if status in _LIVE_SANDBOX_STATUSES:
+                live_n += 1
+                card = page.locator("div.rounded-xl").filter(
+                    has_text=f"session  {sid8}"
+                )
+                self.assertGreater(
+                    card.count(),
+                    0,
+                    f"live {status} card {sid8} missing from list",
+                )
+                self._assert_sandbox_card_has_no_destroy(
+                    card.first,
+                    where=f"live {status} card {sid8}",
+                )
+
+        self.assertGreater(
+            live_n,
+            0,
+            "fixture + tick must leave a live worker session so cards are "
+            "status-only (no Kill): "
+            f"{[(s.get('id'), s.get('status')) for s in session_rows]!r}",
+        )
+        self._assert_sandboxes_page_has_no_destroy(page, where="after fleet run")
+
+        _goto_ws_page(page, base, "/sessions")
+        after_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertEqual(
+            after_h1,
+            "Chat history",
+            f"Chat /sessions heading must stay Chat history after a fleet run: "
+            f"{after_h1!r}",
+        )
+        after = page.inner_text("body")
+        self.assertNotEqual(after_h1, "Sandboxes")
+        self.assertNotIn("sandbox session(s)", after)
+        self.assertNotIn("No sandboxes yet", after)
+        self.assertEqual(
+            page.get_by_role("button", name="Kill", exact=True).count(),
+            0,
+            "Chat history must not grow worker Kill rows",
+        )
+        for sess in session_rows:
+            self.assertNotIn(
+                f"session  {_short_id(str(sess['id']))}",
+                after,
+                "Chat /sessions must not render worker session cards",
+            )
+
+    def test_sandboxes_page_no_destroy_button(self) -> None:
+        # catalog:list-sandboxes-page-no-destroy-button
+        # Docs §6.6: cards show status only. Kill/destroy is not this page.
+        # Docs §17: destroy/kill a sandbox from the UI is a gap (cancel the run).
+        # Own context: signup must not clobber the suite session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_sandboxes_page_no_destroy_button(page)
+        finally:
+            context.close()
+
+    def _assert_sandboxes_page_has_no_destroy(self, page, *, where: str) -> None:
+        h1 = page.locator("h1").first.inner_text().strip()
+        self.assertEqual(h1, "Sandboxes", f"{where}: unexpected heading {h1!r}")
+        for role in ("button", "link"):
+            n = page.get_by_role(role, name=_SANDBOX_DESTROY_BTN, exact=True).count()
+            self.assertEqual(
+                n,
+                0,
+                f"{where}: sandboxes page must not expose a {role} named "
+                f"Kill/Destroy (docs §6.6); found {n}",
+            )
+        for label in ("Kill", "Destroy", "Terminate", "Reap"):
+            self.assertEqual(
+                page.get_by_role("button", name=label, exact=True).count(),
+                0,
+                f"{where}: sandboxes page must not expose {label!r}",
+            )
+
+    def _assert_sandbox_card_has_no_destroy(self, card, *, where: str) -> None:
+        self.assertGreater(card.count() if hasattr(card, "count") else 1, 0, where)
+        kill = card.get_by_role("button", name=_SANDBOX_DESTROY_BTN, exact=True)
+        self.assertEqual(
+            kill.count(),
+            0,
+            f"{where} must not offer Kill/Destroy (docs §6.6 status-only)",
+        )
+        for label in ("Kill", "Destroy", "Terminate", "Reap"):
+            self.assertEqual(
+                card.get_by_role("button", name=label, exact=True).count(),
+                0,
+                f"{where} must not expose {label!r}",
+            )
+
+    def _assert_sandboxes_page_no_destroy_button(self, page) -> None:
+        page_rs = (
+            REPO / "crates" / "fleet-ui" / "src" / "pages" / "sandboxes" / "page.rs"
+        ).read_text()
+        for needle in ("KILL_LABEL", "kill_sandbox", "show_kill", "Destroy"):
+            self.assertNotIn(
+                needle,
+                page_rs,
+                "docs §6.6: sandboxes cards are status-only; "
+                f"page.rs must not contain {needle!r}",
+            )
+        self.assertIn("{card.status}", page_rs)
+        self.assertIn("session  {card.session_short}", page_rs)
+
+        ws, base = signup_login(page, prefix="sbx-nodestroy")
+
+        kill_posts: list[str] = []
+
+        def on_request(req) -> None:
+            if req.method.upper() != "POST":
+                return
+            if _SANDBOX_KILL_POST.search(req.url):
+                kill_posts.append(f"{req.method} {req.url}")
+
+        page.on("request", on_request)
+        try:
+            _goto_ws_page(page, base, "/sandboxes")
+            page.get_by_text("No sandboxes yet").wait_for(timeout=15_000)
+            page.get_by_text("0 sandbox session(s)").wait_for(timeout=15_000)
+            self._assert_sandboxes_page_has_no_destroy(page, where="empty list")
+
+            # Empty-state-only would pass today's page (Kill is gated on live
+            # cards). Pair + Fleet fixture must produce a live card.
+            pair_and_heartbeat(page, ws, f"sbx-nodestroy-{uuid.uuid4().hex[:8]}")
+
+            _goto_ws_page(page, base, "/fleet")
+            self.assertEqual(page.locator("h1").first.inner_text().strip(), "Fleet")
+            _click_enabled(page, "Start 2-task run")
+            page.get_by_text("Started run").wait_for(timeout=15_000)
+            _click_enabled(page, "Run tick")
+
+            sessions_body: dict = {}
+            session_rows: list[dict] = []
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                sessions_body = _json_ok(
+                    page.request.get(f"{UI}/api/workspaces/{ws}/fleet/sessions")
+                )
+                raw = sessions_body.get("sessions") or []
+                session_rows = [r for r in raw if isinstance(r, dict) and r.get("id")]
+                if session_rows and any(
+                    str(r.get("status") or "") in _LIVE_SANDBOX_STATUSES
+                    for r in session_rows
+                ):
+                    break
+                tick = page.get_by_role("button", name="Run tick")
+                if tick.count() and tick.first.is_enabled():
+                    tick.first.click()
+                page.wait_for_timeout(800)
+            self.assertTrue(
+                session_rows,
+                "Start 2-task run + Run tick must create fleet sessions so "
+                "this lock is not an empty-list tautology: "
+                f"{sessions_body!r}"[:800],
+            )
+
+            _goto_ws_page(page, base, "/sandboxes")
+            _click_enabled(page, "Refresh")
+
+            cards = ""
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                sessions_body = _json_ok(
+                    page.request.get(f"{UI}/api/workspaces/{ws}/fleet/sessions")
+                )
+                raw = sessions_body.get("sessions") or []
+                session_rows = [r for r in raw if isinstance(r, dict) and r.get("id")]
+                cards = page.inner_text("body")
+                if session_rows and all(
+                    f"session  {_short_id(str(s['id']))}" in cards for s in session_rows
+                ):
+                    break
+                refresh = page.get_by_role("button", name="Refresh")
+                if refresh.count() and refresh.first.is_enabled():
+                    refresh.first.click()
+                page.wait_for_timeout(500)
+
+            self.assertNotIn("No sandboxes yet", cards)
+            self.assertEqual(page.locator("h1").first.inner_text().strip(), "Sandboxes")
+            self._assert_sandboxes_page_has_no_destroy(page, where="with session cards")
+
+            live_n = 0
+            for sess in session_rows:
+                sid = str(sess["id"])
+                sid8 = _short_id(sid)
+                status = str(sess.get("status") or "")
+                self.assertIn(
+                    f"session  {sid8}",
+                    cards,
+                    f"card missing session short id {sid8}: {cards[:1200]!r}",
+                )
+                card = page.locator("div.rounded-xl").filter(
+                    has_text=f"session  {sid8}"
+                )
+                self.assertGreater(
+                    card.count(),
+                    0,
+                    f"{status or 'session'} card {sid8} missing from list",
+                )
+                text = card.first.inner_text()
+                self.assertIn(
+                    status,
+                    text,
+                    f"card {sid8} must show status {status!r} (docs §6.6): "
+                    f"{text[:400]!r}",
+                )
+                self._assert_sandbox_card_has_no_destroy(
+                    card.first,
+                    where=f"{status or 'session'} card {sid8}",
+                )
+                if status in _LIVE_SANDBOX_STATUSES:
+                    live_n += 1
+
+            self.assertGreater(
+                live_n,
+                0,
+                "fixture + tick must leave a live worker session; empty/terminal "
+                "lists make 'no Kill' a tautology against today's gated button: "
+                f"{[(s.get('id'), s.get('status')) for s in session_rows]!r}",
+            )
+
+            _click_enabled(page, "Refresh")
+            page.wait_for_timeout(400)
+            self._assert_sandboxes_page_has_no_destroy(page, where="after Refresh")
+        finally:
+            page.remove_listener("request", on_request)
+
+        self.assertEqual(
+            kill_posts,
+            [],
+            "sandboxes page must not POST …/fleet/sessions/{id}/kill "
+            f"(docs §6.6 / §17): {kill_posts!r}",
+        )
+
+    def test_sessions_page_lists_chats_not_workers(self) -> None:
+        # catalog:list-sessions-page-lists-chats-not-workers
+        # Docs §6.3 / §6.4: /{ws}/sessions is saved chats (click → /chat/{id}).
+        # Sidebar Live sessions is that same route, not worker sandboxes.
+        # Fleet live view is /sessions/{session_id} from fleet cards only.
+        # Own context: signup must not clobber the suite session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_sessions_page_lists_chats_not_workers(page)
+        finally:
+            context.close()
+
+    def _assert_sessions_page_lists_chats_not_workers(self, page) -> None:
+        ws, base = signup_login(page, prefix="sess-chats")
+        title = f"saved-chat-{uuid.uuid4().hex[:10]}"
+        created = _json_ok(
+            page.request.post(
+                f"{UI}/api/workspaces/{ws}/chat/conversations",
+                data=json.dumps({"title": title}),
+                headers={"Content-Type": "application/json"},
+            )
+        )
+        cid = str((created.get("conversation") or {}).get("id") or "")
+        self.assertTrue(cid, f"POST /chat/conversations missing id: {created!r}"[:600])
+
+        conv_gets: list[str] = []
+        fleet_session_gets: list[str] = []
+        fleet_worker_gets: list[str] = []
+
+        def on_request(req) -> None:
+            if req.method.upper() != "GET":
+                return
+            url = req.url
+            if f"/api/workspaces/{ws}/chat/conversations" in url:
+                conv_gets.append(url)
+            if re.search(rf"/api/workspaces/{ws}/fleet/sessions(?:/|\?|$)", url):
+                fleet_session_gets.append(url)
+            if f"/api/workspaces/{ws}/fleet/workers" in url:
+                fleet_worker_gets.append(url)
+
+        page.on("request", on_request)
+        try:
+            _goto_ws_page(page, base, "/sessions")
+            h1 = page.locator("h1").first.inner_text().strip()
+            self.assertEqual(
+                h1,
+                "Chat history",
+                f"/{ws}/sessions must be Chat history, not worker rows: {h1!r}",
+            )
+            self.assertRegex(
+                page.url,
+                rf"/{re.escape(ws)}/sessions/?$",
+                f"chat history URL must be /{{ws}}/sessions, not live view: {page.url}",
+            )
+            page.get_by_role("heading", name=title, exact=True).wait_for(timeout=10_000)
+            body = page.inner_text("body")
+            self.assertIn(title, body, "saved chat title missing from /sessions")
+            self.assertIn("Saved conversations", body)
+            self.assertNotIn("No saved chats yet", body)
+            self.assertNotIn("No sandboxes yet", body)
+            self.assertNotIn("sandbox session(s)", body)
+            self.assertNotIn("Control plane", body)
+            self.assertEqual(
+                page.get_by_role("button", name="Kill").count(),
+                0,
+                "Chat history must not offer worker Kill",
+            )
+            self.assertGreater(
+                len(conv_gets),
+                0,
+                "Chat history must GET /chat/conversations",
+            )
+            self.assertEqual(
+                fleet_session_gets,
+                [],
+                "Chat history must not GET /fleet/sessions "
+                f"(worker list/detail): {fleet_session_gets!r}",
+            )
+            self.assertEqual(
+                fleet_worker_gets,
+                [],
+                "Chat history must not GET /fleet/workers: "
+                f"{fleet_worker_gets!r}",
+            )
+
+            workers_body = _json_ok(
+                page.request.get(f"{UI}/api/workspaces/{ws}/fleet/sessions")
+            )
+            for sid in _list_ids(workers_body, "sessions"):
+                self.assertNotIn(
+                    f"session  {_short_id(sid)}",
+                    body,
+                    "Chat /sessions must not render worker session cards",
+                )
+                self.assertNotIn(sid, body)
+
+            page.get_by_role("heading", name=title, exact=True).click()
+            page.wait_for_url(
+                re.compile(rf".*/{re.escape(ws)}/chat/{re.escape(cid)}/?$"),
+                timeout=10_000,
+            )
+            self.assertRegex(
+                page.url,
+                rf"/{re.escape(ws)}/chat/{re.escape(cid)}/?$",
+                f"row click must open /chat/{{id}}, not worker live: {page.url}",
+            )
+            self.assertNotRegex(
+                page.url,
+                rf"/{re.escape(ws)}/sessions/",
+                f"row click must not open /sessions/{{id}}: {page.url}",
+            )
+
+            live = page.get_by_role("link", name="Live sessions", exact=True)
+            if live.count() == 0 or not live.first.is_visible():
+                page.get_by_text("Agents", exact=True).first.click()
+                live = page.get_by_role("link", name="Live sessions", exact=True)
+            self.assertGreater(
+                live.count(),
+                0,
+                "sidebar missing Live sessions (docs §5.1 / §6.3)",
+            )
+            live.first.click()
+            page.wait_for_url(
+                re.compile(rf".*/{re.escape(ws)}/(?:sessions|sandboxes)(?:/|\?|$)"),
+                timeout=10_000,
+            )
+            self.assertRegex(
+                page.url,
+                rf"/{re.escape(ws)}/sessions/?$",
+                "sidebar Live sessions must open Chat history /{ws}/sessions, "
+                f"not worker sandboxes: {page.url}",
+            )
+            self.assertNotIn("/sandboxes", page.url)
+            live_h1 = page.locator("h1").first.inner_text().strip()
+            self.assertEqual(
+                live_h1,
+                "Chat history",
+                "sidebar Live sessions must land on Chat history "
+                f"(/{{ws}}/sessions), not workers: {live_h1!r} {page.url}",
+            )
+            page.get_by_role("heading", name=title, exact=True).wait_for(timeout=10_000)
+            self.assertIn(title, page.inner_text("body"))
+        finally:
+            page.remove_listener("request", on_request)
+
+        _goto_ws_page(page, base, "/sandboxes")
+        sbx_h1 = page.locator("h1").first.inner_text().strip()
+        self.assertEqual(
+            sbx_h1,
+            "Sandboxes",
+            f"control /sandboxes must stay worker sessions: {sbx_h1!r}",
+        )
+        sbx = page.inner_text("body")
+        self.assertIn("No sandboxes yet", sbx)
+        self.assertIn("Worker sessions spawned by fleet ticks", sbx)
+        self.assertNotIn(title, sbx)
+
+    def test_chat_send_empty_model_blocked(self) -> None:
+        # catalog:list-chat-send-empty-model-blocked
+        # Docs §6.2: Send with empty model toasts "Select a model first…"
+        # and must not POST /chat or create an empty-model turn.
+        # Own context: signup must not clobber the suite session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_chat_send_empty_model_blocked(page)
+        finally:
+            context.close()
+
+    def _assert_chat_send_empty_model_blocked(self, page) -> None:
+        ws, base = signup_login(page, prefix="chat-nomodel")
+        host_name = f"chat-empty-model-{uuid.uuid4().hex[:8]}"
+        # Blank listed model keeps Ollama available (Send enabled) while
+        # selected_model.trim() is empty — the §6.2 case. A real tag is the
+        # control so a no-op Send cannot pass as "blocked".
+        ready_model = "llama3.2:latest"
+        pair_and_heartbeat(
+            page,
+            ws,
+            host_name,
+            heartbeat_extra={
+                "agents": [
+                    {
+                        "id": "ollama",
+                        "name": "Ollama",
+                        "installed": True,
+                        "logged_in": True,
+                        "models": ["", ready_model],
+                    }
+                ]
+            },
+        )
+
+        before_ids = _chat_conversation_ids(page, ws)
+        posted: list[str] = []
+
+        def _gate_chat_posts(route) -> None:
+            req = route.request
+            if _is_chat_turn_post(req.method, req.url):
+                posted.append(f"{req.method} {req.url}")
+                route.abort()
+                return
+            route.continue_()
+
+        def _open_new_chat() -> None:
+            last_err: Exception | None = None
+            for _ in range(12):
+                try:
+                    page.goto(
+                        f"{base}/chat",
+                        wait_until="domcontentloaded",
+                        timeout=15_000,
+                    )
+                    _wait_dx_ready(page)
+                    wait_dx_ready(page)
+                    page.get_by_text("How can I help?").wait_for(timeout=8_000)
+                    return
+                except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
+                    last_err = e
+                    time.sleep(2)
+            raise RuntimeError(f"could not open /chat: {last_err}")
+
+        def _wait_composer_ready() -> None:
+            page.wait_for_function(
+                """() => {
+                    const r = document.querySelector(
+                        "select[title='Self-hosted runner for this chat']"
+                    );
+                    const p = document.querySelector("select[title='Chat provider']");
+                    return !!(
+                        r && r.value
+                        && p && [...p.options].some((o) => o.value === "ollama")
+                    );
+                }""",
+                timeout=15_000,
+            )
+            page.locator("select[title='Chat provider']").select_option("ollama")
+            page.locator("select[title='Model for the selected provider']").wait_for(
+                state="visible", timeout=10_000
+            )
+
+        def _set_model(value: str) -> None:
+            sel = page.locator("select[title='Model for the selected provider']")
+            sel.wait_for(state="visible", timeout=10_000)
+            page.wait_for_function(
+                """(v) => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    return !!(s && [...s.options].some((o) => (o.value || "") === v));
+                }""",
+                arg=value,
+                timeout=10_000,
+            )
+            try:
+                sel.select_option(value=value)
+            except Exception:
+                page.evaluate(
+                    """(v) => {
+                        const s = document.querySelector(
+                            "select[title='Model for the selected provider']"
+                        );
+                        if (!s) throw new Error("model select missing");
+                        s.value = v;
+                        s.dispatchEvent(new Event("input", { bubbles: true }));
+                        s.dispatchEvent(new Event("change", { bubbles: true }));
+                    }""",
+                    value,
+                )
+            page.wait_for_function(
+                """(v) => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    return !!(s && (s.value || "") === v);
+                }""",
+                arg=value,
+                timeout=5_000,
+            )
+            self.assertEqual(
+                sel.input_value() or "",
+                value,
+                f"model select must be {value!r} before Send",
+            )
+
+        def _dismiss_toasts() -> None:
+            for _ in range(6):
+                btn = page.get_by_role("button", name="Dismiss")
+                if btn.count() == 0 or not btn.first.is_visible():
+                    return
+                btn.first.click()
+                page.wait_for_timeout(100)
+
+        def _send_draft(text: str, *, via: str = "button") -> None:
+            box = page.locator("textarea")
+            box.wait_for(state="visible", timeout=10_000)
+            self.assertTrue(
+                box.is_enabled(),
+                "composer must stay enabled so Send/Enter can toast on empty "
+                "model (disabled Send is not the §6.2 toast)",
+            )
+            box.fill(text)
+            send = page.get_by_role("button", name="Send message")
+            send.first.wait_for(state="visible", timeout=10_000)
+            self.assertTrue(
+                send.first.is_enabled(),
+                "Send must be clickable with a draft",
+            )
+            if via == "enter":
+                # Docs §6.2: Type + Enter (no Shift) is the same send path.
+                box.press("Enter")
+            else:
+                send.first.click()
+
+        def _assert_empty_model_toast(where: str) -> None:
+            toast = page.get_by_role("status").filter(
+                has_text=re.compile(r"Select a model first", re.I)
+            )
+            try:
+                toast.first.wait_for(state="visible", timeout=8_000)
+            except Exception as e:
+                body = page.inner_text("body")
+                self.fail(
+                    "expected toast 'Select a model first…' after Send with "
+                    f"empty model on {where} ({e}). posted={posted!r} "
+                    f"url={page.url!r} body={body[:1200]!r}"
+                )
+            toast_text = toast.first.inner_text()
+            self.assertIn(
+                "Select a model first",
+                toast_text,
+                f"{where}: toast must be the empty-model copy, not a "
+                f"network/provider error: {toast_text!r}",
+            )
+
+        def _assert_no_turn(where: str, *, ids_before: list[str], draft: str) -> None:
+            page.wait_for_timeout(400)
+            self.assertEqual(
+                posted,
+                [],
+                f"{where}: Send with empty model must not POST /chat, "
+                f"/chat/stream, or /chat/conversations: {posted!r}",
+            )
+            self.assertIn(
+                "How can I help?",
+                page.inner_text("body"),
+                f"{where}: empty-model Send must not create a user turn",
+            )
+            after_ids = _chat_conversation_ids(page, ws)
+            self.assertEqual(
+                after_ids,
+                ids_before,
+                f"{where}: empty-model Send must not insert a conversations "
+                f"row: before={ids_before!r} after={after_ids!r}",
+            )
+            box = page.locator("textarea")
+            self.assertEqual(
+                box.input_value(),
+                draft,
+                f"{where}: draft must stay (send returns before clearing it)",
+            )
+            self.assertTrue(
+                box.is_enabled(),
+                f"{where}: composer must stay enabled (must not stick in sending)",
+            )
+            send = page.get_by_role("button", name="Send message")
+            self.assertTrue(
+                send.first.is_enabled(),
+                f"{where}: Send must stay enabled after the empty-model toast",
+            )
+
+        page.route(_CHAT_TURN_POST_RE, _gate_chat_posts)
+        try:
+            _open_new_chat()
+            _wait_composer_ready()
+            _set_model("")
+
+            new_msg = f"empty-model-blocked-{uuid.uuid4().hex[:8]}"
+            _send_draft(new_msg)
+            _assert_empty_model_toast("new chat")
+            _assert_no_turn("new chat", ids_before=before_ids, draft=new_msg)
+            self.assertRegex(
+                page.url.rstrip("/"),
+                r"/chat$",
+                f"must stay on New chat, not /chat/{{id}}: {page.url}",
+            )
+
+            # Existing thread uses send_on_existing_session — same §6.2 lock.
+            planted = _json_ok(
+                page.request.post(
+                    f"{UI}/api/workspaces/{ws}/chat/conversations",
+                    data=json.dumps({"title": f"planted-{uuid.uuid4().hex[:8]}"}),
+                    headers={"Content-Type": "application/json"},
+                )
+            )
+            conv = planted.get("conversation") or planted
+            cid = str(conv.get("id") or "")
+            self.assertTrue(cid, f"plant conversation missing id: {planted!r}"[:400])
+            planted_ids = _chat_conversation_ids(page, ws)
+            self.assertIn(cid, planted_ids)
+
+            last_err: Exception | None = None
+            for _ in range(12):
+                try:
+                    page.goto(
+                        f"{base}/chat/{cid}",
+                        wait_until="domcontentloaded",
+                        timeout=15_000,
+                    )
+                    _wait_dx_ready(page)
+                    wait_dx_ready(page)
+                    page.get_by_text("How can I help?").wait_for(timeout=8_000)
+                    last_err = None
+                    break
+                except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
+                    last_err = e
+                    time.sleep(2)
+            if last_err is not None:
+                raise RuntimeError(f"could not open /chat/{cid}: {last_err}")
+
+            _dismiss_toasts()
+            _wait_composer_ready()
+            _set_model("")
+            thread_msg = f"empty-model-thread-{uuid.uuid4().hex[:8]}"
+            posted.clear()
+            _send_draft(thread_msg, via="enter")
+            _assert_empty_model_toast("existing thread")
+            _assert_no_turn("existing thread", ids_before=planted_ids, draft=thread_msg)
+            self.assertIn(
+                cid,
+                page.url,
+                f"must stay on /chat/{cid}, not create another thread: {page.url}",
+            )
+            stored = _json_ok(
+                page.request.get(
+                    f"{UI}/api/workspaces/{ws}/chat/conversations/{cid}"
+                )
+            )
+            stored_msgs = stored.get("messages") or []
+            self.assertEqual(
+                stored_msgs,
+                [],
+                "empty-model Send must not persist a user/assistant row: "
+                f"{stored_msgs!r}",
+            )
+
+            # Control: a selected model must attempt POST (aborted — no LLM).
+            _dismiss_toasts()
+            _open_new_chat()
+            _wait_composer_ready()
+            _set_model(ready_model)
+            control_msg = f"empty-model-control-{uuid.uuid4().hex[:8]}"
+            posted.clear()
+            _send_draft(control_msg)
+            deadline = time.time() + 8
+            while time.time() < deadline and not posted:
+                page.wait_for_timeout(100)
+            self.assertTrue(
+                posted,
+                "control: Send with a selected model must POST /chat, "
+                "/chat/stream, or /chat/conversations so the empty-model "
+                f"block is not a no-op Send. url={page.url!r}",
+            )
+            self.assertTrue(
+                any(_is_chat_turn_post(*p.split(" ", 1)) for p in posted),
+                f"control posts must be chat turn POSTs: {posted!r}",
+            )
+        finally:
+            page.unroute(_CHAT_TURN_POST_RE, _gate_chat_posts)
+
+    def test_chat_openai_coming_soon_snaps_back(self) -> None:
+        # catalog:list-chat-openai-coming-soon-snaps-back
+        # Docs §6.2: pick openai → coming-soon toast, snap back to the first
+        # available provider. Must not persist openai as the thread provider
+        # or call an OpenAI URL.
+        # Own context: signup must not clobber the suite session / test_18 logout.
+        context = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
+        )
+        page = context.new_page()
+        page.set_default_timeout(20_000)
+        try:
+            self._assert_chat_openai_coming_soon_snaps_back(page)
+        finally:
+            context.close()
+
+    def _assert_chat_openai_coming_soon_snaps_back(self, page) -> None:
+        ws, base = signup_login(page, prefix="chat-oai")
+        host_name = f"chat-openai-soon-{uuid.uuid4().hex[:8]}"
+        ready_model = "llama3.2:latest"
+        created, paired, _hb = pair_and_heartbeat(
+            page,
+            ws,
+            host_name,
+            heartbeat_extra={
+                "agents": [
+                    {
+                        "id": "ollama",
+                        "name": "Ollama",
+                        "installed": True,
+                        "logged_in": True,
+                        "models": [ready_model],
+                    },
+                    {
+                        "id": "grok",
+                        "name": "Grok",
+                        "installed": False,
+                        "logged_in": False,
+                        "models": [],
+                    },
+                    {
+                        "id": "claude",
+                        "name": "Claude",
+                        "installed": False,
+                        "logged_in": False,
+                        "models": [],
+                    },
+                ]
+            },
+        )
+        host = created.get("host") if isinstance(created.get("host"), dict) else {}
+        host_id = str(host.get("id") or created.get("id") or paired.get("id") or "")
+        self.assertTrue(host_id, f"create host missing id: {created!r}"[:400])
+
+        status = _json_ok(
+            page.request.get(
+                f"{UI}/api/workspaces/{ws}/chat/status?runner_id={host_id}"
+            )
+        )
+        first_available = _first_live_chat_provider(status)
+        self.assertNotEqual(
+            first_available,
+            "openai",
+            "first available must exclude coming-soon openai",
+        )
+        self.assertEqual(
+            first_available,
+            "ollama",
+            "paired Ollama must be the first available provider so snap-back "
+            f"is unambiguous: {status!r}"[:800],
+        )
+
+        openai_hits: list[str] = []
+        openai_posts: list[str] = []
+        chat_posts: list[str] = []
+
+        def _gate(route) -> None:
+            req = route.request
+            url = req.url
+            if _is_openai_url(url):
+                openai_hits.append(f"{req.method} {url}")
+                route.abort()
+                return
+            if _is_chat_turn_post(req.method, url):
+                provider = _json_provider(req.post_data)
+                chat_posts.append(f"{req.method} {url} provider={provider!r}")
+                if provider.lower() == "openai":
+                    openai_posts.append(chat_posts[-1])
+                    route.abort()
+                    return
+                route.abort()
+                return
+            route.continue_()
+
+        def _on_request(req) -> None:
+            if _is_openai_url(req.url):
+                openai_hits.append(f"{req.method} {req.url}")
+
+        def _open_chat(path: str) -> None:
+            last_err: Exception | None = None
+            for _ in range(12):
+                try:
+                    page.goto(
+                        f"{base}{path}",
+                        wait_until="domcontentloaded",
+                        timeout=15_000,
+                    )
+                    _wait_dx_ready(page)
+                    wait_dx_ready(page)
+                    page.get_by_text("How can I help?").wait_for(timeout=8_000)
+                    return
+                except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
+                    last_err = e
+                    time.sleep(2)
+            raise RuntimeError(f"could not open {path}: {last_err}")
+
+        def _wait_composer_ready() -> None:
+            page.wait_for_function(
+                """(hostId) => {
+                    const r = document.querySelector(
+                        "select[title='Self-hosted runner for this chat']"
+                    );
+                    const p = document.querySelector("select[title='Chat provider']");
+                    return !!(
+                        r && [...r.options].some((o) => o.value === hostId)
+                        && p && [...p.options].some((o) => o.value === "openai")
+                        && [...p.options].some((o) => o.value === "ollama")
+                    );
+                }""",
+                arg=host_id,
+                timeout=15_000,
+            )
+            page.evaluate(
+                """(hostId) => {
+                    const r = document.querySelector(
+                        "select[title='Self-hosted runner for this chat']"
+                    );
+                    if (!r || r.value === hostId) return;
+                    r.value = hostId;
+                    r.dispatchEvent(new Event("input", { bubbles: true }));
+                    r.dispatchEvent(new Event("change", { bubbles: true }));
+                }""",
+                host_id,
+            )
+            page.wait_for_function(
+                """(hostId) => {
+                    const r = document.querySelector(
+                        "select[title='Self-hosted runner for this chat']"
+                    );
+                    const p = document.querySelector("select[title='Chat provider']");
+                    return !!(
+                        r && r.value === hostId
+                        && p && [...p.options].some((o) => o.value === "openai")
+                        && [...p.options].some((o) => o.value === "ollama")
+                    );
+                }""",
+                arg=host_id,
+                timeout=10_000,
+            )
+
+        def _provider_value() -> str:
+            return page.evaluate(
+                """() => {
+                    const p = document.querySelector("select[title='Chat provider']");
+                    return (p && p.value) || "";
+                }"""
+            )
+
+        def _openai_option() -> dict:
+            return page.evaluate(
+                """() => {
+                    const p = document.querySelector("select[title='Chat provider']");
+                    const o = p && [...p.options].find((x) => x.value === "openai");
+                    if (!o) return {present: false, disabled: true, label: ""};
+                    return {
+                        present: true,
+                        disabled: !!o.disabled,
+                        label: (o.textContent || "").trim(),
+                    };
+                }"""
+            )
+
+        def _pick_provider(value: str) -> None:
+            # Native select_option waits for the value to stick; coming-soon
+            # snap-back would look like a failed select. Dispatch change instead.
+            page.evaluate(
+                """(v) => {
+                    const s = document.querySelector("select[title='Chat provider']");
+                    if (!s) throw new Error("provider select missing");
+                    const opt = [...s.options].find((o) => o.value === v);
+                    if (!opt) throw new Error("provider option missing: " + v);
+                    if (opt.disabled) {
+                        throw new Error(
+                            "provider option disabled (must be pickable for toast+snap-back): " + v
+                        );
+                    }
+                    s.value = v;
+                    s.dispatchEvent(new Event("input", { bubbles: true }));
+                    s.dispatchEvent(new Event("change", { bubbles: true }));
+                }""",
+                value,
+            )
+
+        def _stored_provider() -> str:
+            return page.evaluate(
+                """(ws) => (localStorage.getItem("fleet-chat-provider:" + ws) || "").trim()""",
+                ws,
+            )
+
+        def _dismiss_toasts() -> None:
+            for _ in range(6):
+                btn = page.get_by_role("button", name="Dismiss")
+                if btn.count() == 0 or not btn.first.is_visible():
+                    return
+                btn.first.click()
+                page.wait_for_timeout(100)
+
+        def _conversation_providers() -> list[tuple[str, str]]:
+            body = _json_ok(
+                page.request.get(
+                    f"{UI}/api/workspaces/{ws}/chat/conversations"
+                )
+            )
+            out: list[tuple[str, str]] = []
+            for row in body.get("conversations") or []:
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                out.append((str(row["id"]), str(row.get("provider") or "")))
+            return out
+
+        def _assert_no_openai_side_effects(where: str) -> None:
+            self.assertEqual(
+                openai_hits,
+                [],
+                f"{where}: must not call an OpenAI URL: {openai_hits!r}",
+            )
+            self.assertEqual(
+                openai_posts,
+                [],
+                f"{where}: must not POST /chat with provider=openai: "
+                f"{openai_posts!r} all={chat_posts!r}",
+            )
+            stored = _stored_provider()
+            self.assertNotEqual(
+                stored.lower(),
+                "openai",
+                f"{where}: must not persist openai in localStorage "
+                f"(fleet-chat-provider): {stored!r}",
+            )
+            persisted = [
+                (cid, prov)
+                for cid, prov in _conversation_providers()
+                if prov.lower() == "openai"
+            ]
+            self.assertEqual(
+                persisted,
+                [],
+                f"{where}: must not persist openai as the thread provider: "
+                f"{persisted!r}",
+            )
+
+        def _assert_openai_pick_snaps(where: str) -> None:
+            opt = _openai_option()
+            self.assertTrue(
+                opt.get("present"),
+                f"{where}: OpenAI must be in the provider dropdown so it can "
+                "be picked (docs §6.2 toast + snap back)",
+            )
+            self.assertFalse(
+                opt.get("disabled"),
+                f"{where}: OpenAI must be pickable (disabled skips the toast/"
+                f"snap-back path): {opt!r}",
+            )
+            _dismiss_toasts()
+            openai_hits.clear()
+            openai_posts.clear()
+            chat_posts.clear()
+            before_ids = {cid for cid, _ in _conversation_providers()}
+
+            _pick_provider("openai")
+
+            toast = page.get_by_role("status").filter(
+                has_text=re.compile(r"coming soon", re.I)
+            )
+            try:
+                toast.first.wait_for(state="visible", timeout=8_000)
+            except Exception as e:
+                body = page.inner_text("body")
+                self.fail(
+                    f"{where}: expected coming-soon toast after picking OpenAI "
+                    f"({e}). provider={_provider_value()!r} stored="
+                    f"{_stored_provider()!r} url={page.url!r} "
+                    f"body={body[:1200]!r}"
+                )
+            toast_text = toast.first.inner_text()
+            self.assertRegex(
+                toast_text,
+                re.compile(r"coming soon", re.I),
+                f"{where}: toast must be the coming-soon copy, not a key/"
+                f"offline error: {toast_text!r}",
+            )
+
+            try:
+                page.wait_for_function(
+                    """(expected) => {
+                        const s = document.querySelector(
+                            "select[title='Chat provider']"
+                        );
+                        return !!(s && s.value === expected);
+                    }""",
+                    arg=first_available,
+                    timeout=8_000,
+                )
+            except Exception as e:
+                self.fail(
+                    f"{where}: OpenAI pick must snap back to first available "
+                    f"{first_available!r} ({e}). now={_provider_value()!r} "
+                    f"stored={_stored_provider()!r}"
+                )
+            self.assertEqual(
+                _provider_value(),
+                first_available,
+                f"{where}: provider select must snap back to {first_available!r}",
+            )
+            _assert_no_openai_side_effects(where)
+            after_ids = {cid for cid, _ in _conversation_providers()}
+            self.assertEqual(
+                after_ids,
+                before_ids,
+                f"{where}: picking OpenAI must not insert a conversations row: "
+                f"before={sorted(before_ids)!r} after={sorted(after_ids)!r}",
+            )
+
+        def _set_model(value: str) -> None:
+            page.wait_for_function(
+                """(v) => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    return !!(s && [...s.options].some((o) => (o.value || "") === v));
+                }""",
+                arg=value,
+                timeout=10_000,
+            )
+            page.evaluate(
+                """(v) => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    if (!s) throw new Error("model select missing");
+                    s.value = v;
+                    s.dispatchEvent(new Event("input", { bubbles: true }));
+                    s.dispatchEvent(new Event("change", { bubbles: true }));
+                }""",
+                value,
+            )
+
+        def _send_draft(text: str) -> None:
+            box = page.locator("textarea")
+            box.wait_for(state="visible", timeout=10_000)
+            box.fill(text)
+            send = page.get_by_role("button", name="Send message")
+            send.first.wait_for(state="visible", timeout=10_000)
+            self.assertTrue(
+                send.first.is_enabled(),
+                "Send must stay enabled after snap-back so a leaked openai "
+                "provider would POST (disabled Send hides the persist leak)",
+            )
+            send.first.click()
+
+        page.on("request", _on_request)
+        page.route(_OPENAI_URL_RE, _gate)
+        page.route(_CHAT_TURN_POST_RE, _gate)
+        try:
+            _open_chat("/chat")
+            _wait_composer_ready()
+            _pick_provider(first_available)
+            page.wait_for_function(
+                """(expected) => {
+                    const s = document.querySelector("select[title='Chat provider']");
+                    return !!(s && s.value === expected);
+                }""",
+                arg=first_available,
+                timeout=8_000,
+            )
+            _dismiss_toasts()
+            coming = page.get_by_role("status").filter(
+                has_text=re.compile(r"coming soon", re.I)
+            )
+            self.assertEqual(
+                coming.count(),
+                0,
+                "control: picking the first available provider must not toast "
+                f"coming soon: {coming.inner_text() if coming.count() else ''}",
+            )
+            self.assertEqual(_provider_value(), first_available)
+            _assert_no_openai_side_effects("control pick")
+
+            _assert_openai_pick_snaps("new chat")
+
+            leaked = f"openai-soon-leak-{uuid.uuid4().hex[:8]}"
+            openai_hits.clear()
+            openai_posts.clear()
+            chat_posts.clear()
+            _set_model(ready_model)
+            _send_draft(leaked)
+            deadline = time.time() + 6
+            while time.time() < deadline and not chat_posts:
+                page.wait_for_timeout(100)
+            self.assertTrue(
+                chat_posts,
+                "after snap-back, Send must POST a non-openai chat turn so a "
+                f"stuck openai selection cannot hide: url={page.url!r}",
+            )
+            for post in chat_posts:
+                self.assertNotIn(
+                    "provider='openai'",
+                    post,
+                    f"Send after OpenAI pick must not POST provider=openai: "
+                    f"{chat_posts!r}",
+                )
+            _assert_no_openai_side_effects("new chat send")
+            self.assertRegex(
+                page.url.rstrip("/"),
+                r"/chat$",
+                f"aborted first send must stay on New chat: {page.url}",
+            )
+
+            planted = _json_ok(
+                page.request.post(
+                    f"{UI}/api/workspaces/{ws}/chat/conversations",
+                    data=json.dumps(
+                        {
+                            "title": f"planted-oai-{uuid.uuid4().hex[:8]}",
+                            "provider": first_available,
+                            "model": ready_model,
+                        }
+                    ),
+                    headers={"Content-Type": "application/json"},
+                )
+            )
+            conv = planted.get("conversation") or planted
+            cid = str(conv.get("id") or "")
+            self.assertTrue(cid, f"plant conversation missing id: {planted!r}"[:400])
+            self.assertNotEqual(
+                str(conv.get("provider") or "").lower(),
+                "openai",
+                f"planted thread must not start as openai: {planted!r}"[:400],
+            )
+
+            _open_chat(f"/chat/{cid}")
+            _wait_composer_ready()
+            _pick_provider(first_available)
+            page.wait_for_function(
+                """(expected) => {
+                    const s = document.querySelector("select[title='Chat provider']");
+                    return !!(s && s.value === expected);
+                }""",
+                arg=first_available,
+                timeout=8_000,
+            )
+            _assert_openai_pick_snaps("existing thread")
+            stored = _json_ok(
+                page.request.get(
+                    f"{UI}/api/workspaces/{ws}/chat/conversations/{cid}"
+                )
+            )
+            thread = stored.get("conversation") or stored
+            self.assertNotEqual(
+                str(thread.get("provider") or "").lower(),
+                "openai",
+                f"existing thread must not persist openai: {thread!r}"[:400],
+            )
+            for msg in stored.get("messages") or []:
+                self.assertNotEqual(
+                    str((msg or {}).get("provider") or "").lower(),
+                    "openai",
+                    f"existing thread must not persist an openai message: {msg!r}",
+                )
+            self.assertIn(
+                cid,
+                page.url,
+                f"must stay on /chat/{cid}: {page.url}",
+            )
+        finally:
+            page.unroute(_OPENAI_URL_RE, _gate)
+            page.unroute(_CHAT_TURN_POST_RE, _gate)
 
     def test_18_logout_returns_to_login(self) -> None:
         # Unittest runs methods in name order. Logout must stay last so

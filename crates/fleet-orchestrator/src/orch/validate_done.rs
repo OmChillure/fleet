@@ -6,9 +6,29 @@
 
 use std::path::Path;
 
+use uuid::Uuid;
+
 use crate::store::BoardTaskRow;
 
 use super::session_context::acceptance_from_json;
+
+/// Worker-driven terminal apply (`done_success` / `done_failed` / `blocked`)
+/// is allowed only from `assigned`/`in_progress` while `claimed_session_id`
+/// matches the reporter. Blocked HITL stays blocked until resume. A stale
+/// success after bounce (claim cleared or a new session) must not complete.
+pub fn can_apply_task_terminal(
+    task: &BoardTaskRow,
+    reporting_session_id: Uuid,
+    terminal_status: &str,
+) -> bool {
+    if !matches!(terminal_status, "done_success" | "done_failed" | "blocked") {
+        return false;
+    }
+    if !matches!(task.status.as_str(), "assigned" | "in_progress") {
+        return false;
+    }
+    task.claimed_session_id == Some(reporting_session_id)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoneCheck {
@@ -29,7 +49,9 @@ impl DoneCheck {
     }
 
     pub fn notes(&self) -> String {
-        let mut out = String::from("## Task validation failed — finish these before the run can continue\n\n");
+        let mut out = String::from(
+            "## Task validation failed — finish these before the run can continue\n\n",
+        );
         for r in &self.reasons {
             out.push_str("- ");
             out.push_str(r);
@@ -116,8 +138,6 @@ pub fn validate_task_done(
         DoneCheck::fail(reasons)
     }
 }
-
-
 
 fn looks_blocked(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
@@ -307,7 +327,11 @@ mod tests {
     #[test]
     fn process_passes_with_result_and_work() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("result.md"), "Done. Wrote hello in work/.\n").unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Done. Wrote hello in work/.\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(dir.path().join("work")).unwrap();
         std::fs::write(dir.path().join("work").join("hello.txt"), "hi\n").unwrap();
         let c = validate_task_done(&task(json!([])), dir.path(), "process");
@@ -362,5 +386,118 @@ mod tests {
         assert_eq!(acc, vec!["result.md exists and is non-empty"]);
         let coding = default_acceptance("coding");
         assert!(coding.iter().any(|l| l.contains("exists:work")));
+    }
+
+    #[test]
+    fn apply_task_terminal_only_from_assigned_in_progress_with_matching_claimed_session_id() {
+        let claim = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let terminals = ["done_success", "done_failed", "blocked"];
+
+        for status in ["assigned", "in_progress"] {
+            let mut t = task(json!([]));
+            t.status = status.into();
+            t.claimed_session_id = Some(claim);
+            for terminal in terminals {
+                assert!(
+                    can_apply_task_terminal(&t, claim, terminal),
+                    "{status} + matching claim must allow {terminal}"
+                );
+            }
+        }
+
+        // Blocked HITL must not be overwritten — not even by the claiming session.
+        let mut blocked = task(json!([]));
+        blocked.status = "blocked".into();
+        blocked.claimed_session_id = Some(claim);
+        blocked.block_reason = Some("needs_approval".into());
+        blocked.hitl_notes = Some("waiting on human".into());
+        for terminal in terminals {
+            assert!(
+                !can_apply_task_terminal(&blocked, claim, terminal),
+                "blocked HITL must not be overwritten by {terminal}"
+            );
+        }
+
+        // Bounce clears the claim; a later session owns the card.
+        let mut bounced = task(json!([]));
+        bounced.status = "ready".into();
+        bounced.claimed_session_id = None;
+        for terminal in terminals {
+            assert!(
+                !can_apply_task_terminal(&bounced, claim, terminal),
+                "stale {terminal} after bounce must not complete an unclaimed task"
+            );
+        }
+
+        let mut reclaimed = task(json!([]));
+        reclaimed.status = "in_progress".into();
+        reclaimed.claimed_session_id = Some(other);
+        for terminal in terminals {
+            assert!(
+                !can_apply_task_terminal(&reclaimed, claim, terminal),
+                "stale {terminal} after bounce must not complete the wrong claim"
+            );
+        }
+        for terminal in terminals {
+            assert!(
+                can_apply_task_terminal(&reclaimed, other, terminal),
+                "the live claim may still apply {terminal}"
+            );
+        }
+
+        for status in ["assigned", "in_progress"] {
+            let mut t = task(json!([]));
+            t.status = status.into();
+            t.claimed_session_id = Some(claim);
+            for terminal in terminals {
+                assert!(
+                    !can_apply_task_terminal(&t, other, terminal),
+                    "{status} with a mismatched claim must not apply {terminal}"
+                );
+            }
+        }
+
+        for status in [
+            "queued",
+            "ready",
+            "retry_wait",
+            "done_success",
+            "done_failed",
+            "cancelled",
+        ] {
+            let mut t = task(json!([]));
+            t.status = status.into();
+            t.claimed_session_id = Some(claim);
+            for terminal in terminals {
+                assert!(
+                    !can_apply_task_terminal(&t, claim, terminal),
+                    "{status} must not accept apply_task_terminal {terminal}"
+                );
+            }
+        }
+
+        for status in ["assigned", "in_progress"] {
+            let mut unclaimed = task(json!([]));
+            unclaimed.status = status.into();
+            unclaimed.claimed_session_id = None;
+            assert!(
+                !can_apply_task_terminal(&unclaimed, claim, "done_success"),
+                "{status} with no claim must not complete"
+            );
+        }
+
+        assert!(
+            !can_apply_task_terminal(&reclaimed, other, "running"),
+            "non-terminal worker status is not apply_task_terminal"
+        );
+        assert!(
+            !can_apply_task_terminal(&reclaimed, other, "success"),
+            "worker payload alias 'success' is not apply_task_terminal (must be done_success)"
+        );
+        assert!(
+            !can_apply_task_terminal(&reclaimed, other, ""),
+            "empty status is not apply_task_terminal"
+        );
     }
 }

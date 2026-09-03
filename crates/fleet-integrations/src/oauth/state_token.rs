@@ -59,6 +59,11 @@ pub fn verify_oauth_state(secret: &str, token: &str) -> AppResult<OAuthStateClai
     if data.claims.typ != "oauth_state" {
         return Err(AppError::unauthorized("invalid OAuth state type"));
     }
+    // Verify is not consume — the callback persists the nonce once. A blank
+    // nonce cannot be a single-use key.
+    if data.claims.nonce.trim().is_empty() {
+        return Err(AppError::unauthorized("invalid OAuth state nonce"));
+    }
     Ok(data.claims)
 }
 
@@ -92,13 +97,8 @@ mod tests {
 
     #[test]
     fn wrong_secret_rejected() {
-        let token = issue_oauth_state(
-            "correct-secret",
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "slack",
-        )
-        .unwrap();
+        let token =
+            issue_oauth_state("correct-secret", Uuid::now_v7(), Uuid::now_v7(), "slack").unwrap();
 
         let err = verify_oauth_state("other-secret", &token).unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(_)));
@@ -204,6 +204,86 @@ mod tests {
                 );
             }
             other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oauth_state_nonce_is_unique_per_issued_token() {
+        let secret = "oauth-state-test-secret";
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let a = issue_oauth_state(secret, user_id, workspace_id, "github").unwrap();
+        let b = issue_oauth_state(secret, user_id, workspace_id, "github").unwrap();
+        assert_ne!(a, b, "each Connect start must mint a distinct state JWT");
+
+        let claims_a = verify_oauth_state(secret, &a).expect("first token");
+        let claims_b = verify_oauth_state(secret, &b).expect("second token");
+        assert_ne!(
+            claims_a.nonce, claims_b.nonce,
+            "nonce is the single-use key; two issues must not share one"
+        );
+        assert!(
+            Uuid::parse_str(&claims_a.nonce).is_ok(),
+            "nonce must be persistable as a UUID, got {}",
+            claims_a.nonce
+        );
+        assert!(
+            Uuid::parse_str(&claims_b.nonce).is_ok(),
+            "nonce must be persistable as a UUID, got {}",
+            claims_b.nonce
+        );
+    }
+
+    /// GitHub App manifest verifies the same JWT, then user-oauth completes.
+    /// Signature check must not burn the nonce.
+    #[test]
+    fn oauth_state_verify_does_not_consume_nonce() {
+        let secret = "oauth-state-test-secret";
+        let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "github").unwrap();
+        let first = verify_oauth_state(secret, &token).expect("first verify");
+        let second = verify_oauth_state(secret, &token).expect("verify is not consume");
+        assert_eq!(first.nonce, second.nonce);
+        assert!(!first.nonce.trim().is_empty());
+        assert!(
+            Uuid::parse_str(&first.nonce).is_ok(),
+            "nonce must be persistable as a UUID, got {}",
+            first.nonce
+        );
+    }
+
+    #[test]
+    fn oauth_state_empty_nonce_is_rejected() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let secret = "oauth-state-test-secret";
+        let now = chrono::Utc::now().timestamp();
+        for nonce in ["", "   "] {
+            let token = encode(
+                &Header::default(),
+                &OAuthStateClaims {
+                    sub: Uuid::now_v7().to_string(),
+                    workspace_id: Uuid::now_v7().to_string(),
+                    provider: "github".into(),
+                    nonce: nonce.into(),
+                    exp: now + 600,
+                    iat: now,
+                    typ: "oauth_state".into(),
+                },
+                &EncodingKey::from_secret(secret.as_bytes()),
+            )
+            .unwrap();
+
+            let err = verify_oauth_state(secret, &token).unwrap_err();
+            match err {
+                AppError::Unauthorized(msg) => {
+                    assert!(
+                        msg.to_ascii_lowercase().contains("nonce")
+                            || msg.to_ascii_lowercase().contains("invalid"),
+                        "blank nonce {nonce:?} must not verify, got {msg}"
+                    );
+                }
+                other => panic!("expected Unauthorized for blank nonce {nonce:?}, got {other:?}"),
+            }
         }
     }
 }

@@ -1,9 +1,9 @@
 //! Google Drive file list / metadata / export (readonly).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 const FILE_FIELDS: &str =
     "id,name,mimeType,modifiedTime,webViewLink,size,owners(displayName,emailAddress)";
@@ -70,11 +70,7 @@ pub(crate) async fn get_file(http: &reqwest::Client, token: &str, args: &Value) 
     )
 }
 
-pub(crate) async fn export_file(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn export_file(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let id = match req_str(args, "file_id").or_else(|_| req_str(args, "id")) {
         Ok(i) => i,
         Err(e) => return ProxyResult::err("google_drive", "export_file", "bad_args", e, None),
@@ -84,10 +80,7 @@ pub(crate) async fn export_file(
     if !(200..300).contains(&status) {
         return upstream_err("export_file", status, &meta);
     }
-    let mime = meta
-        .get("mimeType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let mime = meta.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
     let export_mime = args
         .get("mime_type")
         .and_then(|v| v.as_str())
@@ -110,9 +103,7 @@ pub(crate) async fn export_file(
         );
     }
     let exp_enc = urlencoding(export_mime);
-    let url = format!(
-        "https://www.googleapis.com/drive/v3/files/{id}/export?mimeType={exp_enc}"
-    );
+    let url = format!("https://www.googleapis.com/drive/v3/files/{id}/export?mimeType={exp_enc}");
     let (status, body) = drive_get(http, token, &url).await;
     if !(200..300).contains(&status) {
         return upstream_err("export_file", status, &body);
@@ -125,7 +116,10 @@ pub(crate) async fn export_file(
     ProxyResult::ok_result(
         "google_drive",
         "export_file",
-        format!("Exported Drive file {}", meta.get("name").and_then(|v| v.as_str()).unwrap_or(&id)),
+        format!(
+            "Exported Drive file {}",
+            meta.get("name").and_then(|v| v.as_str()).unwrap_or(&id)
+        ),
         json!({
             "file": map_file(&meta),
             "mime_type": export_mime,

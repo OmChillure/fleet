@@ -1,6 +1,6 @@
 //! Figma REST helpers (control plane only). `file_read` scope.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 

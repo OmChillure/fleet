@@ -7,13 +7,15 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
+use fleet_orchestrator::orch::TickError;
+use fleet_orchestrator::store::StoreError;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -157,6 +159,7 @@ async fn settings_json(
     let min_isolation = fleet_db::repos::workspaces::min_isolation(&state.db, workspace_id)
         .await
         .unwrap_or_else(|_| "process".into());
+    // Do not serialize OpenaiConfig / ClaudeConfig / GrokConfig — api_key stays off the wire.
     json!({
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
@@ -166,7 +169,7 @@ async fn settings_json(
         "fleet_llm": cfg.fleet_llm,
         "fleet_llm_model": cfg.fleet_llm_model,
         "grok_env": grok_env,
-        "effective_backend": llm.backend,
+        "effective_backend": llm.backend.as_deref().unwrap_or("off"),
         "effective_model": llm.model,
     })
 }
@@ -301,30 +304,14 @@ async fn patch_fleet_config(
         .get_project_config(workspace_id)
         .await
         .map_err(|e| map_orch_err("get_project_config", e))?;
-    let remote = match body.repo_url {
-        None => match existing.git_remote() {
-            Some(mut r) => {
-                if let Some(rf) = body.git_ref.as_deref() {
-                    r.git_ref = fleet_orchestrator::domain::normalize_git_ref(Some(rf))
-                        .map_err(|e| AppError::bad_request(e.to_string()))?;
-                }
-                Some(r)
-            }
-            None => {
-                if body.git_ref.is_some() {
-                    return Err(AppError::bad_request(
-                        "git_ref requires repo_url on this project",
-                    ));
-                }
-                None
-            }
-        },
-        Some(ref url) => fleet_orchestrator::domain::parse_project_git_remote(
-            Some(url.as_str()),
-            body.git_ref.as_deref().or(Some(existing.git_ref.as_str())),
-        )
-        .map_err(|e| AppError::bad_request(e.to_string()))?,
-    };
+    let existing_remote = existing.git_remote();
+    let remote = fleet_orchestrator::domain::apply_git_remote_patch(
+        existing_remote.as_ref(),
+        existing.git_ref.as_str(),
+        body.repo_url.as_deref(),
+        body.git_ref.as_deref(),
+    )
+    .map_err(|e| AppError::bad_request(e.to_string()))?;
     let cfg = state
         .orch
         .store
@@ -348,7 +335,7 @@ pub struct FixtureRequest {
     pub kind: Option<String>,
 }
 
-fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
+fn fixture_tasks(kind: &str) -> Option<Vec<PlanTask>> {
     let coding = |id: &str, title: &str, deps: Vec<&str>, priority: i32| PlanTask {
         plan_task_id: id.into(),
         title: title.into(),
@@ -363,13 +350,13 @@ fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
         max_retries: Some(1),
     };
     match kind {
-        "diamond" => vec![
+        "diamond" => Some(vec![
             coding("root", "Root", vec![], 100),
             coding("left", "Left branch", vec!["root"], 50),
             coding("right", "Right branch", vec!["root"], 50),
             coding("join", "Join", vec!["left", "right"], 10),
-        ],
-        _ => vec![
+        ]),
+        "chain" => Some(vec![
             PlanTask {
                 plan_task_id: "t1".into(),
                 title: "Root task".into(),
@@ -399,7 +386,8 @@ fn fixture_tasks(kind: &str) -> Vec<PlanTask> {
                 timeout_s: Some(3600),
                 max_retries: None,
             },
-        ],
+        ]),
+        _ => None,
     }
 }
 
@@ -416,12 +404,15 @@ async fn post_fixture(
     );
     ensure_project(&state, workspace_id, &name).await?;
 
+    // Empty/omitted kind stays "chain". Unknown non-empty kinds 400 fail-closed.
     let kind = body
         .kind
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("chain");
+    let tasks = fixture_tasks(kind)
+        .ok_or_else(|| AppError::bad_request(format!("unknown fixture kind: {kind}")))?;
     let run_id = Uuid::new_v4();
     let plan_id = Uuid::new_v4();
     let plan = WorkPlanBody {
@@ -431,7 +422,7 @@ async fn post_fixture(
         version: 1,
         status: WorkPlanStatus::Accepted,
         source: "ui".into(),
-        tasks: fixture_tasks(kind),
+        tasks,
         policy: PlanPolicy {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
@@ -481,12 +472,13 @@ async fn post_tick(
         .tick
         .tick_project(workspace_id)
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("lock") {
+        .map_err(|e| match e {
+            TickError::Store(StoreError::Conflict(msg)) => {
                 tracing::warn!(%workspace_id, error = %msg, "tick conflict (lock)");
                 AppError::conflict(msg)
-            } else {
+            }
+            e => {
+                let msg = e.to_string();
                 tracing::error!(%workspace_id, error = %msg, "tick failed");
                 AppError::internal(msg)
             }
@@ -674,6 +666,7 @@ async fn get_tasks(
             "plan_task_id": t.plan_task_id,
             "title": t.title,
             "status": t.status,
+            "depends_on": t.depends_on,
             "priority": t.priority,
             "attempt": t.attempt,
             "progress_pct": t.progress_pct,
@@ -974,5 +967,107 @@ impl AuthFromApp for AuthState {
             db: state.db.clone(),
             config: state.auth.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod git_config_ref_requires_url {
+    use super::PatchFleetConfigRequest;
+    use fleet_orchestrator::domain::{apply_git_remote_patch, ProjectGitRemote};
+    use serde_json::json;
+
+    fn production_src() -> &'static str {
+        let src = include_str!("fleet_routes.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn parse_body(v: serde_json::Value) -> PatchFleetConfigRequest {
+        serde_json::from_value(v).expect("PatchFleetConfigRequest")
+    }
+
+    /// Omitted `repo_url` (ref-only) vs empty string (clear) must stay distinct.
+    #[test]
+    fn patch_body_omitted_url_is_none_empty_string_is_some() {
+        let omitted = parse_body(json!({ "git_ref": "feature" }));
+        assert!(omitted.repo_url.is_none(), "omitted repo_url is None");
+        assert_eq!(omitted.git_ref.as_deref(), Some("feature"));
+
+        let empty = parse_body(json!({ "repo_url": "" }));
+        assert_eq!(empty.repo_url.as_deref(), Some(""));
+        assert!(empty.git_ref.is_none());
+
+        let whitespace = parse_body(json!({ "repo_url": "   " }));
+        assert_eq!(whitespace.repo_url.as_deref(), Some("   "));
+    }
+
+    #[test]
+    fn cookie_patch_uses_shared_apply_git_remote_patch() {
+        let src = production_src();
+        let patch_fn = src
+            .split("async fn patch_fleet_config")
+            .nth(1)
+            .expect("patch_fleet_config")
+            .split("async fn ")
+            .next()
+            .expect("patch_fleet_config body");
+        assert!(
+            patch_fn.contains("apply_git_remote_patch"),
+            "cookie PATCH /fleet/config must share apply_git_remote_patch with admin (Docs §6.9 / §8.2)"
+        );
+        assert!(
+            !patch_fn.contains("git_ref requires repo_url on this project"),
+            "cookie PATCH must not re-implement the ref-without-URL branch"
+        );
+    }
+
+    /// Same three outcomes as admin PATCH, via the shared resolver.
+    #[test]
+    fn cookie_patch_empty_url_clears_git_ref_without_url_and_garbage_url_are_errors() {
+        let url = "https://github.com/acme/app.git";
+        let existing = ProjectGitRemote {
+            url: url.into(),
+            git_ref: "develop".into(),
+        };
+
+        let clear = parse_body(json!({ "repo_url": "" }));
+        assert_eq!(
+            apply_git_remote_patch(
+                Some(&existing),
+                "develop",
+                clear.repo_url.as_deref(),
+                clear.git_ref.as_deref(),
+            )
+            .unwrap(),
+            None
+        );
+
+        let ref_only = parse_body(json!({ "git_ref": "feature" }));
+        let err = apply_git_remote_patch(
+            None,
+            "main",
+            ref_only.repo_url.as_deref(),
+            ref_only.git_ref.as_deref(),
+        )
+        .expect_err("git_ref without URL");
+        assert!(
+            err.to_string().contains("repo_url"),
+            "ref-without-URL must mention repo_url: {err}"
+        );
+
+        let garbage = parse_body(json!({ "repo_url": "not a url" }));
+        let err = apply_git_remote_patch(
+            Some(&existing),
+            "develop",
+            garbage.repo_url.as_deref(),
+            garbage.git_ref.as_deref(),
+        )
+        .expect_err("garbage URL");
+        assert!(
+            err.to_string().contains("repo_url"),
+            "garbage URL must mention repo_url: {err}"
+        );
     }
 }

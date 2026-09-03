@@ -96,6 +96,7 @@ holes = {
     "catalog:e2e-specs": e2e_status,
     "catalog:e2e-software-line": e2e_status,
     "catalog:e2e-copy-buttons": e2e_status,
+    "catalog:e2e-pair-done": e2e_status,
     "catalog:e2e-loopback-warning": e2e_status,
     "catalog:e2e-last-seen": e2e_status,
     "catalog:e2e-show-removed": e2e_status,
@@ -103,6 +104,7 @@ holes = {
     "catalog:e2e-apply-toast-pending": e2e_status,
     "catalog:e2e-widgets-lock-pending": e2e_status,
     "catalog:e2e-partners-ack-persists": e2e_status,
+    "catalog:e2e-cloud-coming-soon": e2e_status,
 }
 data["holes"] = holes
 if units_ok == "1" and e2e_status == "pass":

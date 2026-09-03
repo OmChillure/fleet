@@ -1,7 +1,7 @@
 //! Harness registry: how to spawn ACP agents.
 
 use crate::job::Job;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use which::which;
 
@@ -139,7 +139,11 @@ fn ensure_bin(name: &str) -> Result<()> {
 }
 
 /// Env vars for the harness child process.
-pub fn harness_env(job: &Job, harness: &str, work_dir: &Path) -> Result<std::collections::HashMap<String, String>> {
+pub fn harness_env(
+    job: &Job,
+    harness: &str,
+    work_dir: &Path,
+) -> Result<std::collections::HashMap<String, String>> {
     let mut env = std::collections::HashMap::new();
     match harness {
         "opencode" => {
@@ -179,7 +183,6 @@ pub fn harness_env(job: &Job, harness: &str, work_dir: &Path) -> Result<std::col
     }
     Ok(env)
 }
-
 
 #[cfg(test)]
 mod tests {

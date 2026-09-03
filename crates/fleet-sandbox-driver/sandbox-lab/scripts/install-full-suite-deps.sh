@@ -362,7 +362,7 @@ docker_build_if_needed() {
     echo "==> rebuild ${tag}: image fleet.git_sha=${have:-unset} != HEAD ${sha}"
   fi
   echo "==> docker build ${tag} FLEET_GIT_SHA=${sha}"
-  docker build -t "${tag}" --build-arg "FLEET_GIT_SHA=${sha}" "$@"
+  DOCKER_BUILDKIT=1 docker build -t "${tag}" --build-arg "FLEET_GIT_SHA=${sha}" "$@"
 }
 
 dc() {
@@ -724,7 +724,9 @@ install_dx() {
   # openssl-sys accepts 1.0.2–1.1.1 or 3.x only. Skip the doomed host compile.
   if [[ "${host_ssl}" != *OpenSSL\ 4* && "${host_ssl}" != *OpenSSL\ 5* ]]; then
     echo "==> cargo install dioxus-cli --version ${ver} --locked"
-    if as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; cargo install dioxus-cli --version ${ver} --locked"; then
+    if as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; cargo install dioxus-cli --version ${ver} --locked" \
+      && as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null && dx --version 2>/dev/null | grep -q '${ver}'"; then
+      echo "    dx $(as_user_sh 'source "$HOME/.cargo/env" 2>/dev/null; dx --version')"
       return 0
     fi
     echo "==> host cargo install dx failed; falling back to ${RUST_IMAGE}"
@@ -733,7 +735,7 @@ install_dx() {
   fi
   # Root in the image so PATH has /usr/local/cargo/bin. bash -l as uid 1000
   # drops that PATH ("cargo: command not found"). Copy dx out and chown.
-  docker run --rm \
+  if ! docker run --rm \
     -v "${out_bin}:/out" \
     -e PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     -e RUSTUP_HOME=/usr/local/rustup \
@@ -744,7 +746,10 @@ install_dx() {
       cargo --version
       cargo install dioxus-cli --version ${ver} --locked
       install -m 755 /usr/local/cargo/bin/dx /out/dx
-      chown ${REAL_UID}:${REAL_GID} /out/dx"
+      chown ${REAL_UID}:${REAL_GID} /out/dx"; then
+    echo "ERROR: ${RUST_IMAGE} could not install dx ${ver}. Host dx is required; Kind UI is not a substitute." >&2
+    exit 1
+  fi
   if ! as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null && dx --version 2>/dev/null | grep -q '${ver}'"; then
     echo "ERROR: dx ${ver} not on PATH after ${RUST_IMAGE} install. Re-run this script; do not cargo-install on the host." >&2
     exit 1
@@ -752,6 +757,10 @@ install_dx() {
   echo "    dx $(as_user_sh 'source "$HOME/.cargo/env" 2>/dev/null; dx --version')"
 }
 install_dx
+if ! as_user_sh "source \"\$HOME/.cargo/env\" 2>/dev/null; command -v dx >/dev/null"; then
+  echo "ERROR: dx not on PATH after install_dx. Kind UI is not a substitute. Missing dx is a fail, not a WARN." >&2
+  exit 1
+fi
 
 echo "==> preflight: Cargo.lock vs rustc ${RUST_TOOLCHAIN}"
 PRE_DIR="${TMP_ROOT}/install-preflight"

@@ -1,6 +1,6 @@
 //! GitLab read tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -37,7 +37,10 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
         Ok(v) => v,
         Err(e) => return ProxyResult::err("gitlab", "list_issues", "bad_args", e, None),
     };
-    let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("opened");
+    let state = args
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("opened");
     let per_page = args
         .get("per_page")
         .and_then(|v| v.as_u64())
@@ -69,7 +72,10 @@ pub(crate) async fn list_issues(http: &reqwest::Client, token: &str, args: &Valu
 fn issue_iid(args: &Value) -> Result<u64, String> {
     args.get("iid")
         .or_else(|| args.get("number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .ok_or_else(|| "iid is required".into())
 }
 
@@ -101,7 +107,10 @@ pub(crate) async fn list_mrs(http: &reqwest::Client, token: &str, args: &Value) 
         Ok(v) => v,
         Err(e) => return ProxyResult::err("gitlab", "list_mrs", "bad_args", e, None),
     };
-    let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("opened");
+    let state = args
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("opened");
     let per_page = args
         .get("per_page")
         .and_then(|v| v.as_u64())

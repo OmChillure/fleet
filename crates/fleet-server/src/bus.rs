@@ -4,11 +4,11 @@
 use std::time::Duration;
 
 use fleet_bus::{
-    KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS, decode_sample, key_for_message,
-    put_bus_message, try_open_from_env,
+    decode_sample, key_for_message, put_bus_message, try_open_from_env,
+    KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS,
 };
-use fleet_db::PgPool;
 use fleet_db::repos::control_plane_events;
+use fleet_db::PgPool;
 use tracing::{info, warn};
 
 /// Start subscriber + outbox publisher when `ZENOH_LOCATOR` is set.

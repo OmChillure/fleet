@@ -1,13 +1,14 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::auth::{AdminAuth, WorkerAuth};
 use super::state::AppState;
 use crate::domain::WorkPlanBody;
+use crate::orch::TickError;
 use crate::store::StoreError;
 
 type ApiError = (StatusCode, Json<Value>);
@@ -31,6 +32,16 @@ fn map_store(e: StoreError) -> ApiError {
             // Log the full sqlx detail once; client sees a generic message.
             tracing::error!(error = %e, "store sqlx error");
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+        }
+    }
+}
+
+fn map_tick(e: TickError) -> ApiError {
+    match e {
+        TickError::Store(se) => map_store(se),
+        TickError::Other(m) => {
+            tracing::error!(error = %m, "tick failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, m)
         }
     }
 }
@@ -92,11 +103,9 @@ pub async fn create_project(
         return Err(err(StatusCode::BAD_REQUEST, "name required"));
     }
     let max = body.max_agents.unwrap_or(3).max(0);
-    let remote = crate::domain::parse_project_git_remote(
-        body.repo_url.as_deref(),
-        body.git_ref.as_deref(),
-    )
-    .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let remote =
+        crate::domain::parse_project_git_remote(body.repo_url.as_deref(), body.git_ref.as_deref())
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let project = state
         .store
         .create_project(body.name.trim(), max)
@@ -169,37 +178,20 @@ pub async fn patch_config(
     Path(project_id): Path<Uuid>,
     Json(body): Json<PatchConfigBody>,
 ) -> Result<Json<Value>, ApiError> {
-    // Keep existing ref when only repo_url is sent.
     let existing = state
         .store
         .get_project_config(project_id)
         .await
         .map_err(map_store)?;
-    let git_ref = body.git_ref.as_deref().or(Some(existing.git_ref.as_str()));
-    let remote = crate::domain::parse_project_git_remote(body.repo_url.as_deref(), git_ref)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    // If the client omitted repo_url, keep the current URL and only change ref.
-    let remote = match body.repo_url {
-        None => match existing.git_remote() {
-            Some(mut r) => {
-                if let Some(rf) = body.git_ref.as_deref() {
-                    r.git_ref = crate::domain::normalize_git_ref(Some(rf))
-                        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-                }
-                Some(r)
-            }
-            None => {
-                if body.git_ref.is_some() {
-                    return Err(err(
-                        StatusCode::BAD_REQUEST,
-                        "git_ref requires repo_url on this project",
-                    ));
-                }
-                None
-            }
-        },
-        Some(_) => remote,
-    };
+    // Same semantics as cookie PATCH …/fleet/config (Docs §6.9 / §8.2).
+    let existing_remote = existing.git_remote();
+    let remote = crate::domain::apply_git_remote_patch(
+        existing_remote.as_ref(),
+        existing.git_ref.as_str(),
+        body.repo_url.as_deref(),
+        body.git_ref.as_deref(),
+    )
+    .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let cfg = state
         .store
         .set_project_git_remote(project_id, remote.as_ref())
@@ -254,11 +246,7 @@ pub async fn list_runs(
     _admin: AdminAuth,
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let runs = state
-        .store
-        .list_runs(project_id)
-        .await
-        .map_err(map_store)?;
+    let runs = state.store.list_runs(project_id).await.map_err(map_store)?;
     Ok(Json(json!({ "runs": runs.iter().map(|r| json!({
         "id": r.id,
         "status": r.status,
@@ -648,15 +636,11 @@ pub async fn admin_tick(
         .map_err(map_store)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "project not found"))?;
 
-    let report = state.tick.tick_project(project_id).await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("lock") {
-            err(StatusCode::CONFLICT, msg)
-        } else {
-            tracing::error!(error = %e, "tick failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, msg)
-        }
-    })?;
+    let report = state
+        .tick
+        .tick_project(project_id)
+        .await
+        .map_err(map_tick)?;
 
     Ok(Json(json!({
         "tick_id": report.tick_id,
@@ -677,3 +661,95 @@ pub async fn admin_tick(
     })))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AuthMode;
+    use crate::orch::TickRunner;
+    use crate::sandbox::StubRuntime;
+    use crate::store::Store;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    async fn app_with_unacquirable_pool() -> axum::Router {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
+            .expect("lazy pool that never talks to Postgres");
+        // Closed pool cannot acquire — DB-down without a live server or DATABASE_URL.
+        pool.close().await;
+        let store = Store::new(pool);
+        let runtime = Arc::new(StubRuntime::new(Duration::from_millis(1)));
+        let tick = Arc::new(TickRunner::new(
+            store.clone(),
+            runtime,
+            std::env::temp_dir().join("fleet-orch-readyz-unacquirable"),
+            "http://127.0.0.1:0",
+        ));
+        super::super::router(AppState {
+            store,
+            tick,
+            admin_token: "test-admin".into(),
+            auth_mode: AuthMode::Token,
+        })
+    }
+
+    async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, Value) {
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = if bytes.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&bytes)}))
+        };
+        (status, v)
+    }
+
+    /// Docs §8.2/§14: /healthz is liveness without DB; /readyz acquires or 503.
+    #[tokio::test]
+    async fn healthz_ok_without_db_readyz_503_when_pool_cannot_acquire() {
+        let app = app_with_unacquirable_pool().await;
+
+        let (st, v) = get_json(app.clone(), "/healthz").await;
+        assert_eq!(st, StatusCode::OK, "healthz must stay ok with no DB: {v}");
+        assert_eq!(v["status"], "ok");
+        assert!(
+            v.get("db").is_none(),
+            "healthz must not acquire or report DB: {v}"
+        );
+
+        let (st, v) = get_json(app, "/readyz").await;
+        assert_ne!(
+            st,
+            StatusCode::OK,
+            "must not 200 ready when the pool cannot acquire: {v}"
+        );
+        assert_eq!(
+            st,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "readyz must be 503 when acquire fails, got {st}: {v}"
+        );
+        assert_ne!(
+            v["status"], "ready",
+            "must not 200 ready when the pool cannot acquire: {v}"
+        );
+        assert_eq!(v["error"], "db unavailable");
+    }
+}

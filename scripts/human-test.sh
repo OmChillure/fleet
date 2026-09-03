@@ -8,10 +8,11 @@
 # (no flags; PROFILE/ENABLE_* in repo-root .env).
 #
 # Usage:
-#   ./scripts/human-test.sh              # launch if needed + interactive guide
+#   ./scripts/human-test.sh              # launch + guide (scoped to HUMAN_TEST_SCOPE.md)
 #   ./scripts/human-test.sh launch       # start Postgres + API + UI
-#   ./scripts/human-test.sh guide        # walkthrough only (stack must be up)
-#   ./scripts/human-test.sh record […]   # agent: Playwright .webm → .tmp/demos/
+#   ./scripts/human-test.sh guide        # scoped walkthrough (stack must be up)
+#   ./scripts/human-test.sh guide-all    # full catalog (first product tour only)
+#   ./scripts/human-test.sh record       # film HUMAN_TEST_SCOPE.md scenes + frames
 #   ./scripts/human-test.sh record --list
 #   ./scripts/human-test.sh status
 #   ./scripts/human-test.sh stop
@@ -94,6 +95,14 @@ cmd_launch() {
   FLEET_GIT_SHA="$(bash "${ROOT}/scripts/tree-id.sh")"
   log "Starting stack via ./scripts/fleet-dev.sh start"
   "${DEV}" start
+  if [[ -f "${ROOT}/.run/host-urls.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a
+    . "${ROOT}/.run/host-urls.env"
+    set +a
+    UI_URL="${FLEET_UI_URL:-$UI_URL}"
+    API_URL="${FLEET_API_URL:-$API_URL}"
+  fi
   require_this_tree || {
     err "Launched stack is not this tree. Logs: ./scripts/fleet-dev.sh logs"
     exit 1
@@ -102,9 +111,39 @@ cmd_launch() {
   ok "API ${API_URL}/health  git_sha=${FLEET_GIT_SHA}"
 }
 
+SCOPE_FILTER=0
+SCOPE_TITLES=()
+
+load_scope_pauses() {
+  if [[ ! -f "${ROOT}/HUMAN_TEST_SCOPE.md" ]]; then
+    err "HUMAN_TEST_SCOPE.md missing. Run: python3 tests/browser/surface_scope.py --write"
+    exit 1
+  fi
+  SCOPE_FILTER=1
+  SCOPE_TITLES=()
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && SCOPE_TITLES+=("${line}")
+  done < <(python3 "${ROOT}/tests/browser/surface_scope.py" --pause-titles)
+}
+
+scope_wants() {
+  local title="$1" prefix
+  [[ "${SCOPE_FILTER}" -eq 0 ]] && return 0
+  for prefix in "${SCOPE_TITLES[@]}"; do
+    if [[ "${title}" == "${prefix}" || "${title}" == "${prefix} "* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 pause_step() {
   local title="$1"
   shift
+  if ! scope_wants "${title}"; then
+    return 0
+  fi
   echo
   printf '%s▶ %s%s\n' "$GRN" "${title}" "$RST"
   local line
@@ -133,7 +172,13 @@ cmd_guide() {
   ok "Human testing walkthrough  (${DOC})"
   echo "    Use ${UI_URL} (localhost, not 127.0.0.1) so cookies work."
   echo "    Throwaway accounts only: you@example.test — never real email/tokens."
-  echo "    Agents record the MR video separately: $0 record"
+  if [[ "${SCOPE_FILTER}" -eq 1 ]]; then
+    echo "    Scoped to HUMAN_TEST_SCOPE.md (this merge). guide-all = full catalog."
+    echo "    After the agent films, they must review frames + .webm for bugs."
+  else
+    echo "    Full catalog (first product tour). For an MR use $0 (scoped)."
+  fi
+  echo "    Agents record the same scenes on the final merge tree: $0 record"
   open_browser "${UI_URL}/"
 
   pause_step "Landing  ${UI_URL}/" \
@@ -225,9 +270,10 @@ cmd_guide() {
     "Host API + cluster: KUBECONFIG + K8S_WORKER_API_URL a pod can reach (not 127.0.0.1)." || return 0
 
   pause_step "Cases" \
-    "/{ws}/cases — New case form (title + policy) creates a durable workflow." \
-    "Open a case: events, Observe, Decide now, Cancel." \
-    "Fleet blocked tasks have Resume; Sandboxes live rows have Kill." || return 0
+    "/{ws}/cases (Monitoring → Cases). New case: title + policy, Create case — lands on detail." \
+    "Observe a fact (event kind observed appears). Then Cancel — status cancelled, action buttons hide." \
+    "Empty list before create is OK. Events is the log. Decide now / Complete / Fail stay available until Cancel." \
+    "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
     "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
@@ -261,7 +307,7 @@ cmd_guide() {
   echo
   ok "Walkthrough done."
   echo "    Review: ask on Slack after the MR exists."
-  echo "    Agent demo: $0 record     → attach .tmp/demos/*.webm to the MR."
+  echo "    Agent demo: $0 record  → .tmp/demos/*.webm + frames; review for bugs."
   echo "    Stop stack: $0 stop"
 }
 
@@ -277,12 +323,30 @@ cmd_record() {
 }
 
 main() {
+  if [[ -f "${ROOT}/.run/host-urls.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a
+    . "${ROOT}/.run/host-urls.env"
+    set +a
+    UI_URL="${FLEET_UI_URL:-$UI_URL}"
+    API_URL="${FLEET_API_URL:-$API_URL}"
+  fi
   local cmd="${1:-}"
   if [[ -n "${cmd}" ]]; then
     shift || true
   fi
   case "${cmd}" in
-    ""|guide-all|walk)
+    "")
+      load_scope_pauses
+      if require_this_tree >/dev/null; then
+        ok "Stack already up (this tree)."
+      else
+        cmd_launch
+      fi
+      cmd_guide
+      ;;
+    guide-all|walk)
+      SCOPE_FILTER=0
       if require_this_tree >/dev/null; then
         ok "Stack already up (this tree)."
       else
@@ -291,7 +355,10 @@ main() {
       cmd_guide
       ;;
     launch|start) cmd_launch ;;
-    guide)        cmd_guide ;;
+    guide)
+      load_scope_pauses
+      cmd_guide
+      ;;
     record)       cmd_record "$@" ;;
     status)       "${DEV}" status ;;
     stop)         "${DEV}" stop ;;

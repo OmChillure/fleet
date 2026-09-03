@@ -76,7 +76,14 @@ pub fn spawn_payload(
     timeout_s: i32,
     host_id: Uuid,
 ) -> SpawnPayload {
-    let mut env = req.env.clone();
+    // Tokens stay on the CP. Payload env is FLEET_* only — no OAuth /
+    // integration ciphertext (GITHUB_TOKEN, access_token, client_secret).
+    let mut env: HashMap<String, String> = req
+        .env
+        .iter()
+        .filter(|(k, _)| k.starts_with("FLEET_"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     env.remove("FLEET_WORK_DIR");
     env.insert("FLEET_WORKER_TOKEN".into(), req.worker_token.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
@@ -168,7 +175,7 @@ mod tests {
             "/home/viny/.local/bin/mock-acp-agent".into(),
         );
         let host_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-        let p = spawn_payload(&req, "http://127.0.0.1:8080", "container", 3600, host_id);
+        let p = spawn_payload(&req, "http://172.18.0.1:8080", "container", 3600, host_id);
         assert!(
             !p.env.contains_key("FLEET_MOCK_ACP_BIN"),
             "container claims must not carry host-absolute bins: {:?}",
@@ -178,13 +185,13 @@ mod tests {
         assert_eq!(p.worker_token, "tok-plain");
         assert_eq!(p.runtime, "container");
         assert_eq!(p.isolation, "container");
-        assert_eq!(p.orchestrator_url, "http://127.0.0.1:8080");
+        assert_eq!(p.orchestrator_url, "http://172.18.0.1:8080");
         assert_eq!(p.timeout_s, 3600);
         assert_eq!(p.host_id, host_id);
         assert_eq!(p.env.get("FLEET_WORKER_TOKEN").unwrap(), "tok-plain");
         assert_eq!(
             p.env.get("FLEET_ORCHESTRATOR_URL").unwrap(),
-            "http://127.0.0.1:8080"
+            "http://172.18.0.1:8080"
         );
         assert!(!p.env.contains_key("FLEET_WORK_DIR"));
         let v = serde_json::to_value(&p).unwrap();

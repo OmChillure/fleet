@@ -1,6 +1,6 @@
 //! Bitbucket Cloud REST 2.0 helpers.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -147,7 +147,13 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
     } else {
         "upstream"
     };
-    ProxyResult::err("bitbucket", op, code, format!("{msg} ({status})"), Some(status))
+    ProxyResult::err(
+        "bitbucket",
+        op,
+        code,
+        format!("{msg} ({status})"),
+        Some(status),
+    )
 }
 
 #[cfg(test)]

@@ -44,7 +44,10 @@ pub async fn invoke(
             "jira",
             other,
             "unknown_op",
-            format!("unknown jira operation `{other}`; valid: {}", OPERATIONS.join(", ")),
+            format!(
+                "unknown jira operation `{other}`; valid: {}",
+                OPERATIONS.join(", ")
+            ),
             None,
         ),
     }

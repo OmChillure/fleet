@@ -27,10 +27,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Version => {
-            println!(
-                "fleet-host {}",
-                fleet_host::software::host_pkg_version()
-            );
+            println!("fleet-host {}", fleet_host::software::host_pkg_version());
             println!(
                 "fleet-driver {}",
                 fleet_host::software::driver_pkg_version()

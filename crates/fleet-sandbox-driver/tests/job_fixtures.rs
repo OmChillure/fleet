@@ -64,15 +64,14 @@ fn invoices_job_is_default_deny_with_named_tools() {
     assert!(prompt.contains("django_test"));
     assert!(prompt.contains("fleet_marker"));
     assert!(prompt.contains("times out") || prompt.contains("timeout"));
-    assert!(j["project_setup"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c.as_str().unwrap().contains("pip install")));
-    assert!(j["repo_url"]
-        .as_str()
-        .unwrap()
-        .contains("123-invoices"));
+    assert!(
+        j["project_setup"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("pip install"))
+    );
+    assert!(j["repo_url"].as_str().unwrap().contains("123-invoices"));
 }
 
 #[test]
@@ -102,7 +101,10 @@ fn invoices_pi_job_is_model_field_task() {
     let allow = j["permission_allow"].as_array().unwrap();
     assert!(!allow.iter().any(|v| v.as_str() == Some("*")));
     let allow_s: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
-    assert!(allow_s.iter().any(|a| a.contains("invoices/")), "{allow_s:?}");
+    assert!(
+        allow_s.iter().any(|a| a.contains("invoices/")),
+        "{allow_s:?}"
+    );
     let tools = &j["project_setup"]["tools"];
     assert!(tools.get("django_makemigrations").is_some());
     assert!(tools.get("django_test_fleet").is_some());
@@ -141,11 +143,13 @@ fn minimal_node_job_shape_differs_from_django() {
     assert!(tools.get("list_root").is_some());
     assert!(tools.get("django_check").is_none());
     assert_eq!(tools["list_root"]["argv"][0], "ls");
-    assert!(!j["project_setup"]["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c.as_str().unwrap().contains("manage.py")));
+    assert!(
+        !j["project_setup"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("manage.py"))
+    );
 }
 
 #[test]
@@ -178,8 +182,10 @@ fn commands_only_shape_empty_tools_default_deny() {
     assert_eq!(j["project_setup"]["strategy"], "commands");
     let tools = j["project_setup"]["tools"].as_object().unwrap();
     assert!(tools.is_empty(), "commands-only has no named tools");
-    assert!(!j["project_setup"]["commands"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        !j["project_setup"]["commands"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -1,10 +1,10 @@
 //! Push fleet task status to Jira / Linear / GitHub / GitLab via the control-plane proxy.
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::sandbox::io::IntegrationHandle;
 use super::{ExternalBoardSync, SyncError, TaskStatusSync};
+use crate::sandbox::io::IntegrationHandle;
 
 pub struct IoBoardSync {
     pub io: IntegrationHandle,
@@ -388,7 +388,11 @@ fn pick_linear_state_id(data: &Value, want_type: &str) -> Option<String> {
 }
 
 fn value_id(v: Option<&Value>) -> Option<String> {
-    v.and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_i64().map(|n| n.to_string())))
+    v.and_then(|v| {
+        v.as_str()
+            .map(|s| s.to_string())
+            .or_else(|| v.as_i64().map(|n| n.to_string()))
+    })
 }
 
 fn pick_transition_id(data: &Value, want: &str) -> Option<String> {
@@ -475,8 +479,14 @@ mod tests {
                 { "id": "s3", "name": "Done", "type": "completed" }
             ]
         });
-        assert_eq!(pick_linear_state_id(&linear, "started").as_deref(), Some("s2"));
-        assert_eq!(pick_linear_state_id(&linear, "completed").as_deref(), Some("s3"));
+        assert_eq!(
+            pick_linear_state_id(&linear, "started").as_deref(),
+            Some("s2")
+        );
+        assert_eq!(
+            pick_linear_state_id(&linear, "completed").as_deref(),
+            Some("s3")
+        );
         assert_eq!(linear_state_type("done_success"), Some("completed"));
         assert_eq!(github_issue_state("done_success"), Some("closed"));
         assert_eq!(github_issue_state("in_progress"), None);
@@ -546,10 +556,7 @@ mod tests {
             .unwrap();
         }
         let calls = rec.calls.lock().unwrap();
-        let ops: Vec<String> = calls
-            .iter()
-            .map(|(p, o, _)| format!("{p}.{o}"))
-            .collect();
+        let ops: Vec<String> = calls.iter().map(|(p, o, _)| format!("{p}.{o}")).collect();
         assert!(ops.contains(&"jira.transition_issue".into()), "{ops:?}");
         assert!(ops.contains(&"linear.update_issue".into()), "{ops:?}");
         assert!(ops.contains(&"github.update_issue".into()), "{ops:?}");

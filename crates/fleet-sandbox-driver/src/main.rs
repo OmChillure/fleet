@@ -5,16 +5,17 @@ use chrono::Utc;
 use clap::Parser;
 use fleet_sandbox_driver::bus::Bus;
 use fleet_sandbox_driver::job::{Job, JobResult};
-use fleet_sandbox_driver::{
-    acp, handshake, harness, parse_env_bool, policy, provision,
-};
+use fleet_sandbox_driver::{acp, handshake, harness, parse_env_bool, policy, provision};
 use serde_json::json;
 use std::time::Instant;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "fleet-sandbox-driver", about = "In-sandbox: provision workspace + drive harness over ACP")]
+#[command(
+    name = "fleet-sandbox-driver",
+    about = "In-sandbox: provision workspace + drive harness over ACP"
+)]
 struct Args {
     /// Redis URL
     #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379/0")]

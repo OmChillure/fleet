@@ -4,10 +4,30 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    finish_ticket, list_inbox, poll_inbox, start_monitor, stop_monitor, update_monitor,
-    MonitorPatch, MonitorState, TicketRow,
+    InboxResponse, MonitorPatch, MonitorState, TicketRow, finish_ticket, list_inbox, poll_inbox,
+    start_monitor, stop_monitor, update_monitor,
 };
 use crate::components::toast::show_toast;
+
+fn status_for(resp: &InboxResponse) -> String {
+    let n = resp.tickets.len();
+    match resp.monitor.as_ref() {
+        Some(m) => {
+            let extra = if m.enabled {
+                "monitor on"
+            } else {
+                "monitor off"
+            };
+            let poll = m
+                .last_poll_at
+                .as_deref()
+                .map(|s| s.get(..19).unwrap_or(s).replace('T', " "))
+                .unwrap_or_else(|| "never".into());
+            format!("{n} ticket(s) · {extra} · last poll {poll}")
+        }
+        None => format!("{n} ticket(s)"),
+    }
+}
 
 #[component]
 pub fn Inbox(workspace_id: String) -> Element {
@@ -28,28 +48,18 @@ pub fn Inbox(workspace_id: String) -> Element {
             loop {
                 match list_inbox(&ws).await {
                     Ok(resp) => {
-                        let n = resp.tickets.len();
-                        rows.set(resp.tickets);
-                        if let Some(m) = resp.monitor.clone() {
-                            if monitor().is_none() {
+                        if monitor().is_none() {
+                            if let Some(m) = resp.monitor.as_ref() {
                                 github_repos.set(m.github_repos.join(", "));
                                 slack_channels.set(m.slack_channels.join(", "));
                                 jira_jql.set(m.jira_jql.clone().unwrap_or_default());
                                 notion_dbs.set(m.notion_databases.join(", "));
                                 auto_launch.set(m.auto_launch);
                             }
-                            let extra = if m.enabled { "monitor on" } else { "monitor off" };
-                            let poll = m
-                                .last_poll_at
-                                .as_deref()
-                                .map(|s| s.get(..19).unwrap_or(s).replace('T', " "))
-                                .unwrap_or_else(|| "never".into());
-                            status_line.set(format!("{n} ticket(s) · {extra} · last poll {poll}"));
-                            monitor.set(Some(m));
-                        } else {
-                            status_line.set(format!("{n} ticket(s)"));
-                            monitor.set(None);
                         }
+                        status_line.set(status_for(&resp));
+                        monitor.set(resp.monitor.clone());
+                        rows.set(resp.tickets);
                     }
                     Err(e) => status_line.set(e.message()),
                 }
@@ -87,6 +97,11 @@ pub fn Inbox(workspace_id: String) -> Element {
                                         Ok(_) => show_toast().success("Monitor on — polling connected boards."),
                                         Err(e) => show_toast().error(e.message()),
                                     }
+                                    if let Ok(resp) = list_inbox(&ws).await {
+                                        rows.set(resp.tickets.clone());
+                                        monitor.set(resp.monitor.clone());
+                                        status_line.set(status_for(&resp));
+                                    }
                                     busy.set(false);
                                 });
                             }
@@ -107,6 +122,11 @@ pub fn Inbox(workspace_id: String) -> Element {
                                     match stop_monitor(&ws).await {
                                         Ok(_) => show_toast().success("Monitor off."),
                                         Err(e) => show_toast().error(e.message()),
+                                    }
+                                    if let Ok(resp) = list_inbox(&ws).await {
+                                        rows.set(resp.tickets.clone());
+                                        monitor.set(resp.monitor.clone());
+                                        status_line.set(status_for(&resp));
                                     }
                                     busy.set(false);
                                 });
@@ -130,7 +150,9 @@ pub fn Inbox(workspace_id: String) -> Element {
                                         Err(e) => show_toast().error(e.message()),
                                     }
                                     if let Ok(resp) = list_inbox(&ws).await {
-                                        rows.set(resp.tickets);
+                                        rows.set(resp.tickets.clone());
+                                        monitor.set(resp.monitor.clone());
+                                        status_line.set(status_for(&resp));
                                     }
                                     busy.set(false);
                                 });
@@ -280,7 +302,9 @@ pub fn Inbox(workspace_id: String) -> Element {
                                                     Err(e) => show_toast().error(e.message()),
                                                 }
                                                 if let Ok(resp) = list_inbox(&ws).await {
-                                                    rows.set(resp.tickets);
+                                                    rows.set(resp.tickets.clone());
+                                                    monitor.set(resp.monitor.clone());
+                                                    status_line.set(status_for(&resp));
                                                 }
                                                 busy.set(false);
                                             });

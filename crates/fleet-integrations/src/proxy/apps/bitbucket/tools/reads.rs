@@ -1,6 +1,6 @@
 //! Bitbucket read tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -57,7 +57,10 @@ pub(crate) async fn get_issue(http: &reqwest::Client, token: &str, args: &Value)
     let id = args
         .get("id")
         .or_else(|| args.get("number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0);
     if id == 0 {
         return ProxyResult::err("bitbucket", "get_issue", "bad_args", "id is required", None);
@@ -109,7 +112,10 @@ pub(crate) async fn get_pr(http: &reqwest::Client, token: &str, args: &Value) ->
     let id = args
         .get("id")
         .or_else(|| args.get("number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0);
     if id == 0 {
         return ProxyResult::err("bitbucket", "get_pr", "bad_args", "id is required", None);
@@ -140,7 +146,13 @@ pub(crate) async fn get_file(http: &reqwest::Client, token: &str, args: &Value) 
         .filter(|s| !s.is_empty())
         .unwrap_or("");
     if path.is_empty() {
-        return ProxyResult::err("bitbucket", "get_file", "bad_args", "path is required", None);
+        return ProxyResult::err(
+            "bitbucket",
+            "get_file",
+            "bad_args",
+            "path is required",
+            None,
+        );
     }
     let rev = args
         .get("ref")

@@ -47,7 +47,10 @@ pub fn markdown_to_parts(input: &str) -> Vec<MdPart> {
                 code_lang = match kind {
                     CodeBlockKind::Fenced(lang) => {
                         let lang = lang.trim().to_string();
-                        if lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                        if lang
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        {
                             lang
                         } else {
                             String::new()
@@ -146,7 +149,9 @@ fn start_tag(out: &mut String, tag: &Tag<'_>, in_table_head: &mut bool) {
             }
             out.push('>');
         }
-        Tag::Image { dest_url, title, .. } => {
+        Tag::Image {
+            dest_url, title, ..
+        } => {
             if let Some(href) = safe_href(dest_url) {
                 out.push_str("<img src=\"");
                 push_esc(out, &href);
@@ -270,14 +275,52 @@ const PY: &[&str] = &[
 const RS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
     "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
-    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-    "use", "where", "while",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while",
 ];
 const JS: &[&str] = &[
-    "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-    "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function",
-    "if", "import", "in", "instanceof", "let", "new", "null", "of", "return", "static", "super",
-    "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void", "while", "with",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "let",
+    "new",
+    "null",
+    "of",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
     "yield",
 ];
 const SH: &[&str] = &[
@@ -328,12 +371,20 @@ fn highlight_json(src: &str) -> String {
             out.push_str("</span>");
             continue;
         }
-        if c.is_ascii_digit() || (c == '-' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit()) {
+        if c.is_ascii_digit()
+            || (c == '-' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit())
+        {
             let start = i;
             i += 1;
             while i < b.len() {
                 let ch = b[i] as char;
-                if ch.is_ascii_digit() || ch == '.' || ch == 'e' || ch == 'E' || ch == '+' || ch == '-' {
+                if ch.is_ascii_digit()
+                    || ch == '.'
+                    || ch == 'e'
+                    || ch == 'E'
+                    || ch == '+'
+                    || ch == '-'
+                {
                     i += 1;
                 } else {
                     break;
@@ -371,9 +422,7 @@ fn highlight_code(src: &str, kws: &[&str], line_comment: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         // line comment
-        if !line_comment.is_empty()
-            && src[char_byte_idx(&chars, i)..].starts_with(line_comment)
-        {
+        if !line_comment.is_empty() && src[char_byte_idx(&chars, i)..].starts_with(line_comment) {
             let start = i;
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
@@ -410,7 +459,8 @@ fn highlight_code(src: &str, kws: &[&str], line_comment: &str) -> String {
         if c.is_ascii_digit() {
             let start = i;
             i += 1;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
             {
                 i += 1;
             }
@@ -451,7 +501,9 @@ mod tests {
 
     #[test]
     fn renders_headings_lists_and_code() {
-        let html = markdown_to_html("# Title\n\n- one\n- two\n\n`code` and **bold**\n\n```rs\nlet x = 1;\n```\n");
+        let html = markdown_to_html(
+            "# Title\n\n- one\n- two\n\n`code` and **bold**\n\n```rs\nlet x = 1;\n```\n",
+        );
         assert!(html.contains("<h1>Title</h1>"));
         assert!(html.contains("<ul>"));
         assert!(html.contains("<code>code</code>"));
@@ -469,10 +521,68 @@ mod tests {
     }
 
     #[test]
+    fn does_not_emit_raw_html_from_user_text() {
+        let html = markdown_to_html(
+            "Hello <script>alert(1)</script>\n\n<SCRIPT src=//evil.test></SCRIPT>\n\n\
+             <img src=x onerror=alert(1)>\n\n<iframe src=//evil.test></iframe>\n\n<svg onload=alert(1)>",
+        );
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("<script"), "{html}");
+        assert!(!lower.contains("<img"), "{html}");
+        assert!(!lower.contains("<iframe"), "{html}");
+        assert!(!lower.contains("<svg"), "{html}");
+        assert!(
+            html.contains("&lt;script") || !lower.contains("script"),
+            "{html}"
+        );
+
+        let js = markdown_to_html(
+            "[x](javascript:alert(1))\n\n[y](JAVASCRIPT:alert(1))\n\n\
+             ![z](javascript:alert(1))\n\n[d](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+        );
+        let js_l = js.to_ascii_lowercase();
+        assert!(!js_l.contains("href=\"javascript:"), "{js}");
+        assert!(!js_l.contains("href='javascript:"), "{js}");
+        assert!(!js_l.contains("src=\"javascript:"), "{js}");
+        assert!(!js_l.contains("src='javascript:"), "{js}");
+        assert!(!js_l.contains("href=\"data:"), "{js}");
+        assert!(!js_l.contains("javascript:"), "{js}");
+        assert!(!js_l.contains("<script"), "{js}");
+
+        let broke = markdown_to_html("[x](https://example.test/a\" onclick=\"alert(1))");
+        assert!(broke.contains("&quot;"), "{broke}");
+        assert!(
+            !broke.contains("href=\"https://example.test/a\""),
+            "{broke}"
+        );
+
+        let fenced = markdown_to_html("```html\n<script>alert(1)</script>\n```");
+        assert!(!fenced.to_ascii_lowercase().contains("<script"), "{fenced}");
+        assert!(fenced.contains("&lt;script"), "{fenced}");
+
+        for part in markdown_to_parts("Hi <script>alert(1)</script>\n\n[x](javascript:alert(1))") {
+            if let MdPart::Html(h) = part {
+                let l = h.to_ascii_lowercase();
+                assert!(!l.contains("<script"), "{h}");
+                assert!(!l.contains("href=\"javascript:"), "{h}");
+                assert!(!l.contains("javascript:"), "{h}");
+            }
+        }
+    }
+
+    #[test]
     fn parts_split_code_blocks() {
         let parts = markdown_to_parts("hi\n\n```json\n{\"a\": 1}\n```\n\nok");
-        assert!(parts.iter().any(|p| matches!(p, MdPart::Code { lang, .. } if lang == "json")));
-        assert!(parts.iter().any(|p| matches!(p, MdPart::Html(h) if h.contains("hi"))));
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Code { lang, .. } if lang == "json"))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("hi")))
+        );
     }
 
     #[test]

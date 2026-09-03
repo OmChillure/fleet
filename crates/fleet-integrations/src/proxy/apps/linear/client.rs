@@ -1,14 +1,11 @@
 //! Linear HTTP / GraphQL helpers.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
 pub(crate) fn map_issue(i: &Value) -> Value {
-    let desc = i
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let desc = i.get("description").and_then(|v| v.as_str()).unwrap_or("");
     let desc = if desc.chars().count() > 2000 {
         let t: String = desc.chars().take(2000).collect();
         format!("{t}…")

@@ -3,7 +3,7 @@
 
 use crate::job::{Job, ProviderSpec};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -21,7 +21,10 @@ pub fn setup_pi(
 
     let models = build_pi_models_json(job, child_env)?;
     let models_path = agent_dir.join("models.json");
-    fs::write(&models_path, format!("{}\n", serde_json::to_string_pretty(&models)?))?;
+    fs::write(
+        &models_path,
+        format!("{}\n", serde_json::to_string_pretty(&models)?),
+    )?;
     info!(path = %models_path.display(), "wrote Pi models.json");
 
     // Quiet ACP startup banners when possible
@@ -53,7 +56,9 @@ pub fn setup_pi(
                 warn!(url = %url, error = %e, "pi provider /models probe failed");
                 child_env.insert(
                     "_FLEET_PROVIDER_PROBE".into(),
-                    serde_json::to_string(&json!({"ok": false, "url": url, "error": e.to_string()}))?,
+                    serde_json::to_string(
+                        &json!({"ok": false, "url": url, "error": e.to_string()}),
+                    )?,
                 );
             }
         }
@@ -85,8 +90,8 @@ fn provider_from_env() -> Option<ProviderSpec> {
     let id = std::env::var("OPENCODE_PROVIDER_ID")
         .or_else(|_| std::env::var("PI_PROVIDER_ID"))
         .unwrap_or_else(|_| "lmstudio".into());
-    let name = std::env::var("OPENCODE_PROVIDER_NAME")
-        .unwrap_or_else(|_| "LM Studio (local)".into());
+    let name =
+        std::env::var("OPENCODE_PROVIDER_NAME").unwrap_or_else(|_| "LM Studio (local)".into());
     let api_key = std::env::var("OPENCODE_API_KEY")
         .or_else(|_| std::env::var("PI_API_KEY"))
         .ok();

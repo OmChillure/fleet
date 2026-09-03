@@ -168,11 +168,7 @@ pub async fn patch_agent_defaults(
 }
 
 /// Soft-disconnect: clear secrets, mark disconnected.
-pub async fn disconnect(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    provider: &str,
-) -> DbResult<bool> {
+pub async fn disconnect(pool: &PgPool, workspace_id: Uuid, provider: &str) -> DbResult<bool> {
     let res = sqlx::query(
         r#"
         UPDATE integration_connections
@@ -304,4 +300,90 @@ pub async fn upsert_oauth_app(
     .fetch_one(pool)
     .await
     .map_err(map_query_err)
+}
+
+/// Persist an OAuth `state` nonce as consumed. Returns `true` if this call
+/// won (first Connect). Returns `false` if the nonce was already used.
+///
+/// Insert is the consume — do this before exchanging the code or writing
+/// credentials so a parallel replay cannot attach a second connection.
+pub async fn consume_oauth_state_nonce(
+    pool: &PgPool,
+    nonce: &str,
+    workspace_id: Uuid,
+    provider: &str,
+) -> DbResult<bool> {
+    if nonce.trim().is_empty() {
+        return Ok(false);
+    }
+    let res = sqlx::query(
+        r#"
+        INSERT INTO integration_oauth_state_nonces (nonce, workspace_id, provider)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (nonce) DO NOTHING
+        "#,
+    )
+    .bind(nonce)
+    .bind(workspace_id)
+    .bind(provider)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() == 1)
+}
+
+#[cfg(test)]
+mod patch_agent_defaults_sql_tests {
+    fn production_src() -> &'static str {
+        let src = include_str!("integrations.rs");
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    /// Defaults PATCH is UPDATE … status='connected'. It must not INSERT.
+    #[test]
+    fn patch_agent_defaults_sql_updates_connected_only_never_inserts() {
+        let src = fn_src(production_src(), "pub async fn patch_agent_defaults(");
+        assert!(
+            src.contains("UPDATE integration_connections"),
+            "patch_agent_defaults must UPDATE: {src}"
+        );
+        assert!(
+            src.contains("WHERE workspace_id = $1 AND provider = $2 AND status = 'connected'"),
+            "must target the connected row only: {src}"
+        );
+        assert!(
+            src.contains("default_runner_id")
+                && src.contains("default_provider")
+                && src.contains("default_model"),
+            "must write agent defaults into config: {src}"
+        );
+        assert!(
+            !src.to_ascii_uppercase().contains("INSERT"),
+            "must not INSERT a connections row: {src}"
+        );
+        assert!(
+            !src.contains("ON CONFLICT"),
+            "must not upsert a fake connected row: {src}"
+        );
+        assert!(
+            src.contains("NotFound"),
+            "zero rows must be NotFound (HTTP 404), not a silent insert: {src}"
+        );
+    }
 }

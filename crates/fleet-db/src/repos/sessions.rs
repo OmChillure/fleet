@@ -35,10 +35,7 @@ pub async fn insert(pool: &PgPool, new: &NewAuthSession) -> DbResult<()> {
     Ok(())
 }
 
-pub async fn insert_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    new: &NewAuthSession,
-) -> DbResult<()> {
+pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewAuthSession) -> DbResult<()> {
     sqlx::query(
         r#"
         INSERT INTO auth_sessions (
@@ -156,11 +153,7 @@ pub async fn revoke_for_rotation_tx(
     Ok(res.rows_affected())
 }
 
-pub async fn is_session_active(
-    pool: &PgPool,
-    session_id: Uuid,
-    user_id: Uuid,
-) -> DbResult<bool> {
+pub async fn is_session_active(pool: &PgPool, session_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let active = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS(

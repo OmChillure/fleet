@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 const TOAST_MS: u32 = 4000;
 const MAX_TOASTS: usize = 4;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ToastKind {
     Info,
@@ -87,10 +87,14 @@ impl Toaster {
         next_id.set(id.wrapping_add(1));
 
         let mut list = items();
-        list.push(ToastItem { id, kind, message });
-        while list.len() > MAX_TOASTS {
-            list.remove(0);
-        }
+        list = merge_toast(
+            list,
+            ToastItem {
+                id,
+                kind,
+                message,
+            },
+        );
         items.set(list);
 
         spawn(async move {
@@ -227,6 +231,18 @@ fn ToastIcon(kind: ToastKind) -> Element {
     }
 }
 
+fn merge_toast(mut list: Vec<ToastItem>, item: ToastItem) -> Vec<ToastItem> {
+    // One success at a time so create/observe/cancel do not stack over the form.
+    if item.kind == ToastKind::Success {
+        list.retain(|t| t.kind != ToastKind::Success);
+    }
+    list.push(item);
+    while list.len() > MAX_TOASTS {
+        list.remove(0);
+    }
+    list
+}
+
 async fn sleep_ms(ms: u32) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -235,5 +251,35 @@ async fn sleep_ms(ms: u32) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = ms;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: u64, kind: ToastKind, message: &str) -> ToastItem {
+        ToastItem {
+            id,
+            kind,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn merge_replaces_previous_success() {
+        let list = vec![item(1, ToastKind::Success, "Case created.")];
+        let out = merge_toast(list, item(2, ToastKind::Success, "Case cancelled."));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].message, "Case cancelled.");
+    }
+
+    #[test]
+    fn merge_keeps_error_when_success_arrives() {
+        let list = vec![item(1, ToastKind::Error, "boom")];
+        let out = merge_toast(list, item(2, ToastKind::Success, "ok"));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, ToastKind::Error);
+        assert_eq!(out[1].kind, ToastKind::Success);
     }
 }

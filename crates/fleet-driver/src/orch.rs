@@ -65,7 +65,8 @@ impl OrchClient {
     }
 
     pub async fn post_status(&self, seq: i32, status: &str, reason: Option<&str>) -> Result<()> {
-        self.post_status_proof(seq, status, reason, None, None).await
+        self.post_status_proof(seq, status, reason, None, None)
+            .await
     }
 
     pub async fn post_status_proof(

@@ -20,8 +20,8 @@ use crate::models::{
     DisconnectResponse, IntegrationAvailability, IntegrationListResponse, IntegrationView,
 };
 use crate::oauth::{
-    authorize_url, convert_manifest, exchange_code, github_install_url, issue_oauth_state,
-    manifest_form_html, verify_oauth_state,
+    OAuthCallbackError, authorize_url, convert_manifest, exchange_code, github_install_url,
+    issue_oauth_state, manifest_form_html, verify_oauth_state,
 };
 use crate::state::IntegrationsState;
 
@@ -95,12 +95,7 @@ fn enrich_views(
             view.oauth_configured = configured;
             view.oauth_callback_url = Some(state.config.callback_url(&view.id));
             view.oauth_app_create_url = oauth_app_create_url(&view.id).map(str::to_string);
-            if matches!(view.availability, IntegrationAvailability::Available) {
-                view.oauth_start_path = Some(format!(
-                    "/api/workspaces/{workspace_id}/integrations/{}/oauth/start",
-                    view.id
-                ));
-            }
+            view.oauth_start_path = catalog::oauth_start_path(workspace_id, &view.id);
             if let Some(conn) = by_provider.get(view.id.as_str()) {
                 view.connected = conn.status == "connected";
                 view.connection = Some(IntegrationConnectionPublic::from(*conn));
@@ -229,34 +224,11 @@ async fn oauth_start(
     let entry = require_available_provider(&provider)?;
 
     if let Some(client) = resolve_oauth_client(&state, workspace_id, &provider).await? {
-        return redirect_to_provider(&state, &user.id, workspace_id, &provider, &client);
+        return redirect_to_provider(&state.config, &user.id, workspace_id, &provider, &client);
     }
 
-    let oauth_state =
-        issue_oauth_state(&state.config.state_secret, user.id, workspace_id, &provider)?;
-
-    if provider == "github" {
-        tracing::info!(%workspace_id, user_id = %user.id, "oauth start github manifest");
-        return Ok(html_page(manifest_form_html(
-            &state.config,
-            workspace_id,
-            &oauth_state,
-        )));
-    }
-
-    tracing::info!(
-        %workspace_id,
-        provider = %provider,
-        user_id = %user.id,
-        "oauth start provider bootstrap"
-    );
-    Ok(html_page(provider_bootstrap_html(
-        &entry.name,
-        &provider,
-        oauth_app_create_url(&provider).unwrap_or("#"),
-        &state.config.callback_url(&provider),
-        &format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"),
-    )))
+    // Env + workspace app unset: still start Connect (must not 500).
+    oauth_start_unconfigured(&state.config, user.id, workspace_id, &provider, &entry)
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,7 +271,7 @@ async fn oauth_start_with_app(
         client_secret,
         github_app_slug: None,
     };
-    redirect_to_provider(&state, &user.id, workspace_id, &provider, &client)
+    redirect_to_provider(&state.config, &user.id, workspace_id, &provider, &client)
 }
 
 fn require_available_provider(provider: &str) -> AppResult<crate::models::IntegrationView> {
@@ -313,16 +285,48 @@ fn require_available_provider(provider: &str) -> AppResult<crate::models::Integr
     Ok(entry)
 }
 
+/// When env + workspace have no OAuth app, start Connect anyway:
+/// GitHub App Manifest, or a one-time in-tab form for everyone else.
+fn oauth_start_unconfigured(
+    config: &crate::config::IntegrationsConfig,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    provider: &str,
+    entry: &crate::models::IntegrationView,
+) -> AppResult<Response> {
+    let oauth_state = issue_oauth_state(&config.state_secret, user_id, workspace_id, provider)?;
+    if provider == "github" {
+        tracing::info!(%workspace_id, user_id = %user_id, "oauth start github manifest");
+        return Ok(html_page(manifest_form_html(
+            config,
+            workspace_id,
+            &oauth_state,
+        )));
+    }
+    tracing::info!(
+        %workspace_id,
+        provider = %provider,
+        user_id = %user_id,
+        "oauth start provider bootstrap"
+    );
+    Ok(html_page(provider_bootstrap_html(
+        &entry.name,
+        provider,
+        oauth_app_create_url(provider).unwrap_or("#"),
+        &config.callback_url(provider),
+        &format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"),
+    )))
+}
+
 fn redirect_to_provider(
-    state: &IntegrationsState,
+    config: &crate::config::IntegrationsConfig,
     user_id: &Uuid,
     workspace_id: Uuid,
     provider: &str,
     client: &OAuthClientConfig,
 ) -> AppResult<Response> {
-    let oauth_state =
-        issue_oauth_state(&state.config.state_secret, *user_id, workspace_id, provider)?;
-    let url = authorize_url(provider, &state.config, client, &oauth_state)?;
+    let oauth_state = issue_oauth_state(&config.state_secret, *user_id, workspace_id, provider)?;
+    let url = authorize_url(provider, config, client, &oauth_state)?;
     tracing::info!(
         %workspace_id,
         provider = %provider,
@@ -360,13 +364,13 @@ async fn persist_oauth_app(
 }
 
 #[derive(Debug, Deserialize)]
-struct OAuthCallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
-    installation_id: Option<i64>,
-    setup_action: Option<String>,
+pub struct OAuthCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+    pub installation_id: Option<i64>,
+    pub setup_action: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,53 +383,79 @@ struct GithubManifestQuery {
 
 /// GitHub redirects here after the user creates the App from the manifest.
 /// Convert the temp code → client_id/secret, then send them to install + authorize.
+///
+/// `jar` is the browser session. A stolen manifest `code`+`state` URL must
+/// not persist an App onto the state workspace.
 async fn github_manifest_callback(
     State(state): State<IntegrationsState>,
+    jar: CookieJar,
     Query(q): Query<GithubManifestQuery>,
 ) -> Response {
     let ui_origin = state.config.ui_public_base.clone();
-    match github_manifest_callback_inner(&state, q).await {
+    match github_manifest_callback_inner(&state, &jar, q).await {
         Ok(url) => Redirect::temporary(&url).into_response(),
-        Err(msg) => {
-            tracing::warn!(error = %msg, "github manifest callback failed");
-            oauth_popup_close_html(&ui_origin, None, Some(&msg))
+        Err(err) => {
+            tracing::warn!(error = %err, "github manifest callback failed");
+            let mut res = oauth_popup_close_html(&ui_origin, None, Some(err.message()));
+            if let Some(status) = err.status() {
+                *res.status_mut() = status;
+            }
+            res
         }
     }
 }
 
 async fn github_manifest_callback_inner(
     state: &IntegrationsState,
+    jar: &CookieJar,
     q: GithubManifestQuery,
-) -> Result<String, String> {
+) -> Result<String, OAuthCallbackError> {
     if let Some(err) = q.error {
         let desc = q.error_description.unwrap_or(err);
-        return Err(format!("GitHub denied app creation: {desc}"));
+        return Err(OAuthCallbackError::client(
+            None,
+            format!("GitHub denied app creation: {desc}"),
+        ));
     }
     let code = q
         .code
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "missing GitHub manifest code".to_string())?;
+        .ok_or_else(|| OAuthCallbackError::client(None, "missing GitHub manifest code"))?;
     let state_jwt = q
         .state
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "missing OAuth state".to_string())?;
-    let claims =
-        verify_oauth_state(&state.config.state_secret, &state_jwt).map_err(|e| e.to_string())?;
+        .ok_or_else(|| OAuthCallbackError::client(None, "missing OAuth state"))?;
+    let claims = verify_oauth_state(&state.config.state_secret, &state_jwt)
+        .map_err(|e| OAuthCallbackError::invalid_state(None, e.to_string()))?;
     if claims.provider != "github" {
-        return Err("OAuth state provider mismatch".into());
+        return Err(OAuthCallbackError::provider_mismatch(Some(
+            claims.workspace_id.clone(),
+        )));
     }
-    let workspace_id =
-        Uuid::parse_str(&claims.workspace_id).map_err(|_| "bad workspace in state".to_string())?;
-    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| "bad user in state".to_string())?;
+    let workspace_id = Uuid::parse_str(&claims.workspace_id).map_err(|_| {
+        OAuthCallbackError::client(Some(claims.workspace_id.clone()), "bad workspace in state")
+    })?;
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+        OAuthCallbackError::client(Some(claims.workspace_id.clone()), "bad user in state")
+    })?;
 
     let member = workspace_repo::find_for_user(&state.db, workspace_id, user_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| OAuthCallbackError::other(Some(claims.workspace_id.clone()), e.to_string()))?;
     if member.is_none() {
-        return Err("not a member of this workspace".into());
+        return Err(OAuthCallbackError::not_a_member(Some(
+            claims.workspace_id.clone(),
+        )));
     }
 
-    let app = convert_manifest(&code).await.map_err(|e| e.to_string())?;
+    // Same bind as user-oauth: fleet_access required, session user ==
+    // state.sub, member of state.workspace_id. Check before convert so a
+    // stolen code+state never fetches client_secret / PEM.
+    bind_callback_session(state, jar, workspace_id, user_id, &claims.workspace_id).await?;
+
+    let app = convert_manifest(&code)
+        .await
+        .map_err(|e| OAuthCallbackError::from_app_error(e, Some(claims.workspace_id.clone())))?;
     persist_oauth_app(
         state,
         workspace_id,
@@ -441,7 +471,7 @@ async fn github_manifest_callback_inner(
         user_id,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| OAuthCallbackError::from_app_error(e, Some(claims.workspace_id.clone())))?;
 
     tracing::info!(
         %workspace_id,
@@ -458,8 +488,12 @@ async fn github_webhook_stub() -> StatusCode {
 }
 
 /// OAuth callback: exchange code, store tokens, notify opener, close tab.
+///
+/// `jar` is the browser session. State `workspace_id` must match that
+/// session's workspace — a Connect started on A must not complete on B.
 async fn oauth_callback(
     State(state): State<IntegrationsState>,
+    jar: CookieJar,
     Path(provider): Path<String>,
     Query(q): Query<OAuthCallbackQuery>,
 ) -> Response {
@@ -470,30 +504,43 @@ async fn oauth_callback(
         return trello_token_capture_html();
     }
     let ui_origin = state.config.ui_public_base.clone();
-    match oauth_callback_inner(&state, &provider, q).await {
+    // SameSite=Lax sends fleet_access on a real top-level provider redirect.
+    // A missing cookie is not a guest Connect — stolen state JWT + code
+    // must not exchange or upsert. Reject before inner so the nonce is
+    // not consumed.
+    if jar.get(fleet_auth::ACCESS_COOKIE).is_none() {
+        tracing::warn!(
+            provider = %provider,
+            "oauth callback rejected: no session"
+        );
+        let mut res = oauth_popup_close_html(&ui_origin, None, Some("not authenticated"));
+        *res.status_mut() = StatusCode::UNAUTHORIZED;
+        return res;
+    }
+    match oauth_callback_inner(&state, &provider, q, &jar).await {
         Ok(provider_id) => oauth_popup_close_html(&ui_origin, Some(&provider_id), None),
-        Err((workspace_hint, msg)) => {
+        Err(err) => {
             // User denials / missing params are expected; everything else is unexpected.
-            let clientish = msg.contains("denied")
-                || msg.contains("missing OAuth")
-                || msg.contains("not a member")
-                || msg.contains("not configured");
-            if clientish {
+            if err.is_expected() {
                 tracing::warn!(
                     provider = %provider,
-                    workspace = ?workspace_hint,
-                    error = %msg,
+                    workspace = ?err.workspace_hint,
+                    error = %err,
                     "oauth callback rejected"
                 );
             } else {
                 tracing::error!(
                     provider = %provider,
-                    workspace = ?workspace_hint,
-                    error = %msg,
+                    workspace = ?err.workspace_hint,
+                    error = %err,
                     "oauth callback failed"
                 );
             }
-            oauth_popup_close_html(&ui_origin, None, Some(&msg))
+            let mut res = oauth_popup_close_html(&ui_origin, None, Some(err.message()));
+            if let Some(status) = err.status() {
+                *res.status_mut() = status;
+            }
+            res
         }
     }
 }
@@ -759,74 +806,113 @@ fn provider_bootstrap_html(
     )
 }
 
-async fn oauth_callback_inner(
+/// Session cookie must be present, user must match `state.sub`, and they
+/// must still be a member of `state.workspace_id`.
+async fn bind_callback_session(
+    state: &IntegrationsState,
+    jar: &CookieJar,
+    workspace_id: Uuid,
+    state_user_id: Uuid,
+    workspace_hint: &str,
+) -> Result<(), OAuthCallbackError> {
+    let hint = Some(workspace_hint.to_string());
+    match require_workspace_member(state, jar, workspace_id).await {
+        Ok((session_user, _)) => {
+            if session_user.id != state_user_id {
+                return Err(OAuthCallbackError::user_mismatch(hint));
+            }
+            Ok(())
+        }
+        Err(e) => Err(OAuthCallbackError::from_app_error(e, hint)),
+    }
+}
+
+/// Consume the state nonce, exchange the code, and upsert the connection.
+pub async fn oauth_callback_inner(
     state: &IntegrationsState,
     provider: &str,
     q: OAuthCallbackQuery,
-) -> Result<String, (Option<String>, String)> {
+    jar: &CookieJar,
+) -> Result<String, OAuthCallbackError> {
     let provider = provider.trim().to_lowercase();
 
     if let Some(err) = q.error {
         let desc = q.error_description.unwrap_or(err);
-        return Err((None, format!("provider denied access: {desc}")));
+        return Err(OAuthCallbackError::client(
+            None,
+            format!("provider denied access: {desc}"),
+        ));
     }
 
     let code = q
         .code
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| (None, "missing OAuth code".into()))?;
+        .ok_or_else(|| OAuthCallbackError::client(None, "missing OAuth code"))?;
     let state_jwt = q
         .state
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| (None, "missing OAuth state".into()))?;
+        .ok_or_else(|| OAuthCallbackError::client(None, "missing OAuth state"))?;
 
     let claims = verify_oauth_state(&state.config.state_secret, &state_jwt)
-        .map_err(|e| (None, e.to_string()))?;
+        .map_err(|e| OAuthCallbackError::invalid_state(None, e.to_string()))?;
 
     if claims.provider != provider {
-        return Err((
-            Some(claims.workspace_id.clone()),
-            "OAuth state provider mismatch".into(),
-        ));
+        return Err(OAuthCallbackError::provider_mismatch(Some(
+            claims.workspace_id.clone(),
+        )));
     }
 
     let workspace_id = Uuid::parse_str(&claims.workspace_id).map_err(|_| {
-        (
-            Some(claims.workspace_id.clone()),
-            "bad workspace in state".into(),
-        )
+        OAuthCallbackError::client(Some(claims.workspace_id.clone()), "bad workspace in state")
     })?;
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-        (
-            Some(claims.workspace_id.clone()),
-            "bad user in state".into(),
-        )
+        OAuthCallbackError::client(Some(claims.workspace_id.clone()), "bad user in state")
     })?;
 
     // Ensure user still a member (state alone is not enough if membership revoked).
     let member = workspace_repo::find_for_user(&state.db, workspace_id, user_id)
         .await
-        .map_err(|e| (Some(claims.workspace_id.clone()), e.to_string()))?;
+        .map_err(|e| OAuthCallbackError::other(Some(claims.workspace_id.clone()), e.to_string()))?;
     if member.is_none() {
-        return Err((
-            Some(claims.workspace_id.clone()),
-            "not a member of this workspace".into(),
-        ));
+        return Err(OAuthCallbackError::not_a_member(Some(
+            claims.workspace_id.clone(),
+        )));
     }
+
+    // Browser session is required. SameSite=Lax sends fleet_access on a
+    // real top-level provider redirect; a missing cookie is not a guest
+    // Connect. Session user must equal state.sub and belong to the state
+    // workspace — a Connect started on A completed with B's cookie is 403.
+    bind_callback_session(state, jar, workspace_id, user_id, &claims.workspace_id).await?;
 
     let client = resolve_oauth_client(state, workspace_id, &provider)
         .await
-        .map_err(|e| (Some(claims.workspace_id.clone()), e.to_string()))?
+        .map_err(|e| OAuthCallbackError::from_app_error(e, Some(claims.workspace_id.clone())))?
         .ok_or_else(|| {
-            (
+            OAuthCallbackError::client(
                 Some(claims.workspace_id.clone()),
                 format!("{provider} OAuth app is not set"),
             )
         })?;
 
+    // Consume before the token exchange so a replay or a parallel callback
+    // cannot attach or replace the connection. Verify-only (manifest) does
+    // not call this.
+    let consumed =
+        integ_repo::consume_oauth_state_nonce(&state.db, &claims.nonce, workspace_id, &provider)
+            .await
+            .map_err(|e| {
+                OAuthCallbackError::other(Some(claims.workspace_id.clone()), e.to_string())
+            })?;
+    if !consumed {
+        return Err(OAuthCallbackError::nonce_reuse(Some(
+            claims.workspace_id.clone(),
+        )));
+    }
+
     let tokens = exchange_code(&provider, &state.config, &client, &code)
         .await
-        .map_err(|e| (Some(claims.workspace_id.clone()), e.to_string()))?;
+        .map_err(|e| OAuthCallbackError::from_app_error(e, Some(claims.workspace_id.clone())))?;
 
     let mut config = tokens.config;
     if let Some(installation_id) = q.installation_id {
@@ -846,7 +932,7 @@ async fn oauth_callback_inner(
         .credentials_key
         .encrypt(&tokens.credentials)
         .map_err(|e| {
-            (
+            OAuthCallbackError::other(
                 Some(claims.workspace_id.clone()),
                 format!("failed to encrypt credentials: {e}"),
             )
@@ -867,7 +953,7 @@ async fn oauth_callback_inner(
         },
     )
     .await
-    .map_err(|e| (Some(claims.workspace_id.clone()), e.to_string()))?;
+    .map_err(|e| OAuthCallbackError::other(Some(claims.workspace_id.clone()), e.to_string()))?;
 
     tracing::info!(
         %workspace_id,
@@ -960,6 +1046,236 @@ async fn disconnect_integration(
 }
 
 #[cfg(test)]
+mod oauth_callback_error_tests {
+    fn production_src(src: &str) -> &str {
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    #[test]
+    fn callback_status_is_typed_and_user_mismatch_is_named() {
+        let src = production_src(include_str!("routes.rs"));
+        assert!(
+            !src.contains("fn oauth_callback_error_status"),
+            "HTTP status must not be scanned from error text"
+        );
+        let bind = fn_src(src, "async fn bind_callback_session(");
+        assert!(
+            bind.contains("user_mismatch"),
+            "user-mismatch arm must use a dedicated error, got {bind}"
+        );
+        assert!(
+            !bind.contains("OAuth state workspace mismatch"),
+            "user-mismatch must not reuse the workspace-mismatch string: {bind}"
+        );
+        let inner = fn_src(src, "pub async fn oauth_callback_inner(");
+        assert!(
+            inner.contains("bind_callback_session"),
+            "oauth_callback_inner must bind the session user: {inner}"
+        );
+        assert!(
+            !inner.contains("OAuth state workspace mismatch"),
+            "user-mismatch must not reuse the workspace-mismatch string: {inner}"
+        );
+        let manifest = fn_src(src, "async fn github_manifest_callback(");
+        assert!(
+            manifest.contains("CookieJar"),
+            "github_manifest_callback must take CookieJar: {manifest}"
+        );
+        let manifest_inner = fn_src(src, "async fn github_manifest_callback_inner(");
+        assert!(
+            manifest_inner.contains("bind_callback_session"),
+            "manifest convert/persist must bind the session user: {manifest_inner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod patch_agent_defaults_tests {
+    use super::*;
+    use crate::models::IntegrationAvailability;
+    use fleet_db::{IntegrationAgentDefaults, IntegrationConnection, IntegrationConnectionPublic};
+    use serde_json::json;
+
+    fn production_src(src: &str) -> &str {
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
+        let after = start + sig.len();
+        let end = src[after..]
+            .find("\npub async fn ")
+            .or_else(|| src[after..].find("\nasync fn "))
+            .or_else(|| src[after..].find("\npub fn "))
+            .or_else(|| src[after..].find("\nfn "))
+            .map(|i| after + i)
+            .unwrap_or(src.len());
+        &src[start..end]
+    }
+
+    /// PATCH defaults UPDATE a connected row only. Never INSERT / upsert.
+    /// Unknown + coming_soon have no connect path; public body has no secrets.
+    #[test]
+    fn patch_agent_defaults_only_updates_connected_never_inserts() {
+        let repo = production_src(include_str!("../../fleet-db/src/repos/integrations.rs"));
+        let sql_fn = fn_src(repo, "pub async fn patch_agent_defaults(");
+        assert!(
+            sql_fn.contains("UPDATE integration_connections"),
+            "patch_agent_defaults must UPDATE the existing row: {sql_fn}"
+        );
+        assert!(
+            sql_fn.contains("default_runner_id")
+                && sql_fn.contains("default_provider")
+                && sql_fn.contains("default_model"),
+            "patch_agent_defaults must write the three agent default keys: {sql_fn}"
+        );
+        assert!(
+            sql_fn.contains("status = 'connected'"),
+            "repo must UPDATE only status=connected: {sql_fn}"
+        );
+        assert!(
+            !sql_fn.to_ascii_uppercase().contains("INSERT"),
+            "patch_agent_defaults must not INSERT a connections row: {sql_fn}"
+        );
+        assert!(
+            !sql_fn.contains("ON CONFLICT") && !sql_fn.contains("upsert"),
+            "patch_agent_defaults must not upsert a fake connected row: {sql_fn}"
+        );
+        assert!(
+            sql_fn.contains("NotFound") && sql_fn.contains("not connected"),
+            "missing connected row must be NotFound, not an insert: {sql_fn}"
+        );
+
+        let routes = production_src(include_str!("routes.rs"));
+        let handler = fn_src(routes, "async fn patch_integration_defaults(");
+        assert!(
+            handler.contains("integ_repo::patch_agent_defaults"),
+            "HTTP PATCH must call patch_agent_defaults: {handler}"
+        );
+        assert!(
+            !handler.contains("integ_repo::upsert"),
+            "HTTP PATCH must not upsert a connection: {handler}"
+        );
+        assert!(
+            handler.contains("is_known_provider") && handler.contains("not_found"),
+            "unknown provider must 404 before the repo: {handler}"
+        );
+        assert!(
+            handler.contains("IntegrationConnectionPublic"),
+            "response must be IntegrationConnectionPublic: {handler}"
+        );
+        assert!(
+            handler.contains("require_workspace_member"),
+            "other-ws cookie must hit membership before any write: {handler}"
+        );
+
+        assert!(catalog::is_known_provider("github"));
+        assert!(catalog::is_known_provider("trello"));
+        assert!(!catalog::is_known_provider("notaprovider"));
+        assert!(!catalog::is_known_provider(""));
+        let trello = catalog::find_provider("trello").expect("trello catalog");
+        assert_eq!(
+            trello.availability,
+            IntegrationAvailability::Available,
+            "trello Connect is live; PATCH may persist defaults on that connected row only"
+        );
+        for coming in ["bitbucket", "confluence"] {
+            assert!(
+                catalog::is_known_provider(coming),
+                "{coming} is a catalog id; PATCH 404 is not-connected, not unknown"
+            );
+            let view = catalog::find_provider(coming).unwrap_or_else(|| panic!("{coming}"));
+            assert_eq!(
+                view.availability,
+                IntegrationAvailability::ComingSoon,
+                "{coming} stays coming_soon so PATCH cannot invent a Connect"
+            );
+            assert_eq!(
+                catalog::oauth_start_path(Uuid::nil(), coming),
+                None,
+                "{coming} must not expose oauth/start; PATCH is the only write and must not persist"
+            );
+        }
+
+        let now = Utc::now();
+        let row = IntegrationConnection {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            provider: "github".into(),
+            status: "connected".into(),
+            account_label: Some("acct".into()),
+            config: json!({
+                "default_runner_id": "runner-1",
+                "default_provider": "grok",
+                "default_model": "model-1",
+                "site": "github.com",
+            }),
+            credentials: json!({
+                "_enc": "v1",
+                "ct": "deadbeef",
+                "access_token": "tok_must_not_serialize",
+                "refresh_token": "ref_must_not_serialize",
+                "client_secret": "secret_must_not_serialize",
+            }),
+            connected_by: None,
+            last_error: None,
+            connected_at: now,
+            updated_at: now,
+            version: 2,
+        };
+        let public = IntegrationConnectionPublic::from(&row);
+        assert_eq!(
+            public.defaults,
+            IntegrationAgentDefaults {
+                default_runner_id: Some("runner-1".into()),
+                default_provider: Some("grok".into()),
+                default_model: Some("model-1".into()),
+            }
+        );
+        let body = serde_json::to_value(&public).expect("serialize public");
+        let obj = body.as_object().expect("object");
+        assert!(
+            !obj.contains_key("credentials"),
+            "public envelope must omit credentials: {body}"
+        );
+        let hay = body.to_string();
+        for needle in [
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "tok_must_not_serialize",
+            "ref_must_not_serialize",
+            "secret_must_not_serialize",
+            "deadbeef",
+        ] {
+            assert!(
+                !hay.contains(needle),
+                "public PATCH body must not contain {needle}: {body}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod disconnect_tests {
     use super::*;
     use crate::crypto::CredentialsKey;
@@ -1025,6 +1341,544 @@ mod disconnect_tests {
         assert!(
             opened.as_object().map(|o| o.is_empty()).unwrap_or(false),
             "wiped credentials must be empty: {opened}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod confluence_oauth_start_tests {
+    use super::*;
+
+    /// Same gate `GET/POST …/oauth/start` uses. Bitbucket http_api is 400
+    /// "not available"; Confluence must match (not 302 / not 500).
+    #[test]
+    fn confluence_get_oauth_start_is_client_error() {
+        let err = require_available_provider("confluence")
+            .expect_err("coming-soon Confluence must not start OAuth");
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(
+                    msg.to_ascii_lowercase().contains("not available"),
+                    "coming-soon start should say not available: {msg}"
+                );
+            }
+            AppError::NotFound(msg) => {
+                panic!("confluence is a known provider; GET start should be 400 not 404: {msg}")
+            }
+            other => panic!("GET start must be 4xx (bitbucket http_api: 400), got {other:?}"),
+        }
+
+        require_available_provider("github")
+            .expect("available providers may bootstrap oauth/start");
+
+        let unknown = require_available_provider("not-a-provider").expect_err("unknown provider");
+        assert!(
+            matches!(unknown, AppError::NotFound(_)),
+            "unknown provider is 404, got {unknown:?}"
+        );
+
+        let bitbucket =
+            require_available_provider("bitbucket").expect_err("bitbucket stays coming soon");
+        assert!(
+            matches!(bitbucket, AppError::BadRequest(_)),
+            "confluence must match bitbucket start gate, got {bitbucket:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod oauth_start_unconfigured_tests {
+    use super::*;
+    use crate::config::IntegrationsConfig;
+    use crate::crypto::CredentialsKey;
+    use axum::body::to_bytes;
+
+    fn unconfigured_config() -> IntegrationsConfig {
+        IntegrationsConfig {
+            api_public_base: "http://localhost:8080".into(),
+            ui_public_base: "http://localhost:3030".into(),
+            state_secret: "dev-change-me-to-a-long-random-secret-at-least-32-chars".into(),
+            credentials_key: CredentialsKey::from_secret(
+                "dev-change-me-to-a-long-random-secret-at-least-32-chars",
+            )
+            .expect("key"),
+            github: None,
+            gitlab: None,
+            slack: None,
+            linear: None,
+            jira: None,
+            figma: None,
+            notion: None,
+            google_drive: None,
+            teams: None,
+            discord: None,
+            trello: None,
+            asana: None,
+        }
+    }
+
+    async fn html_of(res: Response) -> (StatusCode, String, String) {
+        let status = res.status();
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        (status, ct, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Docs: if client id/secret unset, Connect still starts GitHub App
+    /// Manifest or a one-time OAuth app form. Must not 500.
+    #[tokio::test]
+    async fn oauth_start_unconfigured_still_bootstraps() {
+        let cfg = unconfigured_config();
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+
+        for provider in ["github", "gitlab", "jira", "slack"] {
+            assert!(
+                !cfg.is_oauth_configured(provider),
+                "{provider} client id must be unset for this case"
+            );
+        }
+
+        let mut saw_github = false;
+        let mut saw_other = false;
+        for view in catalog::catalog() {
+            let entry = match require_available_provider(&view.id) {
+                Ok(entry) => entry,
+                Err(err) => match err {
+                    AppError::BadRequest(_) | AppError::NotFound(_) => continue,
+                    other => panic!(
+                        "unconfigured start gate must not 500 for {}: {other:?}",
+                        view.id
+                    ),
+                },
+            };
+
+            let res = oauth_start_unconfigured(&cfg, user_id, workspace_id, &entry.id, &entry)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "available {} with unset client must not 500: {e:?}",
+                        entry.id
+                    )
+                });
+            assert!(
+                !res.status().is_server_error(),
+                "available {} unconfigured start must not 5xx, got {}",
+                entry.id,
+                res.status()
+            );
+            assert_eq!(
+                res.status(),
+                StatusCode::OK,
+                "available {} unconfigured start is bootstrap HTML, not 302/4xx: {}",
+                entry.id,
+                res.status()
+            );
+
+            let (status, ct, body) = html_of(res).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                ct.contains("text/html"),
+                "{} expected HTML, content-type={ct:?} body={body}",
+                entry.id
+            );
+            assert!(
+                !body.to_ascii_lowercase().contains("internal server error"),
+                "{} bootstrap must not be a 500 page: {body}",
+                entry.id
+            );
+
+            if entry.id == "github" {
+                saw_github = true;
+                assert!(
+                    body.contains("github.com/settings/apps/new")
+                        && body.contains("name=\"manifest\""),
+                    "GitHub unconfigured start is App Manifest, got {body}"
+                );
+                assert!(
+                    !body.contains("/login/oauth/authorize"),
+                    "GitHub unconfigured must not send the user-oauth authorize URL: {body}"
+                );
+                assert!(
+                    !body.contains("name=\"client_id\""),
+                    "GitHub uses Manifest, not the one-time client form: {body}"
+                );
+            } else {
+                saw_other = true;
+                assert!(
+                    body.contains("client_id") && body.contains("client_secret"),
+                    "{} unconfigured start is the one-time OAuth app form: {body}",
+                    entry.id
+                );
+                let action = format!(
+                    "/api/workspaces/{workspace_id}/integrations/{}/oauth/start",
+                    entry.id
+                );
+                assert!(
+                    body.contains(&action),
+                    "{} bootstrap form must POST back to oauth/start: {body}",
+                    entry.id
+                );
+                assert!(
+                    body.contains(&cfg.callback_url(&entry.id)),
+                    "{} form must show API_PUBLIC_BASE callback: {body}",
+                    entry.id
+                );
+                assert!(
+                    !body.contains("github.com/settings/apps/new"),
+                    "{} must not use the GitHub App Manifest form: {body}",
+                    entry.id
+                );
+            }
+        }
+        assert!(
+            saw_github && saw_other,
+            "need GitHub Manifest and at least one other available provider form"
+        );
+
+        // Control: a configured client is 302 to the provider, not bootstrap HTML.
+        let mut configured = unconfigured_config();
+        configured.github = Some(OAuthClientConfig {
+            client_id: "Iv1.configured-client".into(),
+            client_secret: "configured-secret".into(),
+            github_app_slug: None,
+        });
+        assert!(configured.is_oauth_configured("github"));
+        let client = configured.github.clone().expect("github client just set");
+        let redirect = redirect_to_provider(&configured, &user_id, workspace_id, "github", &client)
+            .expect("configured start redirects");
+        assert!(
+            redirect.status().is_redirection(),
+            "configured github must 302, got {}",
+            redirect.status()
+        );
+        let loc = redirect
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            loc.contains("github.com/login/oauth/authorize"),
+            "configured github Location must be user-oauth authorize, got {loc}"
+        );
+        assert!(
+            !loc.contains("/settings/apps/new"),
+            "configured github must not use App Manifest: {loc}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod token_paste_tests {
+    use super::*;
+    use crate::config::IntegrationsConfig;
+    use crate::crypto::CredentialsKey;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn paste_config() -> IntegrationsConfig {
+        IntegrationsConfig {
+            api_public_base: "http://localhost:8080".into(),
+            ui_public_base: "http://localhost:3030".into(),
+            state_secret: "token-paste-not-accepted-secret-32ch!".into(),
+            credentials_key: CredentialsKey::from_secret("token-paste-not-accepted-secret-32ch!")
+                .expect("key"),
+            github: None,
+            gitlab: None,
+            slack: None,
+            linear: None,
+            jira: None,
+            figma: None,
+            notion: None,
+            google_drive: None,
+            teams: None,
+            discord: None,
+            trello: None,
+            asana: None,
+        }
+    }
+
+    fn paste_state() -> IntegrationsState {
+        let pool = fleet_db::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
+            .expect("lazy pool");
+        IntegrationsState {
+            db: pool,
+            auth: fleet_auth::AuthConfig {
+                jwt_secret: "token-paste-not-accepted-secret-32ch!".into(),
+                access_ttl: std::time::Duration::from_secs(900),
+                refresh_ttl: std::time::Duration::from_secs(604_800),
+                cookie_secure: false,
+                cookie_samesite: axum_extra::extract::cookie::SameSite::Lax,
+            },
+            config: paste_config(),
+        }
+    }
+
+    async fn post_body(
+        app: &axum::Router,
+        path: &str,
+        content_type: &str,
+        body: String,
+    ) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .expect("token-paste request");
+        let res = app.clone().oneshot(req).await.expect("token-paste oneshot");
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn get_path(app: &axum::Router, path: &str) -> (StatusCode, String, String) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(Body::empty())
+            .expect("get request");
+        let res = app.clone().oneshot(req).await.expect("get oneshot");
+        let status = res.status();
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        (status, ct, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn assert_rejected_token_post(status: StatusCode, body: &str, pat: &str, context: &str) {
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::BAD_REQUEST,
+            "{context}: pasted PAT/API-key must be 404/400, got {status} body={body}"
+        );
+        assert!(
+            !status.is_success(),
+            "{context}: must not accept a pasted token: {status} {body}"
+        );
+        assert!(
+            !status.is_server_error(),
+            "{context}: reject must not 5xx: {status} {body}"
+        );
+        assert!(
+            !body.contains(pat),
+            "{context}: reject body must not echo the pasted token: {body}"
+        );
+    }
+
+    /// Docs: no personal access token paste. Connect is OAuth consent only.
+    /// Trello's documented flow is the authorize fragment (`#token=` → `?code=`),
+    /// not a PAT/API-key POST body. Random provider POST token is 404/400.
+    #[tokio::test]
+    async fn token_paste_not_accepted_except_trello_oauth_user_token_flow() {
+        let state = paste_state();
+        state.db.close().await;
+        let app = router().with_state(state);
+        let ws = Uuid::now_v7();
+        let pat = format!("ghp_must_not_accept_{}", Uuid::now_v7().as_simple());
+        let json_body = serde_json::json!({
+            "token": pat,
+            "access_token": pat,
+            "api_key": pat,
+            "pat": pat,
+            "personal_access_token": pat,
+        })
+        .to_string();
+        let form_body = format!(
+            "token={pat}&access_token={pat}&api_key={pat}&pat={pat}&personal_access_token={pat}"
+        );
+
+        // Random / unknown, available, coming-soon, and Trello: a pasted
+        // PAT/API-key body is not Connect. Trello's exception is GET
+        // callback fragment capture, not this POST.
+        let providers = [
+            "notaprovider",
+            "made-up-saas",
+            "github",
+            "gitlab",
+            "bitbucket",
+            "trello",
+        ];
+        let suffixes = ["token", "pat", "api-key", "api_key", "connect"];
+        let mut saw_random = false;
+        for provider in providers {
+            if provider == "notaprovider" || provider == "made-up-saas" {
+                saw_random = true;
+                assert!(
+                    !catalog::is_known_provider(provider),
+                    "{provider} must stay unknown so POST token is not a catalog match"
+                );
+            }
+            for suffix in suffixes {
+                let path = format!("/api/workspaces/{ws}/integrations/{provider}/{suffix}");
+                let (status, body) =
+                    post_body(&app, &path, "application/json", json_body.clone()).await;
+                assert_rejected_token_post(status, &body, &pat, &format!("JSON POST {path}"));
+                let (status, body) = post_body(
+                    &app,
+                    &path,
+                    "application/x-www-form-urlencoded",
+                    form_body.clone(),
+                )
+                .await;
+                assert_rejected_token_post(status, &body, &pat, &format!("form POST {path}"));
+            }
+        }
+        assert!(saw_random, "must exercise a random provider POST token");
+
+        // Trello exception: documented OAuth/user-token flow is the
+        // fragment-capture page, not an <input> paste of a PAT/API key.
+        let (tr_status, tr_ct, tr_body) =
+            get_path(&app, "/api/integrations/oauth/callback/trello").await;
+        assert_eq!(
+            tr_status,
+            StatusCode::OK,
+            "Trello callback without code is the fragment capture page, got {tr_status} {tr_body}"
+        );
+        assert!(
+            tr_ct.contains("text/html"),
+            "Trello capture must be HTML, content-type={tr_ct:?} body={tr_body}"
+        );
+        let tr_lower = tr_body.to_ascii_lowercase();
+        assert!(
+            tr_body.contains("location.hash")
+                && (tr_body.contains("h.get(\"token\")") || tr_body.contains("h.get('token')"))
+                && tr_body.contains("code"),
+            "Trello must lift #token= into ?code= (OAuth user-token), got {tr_body}"
+        );
+        assert!(
+            !tr_lower.contains("<input")
+                && !tr_lower.contains("<textarea")
+                && !tr_lower.contains("name=\"token\"")
+                && !tr_lower.contains("name=\"api_key\"")
+                && !tr_lower.contains("name=\"access_token\"")
+                && !tr_lower.contains("name=\"pat\"")
+                && !tr_lower.contains("personal access token")
+                && !tr_lower.contains("paste"),
+            "Trello user-token flow must not be a PAT/API-key paste form: {tr_body}"
+        );
+
+        // Control: other providers do not serve that fragment-token page.
+        let (gh_status, _, gh_body) =
+            get_path(&app, "/api/integrations/oauth/callback/github").await;
+        assert_ne!(
+            gh_status,
+            StatusCode::OK,
+            "GitHub callback without code must not be a 200 token-capture page: {gh_body}"
+        );
+        assert!(
+            !gh_body.contains("location.hash"),
+            "GitHub must not lift #token= the way Trello does: {gh_body}"
+        );
+        assert!(
+            !gh_body.contains(&pat),
+            "GitHub callback must not echo a PAT: {gh_body}"
+        );
+
+        // Unconfigured Connect bootstrap asks for OAuth app client id/secret,
+        // never a user PAT / API key.
+        let bootstrap = provider_bootstrap_html(
+            "Jira",
+            "jira",
+            "https://developer.atlassian.com/console/myapps/",
+            "http://localhost:8080/api/integrations/oauth/callback/jira",
+            &format!("/api/workspaces/{ws}/integrations/jira/oauth/start"),
+        );
+        let boot_lower = bootstrap.to_ascii_lowercase();
+        assert!(
+            bootstrap.contains("name=\"client_id\"")
+                && bootstrap.contains("name=\"client_secret\""),
+            "bootstrap is the OAuth app form: {bootstrap}"
+        );
+        for forbidden in [
+            "name=\"token\"",
+            "name=\"api_key\"",
+            "name=\"access_token\"",
+            "name=\"pat\"",
+            "name=\"personal_access_token\"",
+            "personal access token",
+        ] {
+            assert!(
+                !boot_lower.contains(forbidden),
+                "bootstrap must not accept a pasted {forbidden}: {bootstrap}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod oauth_app_secret_not_returned_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// PUT oauth-app JSON and GET /integrations views omit `client_secret`.
+    /// The HTTP oneshot of the same name is the product lock (bodies,
+    /// Location, Set-Cookie, encrypted persist). GET start when unset still
+    /// serves the collect-a-secret form (sibling oauth-start-unconfigured).
+    #[test]
+    fn oauth_app_put_and_start_form_never_return_client_secret() {
+        let secret = "unit_oauth_app_secret_must_not_serialize";
+        let body = serde_json::to_value(&PutOauthAppResponse {
+            provider: "github".into(),
+            configured: true,
+            oauth_start_path: "/api/workspaces/x/integrations/github/oauth/start".into(),
+        })
+        .expect("serialize PutOauthAppResponse");
+        let obj = body.as_object().expect("object");
+        assert_eq!(obj.get("provider").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(obj.get("configured"), Some(&json!(true)));
+        assert_eq!(
+            obj.get("oauth_start_path").and_then(|v| v.as_str()),
+            Some("/api/workspaces/x/integrations/github/oauth/start")
+        );
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["provider", "configured", "oauth_start_path"]
+                .into_iter()
+                .collect(),
+            "PUT JSON is provider + configured + start path, not a secret: {body}"
+        );
+        assert!(
+            !obj.contains_key("client_secret") && !obj.contains_key("client_id"),
+            "PUT JSON must not include a plaintext client_secret field: {body}"
+        );
+        assert!(
+            !body.to_string().contains(secret),
+            "PUT JSON must not contain a secret string: {body}"
+        );
+
+        let mut view = catalog::find_provider("github").expect("github");
+        view.oauth_configured = true;
+        view.oauth_start_path = Some("/api/workspaces/x/integrations/github/oauth/start".into());
+        let hay = serde_json::to_value(&view).expect("serialize IntegrationView");
+        let view_obj = hay.as_object().expect("object");
+        assert_eq!(
+            view_obj.get("oauth_configured"),
+            Some(&json!(true)),
+            "configured GET view still omits the secret: {hay}"
+        );
+        assert!(
+            !view_obj.contains_key("client_secret") && !view_obj.contains_key("client_id"),
+            "catalog/GET view must not have a client_secret field: {hay}"
+        );
+        assert!(
+            !hay.to_string().contains(secret),
+            "GET view must not contain a secret string: {hay}"
         );
     }
 }

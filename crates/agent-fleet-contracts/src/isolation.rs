@@ -57,23 +57,29 @@ impl ExecutorKind {
     }
 }
 
-/// Weakest offered class that still meets `need`.
-///
-/// Empty offer or nothing ≥ need → `None` (do not assign; do not fall back).
-/// Host part of an `http(s)://` URL. Empty if the string has no host.
+/// Host part of a URL. Understands any `scheme://` authority
+/// (`http`, `https`, `postgres`, `redis`, …), including `[::1]` and `user@host`.
+/// Empty if the string has no host.
 pub fn host_from_url(url: &str) -> &str {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let rest = rest.split('/').next().unwrap_or(rest);
-    if let Some(inside) = rest.strip_prefix('[') {
+    let rest = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    if let Some(inside) = hostport.strip_prefix('[') {
         return inside.split(']').next().unwrap_or("");
     }
-    if rest.starts_with("::") {
-        return rest.split('%').next().unwrap_or(rest);
+    if hostport.starts_with("::") {
+        return hostport.split('%').next().unwrap_or(hostport);
     }
-    rest.rsplit_once(':').map(|(h, _)| h).unwrap_or(rest)
+    hostport
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(hostport)
 }
 
 /// Loopback host: `localhost`, `::1`, or `127.0.0.0/8`.
@@ -102,8 +108,10 @@ pub fn url_is_loopback(url: &str) -> bool {
 
 /// Drop host-absolute `*_BIN` / `*_CMD` (and `FLEET_WORK_CMD`) so isolated
 /// guests do not exec a path that exists only on the plane or host box.
+/// Also drop values that are loopback URLs (127/8, localhost, ::1) so
+/// guests do not inherit host-only secrets or endpoints.
 pub fn strip_isolated_guest_env(env: &mut std::collections::HashMap<String, String>) {
-    env.retain(|k, v| !is_host_path_override(k, v));
+    env.retain(|k, v| !is_host_path_override(k, v) && !url_is_loopback(v));
 }
 
 fn is_host_path_override(key: &str, value: &str) -> bool {
@@ -117,15 +125,11 @@ fn is_host_path_override(key: &str, value: &str) -> bool {
     false
 }
 
-pub fn pick_isolation(
-    need: IsolationClass,
-    offer: &[IsolationClass],
-) -> Option<IsolationClass> {
-    offer
-        .iter()
-        .copied()
-        .filter(|c| *c >= need)
-        .min()
+/// Weakest offered class that still meets `need`.
+///
+/// Empty offer or nothing ≥ need → `None` (do not assign; do not fall back).
+pub fn pick_isolation(need: IsolationClass, offer: &[IsolationClass]) -> Option<IsolationClass> {
+    offer.iter().copied().filter(|c| *c >= need).min()
 }
 
 #[cfg(test)]
@@ -178,10 +182,7 @@ mod tests {
     fn kube_pod_is_container_kubevirt_is_vm() {
         assert_eq!(ExecutorKind::KubePod.isolation(), IsolationClass::Container);
         assert_eq!(ExecutorKind::Kubevirt.isolation(), IsolationClass::Vm);
-        assert_eq!(
-            ExecutorKind::Firecracker.isolation(),
-            IsolationClass::Vm
-        );
+        assert_eq!(ExecutorKind::Firecracker.isolation(), IsolationClass::Vm);
     }
 
     #[test]
@@ -192,8 +193,72 @@ mod tests {
         assert!(url_is_loopback("http://[::1]:8080"));
         assert!(url_is_loopback("http://::1"));
         assert!(!url_is_loopback("http://10.0.0.8:8080"));
-        assert!(!url_is_loopback("http://api.agent-fleet.svc.cluster.local:8080"));
+        assert!(!url_is_loopback(
+            "http://api.agent-fleet.svc.cluster.local:8080"
+        ));
         assert!(!url_is_loopback("http://192.168.1.1:8080"));
+    }
+
+    /// Docs §11: k8s guest callback must not be loopback. Pods cannot reach
+    /// the API host's `127/8`, `localhost`, or `::1`. `url_is_loopback` /
+    /// `host_is_loopback` are the shared rejectors (not only `127.0.0.1`).
+    #[test]
+    fn k8s_guest_callback_url_must_not_be_loopback() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "127.42.0.1",
+            "127.255.255.255",
+            "localhost",
+            "LOCALHOST",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(
+                host_is_loopback(host),
+                "k8s callback host {host} is loopback (127/8, localhost, ::1)"
+            );
+        }
+        for url in [
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1/v1",
+            "http://127.1.2.3:1",
+            "http://127.42.0.1:6379",
+            "http://127.255.255.255:8080",
+            "http://localhost:8080/v1",
+            "http://LOCALHOST:8080",
+            "http://[::1]:8080",
+            "http://::1",
+            "https://127.0.0.1:443/health",
+        ] {
+            assert!(
+                url_is_loopback(url),
+                "k8s callback {url} is loopback; pods cannot reach the API host"
+            );
+            assert!(
+                host_is_loopback(host_from_url(url)),
+                "host of {url} ({}) must be loopback",
+                host_from_url(url)
+            );
+        }
+        for url in [
+            "http://api.agent-fleet.svc.cluster.local:8080",
+            "http://10.0.0.8:8080",
+            "http://172.18.0.1:8081",
+            "http://192.168.1.1:8080",
+        ] {
+            assert!(
+                !url_is_loopback(url),
+                "{url} is cluster-reachable, not loopback"
+            );
+        }
+        assert!(!host_is_loopback("10.0.0.8"));
+        assert!(!host_is_loopback("172.18.0.1"));
+        assert!(!host_is_loopback("192.168.1.1"));
+        assert!(!host_is_loopback("api.agent-fleet.svc.cluster.local"));
+        assert!(!host_is_loopback("8.8.8.8"));
+        assert!(!host_is_loopback("126.0.0.1"));
+        assert!(!host_is_loopback("128.0.0.1"));
     }
 
     #[test]
@@ -212,5 +277,99 @@ mod tests {
         assert!(!env.contains_key("FLEET_WORK_CMD"));
         assert_eq!(env.get("FLEET_GROK_BIN").map(String::as_str), Some("grok"));
         assert_eq!(env.get("FLEET_MODEL").map(String::as_str), Some("llama"));
+    }
+
+    /// Isolated guests must not inherit host-absolute `*_BIN`/`*_CMD` or
+    /// secrets that only exist on loopback (127/8, localhost, ::1).
+    #[test]
+    fn strip_isolated_guest_env_drops_host_path_bins_and_loopback_secrets() {
+        let mut env = std::collections::HashMap::from([
+            (
+                "FLEET_MOCK_ACP_BIN".into(),
+                "/home/viny/.local/bin/mock-acp-agent".into(),
+            ),
+            ("FLEET_GROK_BIN".into(), "/opt/plane/grok".into()),
+            ("GROK_BIN".into(), "/usr/local/bin/grok".into()),
+            (
+                "fleet_mock_acp_bin".into(),
+                "/secret/host/mock-acp-agent".into(),
+            ),
+            ("FLEET_DRIVER_CMD".into(), "/opt/plane/fleet-driver".into()),
+            ("FLEET_WORK_CMD".into(), "echo host-only".into()),
+            ("FLEET_ACP_BIN".into(), "mock-acp-agent".into()),
+            ("FLEET_HARNESS".into(), "mock".into()),
+            ("FLEET_MODEL".into(), "llama".into()),
+            ("FLEET_WORKER_TOKEN".into(), "tok-plain".into()),
+            (
+                "DATABASE_URL".into(),
+                "postgres://127.0.0.1:5432/fleet".into(),
+            ),
+            ("FLEET_API_BASE".into(), "http://127.1.2.3:8080".into()),
+            ("HTTP_PROXY".into(), "http://localhost:3128".into()),
+            ("FLEET_CONTROL_PLANE_URL".into(), "http://[::1]:8080".into()),
+            ("REDIS_URL".into(), "redis://127.42.0.1:6379/0".into()),
+            (
+                "FLEET_ORCHESTRATOR_URL".into(),
+                "http://api.agent-fleet.svc.cluster.local:8080".into(),
+            ),
+            (
+                "FLEET_REPO_URL".into(),
+                "https://github.com/example/repo.git".into(),
+            ),
+            ("LAN_API".into(), "http://10.0.0.8:8080".into()),
+        ]);
+        strip_isolated_guest_env(&mut env);
+
+        for host_only in [
+            "FLEET_MOCK_ACP_BIN",
+            "FLEET_GROK_BIN",
+            "GROK_BIN",
+            "fleet_mock_acp_bin",
+            "FLEET_DRIVER_CMD",
+            "FLEET_WORK_CMD",
+            "DATABASE_URL",
+            "FLEET_API_BASE",
+            "HTTP_PROXY",
+            "FLEET_CONTROL_PLANE_URL",
+            "REDIS_URL",
+        ] {
+            assert!(
+                !env.contains_key(host_only),
+                "isolated guest must not inherit {host_only}: {env:?}"
+            );
+        }
+
+        assert_eq!(
+            env.get("FLEET_ACP_BIN").map(String::as_str),
+            Some("mock-acp-agent")
+        );
+        assert_eq!(env.get("FLEET_HARNESS").map(String::as_str), Some("mock"));
+        assert_eq!(env.get("FLEET_MODEL").map(String::as_str), Some("llama"));
+        assert_eq!(
+            env.get("FLEET_WORKER_TOKEN").map(String::as_str),
+            Some("tok-plain")
+        );
+        assert_eq!(
+            env.get("FLEET_ORCHESTRATOR_URL").map(String::as_str),
+            Some("http://api.agent-fleet.svc.cluster.local:8080")
+        );
+        assert_eq!(
+            env.get("FLEET_REPO_URL").map(String::as_str),
+            Some("https://github.com/example/repo.git")
+        );
+        assert_eq!(
+            env.get("LAN_API").map(String::as_str),
+            Some("http://10.0.0.8:8080")
+        );
+
+        // 127/8 is loopback — not only 127.0.0.1.
+        assert!(url_is_loopback("http://127.0.0.1:5432"));
+        assert!(url_is_loopback("http://127.1.2.3:8080"));
+        assert!(url_is_loopback("http://127.42.0.1:6379"));
+        assert!(host_is_loopback("127.255.255.255"));
+        assert!(!host_is_loopback("10.0.0.8"));
+        assert!(!url_is_loopback(
+            "http://api.agent-fleet.svc.cluster.local:8080"
+        ));
     }
 }

@@ -1,6 +1,6 @@
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 
 use super::state::AppState;
 use crate::config::AuthMode;
@@ -22,8 +22,7 @@ impl FromRequestParts<AppState> for AdminAuth {
         if state.admin_token.trim().is_empty() {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                "admin automation disabled (set ADMIN_TOKEN to enable /v1 bearer routes)"
-                    .into(),
+                "admin automation disabled (set ADMIN_TOKEN to enable /v1 bearer routes)".into(),
             ));
         }
         let header = parts

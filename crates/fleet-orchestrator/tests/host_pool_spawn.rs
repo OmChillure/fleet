@@ -6,6 +6,7 @@ use fleet_orchestrator::sandbox::remote::{
 };
 use fleet_orchestrator::store::{
     AssignableHost, HostRuntime, RunnerIsolation, host_at_capacity, pick_assignable_host,
+    pick_assignable_runner,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -144,6 +145,79 @@ fn pick_skips_when_advertised_cap_reached() {
     inflight.insert(capped.id, 2);
     assert!(host_at_capacity(2, &capped));
     assert!(pick_assignable_host(&[capped], &inflight).is_none());
+}
+
+#[test]
+fn pick_at_advertised_cap_selects_other_native() {
+    // Catalog: second job waits when cap is 1. Two natives: inflight==cap on A
+    // must pick B, not fall through to local SANDBOX_BACKEND.
+    let mut at_cap = host(true, false, true, false, 8);
+    at_cap.advertised_max_concurrent = Some(1);
+    let mut sandboxed = host(true, false, true, false, 8);
+    sandboxed.isolation = RunnerIsolation::Sandboxed;
+    let free = host(true, false, true, false, 8);
+    let mut inflight = HashMap::new();
+    inflight.insert(at_cap.id, 1);
+    assert!(
+        host_at_capacity(1, &at_cap),
+        "advertised cap 1 is full at inflight==1 even when plane max is 8"
+    );
+
+    let chosen = pick_assignable_runner(
+        &[at_cap.clone(), sandboxed.clone(), free.clone()],
+        &inflight,
+    )
+    .expect("under-cap native B must be picked; must not fall through to local spawn");
+    assert_eq!(chosen.id(), free.id);
+    assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
+    assert_eq!(chosen.runtime, HostRuntime::Host);
+
+    let chosen_rev = pick_assignable_runner(
+        &[free.clone(), sandboxed.clone(), at_cap.clone()],
+        &inflight,
+    )
+    .unwrap();
+    assert_eq!(
+        chosen_rev.id(),
+        free.id,
+        "list order must not pick the at-cap host or a sandboxed box"
+    );
+
+    assert!(
+        pick_assignable_runner(&[at_cap.clone(), sandboxed], &inflight).is_none(),
+        "sandboxed is not a fallback; sole native at advertised cap=1 waits"
+    );
+    assert!(
+        pick_assignable_runner(&[at_cap], &inflight).is_none(),
+        "second job waits when the only native is at advertised cap 1"
+    );
+}
+
+#[test]
+fn pick_advertised_zero_is_not_unlimited() {
+    // Some(0) clamps to 1. It is not "no cap" / unlimited.
+    let mut zero = host(true, false, true, false, 8);
+    zero.advertised_max_concurrent = Some(0);
+    assert!(
+        host_at_capacity(1, &zero),
+        "advertised 0 must not be treated as unlimited"
+    );
+    assert!(
+        !host_at_capacity(0, &zero),
+        "advertised 0 still allows the first job (clamp 1)"
+    );
+
+    let other = host(true, false, true, false, 8);
+    let mut inflight = HashMap::new();
+    inflight.insert(zero.id, 1);
+    let chosen = pick_assignable_runner(&[zero.clone(), other.clone()], &inflight)
+        .expect("skip advertised-0 host at 1 inflight; pick the other native");
+    assert_eq!(chosen.id(), other.id);
+    assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
+    assert!(
+        pick_assignable_runner(&[zero], &inflight).is_none(),
+        "advertised 0 at inflight 1 waits; must not local-spawn"
+    );
 }
 
 #[test]

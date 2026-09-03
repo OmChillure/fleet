@@ -30,18 +30,13 @@ pub fn manifest_callback_url(cfg: &IntegrationsConfig) -> String {
 }
 
 pub fn webhook_url(cfg: &IntegrationsConfig) -> String {
-    format!(
-        "{}/api/integrations/webhooks/github",
-        cfg.api_public_base
-    )
+    format!("{}/api/integrations/webhooks/github", cfg.api_public_base)
 }
 
 /// Unique-enough name (GitHub Apps: max 34 chars).
 pub fn app_name_for_workspace(workspace_id: Uuid) -> String {
     let hex = workspace_id.to_string().replace('-', "");
-    let tail = hex
-        .get(hex.len().saturating_sub(8)..)
-        .unwrap_or("local");
+    let tail = hex.get(hex.len().saturating_sub(8)..).unwrap_or("local");
     format!("Agent Fleet {tail}")
 }
 
@@ -117,8 +112,8 @@ pub fn github_install_url(slug: &str, state: &str) -> String {
 }
 
 pub fn manifest_form_html(cfg: &IntegrationsConfig, workspace_id: Uuid, state: &str) -> String {
-    let manifest = serde_json::to_string(&manifest_value(cfg, workspace_id))
-        .unwrap_or_else(|_| "{}".into());
+    let manifest =
+        serde_json::to_string(&manifest_value(cfg, workspace_id)).unwrap_or_else(|_| "{}".into());
     let action = format!(
         "https://github.com/settings/apps/new?state={}",
         urlencoding(state)
@@ -191,11 +186,12 @@ pub async fn convert_manifest(code: &str) -> AppResult<ConvertedGithubApp> {
         return Err(AppError::bad_request(format!("GitHub: {msg}")));
     }
 
-    let parsed: ManifestConversionBody = serde_json::from_value(body).map_err(|e| {
-        AppError::internal(format!("GitHub manifest convert unexpected body: {e}"))
-    })?;
+    let parsed: ManifestConversionBody = serde_json::from_value(body)
+        .map_err(|e| AppError::internal(format!("GitHub manifest convert unexpected body: {e}")))?;
     if parsed.client_id.is_empty() || parsed.client_secret.is_empty() || parsed.slug.is_empty() {
-        return Err(AppError::internal("GitHub manifest convert missing credentials"));
+        return Err(AppError::internal(
+            "GitHub manifest convert missing credentials",
+        ));
     }
     let _ = parsed.message;
     Ok(ConvertedGithubApp {
@@ -234,8 +230,8 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::CredentialsKey;
     use crate::config::IntegrationsConfig;
+    use crate::crypto::CredentialsKey;
 
     fn cfg() -> IntegrationsConfig {
         IntegrationsConfig {
@@ -341,8 +337,8 @@ mod tests {
     }
 
     fn encode_state_typ(secret: &str, typ: &str) -> String {
-        use jsonwebtoken::{EncodingKey, Header, encode};
         use super::super::state_token::OAuthStateClaims;
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let now = chrono::Utc::now().timestamp();
         encode(
@@ -369,9 +365,7 @@ mod tests {
 
         assert_ne!(install, authorize);
         assert!(
-            install.starts_with(
-                "https://github.com/apps/agent-fleet-deadbeef/installations/new?"
-            ),
+            install.starts_with("https://github.com/apps/agent-fleet-deadbeef/installations/new?"),
             "{install}"
         );
         assert!(
@@ -491,17 +485,13 @@ mod tests {
 
     #[test]
     fn user_oauth_state_cannot_complete_manifest_callback() {
-        use jsonwebtoken::{DecodingKey, Validation, decode};
         use super::super::state_token::OAuthStateClaims;
+        use jsonwebtoken::{DecodingKey, Validation, decode};
 
         let secret = cfg().state_secret.clone();
-        let user_state = crate::oauth::issue_oauth_state(
-            &secret,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "github",
-        )
-        .unwrap();
+        let user_state =
+            crate::oauth::issue_oauth_state(&secret, Uuid::now_v7(), Uuid::now_v7(), "github")
+                .unwrap();
         let user_claims = crate::oauth::verify_oauth_state(&secret, &user_state)
             .expect("user-oauth state verifies for the user-oauth callback");
         assert_eq!(user_claims.typ, "oauth_state");

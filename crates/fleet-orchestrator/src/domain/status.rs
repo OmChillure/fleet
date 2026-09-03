@@ -32,10 +32,7 @@ impl BoardTaskStatus {
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::DoneSuccess | Self::DoneFailed | Self::Cancelled
-        )
+        matches!(self, Self::DoneSuccess | Self::DoneFailed | Self::Cancelled)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -88,10 +85,7 @@ pub fn can_transition(from: BoardTaskStatus, to: BoardTaskStatus) -> bool {
     if from == to {
         return false;
     }
-    ALLOWED
-        .get(&from)
-        .map(|v| v.contains(&to))
-        .unwrap_or(false)
+    ALLOWED.get(&from).map(|v| v.contains(&to)).unwrap_or(false)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -165,6 +159,16 @@ pub enum WorkPlanStatus {
 impl WorkPlanStatus {
     pub fn is_accepted(self) -> bool {
         matches!(self, Self::Accepted)
+    }
+
+    pub fn from_db(s: &str) -> Option<Self> {
+        Some(match s {
+            "draft" => Self::Draft,
+            "ready" => Self::Ready,
+            "accepted" => Self::Accepted,
+            "superseded" => Self::Superseded,
+            _ => return None,
+        })
     }
 }
 
@@ -308,6 +312,101 @@ mod tests {
     fn transition_errors() {
         assert!(transition(BoardTaskStatus::Queued, BoardTaskStatus::InProgress).is_err());
         assert!(transition(BoardTaskStatus::Ready, BoardTaskStatus::Assigned).is_ok());
+    }
+
+    #[test]
+    fn illegal_task_transition_rejected() {
+        // Docs §15.1: persist snake_case; illegal edges are rejected (not reopened).
+        // Domain helper lock (extra). Store persist is
+        // store_integration::illegal_task_transition_rejected_in_store.
+        fn persist(from: &str, to: &str) -> Result<(), TransitionError> {
+            let from = BoardTaskStatus::from_db(from)
+                .unwrap_or_else(|| panic!("unknown board status {from}"));
+            let to =
+                BoardTaskStatus::from_db(to).unwrap_or_else(|| panic!("unknown board status {to}"));
+            transition(from, to)
+        }
+
+        let err = persist("done_success", "ready").expect_err("done_success → ready");
+        assert_eq!(err.from, BoardTaskStatus::DoneSuccess);
+        assert_eq!(err.to, BoardTaskStatus::Ready);
+        assert_eq!(
+            err.to_string(),
+            "illegal board task transition: done_success → ready"
+        );
+        assert!(!can_transition(err.from, err.to));
+
+        let err = persist("cancelled", "assigned").expect_err("cancelled → assigned");
+        assert_eq!(err.from, BoardTaskStatus::Cancelled);
+        assert_eq!(err.to, BoardTaskStatus::Assigned);
+        assert_eq!(
+            err.to_string(),
+            "illegal board task transition: cancelled → assigned"
+        );
+        assert!(!can_transition(err.from, err.to));
+
+        let illegal = [
+            ("done_failed", "ready"),
+            ("done_success", "cancelled"),
+            ("cancelled", "done_success"),
+            ("queued", "assigned"),
+            ("ready", "in_progress"),
+            ("assigned", "ready"),
+            ("in_progress", "assigned"),
+            ("done_success", "done_success"),
+            ("cancelled", "cancelled"),
+        ];
+        for (from, to) in illegal {
+            let err = persist(from, to).expect_err(&format!("{from} → {to} must be rejected"));
+            assert_eq!(err.from.as_str(), from);
+            assert_eq!(err.to.as_str(), to);
+            assert_eq!(
+                err.to_string(),
+                format!("illegal board task transition: {from} → {to}")
+            );
+            assert!(
+                !can_transition(err.from, err.to),
+                "CanTransition({from} → {to}) must be false"
+            );
+        }
+
+        // Legal §15.1 path still works so this is not "every persist is rejected".
+        let legal = [
+            ("queued", "ready"),
+            ("ready", "assigned"),
+            ("assigned", "in_progress"),
+            ("in_progress", "done_success"),
+            ("assigned", "done_failed"),
+            ("assigned", "cancelled"),
+            ("in_progress", "blocked"),
+            ("in_progress", "retry_wait"),
+            ("blocked", "ready"),
+            ("retry_wait", "ready"),
+            ("queued", "done_failed"),
+            ("queued", "cancelled"),
+        ];
+        for (from, to) in legal {
+            persist(from, to).unwrap_or_else(|e| panic!("{from} → {to} must be allowed: {e}"));
+            let from_s = BoardTaskStatus::from_db(from).unwrap();
+            let to_s = BoardTaskStatus::from_db(to).unwrap();
+            assert!(
+                can_transition(from_s, to_s),
+                "CanTransition({from} → {to}) must be true"
+            );
+        }
+
+        for from in ["done_success", "done_failed", "cancelled"] {
+            for to in BoardTaskStatus::all() {
+                let err = persist(from, to.as_str())
+                    .expect_err(&format!("{from} → {to} must be rejected"));
+                assert_eq!(err.from.as_str(), from);
+                assert_eq!(err.to, *to);
+                assert!(
+                    !can_transition(err.from, err.to),
+                    "CanTransition({from} → {to}) must be false"
+                );
+            }
+        }
     }
 
     #[test]

@@ -193,17 +193,15 @@ fn default_provider_name() -> String {
     "Custom provider".into()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn deserializes_minimal_job() {
-        let j: Job = serde_json::from_str(
-            r#"{"repo_url":"https://github.com/x/y.git","prompt":"hi"}"#,
-        )
-        .unwrap();
+        let j: Job =
+            serde_json::from_str(r#"{"repo_url":"https://github.com/x/y.git","prompt":"hi"}"#)
+                .unwrap();
         assert_eq!(j.harness, "opencode");
         assert_eq!(j.r#type, "analyze_repo");
         assert!(!j.auto_approve, "permissions default deny");

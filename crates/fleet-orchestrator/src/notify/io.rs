@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::sandbox::io::IntegrationHandle;
 use super::{HitlBlockedEvent, NotificationSink, NotifyError};
+use crate::sandbox::io::IntegrationHandle;
 
 pub struct IoNotify {
     pub io: IntegrationHandle,
@@ -33,7 +33,11 @@ impl NotificationSink for IoNotify {
         post_slack(&self.io, event.project_id, &text).await
     }
 
-    async fn on_event(&self, event_type: &str, payload: serde_json::Value) -> Result<(), NotifyError> {
+    async fn on_event(
+        &self,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), NotifyError> {
         if !matches!(
             event_type,
             "run_completed" | "run_failed" | "run_cancelled" | "run_terminal"

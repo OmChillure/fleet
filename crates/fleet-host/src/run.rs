@@ -1,12 +1,9 @@
 //! Heartbeat + lease loop.
 
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -174,39 +171,10 @@ pub fn unpair() -> Result<()> {
     Ok(())
 }
 
-fn run_lock_path() -> std::path::PathBuf {
-    crate::paths::config_dir().join("run.lock")
-}
-
 /// One `fleet-host run` per config dir. A second process would share the
 /// machine token and pick docker vs kube nondeterministically.
-pub fn acquire_run_lock() -> Result<File> {
-    let path = run_lock_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            bail!(
-                "fleet-host already running (lock {})",
-                path.display()
-            );
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = &file;
-    }
-    Ok(file)
+pub fn acquire_run_lock() -> Result<crate::paths::RunLock> {
+    crate::paths::acquire_run_lock()
 }
 
 pub async fn run() -> Result<()> {
@@ -736,10 +704,7 @@ mod tests {
         }
         let first = acquire_run_lock().expect("first lock");
         let err = acquire_run_lock().expect_err("second lock");
-        assert!(
-            err.to_string().contains("already running"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("already running"), "{err}");
         drop(first);
         acquire_run_lock().expect("lock after drop");
     }
@@ -757,7 +722,9 @@ mod tests {
             is_loopback_url("http://::1"),
             "bare IPv6 loopback must be detected"
         );
-        assert!(!is_loopback_url("http://api.agent-fleet.svc.cluster.local:8080"));
+        assert!(!is_loopback_url(
+            "http://api.agent-fleet.svc.cluster.local:8080"
+        ));
     }
 
     #[test]
@@ -777,7 +744,10 @@ mod tests {
             err.contains("machine_token"),
             "empty token must fail closed: {err}"
         );
-        assert!(cfg.host_id.is_none(), "must not persist a host without a token");
+        assert!(
+            cfg.host_id.is_none(),
+            "must not persist a host without a token"
+        );
     }
 
     #[test]

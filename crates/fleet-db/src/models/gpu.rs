@@ -150,7 +150,10 @@ fn infer_amd(n: &str) -> Option<String> {
     if contains_any(n, &["7735hs", "7735u", "7535hs", "7535u"]) {
         return Some("AMD Radeon 680M".into());
     }
-    if contains_any(n, &["6900hs", "6800hs", "6800u", "6800h", "6600h", "6600hs"]) {
+    if contains_any(
+        n,
+        &["6900hs", "6800hs", "6800u", "6800h", "6600h", "6600hs"],
+    ) {
         return Some("AMD Radeon 680M".into());
     }
     if contains_any(
@@ -359,12 +362,18 @@ mod tests {
             normalize_gpu_name("AMD Radeon(TM) Graphics"),
             "AMD Radeon Graphics"
         );
-        assert_eq!(normalize_gpu_name("Iris Xe Graphics"), "Intel Iris Xe Graphics");
+        assert_eq!(
+            normalize_gpu_name("Iris Xe Graphics"),
+            "Intel Iris Xe Graphics"
+        );
         assert_eq!(normalize_gpu_name("UHD Graphics"), "Intel UHD Graphics");
     }
 
     #[test]
     fn discrete_xeon_has_no_igpu() {
-        assert_eq!(infer_igpu_from_cpu("Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz"), None);
+        assert_eq!(
+            infer_igpu_from_cpu("Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz"),
+            None
+        );
     }
 }

@@ -31,6 +31,13 @@ fn host(
     }
 }
 
+/// Plant a candidate the host picker would take; kind isolation is the runner gate.
+fn planted(kind: RunnerKind, max_concurrent: i32) -> AssignableHost {
+    let mut row = host(true, true, true, true, max_concurrent);
+    row.isolation = kind.isolation();
+    row
+}
+
 #[test]
 fn default_isolation_is_native() {
     let h = host(true, true, true, true, 4);
@@ -95,14 +102,33 @@ fn only_self_hosted_native_kind_is_assignable() {
 }
 
 #[test]
-fn cloud_partners_public_cloud_are_not_chosen() {
+fn select_assignable_runner_ignores_planted_cloud_partners_public_cloud() {
+    // Native-only filter: planted FleetCloud / Partners / PublicCloud rows
+    // are ignored even when they would otherwise win (higher cap).
+    for kind in [
+        RunnerKind::FleetCloud,
+        RunnerKind::Partners,
+        RunnerKind::PublicCloud,
+    ] {
+        let row = planted(kind, 8);
+        assert!(
+            !kind.is_assignable() && !row.isolation.is_assignable(),
+            "{kind:?} must stay off the picker"
+        );
+        assert!(
+            pick_assignable_runner(&[row.clone()], &HashMap::new()).is_none(),
+            "{kind:?} planted alone must not be chosen"
+        );
+        assert!(
+            pick_assignable_host(&[row], &HashMap::new()).is_some(),
+            "host picker has no kind filter; {kind:?} would be chosen"
+        );
+    }
+
     let native = host(true, true, true, true, 4);
-    let mut fleet_cloud = host(true, true, true, true, 8);
-    fleet_cloud.isolation = RunnerKind::FleetCloud.isolation();
-    let mut partners = host(true, true, true, true, 8);
-    partners.isolation = RunnerKind::Partners.isolation();
-    let mut public_cloud = host(true, true, true, true, 8);
-    public_cloud.isolation = RunnerKind::PublicCloud.isolation();
+    let fleet_cloud = planted(RunnerKind::FleetCloud, 8);
+    let partners = planted(RunnerKind::Partners, 8);
+    let public_cloud = planted(RunnerKind::PublicCloud, 8);
 
     assert!(
         pick_assignable_runner(
@@ -112,8 +138,6 @@ fn cloud_partners_public_cloud_are_not_chosen() {
         .is_none(),
         "cloud / partners / public-cloud are not a spawn path"
     );
-    // host picker has no kind filter; runner wrapper is the gate
-    assert!(pick_assignable_host(&[fleet_cloud.clone()], &HashMap::new()).is_some());
 
     let chosen = pick_assignable_runner(
         &[fleet_cloud, partners, public_cloud, native.clone()],

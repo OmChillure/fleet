@@ -98,6 +98,12 @@ json_quote() {
   printf '"%s"' "${1//\"/\\\"}"
 }
 
+# File hash is not bake id. 64-hex is sha256 of a bin; tree-id is 40 hex
+# (optionally -<8-12 hex> when dirty).
+is_file_sha256() {
+  [[ "$1" =~ ^[0-9a-fA-F]{64}$ ]]
+}
+
 pkg_version_from_toml() {
   local name="$1"
   local file="$ROOT/runner-packages.toml"
@@ -145,7 +151,9 @@ if want and want in data:
 PY
 }
 
-# Write $out/manifest.json from the three package bins already in $out.
+# Write $out/manifest.json next to the fleet-host / fleet-driver bins.
+# Fail closed: missing platform or missing host/driver hash must not be
+# reported current. File hash is not bake id (git_sha).
 # git_sha is the bake inside fleet-host. --write-manifest must not stamp
 # today's tree-id onto unchanged / unbaked bins (that made x1 look current).
 # After copy_bins, set FLEET_MANIFEST_STAMP=1 to record $FLEET_GIT_SHA
@@ -175,6 +183,17 @@ write_manifest() {
     fi
   done
 
+  local -a bin_shas=()
+  local sha
+  for bin in "${names[@]}"; do
+    sha="$(file_sha256 "$out/$bin")"
+    if [[ -z "$sha" ]]; then
+      echo "stage-worker-dist: write_manifest: empty sha256 for $out/$bin" >&2
+      return 1
+    fi
+    bin_shas+=("$sha")
+  done
+
   baked="$(baked_sha_from_host "$hostbin" || true)"
   if [[ -n "$baked" ]]; then
     git_sha="$baked"
@@ -187,20 +206,35 @@ write_manifest() {
     git_sha=""
   fi
 
+  if [[ -n "$git_sha" ]]; then
+    if is_file_sha256 "$git_sha"; then
+      echo "stage-worker-dist: write_manifest: git_sha must not be a file hash" >&2
+      return 1
+    fi
+    local bin_sha
+    for bin_sha in "${bin_shas[@]}"; do
+      if [[ "${git_sha,,}" == "${bin_sha,,}" ]]; then
+        echo "stage-worker-dist: write_manifest: git_sha must not be a file hash" >&2
+        return 1
+      fi
+    done
+  fi
+
   local staged_at
   staged_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local host_ver driver_ver
   host_ver="$(pkg_version_from_toml fleet-host)"
   driver_ver="$(pkg_version_from_toml fleet-driver)"
 
+  local tmp="$out/manifest.json.tmp"
   {
     printf '{\n  "git_sha": %s,\n  "platform": %s,\n  "staged_at": %s,\n  "bins": {\n' \
       "$(json_quote "$git_sha")" "$(json_quote "$platform")" "$(json_quote "$staged_at")"
     local i=0
     local n=${#names[@]}
-    local sha size ver stem
+    local size ver stem
     for bin in "${names[@]}"; do
-      sha="$(file_sha256 "$out/$bin")"
+      sha="${bin_shas[$i]}"
       size="$(wc -c <"$out/$bin" | tr -d '[:space:]')"
       stem="${bin%.exe}"
       if [[ "$stem" == "fleet-driver" ]]; then
@@ -218,7 +252,12 @@ write_manifest() {
       fi
     done
     printf '  }\n}\n'
-  } >"$out/manifest.json"
+  } >"$tmp" || {
+    rm -f "$tmp"
+    echo "stage-worker-dist: write_manifest: failed writing $tmp" >&2
+    return 1
+  }
+  mv -f "$tmp" "$out/manifest.json"
   echo "staged $out/manifest.json"
 }
 
@@ -230,12 +269,27 @@ write_manifests_in() {
   fi
   local d
   local any=0
+  local has_host has_driver
   for d in "$root"/*/; do
     [[ -d "$d" ]] || continue
+    has_host=0
+    has_driver=0
     if [[ -f "${d}fleet-host" || -f "${d}fleet-host.exe" ]]; then
-      write_manifest "${d%/}"
-      any=1
+      has_host=1
     fi
+    if [[ -f "${d}fleet-driver" || -f "${d}fleet-driver.exe" ]]; then
+      has_driver=1
+    fi
+    if [[ "$has_host" -eq 0 && "$has_driver" -eq 0 ]]; then
+      continue
+    fi
+    # Incomplete platform: do not write a current-looking manifest.
+    if [[ "$has_host" -eq 0 || "$has_driver" -eq 0 ]]; then
+      echo "stage-worker-dist: write_manifest: missing host/driver in ${d%/}" >&2
+      exit 1
+    fi
+    write_manifest "${d%/}"
+    any=1
   done
   if [[ "$any" -eq 0 ]]; then
     echo "stage-worker-dist: no staged platforms under $root" >&2

@@ -82,7 +82,9 @@ pub fn write_run_context(
         out.push_str("\n\n");
     }
     out.push_str("## Board\n\n");
-    out.push_str("| id | title | status | depends | acceptance |\n| --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "| id | title | status | depends | acceptance |\n| --- | --- | --- | --- | --- |\n",
+    );
     let id_to_plan: std::collections::HashMap<uuid::Uuid, String> = tasks
         .iter()
         .map(|t| (t.id, t.plan_task_id.clone()))

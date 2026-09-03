@@ -88,11 +88,35 @@ pub async fn claim_next(
 }
 
 /// Claim the next ready spawn or signal whose payload is addressed to `host_id`.
+///
+/// `workspace_id` is ignored: cluster hosts lease jobs in other workspaces.
+/// Regular paired hosts must use [`claim_next_spawn_for_host_in_workspace`].
 pub async fn claim_next_spawn_for_host(
     pool: &PgPool,
     workspace_id: Uuid,
     host_id: Uuid,
     lease_for: Duration,
+) -> DbResult<Option<WorkClaim>> {
+    let _ = workspace_id;
+    claim_next_spawn_for_host_filtered(pool, host_id, lease_for, None).await
+}
+
+/// Home-workspace only. A regular paired box must not take another
+/// workspace's `spawn_session` just because the payload names its id.
+pub async fn claim_next_spawn_for_host_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    host_id: Uuid,
+    lease_for: Duration,
+) -> DbResult<Option<WorkClaim>> {
+    claim_next_spawn_for_host_filtered(pool, host_id, lease_for, Some(workspace_id)).await
+}
+
+async fn claim_next_spawn_for_host_filtered(
+    pool: &PgPool,
+    host_id: Uuid,
+    lease_for: Duration,
+    workspace_id: Option<Uuid>,
 ) -> DbResult<Option<WorkClaim>> {
     let lease_token = Uuid::now_v7();
     let lease_expires = Utc::now() + lease_for;
@@ -105,6 +129,7 @@ pub async fn claim_next_spawn_for_host(
               AND available_at <= now()
               AND kind IN ('spawn_session', 'signal_session', 'chat_turn')
               AND payload->>'host_id' = $4
+              AND ($5::uuid IS NULL OR workspace_id = $5)
             ORDER BY CASE
                        WHEN kind = 'signal_session' THEN 0
                        WHEN kind = 'chat_turn' THEN 1
@@ -128,12 +153,12 @@ pub async fn claim_next_spawn_for_host(
         "#
     );
 
-    let _ = workspace_id;
     sqlx::query_as::<_, WorkClaim>(&q)
         .bind(host_id)
         .bind(lease_token)
         .bind(lease_expires)
         .bind(&host_id_text)
+        .bind(workspace_id)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)

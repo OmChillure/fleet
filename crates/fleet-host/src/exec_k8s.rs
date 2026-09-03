@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::client::SpawnPayload;
 use crate::config::LocalConfig;
-use crate::spawn::{LiveChild, child_env, host_child_bin, live_children};
+use crate::spawn::{LiveChild, host_child_bin, live_children};
+#[cfg(test)]
+use crate::spawn::child_env;
 
 /// etcd / CR env budget (same as orchestrator).
 pub const MAX_SPEC_MD_BYTES: usize = 200 * 1024;
@@ -82,7 +84,9 @@ fn nonempty(s: &str, fallback: &str) -> String {
 
 fn network_for_opts(opts: &KubePodOpts) -> SandboxNetwork {
     let mode = opts.egress_mode.trim().to_ascii_lowercase();
-    if mode == "allowlist" {
+    // A host IP callback needs a CIDR or NetworkPolicy blocks heartbeats,
+    // even when the box default is egress none.
+    if mode == "allowlist" || worker_url_is_ip_literal(&opts.worker_api_url) {
         return network_for_worker_url(&opts.worker_api_url);
     }
     SandboxNetwork {
@@ -93,6 +97,12 @@ fn network_for_opts(opts: &KubePodOpts) -> SandboxNetwork {
         },
         allowlist: vec![],
     }
+}
+
+fn worker_url_is_ip_literal(url: &str) -> bool {
+    url_host(url)
+        .map(|host| is_ipv4_literal(&host) || is_ipv6_literal(&host))
+        .unwrap_or(false)
 }
 
 fn namespace_from_env() -> String {
@@ -270,7 +280,11 @@ pub async fn run_kube_pod(
     payload: &SpawnPayload,
     session_dir: &Path,
 ) -> Result<()> {
-    let env = crate::spawn::child_env_for_isolated_guest(payload, &cfg.extra_env, Path::new(POD_WORK_DIR));
+    let env = crate::spawn::child_env_for_isolated_guest(
+        payload,
+        &cfg.extra_env,
+        Path::new(POD_WORK_DIR),
+    );
     let opts = KubePodOpts::from_cfg(cfg, payload, &env);
     if opts.image.trim().is_empty() {
         bail!("kube_pod image is empty");
@@ -344,7 +358,11 @@ pub async fn pull_guest_proof(namespace: &str, cr_name: &str, dest: &Path) {
         return;
     }
     let pod = fleet_operator::crd::pod_name_for(cr_name);
-    for rel in ["result.md", "artifacts/transcript.md", "artifacts/result.json"] {
+    for rel in [
+        "result.md",
+        "artifacts/transcript.md",
+        "artifacts/result.json",
+    ] {
         let out = tokio::process::Command::new("kubectl")
             .args([
                 "-n",
@@ -462,8 +480,14 @@ mod tests {
         assert_eq!(opts.command, vec!["fleet-driver".to_string()]);
         let filled = child_env(&payload, &HashMap::new(), Path::new(POD_WORK_DIR));
         let spec = spec_from_payload(&payload, &filled, &opts).unwrap();
-        assert_eq!(spec.command.as_ref().unwrap(), &vec!["fleet-driver".to_string()]);
-        assert_eq!(spec.env.get("FLEET_HARNESS").map(String::as_str), Some("mock"));
+        assert_eq!(
+            spec.command.as_ref().unwrap(),
+            &vec!["fleet-driver".to_string()]
+        );
+        assert_eq!(
+            spec.env.get("FLEET_HARNESS").map(String::as_str),
+            Some("mock")
+        );
     }
 
     #[test]

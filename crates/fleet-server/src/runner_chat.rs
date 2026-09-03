@@ -9,7 +9,7 @@ use chrono::{TimeDelta, Utc};
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::work_claims;
 use fleet_db::{NewWorkClaim, WorkerHost};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat::ChatProgress;
@@ -41,6 +41,11 @@ pub fn format_transcript(pairs: &[(String, String)]) -> String {
     out
 }
 
+/// Empty or whitespace-only pairs — ignore `format_transcript` role labels.
+fn chat_turn_is_empty(pairs: &[(String, String)]) -> bool {
+    pairs.iter().all(|(_, content)| content.trim().is_empty())
+}
+
 pub async fn run_on_runner(
     state: &AppState,
     workspace_id: Uuid,
@@ -51,13 +56,12 @@ pub async fn run_on_runner(
     pairs: &[(String, String)],
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<(String, String)> {
-    let host = crate::worker_hosts::load_visible_host(state, workspace_id, runner_id).await?;
-    ensure_online(&host)?;
-
-    let prompt = format_transcript(pairs);
-    if prompt.trim().is_empty() {
+    if chat_turn_is_empty(pairs) {
         return Err(AppError::bad_request("empty chat turn".to_string()));
     }
+    let host = require_taking(state, workspace_id, runner_id).await?;
+
+    let prompt = format_transcript(pairs);
     let claim_id = Uuid::now_v7();
     let payload = json!({
         "kind": "chat_turn",
@@ -93,7 +97,32 @@ pub async fn run_on_runner(
     wait_for_result(&state.db, claim_id, model, progress, &host.name, provider).await
 }
 
+/// `DELETE` revoke sets `status=disabled` and drops the machine token, but
+/// leaves `enabled=true` and a fresh `last_seen_at`. Chat must 400 on that
+/// leftover — not enqueue `chat_turn` and wait 240s.
+pub(crate) fn host_is_removed(host: &WorkerHost) -> bool {
+    host.status == fleet_db::WORKER_HOST_STATUS_DISABLED
+}
+
+/// Workspace-visible runner that is still taking chat. Call before enqueue
+/// and before NDJSON so a leftover `runner_id` 400s instead of hanging.
+pub(crate) async fn require_taking(
+    state: &AppState,
+    workspace_id: Uuid,
+    runner_id: Uuid,
+) -> AppResult<WorkerHost> {
+    let host = crate::worker_hosts::load_visible_host(state, workspace_id, runner_id).await?;
+    ensure_online(&host)?;
+    Ok(host)
+}
+
 fn ensure_online(host: &WorkerHost) -> AppResult<()> {
+    if host_is_removed(host) {
+        return Err(AppError::bad_request(format!(
+            "runner `{}` is removed",
+            host.name
+        )));
+    }
     let Some(seen) = host.last_seen_at else {
         return Err(AppError::bad_request(format!(
             "runner `{}` has not heartbeated yet",
@@ -109,6 +138,28 @@ fn ensure_online(host: &WorkerHost) -> AppResult<()> {
     if !host.enabled || host.paused || host.drain {
         return Err(AppError::bad_request(format!(
             "runner `{}` is not taking jobs",
+            host.name
+        )));
+    }
+    // Mid host-bin swap: /me/lease is claim:null; chat must 400 here instead
+    // of enqueue + 240s while the box has stopped polling.
+    if host.software_updating {
+        return Err(AppError::bad_request(format!(
+            "runner `{}` is updating / not taking jobs (host is updating)",
+            host.name
+        )));
+    }
+    // v1 is host mode only. allow_host=false or advertised_host=false already
+    // makes /me/lease claim:null; chat must 400 here instead of enqueue + 240s.
+    if !host.effective_host() {
+        return Err(AppError::bad_request(format!(
+            "runner `{}` is not taking / host jobs not allowed",
+            host.name
+        )));
+    }
+    if fleet_db::repos::worker_hosts::at_job_cap(host) {
+        return Err(AppError::bad_request(format!(
+            "runner `{}` is at cap (too many jobs / not taking more)",
             host.name
         )));
     }
@@ -200,6 +251,8 @@ async fn emit(progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>, ev: Ch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
 
     #[test]
     fn transcript_labels_roles() {
@@ -209,5 +262,43 @@ mod tests {
         ]);
         assert!(t.contains("User:\nhi"));
         assert!(t.contains("Assistant:\nhello"));
+    }
+
+    /// Empty `messages` / empty pairs must 400 and must not enter the 240s wait.
+    /// HTTP contract lives in `tests/chat_stream_http.rs` (cookie + oneshot).
+    #[test]
+    fn empty_messages_rejected_without_hang() {
+        assert!(
+            chat_turn_is_empty(&[]),
+            "no pairs must be an empty chat turn"
+        );
+        assert!(
+            chat_turn_is_empty(&[("user".into(), "  \n".into())]),
+            "whitespace-only content must 400 even though format_transcript adds labels"
+        );
+        assert!(
+            chat_turn_is_empty(&[
+                ("user".into(), String::new()),
+                ("assistant".into(), " \t".into()),
+            ]),
+            "all-blank pairs must 400"
+        );
+        assert!(!chat_turn_is_empty(&[("user".into(), "hi".into())]));
+        assert!(
+            format_transcript(&[]).trim().is_empty(),
+            "no pairs must be an empty transcript"
+        );
+        // Labels alone are not a turn — do not wait on them.
+        assert!(!format_transcript(&[("user".into(), "  \n".into())])
+            .trim()
+            .is_empty());
+
+        let err = parse_result(&json!({ "result": { "ok": true, "text": "  " } }), "m")
+            .expect_err("empty CLI reply");
+        assert!(
+            matches!(&err, AppError::BadRequest(m) if m.contains("empty")),
+            "{err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
     }
 }

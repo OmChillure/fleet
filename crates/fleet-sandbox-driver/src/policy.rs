@@ -2,7 +2,7 @@
 //! Kept free of Redis/Docker I/O so unit tests can drive real shipped logic.
 
 use crate::job::{ProjectSetup, WorkspaceTool};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -84,7 +84,9 @@ pub fn resolve_named_tool<'a>(
         bail!("tool {name:?} has empty argv");
     }
     for a in &tool.argv {
-        if a.chars().any(|c| matches!(c, '\n' | '\r' | ';' | '|' | '&' | '$' | '`')) {
+        if a.chars()
+            .any(|c| matches!(c, '\n' | '\r' | ';' | '|' | '&' | '$' | '`'))
+        {
             bail!("tool {name:?} argv rejected: {a:?}");
         }
     }
@@ -211,22 +213,20 @@ pub fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) 
         return path_allows.iter().any(|p| hay.contains(p));
     }
 
-    token_allows.iter().any(|t| hay.contains(t))
-        || path_allows.iter().any(|p| hay.contains(p))
+    token_allows.iter().any(|t| hay.contains(t)) || path_allows.iter().any(|p| hay.contains(p))
 }
 
 fn looks_like_unrestricted_shell(hay: &str) -> bool {
-    hay.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == '\\'))
-        .any(|tok| {
-            if tok.is_empty() {
-                return false;
-            }
-            let base = tok
-                .rsplit(|c| c == '/' || c == '\\')
-                .next()
-                .unwrap_or(tok);
-            matches!(base, "bash" | "sh" | "zsh" | "dash" | "busybox" | "shell")
-        })
+    hay.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == '\\')
+    })
+    .any(|tok| {
+        if tok.is_empty() {
+            return false;
+        }
+        let base = tok.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(tok);
+        matches!(base, "bash" | "sh" | "zsh" | "dash" | "busybox" | "shell")
+    })
 }
 
 #[cfg(test)]
@@ -247,7 +247,10 @@ mod tests {
     fn jobs_root_default_is_workspace_jobs() {
         assert_eq!(jobs_root_from(None), PathBuf::from("/workspace/jobs"));
         assert_eq!(jobs_root_from(Some("")), PathBuf::from("/workspace/jobs"));
-        assert_eq!(jobs_root_from(Some("   ")), PathBuf::from("/workspace/jobs"));
+        assert_eq!(
+            jobs_root_from(Some("   ")),
+            PathBuf::from("/workspace/jobs")
+        );
     }
 
     #[test]
@@ -314,7 +317,11 @@ mod tests {
         tools.insert(
             "evil".into(),
             WorkspaceTool {
-                argv: vec!["python".into(), "-c".into(), "import os; os.system('x')".into()],
+                argv: vec![
+                    "python".into(),
+                    "-c".into(),
+                    "import os; os.system('x')".into(),
+                ],
                 description: None,
             },
         );

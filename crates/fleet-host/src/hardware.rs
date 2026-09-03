@@ -104,7 +104,7 @@ fn disk_space() -> Option<(u64, u64)> {
         }
         let st = unsafe { buf.assume_init() };
         let frsize = st.f_frsize as u64;
-        let total = st.f_blocks.saturating_mul(frsize as _ ) as u64;
+        let total = st.f_blocks.saturating_mul(frsize as _) as u64;
         let free = st.f_bavail.saturating_mul(frsize as _) as u64;
         if total == 0 {
             return None;

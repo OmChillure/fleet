@@ -9,14 +9,17 @@ pub use host_pool::{
     AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
     host_at_capacity, pick_assignable_host, pick_assignable_host_for, pick_assignable_runner,
-    select_assignable_host, select_assignable_runner, select_assignable_runner_preferring,
+    select_assignable_host, select_assignable_host_preferring, select_assignable_runner,
+    select_assignable_runner_preferring,
     workspace_has_updating_host,
 };
 pub use models::*;
 pub use pool::*;
 pub use tick_ops::SpawnAssignment;
 
-use crate::domain::{WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id};
+use crate::domain::{
+    BoardTaskStatus, WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id, transition,
+};
 use crate::validate::validate_plan;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -497,6 +500,7 @@ impl Store {
         sqlx::query_as::<_, PendingPlanRow>(
             r#"
             SELECT p.id AS plan_id, p.run_id, r.status AS run_status,
+                   p.status AS plan_status,
                    r.cancel_requested_at, p.materialized_at
             FROM work_plans p
             JOIN work_runs r ON r.id = p.run_id
@@ -531,6 +535,7 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Generic persist: honors `can_transition` before the CAS write.
     pub async fn update_task_status(
         &self,
         task_id: Uuid,
@@ -538,6 +543,14 @@ impl Store {
         to: &str,
         failure_reason: Option<&str>,
     ) -> Result<bool> {
+        let from_s = BoardTaskStatus::from_db(from)
+            .ok_or_else(|| StoreError::Validation(format!("unknown board status {from}")))?;
+        let to_s = BoardTaskStatus::from_db(to)
+            .ok_or_else(|| StoreError::Validation(format!("unknown board status {to}")))?;
+        if let Err(err) = transition(from_s, to_s) {
+            return Err(StoreError::Validation(err.to_string()));
+        }
+
         let res = sqlx::query(
             r#"
             UPDATE board_tasks
@@ -615,6 +628,7 @@ pub struct PendingPlanRow {
     pub plan_id: Uuid,
     pub run_id: Uuid,
     pub run_status: String,
+    pub plan_status: String,
     pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     pub materialized_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -626,6 +640,7 @@ struct PlanLockRow {
     body: serde_json::Value,
     materialized_at: Option<chrono::DateTime<chrono::Utc>>,
     run_id: Uuid,
+    plan_status: String,
     run_status: String,
     cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -638,6 +653,7 @@ async fn materialize_in_tx(
     let plan = sqlx::query_as::<_, PlanLockRow>(
         r#"
         SELECT p.id, p.body, p.materialized_at, p.run_id,
+               p.status AS plan_status,
                r.status AS run_status, r.cancel_requested_at
         FROM work_plans p
         JOIN work_runs r ON r.id = p.run_id
@@ -654,7 +670,10 @@ async fn materialize_in_tx(
     if plan.materialized_at.is_some() {
         return Ok(0);
     }
-    if plan.cancel_requested_at.is_some() || plan.run_status != WorkRunStatus::Accepted.as_db() {
+    if plan.cancel_requested_at.is_some()
+        || plan.run_status != WorkRunStatus::Accepted.as_db()
+        || plan.plan_status != WorkPlanStatus::Accepted.as_db()
+    {
         return Ok(0);
     }
 

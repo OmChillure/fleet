@@ -20,6 +20,8 @@ ALLOW_RAW = raw_exec_allowed(os.environ.get("FLEET_ALLOW_RAW_EXEC"))
 
 # job_id -> tools map from the signed provision request (immutable vs harness file writes)
 TOOLS_BY_JOB: dict[str, dict] = {}
+# Valid handshake MACs are one-shot; replay of the same signed request fails closed.
+SEEN_HMACS: set[str] = set()
 
 ALLOWED_BINS = {
     "python", "python3", "pip", "pip3", "npm", "npx", "node", "pytest",
@@ -44,8 +46,12 @@ def verify_request(req: dict) -> None:
     body = {k: v for k, v in req.items() if k != "hmac"}
     raw = canonical_json(body).encode()
     expect = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(str(got), expect):
+    mac = str(got)
+    if not hmac.compare_digest(mac, expect):
         raise ValueError("invalid handshake hmac")
+    if mac in SEEN_HMACS:
+        raise ValueError("replayed handshake hmac")
+    SEEN_HMACS.add(mac)
 
 
 def sign_body(obj: dict) -> dict:
@@ -70,7 +76,12 @@ def jobs_root() -> Path:
 
 
 def path_under_jobs(path: Path, root: Path | None = None) -> bool:
-    """True if path is under jobs isolation root (no '..', logical prefix check)."""
+    """True if path stays under jobs isolation after resolving symlinks.
+
+    Logical ``..`` is rejected before resolve. A symlink whose target leaves
+    the jobs tree is outside. Prefix fallback is only used when resolve()
+    itself fails (broken path, loop); ValueError from relative_to is deny.
+    """
     root = root or jobs_root()
     for c in path.parts:
         if c == "..":
@@ -80,7 +91,9 @@ def path_under_jobs(path: Path, root: Path | None = None) -> bool:
         root_r = root.resolve()
         resolved.relative_to(root_r)
         return True
-    except (ValueError, OSError):
+    except ValueError:
+        return False
+    except OSError:
         pass
     try:
         root_s = str(root if root.is_absolute() else root.absolute())

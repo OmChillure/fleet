@@ -46,6 +46,43 @@ function Normalize-Url([string]$u) {
     return $u.TrimEnd("/")
 }
 
+# 127/8, localhost, or [::1] -- another computer cannot reach this URL.
+function Test-FleetUrlLoopback([string]$Url) {
+    if (-not $Url) { return $false }
+    $hostPart = $Url -replace '^https?://', ''
+    $hostPart = $hostPart.Split('/')[0]
+    # last @ (userinfo), same as host_from_url
+    $at = $hostPart.LastIndexOf('@')
+    if ($at -ge 0) { $hostPart = $hostPart.Substring($at + 1) }
+    if ($hostPart -match '^\[(.+)\](?::\d+)?$') {
+        $hostPart = $Matches[1]
+    } elseif ($hostPart -notmatch ':.*:') {
+        $hostPart = $hostPart.Split(':')[0]
+    }
+    $h = $hostPart.Trim().TrimStart('[').TrimEnd(']').ToLowerInvariant()
+    if ($h -eq 'localhost' -or $h -eq '::1') { return $true }
+    if ($h -match '^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
+        foreach ($p in @($Matches[1], $Matches[2], $Matches[3])) {
+            $n = [int]$p
+            if ($n -gt 255) { return $false }
+        }
+        return $true
+    }
+    return $false
+}
+
+# Warn on loopback. Off-box (GET /health fails) stops before pair/bin fetch.
+# Same-box /health may continue (local fleet-dev).
+function Assert-FleetLoopbackOrigin([string]$Origin) {
+    if (-not (Test-FleetUrlLoopback $Origin)) { return }
+    Write-Warning "FLEET_URL $Origin is loopback. Another computer needs a LAN or public control-plane URL."
+    try {
+        $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "$Origin/health"
+    } catch {
+        throw "refusing to pair: $Origin is loopback and this host is not the control plane"
+    }
+}
+
 if ($env:FLEET_DETECT_ONLY -eq "1") {
     Write-Output (Get-FleetPlatform)
     return
@@ -91,6 +128,7 @@ Write-Host "platform: $platform"
 Write-Host "  machine arch: $machineArch"
 Write-Host "  process arch: $($env:PROCESSOR_ARCHITECTURE)"
 Write-Host "source:   $origin"
+Assert-FleetLoopbackOrigin $origin
 
 $scriptUrl = "$origin/install/worker/${platform}.ps1"
 Write-Host "downloading $platform installer"

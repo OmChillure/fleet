@@ -141,10 +141,7 @@ pub async fn connect_with(database_url: &str, cfg: &PoolConfig) -> DbResult<PgPo
 /// Host/db for logs — never includes password.
 fn redact_db_target(database_url: &str) -> String {
     // postgres://user:pass@host:port/db?… → host:port/db
-    let without_scheme = database_url
-        .split("://")
-        .nth(1)
-        .unwrap_or(database_url);
+    let without_scheme = database_url.split("://").nth(1).unwrap_or(database_url);
     let after_at = without_scheme.split('@').nth(1).unwrap_or(without_scheme);
     let host_and_path = after_at.split('?').next().unwrap_or(after_at);
     host_and_path.to_string()
@@ -180,10 +177,7 @@ pub async fn connect_and_migrate(database_url: &str) -> DbResult<PgPool> {
     connect_and_migrate_with(database_url, &PoolConfig::default()).await
 }
 
-pub async fn connect_and_migrate_with(
-    database_url: &str,
-    cfg: &PoolConfig,
-) -> DbResult<PgPool> {
+pub async fn connect_and_migrate_with(database_url: &str, cfg: &PoolConfig) -> DbResult<PgPool> {
     let target = redact_db_target(database_url);
     tracing::info!(db_target = %target, "connecting to database…");
     let pool = connect_with(database_url, cfg).await?;

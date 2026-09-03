@@ -1,6 +1,6 @@
 //! GitHub HTTP client helpers (control plane only).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -50,11 +50,7 @@ pub(crate) fn map_issue(i: &Value) -> Value {
     let labels: Vec<Value> = i
         .get("labels")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|l| l.get("name").cloned())
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|l| l.get("name").cloned()).collect())
         .unwrap_or_default();
     json!({
         "number": i.get("number"),
@@ -141,8 +137,16 @@ pub(crate) async fn github_get(http: &reqwest::Client, token: &str, url: &str) -
     }
 }
 
-pub(crate) async fn github_post(http: &reqwest::Client, token: &str, url: &str, body: &Value) -> (u16, Value) {
-    match github_headers(http.post(url).json(body), token).send().await {
+pub(crate) async fn github_post(
+    http: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> (u16, Value) {
+    match github_headers(http.post(url).json(body), token)
+        .send()
+        .await
+    {
         Ok(res) => {
             let status = res.status().as_u16();
             let body = res.json::<Value>().await.unwrap_or(json!({}));
@@ -152,7 +156,12 @@ pub(crate) async fn github_post(http: &reqwest::Client, token: &str, url: &str, 
     }
 }
 
-pub(crate) async fn github_put(http: &reqwest::Client, token: &str, url: &str, body: &Value) -> (u16, Value) {
+pub(crate) async fn github_put(
+    http: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> (u16, Value) {
     match github_headers(http.put(url).json(body), token).send().await {
         Ok(res) => {
             let status = res.status().as_u16();
@@ -163,8 +172,16 @@ pub(crate) async fn github_put(http: &reqwest::Client, token: &str, url: &str, b
     }
 }
 
-pub(crate) async fn github_patch(http: &reqwest::Client, token: &str, url: &str, body: &Value) -> (u16, Value) {
-    match github_headers(http.patch(url).json(body), token).send().await {
+pub(crate) async fn github_patch(
+    http: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> (u16, Value) {
+    match github_headers(http.patch(url).json(body), token)
+        .send()
+        .await
+    {
         Ok(res) => {
             let status = res.status().as_u16();
             let body = res.json::<Value>().await.unwrap_or(json!({}));

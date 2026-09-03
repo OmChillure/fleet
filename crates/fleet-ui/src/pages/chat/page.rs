@@ -1184,6 +1184,24 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                         let ws = workspace_id.clone();
                                         move |e| {
                                             let id = e.value();
+                                            if let Some(p) =
+                                                providers.iter().find(|p| p.id == id && p.coming_soon)
+                                            {
+                                                show_toast().error(format!(
+                                                    "{} is coming soon",
+                                                    p.name
+                                                ));
+                                                if let Some(live) = providers
+                                                    .iter()
+                                                    .find(|x| x.available && !x.coming_soon)
+                                                {
+                                                    selected_provider.set(live.id.clone());
+                                                    let model = pick_default_model(live);
+                                                    selected_model.set(model.clone());
+                                                    write_stored_composer(&ws, &live.id, &model);
+                                                }
+                                                return;
+                                            }
                                             selected_provider.set(id.clone());
                                             user_picked_provider.set(true);
                                             let model = if let Some(p) =
@@ -1222,7 +1240,6 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                 key: "{p.id}",
                                                 value: "{p.id}",
                                                 selected: selected_provider() == p.id,
-                                                disabled: p.coming_soon,
                                                 { provider_option_label(p) }
                                             }
                                         }

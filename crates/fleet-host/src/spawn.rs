@@ -538,8 +538,8 @@ pub fn collect_guest_proof(session_dir: &Path) -> Option<String> {
     if let Some(md) = direct.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return Some(md.to_string());
     }
-    let transcript =
-        std::fs::read_to_string(session_dir.join("artifacts").join("transcript.md")).unwrap_or_default();
+    let transcript = std::fs::read_to_string(session_dir.join("artifacts").join("transcript.md"))
+        .unwrap_or_default();
     let has_json = session_dir.join("artifacts").join("result.json").is_file();
     if transcript.trim().is_empty() && !has_json {
         return None;
@@ -857,8 +857,14 @@ mod tests {
             !filtered.contains_key("FLEET_MOCK_ACP_BIN"),
             "host path must not ride into docker/kube: {filtered:?}"
         );
-        assert_eq!(filtered.get("FLEET_HARNESS").map(String::as_str), Some("mock"));
-        assert_eq!(filtered.get("FLEET_GROK_BIN").map(String::as_str), Some("grok"));
+        assert_eq!(
+            filtered.get("FLEET_HARNESS").map(String::as_str),
+            Some("mock")
+        );
+        assert_eq!(
+            filtered.get("FLEET_GROK_BIN").map(String::as_str),
+            Some("grok")
+        );
 
         let mut cfg = LocalConfig::defaults();
         cfg.extra_env = extra;
@@ -867,10 +873,14 @@ mod tests {
             "FLEET_MOCK_ACP_BIN".into(),
             "/opt/plane/mock-acp-agent".into(),
         );
-        payload.env.insert("FLEET_WORK_CMD".into(), "echo host-only".into());
+        payload
+            .env
+            .insert("FLEET_WORK_CMD".into(), "echo host-only".into());
         let args = docker_run_args(&cfg, &payload, Path::new("/tmp/sess"), "n");
         assert!(
-            !args.iter().any(|a| a.contains("/home/viny/.local/bin/mock-acp-agent")),
+            !args
+                .iter()
+                .any(|a| a.contains("/home/viny/.local/bin/mock-acp-agent")),
             "container must use image mock-acp-agent: {args:?}"
         );
         assert!(
@@ -886,8 +896,11 @@ mod tests {
     #[test]
     fn collect_guest_proof_prefers_result_md() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("result.md"), "# Result\n\nACP end_turn from guest.\n")
-            .unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "# Result\n\nACP end_turn from guest.\n",
+        )
+        .unwrap();
         let md = collect_guest_proof(dir.path()).expect("proof");
         assert!(md.contains("ACP end_turn from guest"), "{md}");
     }

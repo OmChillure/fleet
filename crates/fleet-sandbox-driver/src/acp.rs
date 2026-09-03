@@ -1,16 +1,16 @@
 //! Minimal ACP JSON-RPC client over harness stdio.
 
 use crate::harness::HarnessSpec;
-use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tracing::{info, warn};
 
 fn is_blocked_stop(stop: &str) -> bool {
@@ -72,7 +72,10 @@ pub async fn run_session(
     let path = format!("/workspace/bin:{path}");
     cmd.env("PATH", &path);
     cmd.env("FLEET_WORK_DIR", work_dir.display().to_string());
-    cmd.env("FLEET_DIR", crate::provision::fleet_dir().display().to_string());
+    cmd.env(
+        "FLEET_DIR",
+        crate::provision::fleet_dir().display().to_string(),
+    );
     // Harness must not inherit the volume handshake secret (same container).
     cmd.env_remove("FLEET_HANDSHAKE_SECRET");
     for (k, v) in &env_map {
@@ -384,10 +387,7 @@ fn format_tool_update(kind: &str, update: &Value) -> String {
         .or_else(|| update.get("kind"))
         .and_then(|v| v.as_str())
         .unwrap_or("tool");
-    let status = update
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let tool_id = update
         .get("toolCallId")
         .or_else(|| update.get("tool_call_id"))
@@ -426,11 +426,7 @@ fn format_tool_update(kind: &str, update: &Value) -> String {
 
 /// Decide whether a permission request is allowed.
 /// Delegates to [`crate::policy::permission_allowed`] (default-deny).
-pub(crate) fn permission_allowed(
-    auto_approve: bool,
-    allow: &[String],
-    haystack: &str,
-) -> bool {
+pub(crate) fn permission_allowed(auto_approve: bool, allow: &[String], haystack: &str) -> bool {
     crate::policy::permission_allowed(auto_approve, allow, haystack)
 }
 
@@ -459,10 +455,7 @@ async fn handle_agent_request(
         let hay = permission_haystack(msg, method);
         let allowed = permission_allowed(auto_approve, allow, &hay);
         if allowed {
-            let option_id = pick_permission_option(
-                msg.pointer("/params/options"),
-                auto_approve,
-            );
+            let option_id = pick_permission_option(msg.pointer("/params/options"), auto_approve);
             tracing::debug!(
                 %method,
                 %option_id,
@@ -662,7 +655,6 @@ async fn rpc(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,8 +679,14 @@ mod tests {
 
     #[test]
     fn chunk_text_skips_user_and_empty() {
-        assert!(chunk_text(&json!({"sessionUpdate":"user_message_chunk","content":{"text":"x"}})).is_none());
-        assert!(chunk_text(&json!({"sessionUpdate":"agent_message_chunk","content":{"text":""}})).is_none());
+        assert!(
+            chunk_text(&json!({"sessionUpdate":"user_message_chunk","content":{"text":"x"}}))
+                .is_none()
+        );
+        assert!(
+            chunk_text(&json!({"sessionUpdate":"agent_message_chunk","content":{"text":""}}))
+                .is_none()
+        );
     }
 
     #[test]
@@ -729,8 +727,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_session_against_mock_agent() {
-        let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp_agent.py");
-        assert!(mock.is_file(), "ACP mock fixture missing: {}", mock.display());
+        let mock =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp_agent.py");
+        assert!(
+            mock.is_file(),
+            "ACP mock fixture missing: {}",
+            mock.display()
+        );
         which::which("python3").expect("python3 required for ACP mock session test");
         let harness = HarnessSpec {
             name: "custom".into(),
@@ -764,7 +767,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
         assert!(out.ok, "stderr={}", out.stderr_tail);
         assert_eq!(out.session_id.as_deref(), Some("sess-mock-1"));
-        assert!(out.transcript.to_lowercase().contains("hello") || !out.transcript.is_empty(), "transcript={}", out.transcript);
+        assert!(
+            out.transcript.to_lowercase().contains("hello") || !out.transcript.is_empty(),
+            "transcript={}",
+            out.transcript
+        );
         assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
         assert!(
             !methods.lines().any(|l| l.trim() == "session/cancel"),

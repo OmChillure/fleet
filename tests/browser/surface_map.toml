@@ -1,0 +1,220 @@
+# Path prefix → record / human-test scenes.
+# A changed file hits every matching prefix (union). That is the
+# direct + indirect map: a db repo, contract, or shared chrome change
+# pulls the surfaces that consume it.
+#
+# Prefix match: exact path, or path == prefix, or path starts with prefix+"/".
+# Keep prefixes tight. Do not map all of fleet-db or fleet-ui to every scene.
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/home",
+  "crates/fleet-ui/src/pages/home.rs",
+]
+scenes = ["landing"]
+pauses = ["Landing"]
+
+[[rule]]
+paths = [
+  "crates/fleet-auth",
+  "crates/fleet-db/src/repos/workspaces.rs",
+  "crates/fleet-db/src/models/session.rs",
+  "crates/fleet-ui/src/pages/auth",
+]
+scenes = ["auth", "workspace"]
+pauses = ["Signup", "Login", "Login wall", "Workspace switcher"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/components/sidebar.rs",
+  "crates/fleet-ui/src/components/app_shell.rs",
+  "crates/fleet-ui/src/main.rs",
+]
+scenes = ["shell"]
+pauses = ["Sidebar", "User menu"]
+
+[[rule]]
+paths = [
+  "crates/fleet-server/src/lib.rs",
+  "crates/fleet-server/src/main.rs",
+  "crates/fleet-server/src/config.rs",
+]
+scenes = ["api"]
+pauses = []
+
+[[rule]]
+paths = [
+  "crates/fleet-server/src/chat.rs",
+  "crates/fleet-server/src/chat_tools.rs",
+  "crates/fleet-server/src/grok.rs",
+  "crates/fleet-server/src/providers.rs",
+  "crates/fleet-server/src/local_models.rs",
+  "crates/fleet-chat-md",
+  "crates/fleet-ui/src/pages/chat",
+  "crates/agent-fleet-contracts/src/message.rs",
+]
+scenes = ["chat"]
+pauses = ["Chat"]
+
+[[rule]]
+paths = [
+  "crates/fleet-db/src/repos/chats.rs",
+]
+scenes = ["chat", "sessions"]
+pauses = ["Chat", "Chat history"]
+
+[[rule]]
+paths = [
+  "crates/fleet-orchestrator",
+  "crates/fleet-server/src/fleet_routes.rs",
+  "crates/fleet-bus",
+  "crates/agent-fleet-contracts/src/driver.rs",
+]
+scenes = ["fleet"]
+pauses = ["Fleet"]
+
+[[rule]]
+paths = [
+  "crates/fleet-driver",
+]
+scenes = ["fleet", "sandboxes"]
+pauses = ["Fleet", "Sandboxes"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/sandboxes",
+  "crates/fleet-orchestrator/src/sandbox",
+]
+scenes = ["sandboxes"]
+pauses = ["Sandboxes"]
+
+[[rule]]
+paths = [
+  "crates/fleet-server/src/cases.rs",
+  "crates/fleet-db/src/repos/cases.rs",
+  "crates/fleet-ui/src/pages/cases",
+]
+scenes = ["cases"]
+pauses = ["Cases"]
+
+[[rule]]
+paths = [
+  "crates/fleet-server/src/tickets.rs",
+  "crates/fleet-db/src/repos/tickets.rs",
+  "crates/fleet-ui/src/pages/inbox",
+]
+scenes = ["inbox"]
+pauses = ["Inbox"]
+
+[[rule]]
+paths = [
+  "crates/fleet-auth/src/routes/personas.rs",
+  "crates/fleet-db/src/repos/personas.rs",
+  "crates/fleet-ui/src/pages/agents",
+]
+scenes = ["agents"]
+pauses = ["Agents"]
+
+[[rule]]
+paths = [
+  "crates/fleet-integrations",
+  "crates/agent-fleet-contracts/src/integration.rs",
+  "crates/fleet-db/src/repos/integrations.rs",
+  "crates/fleet-ui/src/pages/integrations",
+]
+scenes = ["integrations"]
+pauses = ["Integrations"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/settings",
+  "crates/fleet-auth/src/routes/members.rs",
+  "crates/fleet-server/src/config.rs",
+]
+scenes = ["settings"]
+pauses = ["Settings", "Settings members"]
+
+[[rule]]
+paths = [
+  "crates/agent-fleet-contracts/src/isolation.rs",
+  "crates/fleet-orchestrator/src/domain/capacity.rs",
+]
+scenes = ["unify", "runners"]
+pauses = ["Unify runners", "Runners / Self-hosted"]
+
+[[rule]]
+paths = [
+  "crates/fleet-host",
+  "crates/fleet-server/src/worker_hosts.rs",
+  "crates/fleet-server/src/install_routes.rs",
+  "crates/fleet-server/src/package_versions.rs",
+  "crates/fleet-db/src/repos/worker_hosts.rs",
+  "crates/fleet-db/src/models/worker_host.rs",
+  "crates/fleet-ui/src/pages/runners/self_hosted",
+  "crates/fleet-ui/src/pages/runners/mod.rs",
+  "crates/fleet-ui/src/pages/runners/redirects.rs",
+  "crates/fleet-ui/src/pages/workers",
+  "crates/fleet-runners-view",
+  "scripts/install-worker",
+  "scripts/stage-worker-dist.sh",
+  "runner-packages.toml",
+]
+scenes = ["runners"]
+pauses = ["Runners / Self-hosted", "Workers"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/runners/cloud",
+  "crates/fleet-server/src/partners.rs",
+]
+scenes = ["cloud", "partners"]
+pauses = ["Runners / Cloud", "Runners / Partners"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/runners/partners",
+]
+scenes = ["partners"]
+pauses = ["Runners / Partners"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/dashboard",
+]
+scenes = ["dashboard"]
+pauses = ["Login"]
+
+[[rule]]
+paths = [
+  "crates/fleet-ui/src/pages/sessions",
+]
+scenes = ["sessions"]
+pauses = ["Chat history"]
+
+[[rule]]
+paths = [
+  "crates/fleet-sandbox-driver",
+  "crates/fleet-sandbox-driver/sandbox-lab/workspace/workspace_agent.py",
+  "crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh",
+]
+scenes = ["lab"]
+pauses = []
+
+[[rule]]
+paths = [
+  "crates/fleet-operator",
+  "infra",
+  "Dockerfile",
+  "Dockerfile.ui",
+  "Dockerfile.operator",
+]
+scenes = ["kind"]
+pauses = ["Kubernetes sandboxes"]
+
+[[rule]]
+paths = [
+  "crates/fleet-host/src/exec_k8s.rs",
+  "crates/fleet-orchestrator/src/sandbox/k8s.rs",
+]
+scenes = ["k8s", "fleet"]
+pauses = ["Kubernetes sandboxes", "Fleet"]

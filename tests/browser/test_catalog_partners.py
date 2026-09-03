@@ -175,6 +175,16 @@ class CatalogPartnersAckE2ETests(unittest.TestCase):
 
         _goto_partners(page, base)
         self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
+        main = page.locator("main")
+        self.assertGreater(
+            main.get_by_text("Coming soon", exact=True).count(),
+            0,
+            "partners page must show the Coming soon badge",
+        )
+        body_l = main.inner_text().lower()
+        self.assertIn("coming soon", body_l, "partners page must stay Coming soon")
+        self.assertIn("trust", body_l, "partners page missing trust copy")
+        self.assertIn("disclaimer", body_l, "partners page missing disclaimer copy")
 
         visible = _ack_boxes(page)
         self.assertGreater(
@@ -266,7 +276,14 @@ class CatalogPartnersAckE2ETests(unittest.TestCase):
             "partner picker must stay disabled after ack",
         )
         _assert_no_lend_enablement(self, page, "partners after ack")
+        main = page.locator("main")
+        self.assertGreater(
+            main.get_by_text("Coming soon", exact=True).count(),
+            0,
+            "ack must not drop the Coming soon badge",
+        )
         body_l = page.inner_text("body").lower()
+        self.assertIn("coming soon", body_l, "partners page must stay Coming soon after ack")
         self.assertNotIn("balance", body_l, "ack must not create a credit balance")
         self.assertNotRegex(
             body_l,

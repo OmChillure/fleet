@@ -56,6 +56,19 @@ pub fn decode_access_token(secret: &str, token: &str) -> AppResult<AccessClaims>
     Ok(data.claims)
 }
 
+/// Logout-only: signature + `sid` required, `exp` not checked.
+/// Do not use for `/me` or other gated routes.
+pub(crate) fn decode_access_token_for_logout(secret: &str, token: &str) -> AppResult<AccessClaims> {
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
+    let data = decode::<AccessClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )?;
+    Ok(data.claims)
+}
+
 /// Opaque refresh token (URL-safe hex). Store only the SHA-256 hash.
 pub fn generate_refresh_token() -> String {
     let mut bytes = [0u8; 32];
@@ -132,6 +145,48 @@ mod tests {
         .expect("encode expired token");
 
         let err = decode_access_token(SECRET, &token).expect_err("expired");
+        assert!(
+            matches!(err, AppError::Unauthorized(_)),
+            "expected Unauthorized, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn logout_decode_accepts_expired_token() {
+        let now = Utc::now();
+        let session_id = Uuid::new_v4();
+        let claims = AccessClaims {
+            sub: Uuid::new_v4().to_string(),
+            email: "user@example.test".into(),
+            sid: session_id.to_string(),
+            exp: (now - ChronoDuration::seconds(120)).timestamp(),
+            iat: (now - ChronoDuration::seconds(180)).timestamp(),
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .expect("encode expired token");
+
+        decode_access_token(SECRET, &token).expect_err("gated decode must still reject expired");
+        let decoded = decode_access_token_for_logout(SECRET, &token)
+            .expect("logout decode must accept expired access JWT");
+        assert_eq!(decoded.sid, session_id.to_string());
+    }
+
+    #[test]
+    fn logout_decode_rejects_wrong_secret() {
+        let token = issue_access_token(
+            SECRET,
+            Uuid::new_v4(),
+            "user@example.test",
+            Uuid::new_v4(),
+            Duration::from_secs(900),
+        )
+        .expect("issue");
+
+        let err = decode_access_token_for_logout(OTHER_SECRET, &token).expect_err("wrong secret");
         assert!(
             matches!(err, AppError::Unauthorized(_)),
             "expected Unauthorized, got {err:?}"

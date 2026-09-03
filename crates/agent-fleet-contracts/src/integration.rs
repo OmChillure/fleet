@@ -3,9 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{SessionId, TaskId, ToolCallId, TurnId};
-use crate::types::{
-    ArtifactKind, ArtifactRef, PermissionDecision, ReviewFeedbackKind, RiskLevel,
-};
+use crate::types::{ArtifactKind, ArtifactRef, PermissionDecision, ReviewFeedbackKind, RiskLevel};
 
 // --- inbound ---
 

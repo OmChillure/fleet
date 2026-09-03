@@ -158,9 +158,7 @@ fn error_from(status: reqwest::StatusCode, text: &str) -> String {
         .unwrap_or_else(|_| format!("request failed ({status})"))
 }
 
-pub async fn list_workspace_personas(
-    workspace_id: &str,
-) -> Result<Vec<WorkspacePersona>, String> {
+pub async fn list_workspace_personas(workspace_id: &str) -> Result<Vec<WorkspacePersona>, String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/personas")).await?;
     let status = res.status();
     let text = res.text().await.map_err(|e| e.to_string())?;
@@ -212,10 +210,7 @@ pub async fn create_workspace_persona(
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub async fn archive_workspace_persona(
-    workspace_id: &str,
-    persona_id: &str,
-) -> Result<(), String> {
+pub async fn archive_workspace_persona(workspace_id: &str, persona_id: &str) -> Result<(), String> {
     let res = authorized_send(
         "DELETE",
         &format!("/api/workspaces/{workspace_id}/personas/{persona_id}"),

@@ -1,6 +1,6 @@
 //! Trello board / list / card tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -258,7 +258,13 @@ pub(crate) async fn add_comment(
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err("trello", "add_comment", "bad_args", "text is required", None);
+            return ProxyResult::err(
+                "trello",
+                "add_comment",
+                "bad_args",
+                "text is required",
+                None,
+            );
         }
     };
     let (status, body) = trello_post(
