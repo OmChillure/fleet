@@ -30,9 +30,12 @@ fleet-bus = { path = "../fleet-bus" }
 fleet-db = { workspace = true }
 fleet-integrations = { workspace = true }
 fleet-orchestrator = { workspace = true }
+hex = { workspace = true }
+hmac = "0.12"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }

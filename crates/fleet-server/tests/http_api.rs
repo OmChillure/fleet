@@ -2881,6 +2881,19 @@ async fn inbox_monitor_defaults_auto_launch_and_preserves_filters() {
         "Start monitor (no flag) must keep working tickets: {}",
         first.body
     );
+    assert_eq!(
+        first.body["follow_connected"], true,
+        "Start monitor must follow live connections: {}",
+        first.body
+    );
+    assert!(
+        first.body["providers"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "empty allowlist means all connected, must not snapshot: {}",
+        first.body
+    );
 
     let saved = call(
         &app,
@@ -2917,6 +2930,31 @@ async fn inbox_monitor_defaults_auto_launch_and_preserves_filters() {
         "omitted jira_jql must keep the saved filter: {}",
         again.body
     );
+}
+
+#[tokio::test]
+async fn inbox_monitor_follow_connected_watches_whatever_is_connected() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let started = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    assert_eq!(started.body["follow_connected"], true);
+    assert_eq!(started.body["watching"], json!([]));
+    assert_eq!(started.body["launch_limit"], 8);
+    assert_eq!(started.body["poll_limit"], 20);
+
+    let listed = call(&app, "GET", &inbox_path(&ws, ""), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["monitor"]["follow_connected"], true);
+    assert_eq!(listed.body["monitor"]["watching"], json!([]));
 }
 
 fn workforce(ws: &str, suffix: &str) -> String {

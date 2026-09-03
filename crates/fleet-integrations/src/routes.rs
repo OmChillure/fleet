@@ -52,10 +52,7 @@ where
             "/api/integrations/oauth/github/manifest/callback",
             get(github_manifest_callback),
         )
-        .route(
-            "/api/integrations/webhooks/github",
-            get(github_webhook_stub).post(github_webhook_stub),
-        )
+
         .route(
             "/api/workspaces/{workspace_id}/integrations/{provider}",
             axum::routing::delete(disconnect_integration).patch(patch_integration_defaults),
@@ -481,10 +478,6 @@ async fn github_manifest_callback_inner(
     );
 
     Ok(github_install_url(&app.slug, &state_jwt))
-}
-
-async fn github_webhook_stub() -> StatusCode {
-    StatusCode::NO_CONTENT
 }
 
 /// OAuth callback: exchange code, store tokens, notify opener, close tab.

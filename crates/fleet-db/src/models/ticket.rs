@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
@@ -12,6 +13,11 @@ pub struct TicketMonitor {
     pub slack_channels: Vec<String>,
     pub notion_databases: Vec<String>,
     pub auto_launch: bool,
+    pub follow_connected: bool,
+    pub filters: Value,
+    pub launch_limit: i32,
+    pub poll_limit: i32,
+    pub hook_token: String,
     pub started_by: Option<Uuid>,
     pub last_poll_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,

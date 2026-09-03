@@ -320,6 +320,11 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
             slack_channels: vec![],
             notion_databases: vec![],
             auto_launch: false,
+            follow_connected: true,
+            filters: serde_json::json!({}),
+            launch_limit: 8,
+            poll_limit: 20,
+            hook_token: "tok-monitor-1".into(),
             started_by: Some(user_id),
         },
     )
@@ -411,6 +416,11 @@ async fn ticket_reopen_after_failed_run_and_mark_done() {
             slack_channels: vec![],
             notion_databases: vec![],
             auto_launch: true,
+            follow_connected: true,
+            filters: serde_json::json!({"jira": {"jql": "project = ENG AND status != Done"}}),
+            launch_limit: 8,
+            poll_limit: 20,
+            hook_token: "tok-monitor-2".into(),
             started_by: Some(user_id),
         },
     )

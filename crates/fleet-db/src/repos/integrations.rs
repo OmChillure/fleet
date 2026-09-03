@@ -249,6 +249,24 @@ pub async fn list_oauth_apps(
     .map_err(map_query_err)
 }
 
+pub async fn list_oauth_apps_for_provider(
+    pool: &PgPool,
+    provider: &str,
+) -> DbResult<Vec<IntegrationOAuthApp>> {
+    sqlx::query_as::<_, IntegrationOAuthApp>(
+        r#"
+        SELECT workspace_id, provider, client_id, client_secret, created_by, created_at, updated_at
+        FROM integration_oauth_apps
+        WHERE provider = $1
+        ORDER BY workspace_id
+        "#,
+    )
+    .bind(provider)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
 pub async fn get_oauth_app(
     pool: &PgPool,
     workspace_id: Uuid,

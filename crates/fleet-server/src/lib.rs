@@ -10,6 +10,8 @@ pub mod chat_tools;
 pub mod config;
 pub mod fleet_routes;
 pub mod grok;
+pub mod inbox_sources;
+pub mod inbox_webhooks;
 pub mod install_routes;
 pub mod local_models;
 pub mod package_versions;
@@ -57,6 +59,7 @@ pub fn build_router() -> Router<AppState> {
         .merge(chat::router())
         .merge(cases::router())
         .merge(tickets::router())
+        .merge(inbox_webhooks::router())
         .merge(workforce::router())
         .merge(fleet_routes::router())
         .merge(worker_hosts::router())
@@ -237,6 +240,7 @@ pub async fn api_index() -> Json<Value> {
                 "monitor": "POST /api/workspaces/{workspace_id}/inbox",
                 "poll": "POST /api/workspaces/{workspace_id}/inbox/poll",
                 "finish": "POST /api/workspaces/{workspace_id}/inbox/finish",
+                "webhook": "POST /api/integrations/webhooks/{provider}/{hook_token}",
             },
             "cases": {
                 "list": "GET /api/workspaces/{workspace_id}/cases",

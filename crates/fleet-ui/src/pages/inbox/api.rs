@@ -46,6 +46,10 @@ pub struct MonitorState {
     #[serde(default)]
     pub providers: Vec<String>,
     #[serde(default)]
+    pub watching: Vec<String>,
+    #[serde(default)]
+    pub follow_connected: bool,
+    #[serde(default)]
     pub github_repos: Vec<String>,
     #[serde(default)]
     pub jira_jql: Option<String>,
@@ -54,7 +58,21 @@ pub struct MonitorState {
     #[serde(default)]
     pub notion_databases: Vec<String>,
     #[serde(default)]
+    pub gitlab_projects: Vec<String>,
+    #[serde(default)]
+    pub linear_teams: Vec<String>,
+    #[serde(default)]
+    pub trello_boards: Vec<String>,
+    #[serde(default)]
     pub auto_launch: bool,
+    #[serde(default)]
+    pub launch_limit: i32,
+    #[serde(default)]
+    pub poll_limit: i32,
+    #[serde(default)]
+    pub hook_token: String,
+    #[serde(default)]
+    pub hook_url: String,
     #[serde(default)]
     pub last_poll_at: Option<String>,
     #[serde(default)]
@@ -129,6 +147,8 @@ pub struct MonitorPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_connected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub github_repos: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jira_jql: Option<String>,
@@ -136,6 +156,12 @@ pub struct MonitorPatch {
     pub slack_channels: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notion_databases: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gitlab_projects: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linear_teams: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trello_boards: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_launch: Option<bool>,
 }
@@ -146,6 +172,7 @@ pub async fn start_monitor(workspace_id: &str) -> Result<Value, InboxError> {
         &MonitorPatch {
             enabled: Some(true),
             auto_launch: Some(true),
+            follow_connected: Some(true),
             ..MonitorPatch::default()
         },
     )

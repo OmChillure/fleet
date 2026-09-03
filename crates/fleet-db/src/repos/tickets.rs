@@ -10,7 +10,8 @@ use crate::pool::map_query_err;
 
 const MONITOR_COLS: &str = r#"
     workspace_id, enabled, providers, github_repos, jira_jql,
-    slack_channels, notion_databases, auto_launch, started_by,
+    slack_channels, notion_databases, auto_launch, follow_connected,
+    filters, launch_limit, poll_limit, hook_token, started_by,
     last_poll_at, last_error, created_at, updated_at
 "#;
 
@@ -29,6 +30,11 @@ pub struct UpsertMonitor {
     pub slack_channels: Vec<String>,
     pub notion_databases: Vec<String>,
     pub auto_launch: bool,
+    pub follow_connected: bool,
+    pub filters: serde_json::Value,
+    pub launch_limit: i32,
+    pub poll_limit: i32,
+    pub hook_token: String,
     pub started_by: Option<Uuid>,
 }
 
@@ -62,15 +68,38 @@ pub async fn list_enabled_workspace_ids(pool: &PgPool) -> DbResult<Vec<Uuid>> {
     Ok(rows)
 }
 
+pub async fn get_monitor_by_hook_token(
+    pool: &PgPool,
+    hook_token: &str,
+) -> DbResult<Option<TicketMonitor>> {
+    let token = hook_token.trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let q = format!(
+        r#"
+        SELECT {MONITOR_COLS}
+        FROM ticket_monitors
+        WHERE hook_token = $1
+        "#
+    );
+    sqlx::query_as::<_, TicketMonitor>(&q)
+        .bind(token)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 pub async fn upsert_monitor(pool: &PgPool, spec: &UpsertMonitor) -> DbResult<TicketMonitor> {
     let q = format!(
         r#"
         INSERT INTO ticket_monitors (
             workspace_id, enabled, providers, github_repos, jira_jql,
-            slack_channels, notion_databases, auto_launch, started_by,
+            slack_channels, notion_databases, auto_launch, follow_connected,
+            filters, launch_limit, poll_limit, hook_token, started_by,
             updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
         ON CONFLICT (workspace_id) DO UPDATE SET
             enabled = EXCLUDED.enabled,
             providers = EXCLUDED.providers,
@@ -79,6 +108,11 @@ pub async fn upsert_monitor(pool: &PgPool, spec: &UpsertMonitor) -> DbResult<Tic
             slack_channels = EXCLUDED.slack_channels,
             notion_databases = EXCLUDED.notion_databases,
             auto_launch = EXCLUDED.auto_launch,
+            follow_connected = EXCLUDED.follow_connected,
+            filters = EXCLUDED.filters,
+            launch_limit = EXCLUDED.launch_limit,
+            poll_limit = EXCLUDED.poll_limit,
+            hook_token = COALESCE(ticket_monitors.hook_token, EXCLUDED.hook_token),
             started_by = COALESCE(EXCLUDED.started_by, ticket_monitors.started_by),
             updated_at = now()
         RETURNING {MONITOR_COLS}
@@ -93,6 +127,11 @@ pub async fn upsert_monitor(pool: &PgPool, spec: &UpsertMonitor) -> DbResult<Tic
         .bind(&spec.slack_channels)
         .bind(&spec.notion_databases)
         .bind(spec.auto_launch)
+        .bind(spec.follow_connected)
+        .bind(&spec.filters)
+        .bind(spec.launch_limit)
+        .bind(spec.poll_limit)
+        .bind(&spec.hook_token)
         .bind(spec.started_by)
         .fetch_one(pool)
         .await
@@ -174,7 +213,9 @@ pub async fn list_inbox(
     pool: &PgPool,
     workspace_id: Uuid,
     state: Option<&str>,
+    limit: Option<i64>,
 ) -> DbResult<Vec<TicketInboxItem>> {
+    let limit = limit.unwrap_or(200).clamp(1, 500);
     if let Some(state) = state.map(str::trim).filter(|s| !s.is_empty()) {
         let q = format!(
             r#"
@@ -182,11 +223,13 @@ pub async fn list_inbox(
             FROM ticket_inbox
             WHERE workspace_id = $1 AND state = $2
             ORDER BY last_seen_at DESC
+            LIMIT $3
             "#
         );
         return sqlx::query_as::<_, TicketInboxItem>(&q)
             .bind(workspace_id)
             .bind(state)
+            .bind(limit)
             .fetch_all(pool)
             .await
             .map_err(map_query_err);
@@ -204,10 +247,12 @@ pub async fn list_inbox(
                 ELSE 3
             END,
             last_seen_at DESC
+        LIMIT $2
         "#
     );
     sqlx::query_as::<_, TicketInboxItem>(&q)
         .bind(workspace_id)
+        .bind(limit)
         .fetch_all(pool)
         .await
         .map_err(map_query_err)
