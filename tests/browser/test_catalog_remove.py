@@ -124,16 +124,10 @@ def _signup_api(page) -> tuple[str, str]:
     return ws, f"{UI}/{ws}"
 
 
-def _plane_has_no_remove(page) -> str:
-    first = page.locator("article").first
-    first.wait_for(timeout=10_000)
-    text = first.inner_text()
-    if "Control plane" not in text:
-        raise AssertionError(f"first card is not Control plane: {text[:400]!r}")
-    remove = first.get_by_role("button", name="Remove worker")
-    if remove.count() and remove.first.is_visible():
-        raise AssertionError("control plane must not have Remove worker")
-    return text
+def _plane_has_no_remove(page) -> None:
+    n = page.locator("article").filter(has_text="Control plane").count()
+    if n:
+        raise AssertionError("synthetic Control plane card must not appear")
 
 
 class CatalogRemoveConfirmTests(unittest.TestCase):

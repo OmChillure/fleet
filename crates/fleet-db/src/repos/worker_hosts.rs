@@ -1084,7 +1084,8 @@ pub fn holding_new_jobs(host: &WorkerHost) -> bool {
 }
 
 /// Paired hosts mid host-bin restart (`software_updating`) seen within `seen_within`.
-/// Tick uses this so a brief restart does not fail over to local `SANDBOX_BACKEND`.
+/// Tick uses this so a brief restart does not assign elsewhere while the
+/// paired host is swapping its binary. No host → task stays ready.
 /// Does not change pause/drain meaning.
 pub async fn list_updating_recent(
     pool: &PgPool,

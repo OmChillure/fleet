@@ -271,7 +271,12 @@ async fn run() -> anyhow::Result<()> {
         tracing::error!(%addr, error = %e, "failed to bind listen address");
         e
     })?;
-    axum::serve(listener, app).await.map_err(|e| {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| {
         tracing::error!(error = %e, "server exited with error");
         e
     })?;

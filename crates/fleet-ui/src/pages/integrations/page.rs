@@ -466,7 +466,7 @@ fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
     use_effect(move || {
         let ws = ws.clone();
         spawn(async move {
-            if let Ok((list, _, _)) = list_workers_page(&ws).await {
+            if let Ok((list, _)) = list_workers_page(&ws).await {
                 hosts.set(list.into_iter().filter(|h| !is_removed(h)).collect());
             }
         });

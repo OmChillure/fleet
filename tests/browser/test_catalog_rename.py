@@ -100,14 +100,10 @@ class CatalogRenameTests(unittest.TestCase):
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
 
-        first = page.locator("article").first
-        first.wait_for(timeout=10_000)
-        self.assertIn(
-            "Control plane",
-            first.inner_text(),
-            "control plane must stay first; do not rename it",
+        self.assertEqual(
+            page.locator("article").filter(has_text="Control plane").count(),
+            0,
         )
-        self.assertNotIn(seed, first.inner_text())
 
         card = page.locator("article").filter(has_text=seed)
         card.wait_for(timeout=10_000)
@@ -186,9 +182,10 @@ class CatalogRenameTests(unittest.TestCase):
         body = page.inner_text("body")
         self.assertIn(saved, body)
         self.assertNotIn(cancelled, body)
-        plane = page.locator("article").first.inner_text()
-        self.assertIn("Control plane", plane)
-        self.assertNotIn(saved, plane)
+        self.assertEqual(
+            page.locator("article").filter(has_text="Control plane").count(),
+            0,
+        )
 
 
 if __name__ == "__main__":

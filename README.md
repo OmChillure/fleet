@@ -87,13 +87,14 @@ dx serve --package fleet-ui --port 3030
    bash fences from the task spec.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
-7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`). Backends:
-   - `SANDBOX_BACKEND=stub` — fake timer (default)
-   - `process` — `fleet-driver` binary (`PROCESS_WORKER_BIN`; ACP via `FLEET_HARNESS=mock|grok`)
-   - `local` / `shell` — bash `fleet_worker.sh` in the session workdir (runs ```bash fences from task specs)
-   - `docker` — container (`SANDBOX_DOCKER_IMAGE`, network `none` by default); same worker script as `local`
-   - `k8s` — `FleetSandbox` CR; operator creates a pod. In-cluster API (kind/k3d) defaults to this. Host `.env` stays `stub`/`process`. Worker callback must be a URL pods can reach (not `127.0.0.1`)
-   Finished workdirs are kept 15 minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter the sandbox.
+7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`) leased to a
+   paired `fleet-host`. The API process is not a runner: tick enqueues a claim
+   or leaves the task ready. Isolation is process / container / vm **on the
+   host**. Guest is `fleet-driver`
+   (ACP via `FLEET_HARNESS=mock|grok`). In-cluster, `fleet-host` creates
+   `FleetSandbox` CRs; the operator makes pods. Finished workdirs are kept 15
+   minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter
+   the sandbox.
 8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
    command and one-time pair token. The machine pairs outbound (no inbound
    port). Tick enqueues a claim for an online matching host; otherwise the
@@ -127,9 +128,12 @@ dx serve --package fleet-ui --port 3030
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Inbox → Start monitor) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor watches boards and auto-launches work) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent) |
+| `GET` | `/api/workspaces/{id}/workforce` | Open goals (durable overnight) |
+| `POST` | `/api/workspaces/{id}/workforce/goals` | Set a durable goal (case-backed) |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
@@ -139,7 +143,7 @@ UI app routes (workspace-scoped):
 
 | Path | Page |
 | --- | --- |
-| `/{workspace_id}/dashboard` | Dashboard |
+| `/{workspace_id}/dashboard` | Workforce (goals, approvals, board) |
 | `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
 | `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |

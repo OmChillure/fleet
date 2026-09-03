@@ -397,9 +397,95 @@ pub async fn list_workers(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LiveEventIn {
+    #[serde(default)]
+    pub ts: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct HeartbeatBody {
     pub seq: i32,
     pub progress_pct: Option<i32>,
+    #[serde(default)]
+    pub events: Vec<LiveEventIn>,
+}
+
+const LIVE_BATCH_MAX: usize = 64;
+const LIVE_TEXT_MAX: usize = 4096;
+const LIVE_KIND_MAX: usize = 64;
+
+fn sanitize_live_events(
+    raw: Vec<LiveEventIn>,
+) -> Vec<(chrono::DateTime<chrono::Utc>, String, String)> {
+    let mut out = Vec::new();
+    for ev in raw.into_iter().take(LIVE_BATCH_MAX) {
+        let text: String = ev.text.chars().take(LIVE_TEXT_MAX).collect();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let kind = ev
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("update");
+        let kind: String = kind.chars().take(LIVE_KIND_MAX).collect();
+        let ts = ev
+            .ts
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        out.push((ts, kind, text));
+    }
+    out
+}
+
+async fn enqueue_live_bus(
+    pool: &sqlx::PgPool,
+    session_id: Uuid,
+    report_seq: i32,
+    events: &[(chrono::DateTime<chrono::Utc>, String, String)],
+) {
+    use agent_fleet_contracts::{
+        AgentEvent, BusMessage, MessageBody, Producer, Redaction, SessionId, TurnId,
+    };
+    if events.is_empty() {
+        return;
+    }
+    let sid = SessionId::from_uuid(session_id);
+    let msg = BusMessage::new(
+        Producer::Driver,
+        MessageBody::AgentEvent(AgentEvent {
+            session_id: sid,
+            turn_id: TurnId::from_uuid(session_id),
+            seq: report_seq.max(0) as u64,
+            kind: "batch".into(),
+            acp_method: None,
+            payload: Some(json!({
+                "events": events.iter().map(|(ts, kind, text)| json!({
+                    "ts": ts,
+                    "kind": kind,
+                    "text": text,
+                })).collect::<Vec<_>>()
+            })),
+            redaction: Redaction::None,
+        }),
+    );
+    let message_id = msg.envelope.message_id.as_uuid();
+    let Ok(body) = serde_json::to_value(&msg) else {
+        return;
+    };
+    if let Err(e) =
+        fleet_db::repos::control_plane_events::insert_event(pool, message_id, "agent.event", body)
+            .await
+    {
+        tracing::warn!(error = %e, %session_id, "live event outbox insert failed");
+    }
 }
 
 pub async fn post_heartbeat(
@@ -417,7 +503,21 @@ pub async fn post_heartbeat(
     if session.project_id != project_id {
         return Err(err(StatusCode::NOT_FOUND, "session not in project"));
     }
-    state
+    let events = sanitize_live_events(body.events);
+    let payload = json!({
+        "progress_pct": body.progress_pct,
+        "event_count": events.len(),
+    });
+    // Events first: (session_id, report_seq, idx) is idempotent. If the report
+    // row is written first and events fail, a seq retry would skip them forever.
+    if !events.is_empty() {
+        state
+            .store
+            .insert_live_events(session_id, body.seq, &events)
+            .await
+            .map_err(map_store)?;
+    }
+    let inserted = state
         .store
         .append_worker_report(
             project_id,
@@ -425,10 +525,13 @@ pub async fn post_heartbeat(
             session.board_task_id,
             body.seq,
             "heartbeat",
-            json!({ "progress_pct": body.progress_pct }),
+            payload,
         )
         .await
         .map_err(map_store)?;
+    if inserted && !events.is_empty() {
+        enqueue_live_bus(state.store.pool(), session_id, body.seq, &events).await;
+    }
     Ok(StatusCode::ACCEPTED)
 }
 

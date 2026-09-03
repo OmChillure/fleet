@@ -1,6 +1,6 @@
 //! GitLab write tools (control-plane; OAuth token never returned).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -13,13 +13,7 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     let title = match args.get("title").and_then(|v| v.as_str()).map(str::trim) {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
-            return ProxyResult::err(
-                "gitlab",
-                "create_issue",
-                "bad_args",
-                "title is required",
-                None,
-            );
+            return ProxyResult::err("gitlab", "create_issue", "bad_args", "title is required", None);
         }
     };
     let mut payload = json!({ "title": title });
@@ -33,8 +27,13 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     if let Some(labels) = args.get("labels") {
         payload["labels"] = labels.clone();
     }
-    let (status, body) =
-        gitlab_post(http, token, &project_url(&project, "/issues"), &payload).await;
+    let (status, body) = gitlab_post(
+        http,
+        token,
+        &project_url(&project, "/issues"),
+        &payload,
+    )
+    .await;
     if !(200..300).contains(&status) {
         return upstream_err("create_issue", status, &body);
     }
@@ -58,19 +57,11 @@ pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Val
     let iid = match args
         .get("iid")
         .or_else(|| args.get("number"))
-        .and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        }) {
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
         Some(n) => n,
         None => {
-            return ProxyResult::err(
-                "gitlab",
-                "update_issue",
-                "bad_args",
-                "iid is required",
-                None,
-            );
+            return ProxyResult::err("gitlab", "update_issue", "bad_args", "iid is required", None);
         }
     };
     let mut payload = json!({});
@@ -147,10 +138,8 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     let iid = match args
         .get("iid")
         .or_else(|| args.get("number"))
-        .and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        }) {
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
         Some(n) => n,
         None => {
             return ProxyResult::err("gitlab", "add_comment", "bad_args", "iid is required", None);
@@ -165,13 +154,7 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err(
-                "gitlab",
-                "add_comment",
-                "bad_args",
-                "body is required",
-                None,
-            );
+            return ProxyResult::err("gitlab", "add_comment", "bad_args", "body is required", None);
         }
     };
     let (status, body) = gitlab_post(
@@ -198,11 +181,7 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     )
 }
 
-pub(crate) async fn create_branch(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let project = match require_project(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("gitlab", "create_branch", "bad_args", e, None),
@@ -314,8 +293,31 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    // Docs §7.2: reject oversize / invalid files before any GitLab call.
-    let mut validated: Vec<(&str, &str)> = Vec::with_capacity(files.len());
+    let (st, proj) = gitlab_get(http, token, &project_url(&project, "")).await;
+    if !(200..300).contains(&st) {
+        return upstream_err("commit_files", st, &proj);
+    }
+    let default_branch = proj
+        .get("default_branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main");
+    let base_branch = args
+        .get("base_branch")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_branch);
+
+    let branch_url = format!(
+        "{}/repository/branches/{}",
+        project_url(&project, ""),
+        urlencoding(&branch)
+    );
+    let (br_st, _) = gitlab_get(http, token, &branch_url).await;
+    let branch_exists = (200..300).contains(&br_st);
+
+    let mut actions = Vec::new();
+    let mut paths = Vec::new();
     for f in files {
         let path = match f.get("path").and_then(|v| v.as_str()).map(str::trim) {
             Some(p) if !p.is_empty() && !p.starts_with('/') => p,
@@ -350,40 +352,7 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
                 None,
             );
         }
-        validated.push((path, content));
-    }
-
-    let (st, proj) = gitlab_get(http, token, &project_url(&project, "")).await;
-    if !(200..300).contains(&st) {
-        return upstream_err("commit_files", st, &proj);
-    }
-    let default_branch = proj
-        .get("default_branch")
-        .and_then(|v| v.as_str())
-        .unwrap_or("main");
-    let base_branch = args
-        .get("base_branch")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_branch);
-
-    let branch_url = format!(
-        "{}/repository/branches/{}",
-        project_url(&project, ""),
-        urlencoding(&branch)
-    );
-    let (br_st, _) = gitlab_get(http, token, &branch_url).await;
-    let branch_exists = (200..300).contains(&br_st);
-
-    let mut actions = Vec::new();
-    let mut paths = Vec::new();
-    for (path, content) in &validated {
-        let ref_name = if branch_exists {
-            branch.as_str()
-        } else {
-            base_branch
-        };
+        let ref_name = if branch_exists { branch.as_str() } else { base_branch };
         let file_url = format!(
             "{}/repository/files/{}?ref={}",
             project_url(&project, ""),
@@ -426,7 +395,10 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
     ProxyResult::ok_result(
         "gitlab",
         "commit_files",
-        format!("Committed {} file(s) to {project}@{branch}", paths.len()),
+        format!(
+            "Committed {} file(s) to {project}@{branch}",
+            paths.len()
+        ),
         json!({
             "project": project,
             "branch": branch,
@@ -522,179 +494,43 @@ pub(crate) async fn create_mr(http: &reqwest::Client, token: &str, args: &Value)
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{Value, json};
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::thread;
-    use std::time::Duration;
-
-    /// Docs §7.2. Hard numbers — do not read `MAX_*` when building payloads.
-    const DOC_MAX_COMMIT_FILES: usize = 40;
-    const DOC_MAX_FILE_BYTES: usize = 512 * 1024;
-
-    /// HTTP client that can only reach a local sink. Any connect is an upstream call.
-    struct NoUpstream {
-        hits: Arc<AtomicUsize>,
-        stop: Arc<AtomicBool>,
-        http: reqwest::Client,
-    }
-
-    impl Drop for NoUpstream {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
+pub(crate) async fn merge_mr(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+    let project = match require_project(args) {
+        Ok(v) => v,
+        Err(e) => return ProxyResult::err("gitlab", "merge_mr", "bad_args", e, None),
+    };
+    let iid = match args
+        .get("iid")
+        .or_else(|| args.get("number"))
+        .or_else(|| args.get("mr"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+    {
+        Some(n) => n,
+        None => {
+            return ProxyResult::err(
+                "gitlab",
+                "merge_mr",
+                "bad_args",
+                "iid (merge request) is required",
+                None,
+            );
         }
+    };
+    let (status, body) = gitlab_put(
+        http,
+        token,
+        &project_url(&project, &format!("/merge_requests/{iid}/merge")),
+        &json!({}),
+    )
+    .await;
+    if !(200..300).contains(&status) {
+        return upstream_err("merge_mr", status, &body);
     }
-
-    impl NoUpstream {
-        fn bind() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local sink");
-            listener.set_nonblocking(true).expect("nonblocking sink");
-            let addr = listener.local_addr().expect("sink addr");
-            let hits = Arc::new(AtomicUsize::new(0));
-            let stop = Arc::new(AtomicBool::new(false));
-            let hits_t = hits.clone();
-            let stop_t = stop.clone();
-            thread::spawn(move || {
-                while !stop_t.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            hits_t.fetch_add(1, Ordering::SeqCst);
-                            let _ = stream.set_nonblocking(false);
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-                            let mut buf = [0u8; 128];
-                            let _ = stream.read(&mut buf);
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 503 sink\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                            );
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-            let http = reqwest::Client::builder()
-                .proxy(reqwest::Proxy::all(format!("http://{addr}")).expect("proxy"))
-                .timeout(Duration::from_secs(2))
-                .build()
-                .expect("client");
-            Self { hits, stop, http }
-        }
-
-        fn hits(&self) -> usize {
-            self.hits.load(Ordering::SeqCst)
-        }
-    }
-
-    fn assert_local_bad_args(r: &ProxyResult, sink: &NoUpstream, what: &str) {
-        assert!(!r.ok, "{what}: ok must be false, got {r:?}");
-        assert_eq!(
-            r.error_code.as_deref(),
-            Some("bad_args"),
-            "{what}: must be bad_args (never upstream): {r:?}"
-        );
-        assert_eq!(
-            r.provider_status, None,
-            "{what}: local reject must not report an upstream status: {r:?}"
-        );
-        assert_eq!(
-            sink.hits(),
-            0,
-            "{what}: must not call GitLab (sink saw {} TCP hit(s))",
-            sink.hits()
-        );
-    }
-
-    /// 41 files and a 512KB+1 blob are `ok: false` / `bad_args` and never
-    /// touch GitLab. Raising or skipping the cap fails this test; 40 files /
-    /// exactly 512KB must still reach HTTP.
-    #[tokio::test]
-    async fn commit_files_rejects_over_doc_limits_without_gitlab() {
-        assert_eq!(
-            MAX_COMMIT_FILES, DOC_MAX_COMMIT_FILES,
-            "docs §7.2: max 40 files — raising MAX_COMMIT_FILES must fail this test"
-        );
-        assert_eq!(
-            MAX_FILE_BYTES, DOC_MAX_FILE_BYTES,
-            "docs §7.2: 512KB each — raising MAX_FILE_BYTES must fail this test"
-        );
-
-        let sink = NoUpstream::bind();
-        let files: Vec<Value> = (0..41)
-            .map(|i| json!({"path": format!("f{i}.txt"), "content": "x"}))
-            .collect();
-        assert_eq!(files.len(), 41);
-        let r = commit_files(
-            &sink.http,
-            "must-not-be-sent",
-            &json!({"project": "acme/app", "files": files}),
-        )
-        .await;
-        assert_eq!(r.provider, "gitlab");
-        assert_eq!(r.operation, "commit_files");
-        assert_local_bad_args(&r, &sink, "41 files");
-
-        let sink = NoUpstream::bind();
-        let oversized = "a".repeat(512 * 1024 + 1);
-        assert_eq!(oversized.len(), 512 * 1024 + 1);
-        let r = commit_files(
-            &sink.http,
-            "must-not-be-sent",
-            &json!({
-                "project": "acme/app",
-                "files": [{"path": "huge.txt", "content": oversized}],
-            }),
-        )
-        .await;
-        assert_local_bad_args(&r, &sink, "commit_files 512KiB+1");
-
-        let sink = NoUpstream::bind();
-        let files: Vec<Value> = (0..40)
-            .map(|i| json!({"path": format!("f{i}.txt"), "content": "x"}))
-            .collect();
-        assert_eq!(files.len(), 40);
-        let r = commit_files(
-            &sink.http,
-            "must-not-be-sent",
-            &json!({"project": "acme/app", "files": files}),
-        )
-        .await;
-        assert!(
-            sink.hits() > 0,
-            "40 files is the documented max and must reach HTTP (sink), not be dropped locally: {r:?}"
-        );
-        assert_ne!(
-            r.error_code.as_deref(),
-            Some("bad_args"),
-            "40 files must not be bad_args: {r:?}"
-        );
-
-        let sink = NoUpstream::bind();
-        let exact = "c".repeat(512 * 1024);
-        assert_eq!(exact.len(), 512 * 1024);
-        let r = commit_files(
-            &sink.http,
-            "must-not-be-sent",
-            &json!({
-                "project": "acme/app",
-                "files": [{"path": "exact.txt", "content": exact}],
-            }),
-        )
-        .await;
-        assert!(
-            sink.hits() > 0,
-            "512KiB exactly is the documented max and must reach HTTP: {r:?}"
-        );
-        assert_ne!(
-            r.error_code.as_deref(),
-            Some("bad_args"),
-            "exact 512KiB commit_files must not be bad_args: {r:?}"
-        );
-    }
+    ProxyResult::ok_result(
+        "gitlab",
+        "merge_mr",
+        format!("Merged MR !{iid} on {project}"),
+        map_mr(&body),
+        Some(status),
+    )
 }

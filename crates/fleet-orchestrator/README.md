@@ -28,7 +28,7 @@ src/
   domain/     # statuses, CanTransition, retry, capacity, plan types, stable IDs
   validate/   # ValidatePlan (deps, cycles, limits)
   config/     # env knobs
-  sandbox/    # SandboxRuntime + StubRuntime (PR4)
+  sandbox/    # workspace prep + remote assign payload
   notify/     # NotificationSink + Noop/Log (PR4)
   sync/       # ExternalBoardSync + Noop/Log (PR4)
   store/      # Postgres repositories + migrate (PR3)
@@ -120,25 +120,20 @@ When `project_configs.auto_sync_external` is true, each tick pushes tasks that h
 UPDATE project_configs SET auto_sync_external = true WHERE project_id = $1;
 ```
 
-## Process sandbox (PR7)
+## Process guest (PR7)
 
-Uses a **real guest** binary (`fleet-driver`) that:
+Production tick assigns to a paired `fleet-host`, which starts
+`fleet-driver`. The guest:
 
 1. Authenticates with the session `FLEET_WORKER_TOKEN`
 2. POSTs `running` / heartbeats / terminal `success|failed|blocked` to `/v1/.../workers/{session}/…`
 3. Runs ACP (`FLEET_HARNESS=mock|grok`) and writes `artifacts/result.json` + `artifacts/transcript.md`
 
-```bash
-cargo build -p fleet-driver --bins
-export SANDBOX_BACKEND=process
-export PROCESS_WORKER_BIN="$PWD/target/debug/fleet-driver"
-export FLEET_HARNESS=mock
-cargo run -p fleet-server
-```
+The plane does not run an in-process sandbox. Tests assign to a paired
+host and complete work through worker status reports.
 
-Work dir: `$DATA_DIR/projects/{project}/sessions/{session}/` with `pid` file for reaping.
-
-See [`crates/fleet-driver/README.md`](../fleet-driver/README.md).
+See [`crates/fleet-driver/README.md`](../fleet-driver/README.md) and
+[`docs/components/worker-host/README.md`](../../docs/components/worker-host/README.md).
 
 | Env | Role |
 |-----|------|

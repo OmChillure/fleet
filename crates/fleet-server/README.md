@@ -72,11 +72,10 @@ See [`.env.example`](../../.env.example).
 | `GROK_ENABLED` | `true` | Set `false` to disable Grok |
 | `GROK_AUTH_PATH` | `~/.grok/auth.json` | Grok CLI session (`grok login`) |
 | `XAI_API_KEY` | unset | Optional fallback if no CLI session |
-| `SANDBOX_BACKEND` | `stub` | `stub` \| `process` (local bash) \| `docker` (container) |
-| `FLEET_MAX_AGENTS` | `16` | Concurrent local sandboxes (hard max 256). Extra plan tasks queue |
+| `FLEET_MAX_AGENTS` | `16` | Concurrent jobs across paired hosts (hard max 256). Extra plan tasks queue |
 | `TICK_INTERVAL_S` | `5` | Background ticker interval for queued work |
-| `SANDBOX_DOCKER_IMAGE` | `alpine:3.20` | Image when `SANDBOX_BACKEND=docker` |
-| `SANDBOX_DOCKER_NETWORK` | `none` | Docker network (`none` = no internet) |
+
+The API does not run sandboxes; pair a `fleet-host`.
 
 ---
 
@@ -91,7 +90,7 @@ fleet-server (:8080)
     ├── fleet-integrations   (OAuth + encrypted tokens)
     ├── chat                 (workspace chat → local Ollama + fleet tools)
     ├── fleet routes         (cookie BFF → orchestrator store/tick)
-    ├── fleet-orchestrator   (plans, ticks, StubRuntime sandboxes)
+    ├── fleet-orchestrator   (plans, ticks; assigns to paired fleet-host)
     └── fleet-db             → Postgres
                       ▲
                Ollama :11434

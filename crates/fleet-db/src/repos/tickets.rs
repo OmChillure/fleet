@@ -148,8 +148,9 @@ pub async fn upsert_inbox(pool: &PgPool, item: &UpsertInbox) -> DbResult<TicketI
                 ELSE EXCLUDED.summary
             END,
             state = CASE
-                WHEN ticket_inbox.state IN ('launched', 'ignored') THEN ticket_inbox.state
+                WHEN ticket_inbox.state = 'ignored' THEN 'ignored'
                 WHEN EXCLUDED.state = 'done' THEN 'done'
+                WHEN ticket_inbox.state = 'launched' THEN 'launched'
                 ELSE ticket_inbox.state
             END,
             last_seen_at = now()
@@ -279,6 +280,58 @@ pub async fn mark_launched(
         .bind(provider)
         .bind(external_key)
         .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Run died or was cancelled — ticket goes back to open so the next poll works it again.
+pub async fn reopen_ticket(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    external_key: &str,
+) -> DbResult<Option<TicketInboxItem>> {
+    let q = format!(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'open', run_id = NULL
+        WHERE workspace_id = $1
+          AND lower(provider) = lower($2)
+          AND lower(external_key) = lower($3)
+          AND state = 'launched'
+        RETURNING {INBOX_COLS}
+        "#
+    );
+    sqlx::query_as::<_, TicketInboxItem>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .bind(external_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn mark_inbox_done(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    external_key: &str,
+) -> DbResult<Option<TicketInboxItem>> {
+    let q = format!(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'done'
+        WHERE workspace_id = $1
+          AND lower(provider) = lower($2)
+          AND lower(external_key) = lower($3)
+        RETURNING {INBOX_COLS}
+        "#
+    );
+    sqlx::query_as::<_, TicketInboxItem>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .bind(external_key)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)

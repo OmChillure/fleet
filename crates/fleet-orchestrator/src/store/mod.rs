@@ -88,7 +88,7 @@ impl Store {
             SELECT project_id, max_agents, tick_interval_s, heartbeat_stale_s,
                    spawn_timeout_s, kill_grace_s, default_task_timeout_s,
                    default_max_retries, retry_backoff_s, on_task_fail,
-                   auto_sync_external, sandbox_backend, repo_url, git_ref,
+                   auto_sync_external, repo_url, git_ref,
                    fleet_llm, fleet_llm_model, updated_at
             FROM project_configs
             WHERE project_id = $1
@@ -315,6 +315,7 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Returns true when this seq was new (duplicate seq is a no-op).
     pub async fn append_worker_report(
         &self,
         project_id: Uuid,
@@ -323,8 +324,8 @@ impl Store {
         seq: i32,
         kind: &str,
         payload: serde_json::Value,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<bool> {
+        let res = sqlx::query(
             r#"
             INSERT INTO worker_reports (project_id, session_id, board_task_id, seq, kind, payload)
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -339,7 +340,115 @@ impl Store {
         .bind(payload)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn insert_live_events(
+        &self,
+        session_id: Uuid,
+        report_seq: i32,
+        events: &[(chrono::DateTime<chrono::Utc>, String, String)],
+    ) -> Result<u64> {
+        let mut inserted = 0u64;
+        for (idx, (ts, kind, body)) in events.iter().enumerate() {
+            let res = sqlx::query(
+                r#"
+                INSERT INTO worker_live_events (session_id, report_seq, idx, ts, kind, body)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (session_id, report_seq, idx) DO NOTHING
+                "#,
+            )
+            .bind(session_id)
+            .bind(report_seq)
+            .bind(idx as i32)
+            .bind(ts)
+            .bind(kind)
+            .bind(body)
+            .execute(&self.pool)
+            .await?;
+            inserted += res.rows_affected();
+        }
+        Ok(inserted)
+    }
+
+    pub async fn list_live_events(
+        &self,
+        session_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, String, String)>(
+            r#"
+            SELECT ts, kind, body FROM (
+                SELECT ts, kind, body, report_seq, idx
+                FROM worker_live_events
+                WHERE session_id = $1
+                ORDER BY report_seq DESC, idx DESC
+                LIMIT $2
+            ) q
+            ORDER BY report_seq ASC, idx ASC
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(ts, kind, body)| {
+                serde_json::json!({
+                    "ts": ts,
+                    "kind": kind,
+                    "text": body,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn list_recent_live_activity(
+        &self,
+        session_ids: &[Uuid],
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                i32,
+                i32,
+                chrono::DateTime<chrono::Utc>,
+                String,
+                String,
+            ),
+        >(
+            r#"
+            SELECT session_id, report_seq, idx, ts, kind, body
+            FROM worker_live_events
+            WHERE session_id = ANY($1)
+            ORDER BY ts DESC, report_seq DESC, idx DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(session_ids)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .rev()
+            .map(|(session_id, report_seq, idx, ts, kind, body)| {
+                serde_json::json!({
+                    "session_id": session_id,
+                    "report_seq": report_seq,
+                    "idx": idx,
+                    "ts": ts,
+                    "kind": kind,
+                    "text": body,
+                })
+            })
+            .collect())
     }
 
     pub async fn list_unapplied_reports(&self, project_id: Uuid) -> Result<Vec<WorkerReportRow>> {

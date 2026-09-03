@@ -39,7 +39,7 @@ plus driver/host. It never talks to a browser. `fleet-runners-view`
 | Crate | What |
 | --- | --- |
 | `fleet-db` `tests/worker_hosts_repos.rs` | pair consume-once, revoke, heartbeat, assignable, reclaim |
-| `fleet-db` `tests/plane_runners_repos.rs` | plane default-on, upsert, taking_native_jobs |
+| `fleet-db` `control_plane_runner_id` | plane id is stable and is never a paired host |
 | `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; plane first; plane DELETE 400 |
 | `fleet-orchestrator` `tests/assignable_runner.rs` | picker ignores cloud/partners; native-only |
 | `fleet-orchestrator` `tests/host_update_tick.rs` | hold ready while updating |
@@ -81,8 +81,7 @@ Catalog → test (layer 2):
 | Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons_http_lan_fallback`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
 | Loopback URL warning | `test_14i_loopback_warning`; `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
 | Cancel discards pending | `test_15_cancel_discards_pending_worker` |
-| Control plane first, no software, runtime is SANDBOX_BACKEND | `test_16_control_plane_card` |
-| Plane has no isolation checkboxes | `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
+| API is not a runner; empty Self-hosted | `test_16_control_plane_card`; `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
 | Apply changes appears when dirty | `test_17_apply_changes_when_dirty` |
 | Apply PATCH toast + pending apply | `test_14m_apply_toast`; `test_catalog_apply_toast.test_apply_toast_and_pending_apply_until_ack` |
 | Widgets lock while pending | `test_14n_widgets_lock`; `test_catalog_widgets_lock.test_widgets_lock_while_pending_until_ack` |
@@ -183,9 +182,8 @@ Do this on each id in the matrix
 11. **Reclaim.** Remove worker. Re-run install (or pair) on the **same**
     guest. `machine.id` (or hostname+platform) reclaims the same 8-hex
     id. The old disabled clone is hidden.
-12. **Plane gate.** With **no** assignable guest, turn the control plane
-    off (Stop taking jobs → Apply). A ready task stays ready (no local
-    `SANDBOX_BACKEND`). Turn the plane back on → local spawn works.
+12. **No host.** With **no** assignable guest, a ready task stays ready.
+    The API does not local-spawn.
 13. **Sandboxed.** Checking Sandboxed on the guest must **not** start a
     container/k3d job.
 14. **SHA reuse.** Second install of the same package skips matching

@@ -1,8 +1,8 @@
 //! Fleet driver: ACP client + orchestrator worker protocol.
 //!
-//! The `fleet-driver` binary is a drop-in `PROCESS_WORKER_BIN` for
-//! `SANDBOX_BACKEND=process`. Tests drive [`acp::run_session`] against
-//! `mock-acp-agent` (no LLM).
+//! The `fleet-driver` binary is the guest of a paired `fleet-host`
+//! (and of orchestrator tests that enable local spawn). Tests drive
+//! [`acp::run_session`] against `mock-acp-agent` (no LLM).
 
 /// Distinctive ASCII so fleet-host can read this file's package version.
 /// Prefix is part of the contract — do not rename.

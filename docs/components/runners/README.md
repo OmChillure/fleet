@@ -23,19 +23,19 @@ Testing (required three layers + how to run):
 | Fleet Cloud | Our paid pool | Sandboxed | **MR 3** — placeholder |
 | Partners | Other people’s unused capacity | Sandboxed | **MR 3** — placeholder + [design](partners.md) |
 
-Tick already prefers an assignable remote host, else local
-`SANDBOX_BACKEND` (the workspace **control plane** runner — always first
-on Self-hosted, enable/disable like the others). Later MRs extend *who*
-can be assignable. Do not invent a second spawn path.
+Tick assigns to a paired `fleet-host`. The API process is not a runner
+and does not appear on Self-hosted. No host → the task stays ready.
+Same-machine install is **Add worker** then pair. Do not invent a
+second spawn path.
 
 ---
 
-## Isolation is SANDBOX_BACKEND (once)
+## Isolation is on the host (once)
 
 Do not add Native / Sandboxed checkboxes on runner cards. How a job is
-isolated is `SANDBOX_BACKEND` (`stub` / `process` / `local` / `docker`)
-on the control plane. Paired `fleet-host` boxes run a process on that
-machine. Pause / “Stop taking new jobs” is not isolation.
+isolated is the host’s process / container / vm class (workspace
+`min_isolation`). The API does not run sandboxes. Pause / “Stop taking
+new jobs” is not isolation.
 
 Sidebar: **Runners** accordion (same rank as Monitoring and Agents).
 Children: **Self-hosted** (live), **Cloud** and **Partners**
@@ -75,6 +75,6 @@ job). **Workers** as a nav section collides with the per-job
 | [`testing-procedures.md`](testing-procedures.md) | How to run those three layers |
 | [`docs/components/runners/partners.md`](partners.md) | Partners credit, trust, kill-switch (design) |
 | [`docs/components/worker-host/README.md`](../worker-host/README.md) | Pair, install, heartbeat, lease, `fleet-host` |
-| [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick fallback |
+| [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick assignment |
 | [`docs/components/sandbox-manager/README.md`](../sandbox-manager/README.md) | Sandbox create / observe / destroy |
 | [`docs/components/ui/README.md`](../ui/README.md) | App shell and routes |

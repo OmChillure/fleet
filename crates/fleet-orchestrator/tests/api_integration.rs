@@ -2,8 +2,12 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use chrono::{Duration as ChronoDuration, Utc};
+use fleet_db::models::NewWorkerHost;
+use fleet_db::repos::worker_hosts::{self, generate_pair_token, hash_token};
 use fleet_orchestrator::api::{build_app_state, router};
 use fleet_orchestrator::config::{AuthMode, Config};
+use fleet_orchestrator::store::{Store, connect, migrate};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -46,10 +50,6 @@ async fn app_and_store() -> (axum::Router, fleet_orchestrator::store::Store) {
         retry_backoff: Duration::from_secs(10),
         on_task_fail: "fail_run".into(),
         auto_sync_external: false,
-        sandbox_backend: "stub".into(),
-        stub_duration: Duration::from_millis(0),
-        process_worker_argv: vec!["fleet-driver".into()],
-        k8s: fleet_orchestrator::sandbox::K8sOpts::default(),
         lock_wait_timeout: Duration::from_secs(5),
         log_level: "info".into(),
         leadership_mode: "single_process".into(),
@@ -99,6 +99,104 @@ async fn json_req(
         serde_json::from_slice(&bytes).unwrap_or(json!({"raw": String::from_utf8_lossy(&bytes)}))
     };
     (status, v)
+}
+
+async fn store() -> Store {
+    let url = require_database_url();
+    let pool = connect(&url).await.expect("connect");
+    migrate(&pool).await.expect("migrate");
+    fleet_db::migrate(&pool).await.expect("fleet-db migrate");
+    Store::new(pool)
+}
+
+async fn seed_workspace(store: &Store, project_id: Uuid) {
+    let slug = format!("api{}", project_id.as_simple());
+    sqlx::query(
+        r#"
+        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
+        VALUES ($1, $2, $3, now(), now())
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(project_id)
+    .bind(&slug)
+    .bind("api-int")
+    .execute(store.pool())
+    .await
+    .expect("insert workspace");
+}
+
+async fn pair_online_host(store: &Store, workspace_id: Uuid) {
+    let token = generate_pair_token();
+    let host = worker_hosts::create_pending(
+        store.pool(),
+        &NewWorkerHost::new(Uuid::now_v7(), workspace_id, "api-host".to_string(), None),
+        &hash_token(&token),
+        Utc::now() + ChronoDuration::hours(1),
+    )
+    .await
+    .expect("create_pending");
+    worker_hosts::consume_pair_token(
+        store.pool(),
+        &token,
+        "api-host",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair");
+    worker_hosts::heartbeat(
+        store.pool(),
+        host.id,
+        true,
+        false,
+        Some("linux-x86_64"),
+        Some("api-host"),
+        None,
+        0,
+        Some(4),
+        Some("abc"),
+        None,
+        Some(false),
+        None,
+    )
+    .await
+    .expect("heartbeat");
+}
+
+async fn report_success(store: &Store, project_id: Uuid, plan_task_id: &str) {
+    let snap = store.load_board_snapshot(project_id).await.unwrap();
+    let task = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == plan_task_id)
+        .unwrap_or_else(|| panic!("missing {plan_task_id}"));
+    let session = if let Some(sid) = task.claimed_session_id {
+        snap.sessions.iter().find(|s| s.id == sid)
+    } else {
+        snap.sessions
+            .iter()
+            .filter(|s| s.board_task_id == task.id)
+            .max_by_key(|s| s.attempt)
+    }
+    .unwrap_or_else(|| panic!("no session for {plan_task_id}"));
+    store
+        .append_worker_report(
+            project_id,
+            session.id,
+            task.id,
+            session.attempt,
+            "status",
+            json!({
+                "status": "success",
+                "result_md": "Task completed successfully with artifacts.",
+                "files": {"work/out.txt": "ok"}
+            }),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -199,18 +297,33 @@ async fn fixture_and_tick_happy_path() {
     .await;
     assert_eq!(st, StatusCode::CREATED, "{body}");
 
-    // A few ticks should complete the stub chain (duration 0)
-    for _ in 0..4 {
-        let (st, tick) = json_req(
-            app.clone(),
-            "POST",
-            &format!("/v1/projects/{pid}/admin/tick"),
-            Some(token),
-            Some(json!({})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{tick}");
-    }
+    let pid_uuid = Uuid::parse_str(&pid).expect("project uuid");
+    let store = store().await;
+    seed_workspace(&store, pid_uuid).await;
+    pair_online_host(&store, pid_uuid).await;
+
+    let tick = |app: axum::Router| {
+        let pid = pid.clone();
+        async move {
+            json_req(
+                app,
+                "POST",
+                &format!("/v1/projects/{pid}/admin/tick"),
+                Some(token),
+                Some(json!({})),
+            )
+            .await
+        }
+    };
+
+    let (st, t1) = tick(app.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{t1}");
+    report_success(&store, pid_uuid, "t1").await;
+    let (st, t2) = tick(app.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{t2}");
+    report_success(&store, pid_uuid, "t2").await;
+    let (st, t3) = tick(app.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{t3}");
 
     let (st, tasks) = json_req(
         app.clone(),

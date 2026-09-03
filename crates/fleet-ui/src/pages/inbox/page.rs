@@ -39,7 +39,7 @@ pub fn Inbox(workspace_id: String) -> Element {
     let mut slack_channels = use_signal(String::new);
     let mut jira_jql = use_signal(String::new);
     let mut notion_dbs = use_signal(String::new);
-    let mut auto_launch = use_signal(|| false);
+    let mut auto_launch = use_signal(|| true);
 
     let ws_list = workspace_id.clone();
     use_future(move || {
@@ -74,7 +74,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Inbox" }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Watches every connected integration. Finish starts one generalist on the item — the agent chooses tools from what you asked. Chat finish_ticket only loads the spec so the model can plan."
+                        "Start monitor watches Jira, Linear, GitHub, Slack — whatever you connected. The orchestrator keeps polling and launches a work + review fleet on each open ticket. Failed runs go back on the board. Finish still starts one by hand."
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "{status_line}" }
                     if let Some(err) = monitor().and_then(|m| m.last_error) {
@@ -206,7 +206,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                         checked: auto_launch(),
                         onchange: move |e| auto_launch.set(e.checked()),
                     }
-                    "Auto-launch new items from any connected source"
+                    "Keep working open tickets (on by default with Start monitor)"
                 }
                 button {
                     class: "mt-3 rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",

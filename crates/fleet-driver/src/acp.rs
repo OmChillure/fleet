@@ -45,6 +45,8 @@ pub struct AcpOutcome {
     pub usage: Option<Value>,
 }
 
+pub type LiveOut = Arc<std::sync::Mutex<Vec<Value>>>;
+
 pub struct AcpRun {
     pub harness: HarnessSpec,
     pub cwd: PathBuf,
@@ -55,6 +57,8 @@ pub struct AcpRun {
     pub auto_approve: bool,
     pub timeout: Duration,
     pub extra_env: HashMap<String, String>,
+    /// Plane ingest buffer. Local `live.jsonl` is debug-only.
+    pub live_out: Option<LiveOut>,
 }
 
 pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
@@ -115,6 +119,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
     let terminals = TerminalHub::new();
     let terminals_r = terminals.clone();
     let session_dir = run.session_dir.clone();
+    let live_out = run.live_out.clone();
     let reader = tokio::spawn(async move {
         if let Err(e) = read_loop(
             stdout,
@@ -125,6 +130,7 @@ pub async fn run_session(run: AcpRun) -> Result<AcpOutcome> {
             auto_approve,
             terminals_r,
             session_dir,
+            live_out,
         )
         .await
         {
@@ -390,6 +396,7 @@ async fn read_loop(
     auto_approve: bool,
     terminals: TerminalHub,
     session_dir: PathBuf,
+    live_out: Option<LiveOut>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut mode = FrameMode::Auto;
@@ -425,7 +432,7 @@ async fn read_loop(
                     preview = %piece.chars().take(160).collect::<String>(),
                     "ACP update"
                 );
-                append_live_event(&session_dir, "update", &piece);
+                append_live_event(&session_dir, live_out.as_ref(), "update", &piece);
                 let mut t = transcript.lock().await;
                 if t.len() < TRANSCRIPT_CAP {
                     t.push_str(&piece);
@@ -647,7 +654,9 @@ fn method_is_write_file(method: &str) -> bool {
     m.contains("write_text_file") || m.contains("writetextfile")
 }
 
-fn append_live_event(session_dir: &Path, kind: &str, text: &str) {
+pub const LIVE_BUF_CAP: usize = 64;
+
+fn append_live_event(session_dir: &Path, live_out: Option<&LiveOut>, kind: &str, text: &str) {
     if text.trim().is_empty() {
         return;
     }
@@ -661,6 +670,15 @@ fn append_live_event(session_dir: &Path, kind: &str, text: &str) {
         && let Ok(line) = serde_json::to_string(&rec)
     {
         let _ = writeln!(f, "{line}");
+    }
+    if let Some(buf) = live_out
+        && let Ok(mut g) = buf.lock()
+    {
+        if g.len() >= LIVE_BUF_CAP {
+            let overflow = g.len() + 1 - LIVE_BUF_CAP;
+            g.drain(0..overflow);
+        }
+        g.push(rec);
     }
 }
 

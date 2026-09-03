@@ -30,6 +30,7 @@ fn base_run(dir: &std::path::Path, spec: HarnessSpec) -> AcpRun {
         auto_approve: true,
         timeout: Duration::from_secs(10),
         extra_env: HashMap::new(),
+        live_out: None,
     }
 }
 

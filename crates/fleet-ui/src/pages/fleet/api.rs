@@ -189,6 +189,20 @@ pub async fn resume_task(
     parse(res).await
 }
 
+pub async fn replace_session(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
+    let res = with_credentials(
+        client()
+            .post(api_url(&format!(
+                "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/replace"
+            )))
+            .json(&serde_json::json!({ "reason": "ui_replace" })),
+    )
+    .send()
+    .await
+    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
+    parse(res).await
+}
+
 pub async fn kill_session(workspace_id: &str, session_id: &str) -> Result<Value, FleetError> {
     let res = with_credentials(
         client()

@@ -22,6 +22,7 @@ pub const OPERATIONS: &[&str] = &[
     "create_issue",
     "update_issue",
     "add_comment",
+    "merge_pr",
 ];
 
 pub async fn invoke(
@@ -45,6 +46,7 @@ pub async fn invoke(
         "create_issue" => writes::create_issue(http, token, args).await,
         "update_issue" => writes::update_issue(http, token, args).await,
         "add_comment" => writes::add_comment(http, token, args).await,
+        "merge_pr" => writes::merge_pr(http, token, args).await,
         other => ProxyResult::err(
             "github",
             other,

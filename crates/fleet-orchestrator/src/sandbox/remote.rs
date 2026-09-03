@@ -1,9 +1,7 @@
 //! Remote worker-host handle + `work_claims` spawn payload.
 //!
-//! `remote` is **not** a `SANDBOX_BACKEND` value. Local env backends stay
-//! `stub` | `process` | `local` | `docker`. Tick records
-//! `runtime_backend = "remote"` and `runtime_handle = "host:{id}"` when a
-//! paired host is assigned.
+//! Production assignment is `runtime_backend = "remote"` and
+//! `runtime_handle = "host:{id}"`. The plane does not run a local runtime.
 
 use super::SpawnRequest;
 use serde::{Deserialize, Serialize};

@@ -131,17 +131,13 @@ Status: `phase` (`Creating` / `Running` / `Succeeded` / `Failed`), `podName`, `n
 
 ## Orchestrator hookup
 
-In-cluster API is `SANDBOX_BACKEND=stub` (display only). Tick enqueues
-`work_claims`; `fleet-host` creates and deletes `FleetSandbox` CRs. The
-`fleet-host` ServiceAccount can create/get/list/delete those CRs; the
-operator still creates the Pod + NetworkPolicy. Worker heartbeats stay
-`POST /v1/.../heartbeat|status`.
-
-Host `.env` is unchanged (`stub` / `process` / …).
+In-cluster API is not a runner. Tick enqueues `work_claims`; `fleet-host`
+creates and deletes `FleetSandbox` CRs. The `fleet-host` ServiceAccount
+can create/get/list/delete those CRs; the operator still creates the Pod
++ NetworkPolicy. Worker heartbeats stay `POST /v1/.../heartbeat|status`.
 
 | Env | Default | Role |
 | --- | --- | --- |
-| `SANDBOX_BACKEND` | `stub` (API display only; not a runner) | fleet-host creates CRs |
 | `K8S_NAMESPACE` | `agent-fleet` | CR namespace |
 | `K8S_WORKER_IMAGE` | `agent-fleet-api:local` | pod image (`fleet-driver`) |
 | `K8S_WORKER_COMMAND` | `fleet-driver` | container command |

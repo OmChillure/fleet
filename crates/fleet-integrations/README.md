@@ -124,8 +124,8 @@ let result = invoke(
 | Provider | Operations |
 | --- | --- |
 | `github` (read) | `list_repos`, `list_issues`, `get_issue`, `list_prs`, `get_pr`, `get_file`, `list_commits` |
-| `github` (write) | `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment` |
-| `gitlab` | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment` |
+| `github` (write) | `put_file`, `commit_files`, `create_branch`, `create_pr`, `create_issue`, `add_comment`, `merge_pr` |
+| `gitlab` | `list_repos`, `list_issues`, `get_issue`, `list_mrs`, `get_mr`, `get_file`, `list_commits`, `commit_files`, `create_branch`, `create_mr`, `create_issue`, `add_comment`, `merge_mr` |
 | `jira` | `search_issues`, `get_issue`, `list_projects`, `create_issue`, `add_comment`, `list_transitions`, `transition_issue` |
 | `linear` | `list_issues`, `get_issue`, `list_teams`, `create_issue`, `update_issue`, `add_comment` |
 | `slack` | `list_channels`, `list_users`, `post_message`, `get_channel_history` |

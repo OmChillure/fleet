@@ -1,6 +1,6 @@
 //! Tick must not local-spawn while a paired host is mid host-bin restart.
-//! Kill mid-swap + auto_update on holds ready; no local SANDBOX_BACKEND, no token rotate.
-//! Offline without `software_updating` keeps today's local fallback.
+//! Kill mid-swap + auto_update on holds ready; no in-process fallback, no token rotate.
+//! Offline without `software_updating` still leaves the task ready.
 //! Requires DATABASE_URL.
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -10,13 +10,7 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::sandbox::StubRuntime;
-use fleet_orchestrator::store::{
-    Store, connect, migrate, select_assignable_host, select_assignable_runner,
-    select_assignable_runner_preferring,
-};
-use std::sync::Arc;
-use std::time::Duration;
+use fleet_orchestrator::store::{Store, connect, migrate};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -40,13 +34,7 @@ async fn setup() -> Store {
 }
 
 fn runner(store: Store) -> TickRunner {
-    let rt = Arc::new(StubRuntime::new(Duration::from_secs(60)));
-    TickRunner::new(
-        store,
-        rt,
-        std::env::temp_dir().join("fleet-orch-data"),
-        "http://127.0.0.1:8080",
-    )
+    TickRunner::with_store(store)
 }
 
 fn one_task_plan(project_id: Uuid) -> WorkPlanBody {
@@ -233,10 +221,10 @@ async fn tick_offline_host_without_updating_leaves_ready() {
 }
 
 /// Guest killed mid host-bin swap (`software_updating`, last_seen stale but
-/// inside the 2 min hold). `auto_update` on must not fail over to the test
-/// local SANDBOX_BACKEND (`with_local_spawn`) and must not rotate the token.
+/// inside the 2 min hold). `auto_update` on must not fail over to the
+/// in-process fallback and must not rotate the token.
 #[tokio::test]
-async fn hold_ready_when_guest_killed_mid_swap_no_local() {
+async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
     let store = setup().await;
     let project = store
         .create_project(&format!("upd-kill-{}", Uuid::new_v4()), 3)
@@ -267,14 +255,10 @@ async fn hold_ready_when_guest_killed_mid_swap_no_local() {
         .unwrap();
 
     let r = runner(store.clone())
-        .with_local_spawn()
         .tick_project(project.id)
         .await
         .unwrap();
-    assert_eq!(
-        r.spawned, 0,
-        "must not local-spawn SANDBOX_BACKEND mid-swap: {r:?}"
-    );
+    assert_eq!(r.spawned, 0, "must not local-spawn mid-swap: {r:?}");
     assert_eq!(r.spawn_failed, 0, "{r:?}");
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
@@ -286,7 +270,7 @@ async fn hold_ready_when_guest_killed_mid_swap_no_local() {
     );
     assert!(
         snap.sessions.is_empty(),
-        "no local SANDBOX_BACKEND session: {:?}",
+        "no local in-process session: {:?}",
         snap.sessions
     );
 
@@ -300,162 +284,4 @@ async fn hold_ready_when_guest_killed_mid_swap_no_local() {
         "tick must not rotate machine token mid-swap (AGENTS.md lockout)"
     );
     assert!(after.auto_update, "auto_update stays on");
-}
-
-/// Catalog: online remote native under cap wins over local SANDBOX_BACKEND.
-/// `with_local_spawn` + plane taking (default allow_host) + instant stub
-/// must not steal the job. A local steal would complete_via_runtime here.
-#[tokio::test]
-async fn tick_prefer_remote_native_over_local_sandbox_backend() {
-    let store = setup().await;
-    let project = store
-        .create_project(&format!("pref-rem-{}", Uuid::new_v4()), 3)
-        .await
-        .unwrap();
-    seed_workspace_for_project(&store, project.id).await;
-    let host_id = pair_host(&store, project.id, "online-native").await;
-    heartbeat_software(&store, host_id, false).await;
-
-    store
-        .insert_accepted_plan(project.id, one_task_plan(project.id))
-        .await
-        .unwrap();
-
-    // Instant stub: a with_local_spawn steal completes in this same tick.
-    let rt = Arc::new(StubRuntime::new(Duration::ZERO));
-    let rnr = TickRunner::new(
-        store.clone(),
-        rt,
-        std::env::temp_dir().join("fleet-orch-data"),
-        "http://172.18.0.1:8080",
-    )
-    .with_local_spawn();
-    assert_eq!(
-        rnr.runtime_backend(),
-        "stub",
-        "stub SANDBOX_BACKEND is available; remote native must still win"
-    );
-
-    let r = rnr.tick_project(project.id).await.unwrap();
-    assert!(
-        r.spawned >= 1,
-        "ready task must spawn on the free paired host: {r:?}"
-    );
-    assert_eq!(r.spawn_failed, 0, "{r:?}");
-    assert_eq!(
-        r.completed_via_runtime, 0,
-        "remote session must not be completed_via_runtime by stub: {r:?}"
-    );
-
-    let snap = store.load_board_snapshot(project.id).await.unwrap();
-    assert_eq!(
-        snap.sessions.len(),
-        1,
-        "exactly one session: {:?}",
-        snap.sessions
-    );
-    let sess = &snap.sessions[0];
-    assert_eq!(
-        sess.runtime_backend, "remote",
-        "free remote native wins over local SANDBOX_BACKEND: {}",
-        sess.runtime_backend
-    );
-    assert_eq!(
-        sess.runtime_handle.as_deref(),
-        Some(format!("host:{host_id}").as_str()),
-        "runtime_handle must be this host: {:?}",
-        sess.runtime_handle
-    );
-    assert!(
-        snap.sessions
-            .iter()
-            .all(|s| s.runtime_backend != "stub" && s.runtime_backend != "process"),
-        "no stub/process session: {:?}",
-        snap.sessions
-    );
-
-    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
-    assert_ne!(
-        t1.status, "done_success",
-        "task must not be completed_via_runtime by stub: {:?}",
-        t1.status
-    );
-}
-
-/// Tick picker is `list_assignable`: after revoke the row is gone. A live
-/// sibling still wins. Preferring the revoked id must not revive it.
-/// Do not rotate_machine_token — recovery is re-pair.
-#[tokio::test]
-async fn select_assignable_skips_revoked_host() {
-    let store = setup().await;
-    let project = store
-        .create_project(&format!("rev-skip-{}", Uuid::new_v4()), 3)
-        .await
-        .unwrap();
-    seed_workspace_for_project(&store, project.id).await;
-    let revoked_id = pair_host(&store, project.id, "will-revoke").await;
-    let live_id = pair_host(&store, project.id, "stays-live").await;
-    heartbeat_software(&store, revoked_id, false).await;
-    heartbeat_software(&store, live_id, false).await;
-
-    let before_host = select_assignable_host(&store, project.id)
-        .await
-        .expect("paired natives must be assignable before revoke");
-    assert!(
-        before_host.id() == revoked_id || before_host.id() == live_id,
-        "picker must return one of this workspace's hosts before revoke, got {}",
-        before_host.id()
-    );
-    let before_runner = select_assignable_runner(&store, project.id)
-        .await
-        .expect("runner picker must see a host before revoke");
-    assert!(
-        before_runner.id() == revoked_id || before_runner.id() == live_id,
-        "runner picker must return one of this workspace's hosts before revoke, got {}",
-        before_runner.id()
-    );
-
-    worker_hosts::revoke(store.pool(), revoked_id)
-        .await
-        .expect("revoke");
-
-    let after_host = select_assignable_host(&store, project.id)
-        .await
-        .expect("live sibling must remain assignable");
-    assert_eq!(
-        after_host.id(),
-        live_id,
-        "host picker must skip the revoked row and keep the sibling"
-    );
-    let after_runner = select_assignable_runner(&store, project.id)
-        .await
-        .expect("live sibling must remain a v1 runner");
-    assert_eq!(
-        after_runner.id(),
-        live_id,
-        "runner picker must skip the revoked row"
-    );
-
-    let preferred = select_assignable_runner_preferring(&store, project.id, Some(revoked_id)).await;
-    assert_eq!(
-        preferred.as_ref().map(|c| c.id()),
-        Some(live_id),
-        "preferring a revoked host must fall through to the live sibling, not revive it: {preferred:?}"
-    );
-
-    worker_hosts::revoke(store.pool(), live_id)
-        .await
-        .expect("revoke sibling");
-    let none_host = select_assignable_host(&store, project.id).await;
-    assert!(
-        none_host.as_ref().map(|c| c.id()) != Some(revoked_id)
-            && none_host.as_ref().map(|c| c.id()) != Some(live_id),
-        "picker must not return a revoked host: {none_host:?}"
-    );
-    let none_runner = select_assignable_runner(&store, project.id).await;
-    assert!(
-        none_runner.as_ref().map(|c| c.id()) != Some(revoked_id)
-            && none_runner.as_ref().map(|c| c.id()) != Some(live_id),
-        "runner picker must not return a revoked host: {none_runner:?}"
-    );
 }

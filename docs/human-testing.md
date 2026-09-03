@@ -87,11 +87,13 @@ same change. The walkthrough is allowed to go stale only if the product did.
 
 1. **Landing** `/` — hero, Get started, Log in.
 2. **Signup** — valid account; you land on login, not inside the app.
-3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Shows open
-   runs, live agents, team board, tickets, and team chat (empty until a run).
+3. **Login** — dashboard of a workspace (`/{uuid}/dashboard`). Title is
+   **Workforce**. Shows set-a-goal, open goals, open runs, live
+   agents, team board, and team chat (empty until a run). An in-progress
+   card has **Watch** → Live session.
 4. **Unauthenticated deep link** — incognito or logged-out `/{uuid}/dashboard`
    redirects to `/login`.
-5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Dashboard, Fleet,
+5. **Sidebar** — Chat (New chat, Chat history), Monitoring (Workforce, Fleet,
    Sandboxes, Cases, Inbox), Agents (All agents, Live sessions), Runners (Self-hosted,
    Cloud, Partners), Workspace (Integrations, Settings). Expand collapsed
    sections. `/workers` still redirects.
@@ -100,12 +102,12 @@ same change. The walkthrough is allowed to go stale only if the product did.
     Members: invite by email (member/admin). Existing users join immediately;
     others join on signup or next login. Owner can change roles / remove;
     member cannot invite.
-8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Add a worker;
-   paste the install command on the machine (Linux/macOS or Windows). Copy
-   Unix, Windows, and token (works on HTTP LAN). Token panel is success —
-   do not require a second machine. On a runner with Ollama: disk free, a
-   searchable current top-50 popular-model list, and an Unlisted field for
-   any name/URL. `/{ws}/workers` redirects here (`workers` scene is an alias).
+8. **Runners / Self-hosted** — `/{ws}/runners/self-hosted`. Empty is **No
+   workers yet** (the API is not a runner). Add a worker; paste the
+   install command on the machine (this one is fine). Token panel is
+   success — do not require a second machine. On a runner with Ollama:
+   disk free, a searchable current top-50 popular-model list, and an
+   Unlisted field for any name/URL. `/{ws}/workers` redirects here.
 9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
    (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
 10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;
@@ -128,10 +130,10 @@ same change. The walkthrough is allowed to go stale only if the product did.
 15. **Sandboxes** — same worker sessions as Fleet.
 16. **Cases** — `/{ws}/cases` New case (title + policy) → Create case. Detail:
     Observe a fact, then Cancel (status cancelled). Empty list before create is OK.
-17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK
-    before a row exists. Start monitor turns the status to monitor on
-    (Connect an app first). Finish on an open row launches a fleet run
-    (Finish hides; row shows the run id).
+    The LLM invents the workflow; this page is the log.
+17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK.
+    Start monitor watches Jira/GitHub/Linear/… and auto-launches work+review
+    on open tickets (needs an integration). Finish still starts one by hand.
 18. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
 19. **User menu** — theme Black/White (not persisted), Log out → `/login`.
 20. **This MR** — do the new thing this change added. If the script has no
@@ -205,7 +207,7 @@ really spans the product.
 | `crates/fleet-db` chats repo | `chat` + `sessions` | new thread appears under Chat history |
 | `crates/fleet-orchestrator` tick, plans, store, team chat | `fleet` | Start 2-task run, Run tick, cards change column. LLM workers use TEAM_CHAT.md |
 | `crates/fleet-server` `fleet_routes` | `fleet` | same — cookie BFF, not `/v1` |
-| `crates/fleet-driver`, `SANDBOX_BACKEND=process` | `fleet` then `sandboxes` | session card, backend name, work dir. Set process backend in `.env` **before** launch if that is the MR |
+| `crates/fleet-driver` on a paired `fleet-host` | `fleet` then `sandboxes` | session card, host runtime, work dir. Pair a host before launch |
 | `fleet-host` + operator + CRD | `k8s` then `fleet` | CRD + operator + fleet-host present; Start run + tick → host creates a CR |
 | `crates/fleet-ui` sandboxes page | `sandboxes` | list or empty hint naming Fleet |
 | `crates/fleet-server` `cases.rs`, `fleet-ui` cases | `cases` | New case form; create → Observe → Cancel on detail (empty list OK before create) |
@@ -217,7 +219,7 @@ really spans the product.
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. Private (Ollama): top-50, tags, models directory, disk/RAM/VRAM guards. Sandboxing Native / VMs / Containers. `/{ws}/workers` redirects |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
 | `crates/fleet-ui` Partners `/{ws}/runners/partners` | `partners` | trust copy, disclaimer, verified vs open. Ack does not enable lending |
-| `crates/fleet-ui` dashboard + `fleet/overview` | `dashboard` | Open runs / Live agents / Team board (empty OK) |
+| `crates/fleet-ui` dashboard + `fleet/overview` + workforce | `dashboard` | Workforce: Set a goal, Open goals / Open runs / Team board (empty OK) |
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
 | `sandbox-lab/workspace/workspace_agent.py` | `lab` | same |

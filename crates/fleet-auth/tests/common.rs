@@ -32,21 +32,18 @@ pub fn unique_email() -> String {
     format!("auth.{uuid}@example.test")
 }
 
-/// Same secret the in-process test app signs access JWTs with.
-pub fn test_jwt_secret() -> String {
-    std::env::var("JWT_SECRET")
+fn test_auth_config() -> AuthConfig {
+    let jwt_secret = std::env::var("JWT_SECRET")
         .ok()
         .filter(|s| s.len() >= 32)
-        .unwrap_or_else(|| "dev-change-me-to-a-long-random-secret-at-least-32-chars".into())
-}
-
-fn test_auth_config() -> AuthConfig {
+        .unwrap_or_else(|| "dev-change-me-to-a-long-random-secret-at-least-32-chars".into());
     AuthConfig {
-        jwt_secret: test_jwt_secret(),
+        jwt_secret,
         access_ttl: Duration::from_secs(900),
         refresh_ttl: Duration::from_secs(604_800),
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
+        signup_token: None,
     }
 }
 
@@ -67,24 +64,17 @@ pub async fn connect_and_migrate() -> fleet_db::PgPool {
 }
 
 pub async fn app() -> axum::Router {
-    let db = connect_and_migrate().await;
-    let state = AuthState {
-        db,
-        config: test_auth_config(),
-    };
-    fleet_auth::router().with_state(state)
+    app_with_config(test_auth_config()).await
 }
 
-/// Same harness as [`app`], with an explicit cookie policy. Default
-/// [`test_auth_config`] stays Lax + insecure.
-pub async fn app_with_cookie_policy(
-    cookie_secure: bool,
-    cookie_samesite: cookie::SameSite,
-) -> axum::Router {
-    let db = connect_and_migrate().await;
+pub async fn app_with_signup_token(token: &str) -> axum::Router {
     let mut config = test_auth_config();
-    config.cookie_secure = cookie_secure;
-    config.cookie_samesite = cookie_samesite;
+    config.signup_token = Some(token.to_string());
+    app_with_config(config).await
+}
+
+async fn app_with_config(config: AuthConfig) -> axum::Router {
+    let db = connect_and_migrate().await;
     let state = AuthState { db, config };
     fleet_auth::router().with_state(state)
 }
@@ -126,20 +116,6 @@ impl ParsedSetCookie {
         self.raw
             .split(';')
             .any(|part| part.trim().eq_ignore_ascii_case("Secure"))
-    }
-
-    pub fn same_site(&self) -> Option<&str> {
-        self.raw.split(';').find_map(|part| {
-            let p = part.trim();
-            p.split_once('=')
-                .filter(|(k, _)| k.eq_ignore_ascii_case("SameSite"))
-                .map(|(_, v)| v)
-        })
-    }
-
-    pub fn is_samesite_none(&self) -> bool {
-        self.same_site()
-            .is_some_and(|v| v.eq_ignore_ascii_case("None"))
     }
 }
 
@@ -212,9 +188,6 @@ pub struct HttpOut {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Value,
-    /// Oneshot response bytes as UTF-8 (lossy). Drive secret-omission
-    /// checks against this, not a re-serialized `Value`.
-    pub raw: String,
 }
 
 impl HttpOut {
@@ -242,19 +215,6 @@ pub async fn call(
     cookies: Option<&CookieJar>,
     body: Option<Value>,
 ) -> HttpOut {
-    call_with_headers(app, method, uri, cookies, &[], body).await
-}
-
-/// Same oneshot as [`call`], plus extra request headers (`Host`,
-/// `X-Forwarded-Host`, …). Cookie scope must not follow those.
-pub async fn call_with_headers(
-    app: &axum::Router,
-    method: &str,
-    uri: &str,
-    cookies: Option<&CookieJar>,
-    extra_headers: &[(&str, &str)],
-    body: Option<Value>,
-) -> HttpOut {
     let mut builder = Request::builder().method(method).uri(uri);
     if body.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -264,9 +224,46 @@ pub async fn call_with_headers(
             builder = builder.header(header::COOKIE, h);
         }
     }
-    for (name, value) in extra_headers {
-        builder = builder.header(*name, *value);
+    call_finish(app, builder, body).await
+}
+
+pub async fn call_with_xff(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    xff: &str,
+    body: Option<Value>,
+) -> HttpOut {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
     }
+    builder = builder.header("x-forwarded-for", xff);
+    call_finish(app, builder, body).await
+}
+
+pub async fn call_with_proxy_ips(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    xff: &str,
+    real_ip: &str,
+    body: Option<Value>,
+) -> HttpOut {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    builder = builder.header("x-forwarded-for", xff);
+    builder = builder.header("x-real-ip", real_ip);
+    call_finish(app, builder, body).await
+}
+
+async fn call_finish(
+    app: &axum::Router,
+    builder: axum::http::request::Builder,
+    body: Option<Value>,
+) -> HttpOut {
     let req = builder
         .body(match body {
             Some(b) => Body::from(serde_json::to_vec(&b).unwrap()),
@@ -277,17 +274,16 @@ pub async fn call_with_headers(
     let status = res.status();
     let headers = res.headers().clone();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let raw = String::from_utf8_lossy(&bytes).into_owned();
     let body = if bytes.is_empty() {
         json!({})
     } else {
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({ "raw": raw.clone() }))
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }))
     };
     HttpOut {
         status,
         headers,
         body,
-        raw,
     }
 }
 
@@ -304,6 +300,19 @@ pub async fn signup_with(
     let mut body = json!({ "email": email, "password": password });
     if let Some(name) = display_name {
         body["display_name"] = json!(name);
+    }
+    call(app, "POST", "/api/auth/signup", None, Some(body)).await
+}
+
+pub async fn signup_with_token(
+    app: &axum::Router,
+    email: &str,
+    password: &str,
+    token: Option<&str>,
+) -> HttpOut {
+    let mut body = json!({ "email": email, "password": password });
+    if let Some(token) = token {
+        body["token"] = json!(token);
     }
     call(app, "POST", "/api/auth/signup", None, Some(body)).await
 }

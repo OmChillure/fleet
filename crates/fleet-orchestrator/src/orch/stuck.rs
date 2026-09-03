@@ -1,18 +1,12 @@
-//! Step 8 — stuck detection, kill, retry; stub exit → success.
+//! Step 8 — stuck detection, kill, retry for paired-host sessions.
 
 use crate::domain::{ExitReason, WorkerSessionStatus};
-use crate::sandbox::share::{archive_session_tree, read_changes_request, sync_session_repo_back};
-use crate::sandbox::team::archive_session_result;
-use crate::sandbox::{RuntimeHandle, SandboxRuntime, SandboxState, Signal};
 use crate::store::{BoardSnapshot, Store};
 use chrono::{Duration as ChronoDuration, Utc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use uuid::Uuid;
 
-use super::can_apply_task_terminal;
-use super::review::apply_review_bounce;
 use super::spawn::apply_retry_after_failure;
 use super::tick::TickError;
 
@@ -25,7 +19,6 @@ pub struct StuckOutcome {
 
 pub async fn process_sessions(
     store: &Store,
-    runtime: &Arc<dyn SandboxRuntime>,
     project_id: Uuid,
     snap: &BoardSnapshot,
     heartbeat_stale_s: i32,
@@ -65,182 +58,18 @@ pub async fn process_sessions(
             .unwrap_or(false);
 
         let remote = session.runtime_backend == "remote";
-        let handle = session.runtime_handle.as_ref().map(|id| RuntimeHandle {
-            backend: session.runtime_backend.clone(),
-            id: id.clone(),
-        });
 
         // Terminal task still holding session → free
         if task_terminal {
-            if !remote && let Some(ref h) = handle {
-                let _ = runtime.destroy(h).await;
-            }
             store
                 .free_session_claim(session.board_task_id, session.id, "clean")
                 .await?;
             continue;
         }
 
-        // Local runtime only. `host:{uuid}` is not a stub/process handle.
-        if !remote
-            && let Some(ref h) = handle
-            && let Ok(SandboxState::Exited { code }) = runtime.state(h).await
-        {
-            let cancel = cancel_by_run.get(&session.run_id).copied().unwrap_or(false);
-            if cancel {
-                let _ = runtime.destroy(h).await;
-                store
-                    .free_session_claim(session.board_task_id, session.id, "cancel")
-                    .await?;
-                store
-                    .set_task_cancelled(session.board_task_id, "cancel")
-                    .await?;
-                out.killed += 1;
-                continue;
-            }
-            if code.unwrap_or(0) == 0 {
-                let _ = runtime.destroy(h).await;
-                let work = session_work_dir(data_dir, session, project_id);
-                if let Some(task) = task {
-                    if work.exists() {
-                        archive_session_result(
-                            data_dir,
-                            project_id,
-                            session.run_id,
-                            &task.plan_task_id,
-                            &work,
-                        )
-                        .await;
-                        archive_session_tree(
-                            data_dir,
-                            project_id,
-                            session.run_id,
-                            &task.plan_task_id,
-                            &work,
-                        );
-                        sync_session_repo_back(data_dir, &work, task);
-                    }
-                    if let Some(req) = read_changes_request(&work) {
-                        let n =
-                            apply_review_bounce(store, snap, session.board_task_id, &req, data_dir)
-                                .await?;
-                        store
-                            .free_session_claim(
-                                session.board_task_id,
-                                session.id,
-                                "changes_requested",
-                            )
-                            .await?;
-                        out.reviews_bounced += n;
-                        continue;
-                    }
-                    let check = super::validate_done::validate_task_done(
-                        task,
-                        &work,
-                        &session.runtime_backend,
-                    );
-                    if !check.ok {
-                        let bounces = task
-                            .hitl_notes
-                            .as_deref()
-                            .unwrap_or("")
-                            .matches("Task validation failed")
-                            .count();
-                        if bounces >= 2 {
-                            if !can_apply_task_terminal(task, session.id, "done_success") {
-                                store
-                                    .free_session_claim(
-                                        session.board_task_id,
-                                        session.id,
-                                        "stale_terminal",
-                                    )
-                                    .await?;
-                                continue;
-                            }
-                            store
-                                .set_task_done_failed(
-                                    session.board_task_id,
-                                    "validation_failed_exhausted",
-                                )
-                                .await?;
-                            store
-                                .free_session_claim(
-                                    session.board_task_id,
-                                    session.id,
-                                    "validation_failed_exhausted",
-                                )
-                                .await?;
-                        } else {
-                            if !can_apply_task_terminal(task, session.id, "done_success") {
-                                store
-                                    .free_session_claim(
-                                        session.board_task_id,
-                                        session.id,
-                                        "stale_terminal",
-                                    )
-                                    .await?;
-                                continue;
-                            }
-                            store
-                                .reopen_task_for_changes(
-                                    session.board_task_id,
-                                    "validation_failed",
-                                    &check.notes(),
-                                )
-                                .await?;
-                            store
-                                .free_session_claim(
-                                    session.board_task_id,
-                                    session.id,
-                                    "validation_failed",
-                                )
-                                .await?;
-                        }
-                        out.retried += 1;
-                        continue;
-                    }
-                }
-                if let Some(task) = task {
-                    if !can_apply_task_terminal(task, session.id, "done_success") {
-                        store
-                            .free_session_claim(
-                                session.board_task_id,
-                                session.id,
-                                "stale_terminal",
-                            )
-                            .await?;
-                        continue;
-                    }
-                }
-                store
-                    .apply_task_terminal(
-                        session.board_task_id,
-                        session.id,
-                        "done_success",
-                        None,
-                        session.attempt, // seq surrogate
-                    )
-                    .await?;
-                out.completed_via_runtime += 1;
-                continue;
-            } else {
-                let _ = runtime.destroy(h).await;
-                store
-                    .free_session_claim(session.board_task_id, session.id, "worker_failed")
-                    .await?;
-                let max_retries = task.map(|t| t.max_retries).unwrap_or(2);
-                apply_retry_after_failure(
-                    store,
-                    session.board_task_id,
-                    session.attempt,
-                    max_retries,
-                    cancel,
-                    ExitReason::Timeout,
-                )
-                .await?;
-                out.retried += 1;
-                continue;
-            }
+        // Legacy in-process sessions are not completed on the plane.
+        if !remote {
+            continue;
         }
 
         // Spawn hang. Remote stays spawning until the host claims + job heartbeats.
@@ -252,9 +81,6 @@ pub async fn process_sessions(
             };
             let age = now.signed_duration_since(session.created_at);
             if age > ChronoDuration::seconds(limit as i64) {
-                if !remote && let Some(ref h) = handle {
-                    let _ = runtime.destroy(h).await;
-                }
                 store.complete_spawn_failure(session.id).await?;
                 let max_retries = task.map(|t| t.max_retries).unwrap_or(2);
                 let cancel = cancel_by_run.get(&session.run_id).copied().unwrap_or(false);
@@ -279,10 +105,6 @@ pub async fn process_sessions(
                 .map(|d| now >= d)
                 .unwrap_or(true);
             if past {
-                if !remote && let Some(ref h) = handle {
-                    let _ = runtime.signal(h, Signal::Kill).await;
-                    let _ = runtime.destroy(h).await;
-                }
                 let cancel = cancel_by_run.get(&session.run_id).copied().unwrap_or(false);
                 let reason = session.exit_reason.as_deref().unwrap_or("stale");
                 store
@@ -357,15 +179,15 @@ pub async fn process_sessions(
                 store
                     .mark_session_killing(session.id, exit_reason, grace)
                     .await?;
-                if !remote && let Some(ref h) = handle {
-                    let _ = runtime.signal(h, Signal::Term).await;
+                if let Some(host_id) = crate::sandbox::remote::host_id_from_handle(
+                    session.runtime_handle.as_deref().unwrap_or(""),
+                ) {
+                    let _ = crate::store::enqueue_signal_session(
+                        store, project_id, session.id, host_id, "kill",
+                    )
+                    .await;
                 }
-                // If grace is 0, kill immediately next lines
                 if kill_grace_s <= 0 {
-                    if !remote && let Some(ref h) = handle {
-                        let _ = runtime.signal(h, Signal::Kill).await;
-                        let _ = runtime.destroy(h).await;
-                    }
                     store
                         .free_session_claim(session.board_task_id, session.id, exit_reason)
                         .await?;

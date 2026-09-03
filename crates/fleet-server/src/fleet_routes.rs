@@ -142,7 +142,6 @@ async fn get_fleet_project(
         "name": project.name,
         "workspace_id": workspace_id,
         "role": role,
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "config": settings_json(&state, workspace_id, &cfg).await,
     })))
 }
@@ -164,7 +163,6 @@ async fn settings_json(
     json!({
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
-        "sandbox_backend": cfg.sandbox_backend,
         "min_isolation": min_isolation,
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
@@ -324,7 +322,6 @@ async fn patch_fleet_config(
         "project_id": workspace_id,
         "config": {
             "max_agents": cfg.max_agents,
-            "sandbox_backend": cfg.sandbox_backend,
             "repo_url": cfg.repo_url,
             "git_ref": cfg.git_ref,
         }
@@ -584,8 +581,30 @@ async fn get_overview(
         .filter(|t| t.failure_reason.as_deref() == Some("changes_requested"))
         .count();
 
+    let live_ids: Vec<uuid::Uuid> = sessions.iter().map(|s| s.id).collect();
+    let mut activity = state
+        .orch
+        .store
+        .list_recent_live_activity(&live_ids, 40)
+        .await
+        .map_err(|e| map_orch_err("list_live_activity", e))?;
+    for ev in &mut activity {
+        let Some(sid) = ev
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        if let Some(s) = sessions.iter().find(|x| x.id == sid) {
+            ev.as_object_mut().map(|o| {
+                o.insert("profile".into(), json!(s.worker_profile));
+                o.insert("status".into(), json!(s.status));
+            });
+        }
+    }
+
     Ok(Json(json!({
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "open_runs": runs.iter().filter(|r| {
             !matches!(r.status.as_str(), "completed" | "failed" | "cancelled")
         }).count(),
@@ -609,9 +628,10 @@ async fn get_overview(
             "worker_profile": t.worker_profile,
             "failure_reason": t.failure_reason,
             "attempt": t.attempt,
+            "claimed_session_id": t.claimed_session_id,
         })).collect::<Vec<_>>(),
         "waiting": waiting,
-        "activity": collect_activity(&sessions, 40),
+        "activity": activity,
         "chat": chat.iter().rev().take(30).rev().map(|m| json!({
             "id": m.id,
             "seq": m.seq,
@@ -673,7 +693,6 @@ async fn get_sessions(
         .await
         .map_err(|e| map_orch_err("list_sessions", e))?;
     Ok(Json(json!({
-        "sandbox_backend": state.orch.tick.runtime_backend(),
         "sessions": sessions.iter().map(|s| json!({
             "id": s.id,
             "run_id": s.run_id,
@@ -712,7 +731,12 @@ async fn get_session_detail(
         return Err(AppError::not_found("session"));
     }
     let work_dir = session.work_dir.clone().unwrap_or_default();
-    let live = read_live_events(&work_dir, 500);
+    let live = state
+        .orch
+        .store
+        .list_live_events(session_id, 500)
+        .await
+        .map_err(|e| map_orch_err("list_live_events", e))?;
     let mut transcript = read_capped_file(
         std::path::Path::new(&work_dir).join("artifacts/transcript.md"),
         80_000,
@@ -764,64 +788,6 @@ fn read_capped_file(path: impl AsRef<std::path::Path>, max: usize) -> String {
         .collect()
 }
 
-fn collect_activity(
-    sessions: &[fleet_orchestrator::store::WorkerSessionRow],
-    max: usize,
-) -> Vec<Value> {
-    let mut live_sess: Vec<_> = sessions
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.status.as_str(),
-                "spawning" | "healthy" | "stuck" | "killing" | "exited"
-            )
-        })
-        .collect();
-    live_sess.sort_by_key(|s| std::cmp::Reverse(s.started_at.or(Some(s.created_at))));
-    let mut out = Vec::new();
-    for s in live_sess.into_iter().take(8) {
-        let dir = s.work_dir.clone().unwrap_or_default();
-        for ev in read_live_events(&dir, 8).into_iter().rev() {
-            let text = ev
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if text.is_empty() {
-                continue;
-            }
-            out.push(json!({
-                "session_id": s.id,
-                "profile": s.worker_profile,
-                "status": s.status,
-                "kind": ev.get("kind").and_then(|v| v.as_str()).unwrap_or("think"),
-                "text": text,
-                "ts": ev.get("ts").cloned().unwrap_or(Value::Null),
-            }));
-        }
-    }
-    out.truncate(max);
-    out
-}
-
-fn read_live_events(work_dir: &str, max: usize) -> Vec<Value> {
-    if work_dir.is_empty() {
-        return vec![];
-    }
-    let path = std::path::Path::new(work_dir).join("live.jsonl");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    let mut lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() > max {
-        lines = lines.split_off(lines.len() - max);
-    }
-    lines
-        .into_iter()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
-}
-
 async fn get_runs(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -861,14 +827,7 @@ async fn get_workers(
         .list_sessions_for_project(workspace_id)
         .await
         .map_err(|e| map_orch_err("list_sessions_for_project", e))?;
-    let cfg = state
-        .orch
-        .store
-        .get_project_config(workspace_id)
-        .await
-        .map_err(|e| map_orch_err("get_project_config", e))?;
     Ok(Json(json!({
-        "sandbox_backend": cfg.sandbox_backend,
         "sandboxes": sessions.iter().map(|s| json!({
             "id": s.id,
             "run_id": s.run_id,

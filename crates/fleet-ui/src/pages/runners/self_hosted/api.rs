@@ -26,8 +26,6 @@ struct HostListResponse {
     plane_git_sha: Option<String>,
     #[serde(default)]
     package_versions: Option<PackageVersions>,
-    #[serde(default)]
-    sandbox_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,7 +157,7 @@ pub async fn list_hosts(workspace_id: &str) -> Result<Vec<HostPublic>, String> {
 
 pub async fn list_workers_page(
     workspace_id: &str,
-) -> Result<(Vec<HostPublic>, PackageInventory, String), String> {
+) -> Result<(Vec<HostPublic>, PackageInventory), String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/worker-hosts")).await?;
     let body: HostListResponse = parse_json(res).await?;
     let plane = body.plane_git_sha.clone();
@@ -180,7 +178,6 @@ pub async fn list_workers_page(
             plane_git_sha: body.plane_git_sha,
             package_versions: versions,
         },
-        body.sandbox_backend.unwrap_or_else(|| "stub".into()),
     ))
 }
 

@@ -5,17 +5,16 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    self, format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyRequest,
-    ProxyResult,
+    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
 };
-use fleet_integrations::{catalog, IntegrationAvailability};
+use fleet_integrations::{IntegrationAvailability, catalog};
 use fleet_orchestrator::domain::{
-    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
-    MAX_TASKS_PER_PLAN,
+    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
+    WorkPlanStatus,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -467,7 +466,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "monitor_tickets",
-                "description": "Start or update the workspace ticket inbox. Polls every connected integration (GitHub, GitLab, Bitbucket, Jira, Linear, Trello, Asana, Slack, Teams, Notion, Confluence). Tokens stay on the control plane.",
+                "description": "Start or update the workspace ticket inbox. Polls connected boards (Jira, Linear, GitHub, …) and by default auto-launches a work+review fleet on each open ticket. The poller keeps watching. Tokens stay on the control plane.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -755,45 +754,6 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
     ChatLlmContext::default()
 }
 
-/// Chat tools are bound to the HTTP session workspace. A payload that names
-/// another workspace is forbidden even if the caller is a member of both.
-pub(crate) fn require_session_workspace(
-    session_workspace_id: Uuid,
-    arguments: &Value,
-) -> AppResult<()> {
-    let obj = parse_json_args(arguments).unwrap_or_else(|_| arguments.clone());
-    for requested in requested_workspace_ids(&obj) {
-        if requested != session_workspace_id {
-            return Err(AppError::forbidden(
-                "workspace_id does not match this chat session",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn requested_workspace_ids(obj: &Value) -> Vec<Uuid> {
-    let mut out = Vec::new();
-    if let Some(id) = parse_workspace_id_field(obj.get("workspace_id")) {
-        out.push(id);
-    }
-    if let Some(id) = obj
-        .get("args")
-        .and_then(|a| parse_workspace_id_field(a.get("workspace_id")))
-    {
-        out.push(id);
-    }
-    out
-}
-
-fn parse_workspace_id_field(v: Option<&Value>) -> Option<Uuid> {
-    let v = v?;
-    if let Some(s) = v.as_str() {
-        return Uuid::parse_str(s.trim()).ok();
-    }
-    None
-}
-
 pub async fn execute_tool(
     state: &AppState,
     workspace_id: Uuid,
@@ -802,20 +762,6 @@ pub async fn execute_tool(
     arguments: &Value,
     llm: &ChatLlmContext,
 ) -> (Value, ChatAction) {
-    if let Err(e) = require_session_workspace(workspace_id, arguments) {
-        let msg = e.to_string();
-        return (
-            json!({ "error": msg }),
-            ChatAction {
-                tool: name.to_string(),
-                ok: false,
-                summary: msg,
-                run_id: None,
-                sandbox_ids: None,
-                detail: None,
-            },
-        );
-    }
     let result = match name {
         "list_sandboxes" => list_sandboxes(state, workspace_id).await,
         "list_tasks" => {
@@ -1204,11 +1150,7 @@ pub fn coerce_integration_args(
             }
         }
     }
-    if changed {
-        Some(next)
-    } else {
-        None
-    }
+    if changed { Some(next) } else { None }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -1484,34 +1426,24 @@ async fn prefetch_context(
     workspace_id: Uuid,
     user_id: Uuid,
     context_from: &[ContextFromArg],
-) -> AppResult<Vec<ProxyResult>> {
+) -> Vec<ProxyResult> {
     let mut out = Vec::new();
     for item in context_from.iter().take(5) {
         let provider = item.provider.trim().to_lowercase();
         let operation = item.operation.trim().to_lowercase();
         let args = item.args.clone().unwrap_or_else(|| json!({}));
-        let result = proxy::invoke(
-            &state.db,
-            &state.integrations.credentials_key,
-            ProxyRequest {
-                workspace_id,
-                provider,
-                operation,
-                args,
-                caller: ProxyCaller::Chat { user_id },
-            },
+        let result = crate::workforce::gated_invoke(
+            state,
+            workspace_id,
+            ProxyCaller::Chat { user_id },
+            &provider,
+            &operation,
+            args,
         )
         .await;
-        if !result.ok {
-            let code = result.error_code.as_deref().unwrap_or("error");
-            return Err(AppError::bad_request(format!(
-                "context_from {} `{}` is {code}: {}. Connect the provider under Workspace → Integrations.",
-                result.provider, result.operation, result.summary
-            )));
-        }
         out.push(result);
     }
-    Ok(out)
+    out
 }
 
 async fn integration_query(
@@ -1520,7 +1452,6 @@ async fn integration_query(
     user_id: Uuid,
     arguments: &Value,
 ) -> AppResult<(Value, ChatAction)> {
-    require_session_workspace(workspace_id, arguments)?;
     let obj = parse_json_args(arguments).map_err(AppError::bad_request)?;
     let provider = obj
         .get("provider")
@@ -1557,16 +1488,13 @@ async fn proxy_tool_result(
     operation: &str,
     args: Value,
 ) -> AppResult<(Value, ChatAction)> {
-    let result = proxy::invoke(
-        &state.db,
-        &state.integrations.credentials_key,
-        ProxyRequest {
-            workspace_id,
-            provider: provider.to_string(),
-            operation: operation.to_string(),
-            args,
-            caller: ProxyCaller::Chat { user_id },
-        },
+    let result = crate::workforce::gated_invoke(
+        state,
+        workspace_id,
+        ProxyCaller::Chat { user_id },
+        provider,
+        operation,
+        args,
     )
     .await;
 
@@ -1608,19 +1536,10 @@ async fn tick_until_run_settled(
 ) -> AppResult<(Vec<Value>, bool)> {
     let mut ticks = Vec::new();
     let mut terminal = false;
-    let stub_sleep = std::env::var("STUB_DURATION_S")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
 
     for i in 0..max_ticks {
         if i > 0 {
-            let wait = if stub_sleep > 0 {
-                Duration::from_secs(stub_sleep.min(3))
-            } else {
-                Duration::from_millis(20)
-            };
-            tokio::time::sleep(wait).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
         let report = state
@@ -1664,6 +1583,15 @@ async fn tick_until_run_settled(
             .list_tasks(workspace_id, Some(run_id), None)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?;
+        // The plane does not complete work. Stop once materialize/assign
+        // has nothing more to do this request — inbox arrives from a host.
+        if i >= 1
+            && report.spawned == 0
+            && report.completed_via_runtime == 0
+            && report.inbox_applied == 0
+        {
+            break;
+        }
         let active = tasks.iter().any(|t| {
             matches!(
                 t.status.as_str(),
@@ -1746,16 +1674,7 @@ async fn resolve_chat_run(
 ) -> AppResult<Uuid> {
     ensure_project(state, workspace_id).await?;
     if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
-        let id =
-            Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
-        let run = state
-            .orch
-            .store
-            .get_run(workspace_id, id)
-            .await
-            .map_err(|e| AppError::internal(e.to_string()))?
-            .ok_or_else(|| AppError::not_found("run not found"))?;
-        return Ok(run.id);
+        return Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"));
     }
     let runs = state
         .orch
@@ -1777,7 +1696,6 @@ async fn start_case_tool(
     user_id: Uuid,
     arguments: &Value,
 ) -> AppResult<(Value, ChatAction)> {
-    require_session_workspace(workspace_id, arguments)?;
     let obj = parse_json_args(arguments).map_err(AppError::bad_request)?;
     let title = obj
         .get("title")
@@ -1808,13 +1726,25 @@ async fn start_case_tool(
         crate::cases::CreateCaseBody {
             title: title.clone(),
             kind,
-            policy_md: Some(policy_md),
+            policy_md: Some(policy_md.clone()),
             stage,
             context,
             wake_in_s,
         },
     )
     .await?;
+    if let Err(e) = crate::workforce::attach_case_to_goal(
+        state,
+        workspace_id,
+        Some(user_id),
+        &title,
+        &policy_md,
+        case.id,
+    )
+    .await
+    {
+        tracing::warn!(%workspace_id, case_id = %case.id, error = %e, "attach goal to case failed");
+    }
     let content = crate::cases::case_json(&case, None);
     Ok((
         content.clone(),
@@ -1895,7 +1825,6 @@ async fn observe_case_tool(
     workspace_id: Uuid,
     arguments: &Value,
 ) -> AppResult<(Value, ChatAction)> {
-    require_session_workspace(workspace_id, arguments)?;
     let id = arguments
         .get("case_id")
         .and_then(|v| v.as_str())
@@ -2198,13 +2127,8 @@ async fn configure_fleet_tool(
         .get("max_agents")
         .and_then(|v| v.as_i64())
         .map(|n| n as i32)
-        .unwrap_or(current.max_agents);
-    if max < 1 || max > fleet_orchestrator::domain::MAX_PROJECT_AGENTS {
-        return Err(AppError::bad_request(format!(
-            "max_agents must be 1–{}",
-            fleet_orchestrator::domain::MAX_PROJECT_AGENTS
-        )));
-    }
+        .unwrap_or(current.max_agents)
+        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
 
     let llm = arguments
         .get("fleet_llm")
@@ -2308,7 +2232,6 @@ async fn get_fleet_status(state: &AppState, workspace_id: Uuid) -> AppResult<(Va
         .count();
 
     let content = json!({
-        "sandbox_backend": cfg.sandbox_backend,
         "max_agents": cfg.max_agents,
         "fleet_llm": cfg.fleet_llm,
         "fleet_llm_model": cfg.fleet_llm_model,
@@ -2372,11 +2295,11 @@ async fn launch_agent_task(
         .unwrap_or("")
         .to_string();
     if spec.len() > 32_000 {
-        return Err(AppError::bad_request("spec too long (max 32k bytes)"));
+        return Err(AppError::bad_request("spec too long (max 32k characters)"));
     }
 
     let ctx = if let Some(ref cf) = args.context_from {
-        prefetch_context(state, workspace_id, user_id, cf).await?
+        prefetch_context(state, workspace_id, user_id, cf).await
     } else {
         Vec::new()
     };
@@ -2389,6 +2312,7 @@ async fn launch_agent_task(
     accept_and_drive_plan(
         state,
         workspace_id,
+        Some(user_id),
         plan,
         "launch_agent_task",
         &args.title,
@@ -2411,7 +2335,7 @@ async fn launch_agent_plan(
     ensure_project_capacity(state, workspace_id, max_agents).await?;
 
     let ctx = if let Some(ref cf) = args.context_from {
-        prefetch_context(state, workspace_id, user_id, cf).await?
+        prefetch_context(state, workspace_id, user_id, cf).await
     } else {
         Vec::new()
     };
@@ -2421,53 +2345,53 @@ async fn launch_agent_plan(
         format_context_markdown(&ctx)
     };
 
-    let mut tasks = Vec::with_capacity(args.tasks.len());
-    for t in &args.tasks {
-        let mut spec = t
-            .spec
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
-        if spec.len() > 32_000 {
-            return Err(AppError::bad_request("spec too long (max 32k bytes)"));
-        }
-        if !ctx_md.is_empty() {
-            spec.push_str(&ctx_md);
-        }
-        if spec.len() > 32_000 {
-            return Err(AppError::bad_request("spec too long (max 32k bytes)"));
-        }
-        tasks.push(PlanTask {
-            plan_task_id: t.id.trim().to_string(),
-            title: t.title.trim().to_string(),
-            summary: spec.chars().take(280).collect(),
-            spec_md: spec,
-            depends_on: t
-                .depends_on
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            worker_profile: t
-                .worker_profile
+    let tasks: Vec<PlanTask> = args
+        .tasks
+        .iter()
+        .map(|t| {
+            let mut spec = t
+                .spec
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .unwrap_or("generalist")
-                .to_string(),
-            acceptance: fleet_orchestrator::orch::default_acceptance(
-                t.worker_profile.as_deref().unwrap_or("generalist"),
-            ),
-            priority: t.priority.unwrap_or(100),
-            external_ref: None,
-            timeout_s: Some(3600),
-            max_retries: Some(1),
-        });
-    }
+                .unwrap_or("")
+                .to_string();
+            if !ctx_md.is_empty() {
+                spec.push_str(&ctx_md);
+            }
+            if spec.len() > 32_000 {
+                spec.truncate(32_000);
+            }
+            PlanTask {
+                plan_task_id: t.id.trim().to_string(),
+                title: t.title.trim().to_string(),
+                summary: spec.chars().take(280).collect(),
+                spec_md: spec,
+                depends_on: t
+                    .depends_on
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                worker_profile: t
+                    .worker_profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("generalist")
+                    .to_string(),
+                acceptance: fleet_orchestrator::orch::default_acceptance(
+                    t.worker_profile.as_deref().unwrap_or("generalist"),
+                ),
+                priority: t.priority.unwrap_or(100),
+                external_ref: None,
+                timeout_s: Some(3600),
+                max_retries: Some(1),
+            }
+        })
+        .collect();
 
     let mut plan = build_multi_task_plan(workspace_id, args.max_agents, tasks);
     if let Some(outs) = args.outputs {
@@ -2492,12 +2416,22 @@ async fn launch_agent_plan(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("multi-agent plan");
-    accept_and_drive_plan(state, workspace_id, plan, "launch_agent_plan", label, ctx).await
+    accept_and_drive_plan(
+        state,
+        workspace_id,
+        Some(user_id),
+        plan,
+        "launch_agent_plan",
+        label,
+        ctx,
+    )
+    .await
 }
 
 async fn accept_and_drive_plan(
     state: &AppState,
     workspace_id: Uuid,
+    user_id: Option<Uuid>,
     plan: WorkPlanBody,
     tool_name: &str,
     label: &str,
@@ -2514,6 +2448,19 @@ async fn accept_and_drive_plan(
             tracing::error!(%workspace_id, error = %e, "chat launch insert_accepted_plan failed");
             AppError::bad_request(e.to_string())
         })?;
+    if let Err(e) = crate::workforce::attach_run_to_goal(
+        state,
+        workspace_id,
+        user_id,
+        label,
+        label,
+        run_id,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(%workspace_id, %run_id, error = %e, "attach goal to run failed");
+    }
 
     // Small plans: wait until terminal in this request.
     // Large plans: start the first wave; background ticker (fleet-server) drains the queue.
@@ -2581,8 +2528,16 @@ async fn accept_and_drive_plan(
         })
         .collect();
 
+    let spawned_any = ticks.iter().any(|t| t["spawned"].as_u64().unwrap_or(0) > 0);
+    let host_assignable =
+        fleet_orchestrator::store::select_assignable_host(&state.orch.store, workspace_id)
+            .await
+            .is_some();
+    let waiting_for_host = !terminal && !spawned_any && !host_assignable;
     let hint = if terminal {
         "Sandboxes are ephemeral. Integration tokens stay on the control plane."
+    } else if waiting_for_host {
+        "No paired host — task left ready. Pair a fleet-host to run this work."
     } else {
         "Fleet is running. Do NOT ask the user to continue. Plan outputs fire when the run completes. Watch Fleet."
     };
@@ -2611,6 +2566,11 @@ async fn accept_and_drive_plan(
     let summary = if terminal {
         format!(
             "Fleet finished «{label}» · {task_count} task(s) · run {} · terminal",
+            short_id(&run_id.to_string()),
+        )
+    } else if waiting_for_host {
+        format!(
+            "No paired host — «{label}» left ready · {task_count} task(s) · run {}",
             short_id(&run_id.to_string()),
         )
     } else {
@@ -2810,215 +2770,6 @@ async fn get_integration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
-    fn assert_forbidden(err: AppError) {
-        let status = err.into_response().status();
-        assert_eq!(status, StatusCode::FORBIDDEN, "expected 403");
-    }
-
-    #[test]
-    fn start_case_foreign_workspace_id_is_forbidden() {
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        let err = require_session_workspace(
-            session,
-            &json!({
-                "title": "watch inbox",
-                "policy_md": "wake on reply",
-                "workspace_id": foreign.to_string(),
-            }),
-        )
-        .expect_err("foreign start_case workspace_id");
-        assert_forbidden(err);
-    }
-
-    #[test]
-    fn observe_case_foreign_workspace_id_is_forbidden() {
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        let err = require_session_workspace(
-            session,
-            &json!({
-                "case_id": Uuid::new_v4().to_string(),
-                "note": "they replied",
-                "workspace_id": foreign.to_string(),
-            }),
-        )
-        .expect_err("foreign observe_case workspace_id");
-        assert_forbidden(err);
-    }
-
-    #[test]
-    fn integration_query_foreign_workspace_id_is_forbidden() {
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        let err = require_session_workspace(
-            session,
-            &json!({
-                "provider": "slack",
-                "operation": "list_channels",
-                "workspace_id": foreign.to_string(),
-            }),
-        )
-        .expect_err("foreign integration_query workspace_id");
-        assert_forbidden(err);
-    }
-
-    #[test]
-    fn integration_query_nested_args_foreign_workspace_id_is_forbidden() {
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        let err = require_session_workspace(
-            session,
-            &json!({
-                "provider": "github",
-                "operation": "list_issues",
-                "args": {
-                    "owner": "acme",
-                    "repo": "app",
-                    "workspace_id": foreign.to_string(),
-                },
-            }),
-        )
-        .expect_err("foreign integration_query args.workspace_id");
-        assert_forbidden(err);
-    }
-
-    #[test]
-    fn chat_tool_session_membership_does_not_unlock_foreign_workspace() {
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        for args in [
-            json!({ "workspace_id": foreign, "title": "x", "policy_md": "y" }),
-            json!({ "workspace_id": foreign.to_string(), "case_id": Uuid::new_v4() }),
-            json!({
-                "provider": "notion",
-                "operation": "search",
-                "workspace_id": foreign.to_string(),
-            }),
-        ] {
-            let err = require_session_workspace(session, &args)
-                .expect_err("membership on the session workspace is not enough");
-            assert_forbidden(err);
-        }
-    }
-
-    #[test]
-    fn chat_tool_same_or_omitted_workspace_id_is_ok() {
-        let session = Uuid::new_v4();
-        require_session_workspace(session, &json!({ "title": "x", "policy_md": "y" }))
-            .expect("omitted workspace_id uses the session");
-        require_session_workspace(
-            session,
-            &json!({
-                "title": "x",
-                "policy_md": "y",
-                "workspace_id": session.to_string(),
-            }),
-        )
-        .expect("matching workspace_id");
-        require_session_workspace(
-            session,
-            &json!({
-                "provider": "slack",
-                "operation": "list_channels",
-                "args": { "workspace_id": session.to_string() },
-            }),
-        )
-        .expect("matching nested workspace_id");
-    }
-
-    /// `send_team_message` / `read_team_chat` must not accept another
-    /// workspace's `run_id` or a random UUID. Distinct from
-    /// `require_session_workspace` (foreign `workspace_id` on other tools).
-    #[test]
-    fn resolve_chat_run_scopes_team_chat_to_workspace_run() {
-        let not_found = AppError::not_found("run not found").into_response();
-        assert_eq!(
-            not_found.status(),
-            StatusCode::NOT_FOUND,
-            "unknown / foreign run_id is 404"
-        );
-        let bad = AppError::bad_request("run_id must be a UUID").into_response();
-        assert_eq!(
-            bad.status(),
-            StatusCode::BAD_REQUEST,
-            "malformed run_id is 400"
-        );
-
-        let src = production_src();
-        let resolve = fn_src(src, "async fn resolve_chat_run");
-        assert!(
-            resolve.contains("get_run"),
-            "resolve_chat_run must load the run in this workspace, not parse any UUID:\n{resolve}"
-        );
-        assert!(
-            resolve.contains("get_run(workspace_id, id)")
-                || resolve.contains("get_run(workspace_id,"),
-            "get_run must be keyed by this workspace (project_id):\n{resolve}"
-        );
-        assert!(
-            resolve.contains("AppError::not_found") || resolve.contains("not_found("),
-            "missing / foreign run must fail closed as 404:\n{resolve}"
-        );
-        assert!(
-            resolve.contains("AppError::bad_request") && resolve.contains("run_id must be a UUID"),
-            "malformed run_id must stay 400:\n{resolve}"
-        );
-        let parse_at = resolve
-            .find("Uuid::parse_str")
-            .expect("explicit run_id must parse as UUID");
-        let get_at = resolve
-            .find("get_run")
-            .expect("explicit run_id must call get_run");
-        assert!(
-            parse_at < get_at,
-            "parse then get_run — do not return a parsed UUID that is not this workspace's run:\n{resolve}"
-        );
-        let after_parse = &resolve[parse_at..];
-        assert!(
-            !after_parse
-                .lines()
-                .take(4)
-                .any(|l| l.contains("return Uuid::parse_str")
-                    || (l.contains("return") && l.contains("parse_str") && !l.contains("get_run"))),
-            "must not return the parsed UUID without get_run:\n{resolve}"
-        );
-        assert!(
-            resolve.contains("list_runs(workspace_id)"),
-            "omitted run_id must still resolve via list_runs of this workspace only:\n{resolve}"
-        );
-        assert!(
-            !resolve.contains("list_runs()") && !resolve.contains("list_open_project_ids"),
-            "omitted run_id must not scan other workspaces:\n{resolve}"
-        );
-
-        let send = fn_src(src, "async fn send_team_message_tool");
-        let send_resolve = send
-            .find("resolve_chat_run")
-            .expect("send_team_message must resolve the run");
-        let send_post = send
-            .find("post_message")
-            .expect("send_team_message must post only after resolve");
-        assert!(
-            send_resolve < send_post,
-            "send_team_message must not write chat.jsonl before resolve_chat_run:\n{send}"
-        );
-
-        let read = fn_src(src, "async fn read_team_chat_tool");
-        let read_resolve = read
-            .find("resolve_chat_run")
-            .expect("read_team_chat must resolve the run");
-        let read_list = read
-            .find("list_messages")
-            .expect("read_team_chat must list only after resolve");
-        assert!(
-            read_resolve < read_list,
-            "read_team_chat must not open a chat log before resolve_chat_run:\n{read}"
-        );
-    }
 
     #[test]
     fn stamp_plan_llm_writes_provider_and_model() {
@@ -3039,10 +2790,12 @@ mod tests {
     #[test]
     fn parse_launch_plan_rejects_empty_and_blank_ids() {
         assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": " ", "title": "X" }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": " ", "title": "X" }]
+            }))
+            .is_err()
+        );
         let ok = parse_launch_plan_args(&json!({
             "outputs": [{
                 "provider": "notion",
@@ -3088,517 +2841,10 @@ mod tests {
         assert_eq!(a.spec.as_deref(), Some("details"));
     }
 
-    /// Docs §7.1: `launch_agent_task` / `launch_agent_plan` titles must be
-    /// non-empty and ≤ 200 chars. Empty, whitespace-only, and 201-char
-    /// titles fail closed in parse (no plan/run insert). Exactly 200 still
-    /// parses so this is not “every launch fails”. Distinct from the
-    /// 1000-task cap. Live execute_tool + store lock is
-    /// `launch_title_execute_tool_rejects_empty_and_over_200_and_inserts_no_run`.
-    #[test]
-    fn launch_title_must_be_non_empty_and_at_most_200() {
-        let at_cap = "T".repeat(200);
-        let over = "T".repeat(201);
-        assert_eq!(at_cap.chars().count(), 200);
-        assert_eq!(over.chars().count(), 201);
-        assert_eq!(at_cap.len(), 200);
-        assert_eq!(over.len(), 201);
-
-        fn title_err_is_empty_or_too_long(err: &str, raw: &str) {
-            let lower = err.to_ascii_lowercase();
-            if raw.trim().is_empty() {
-                assert!(
-                    lower.contains("empty") && lower.contains("title"),
-                    "blank title must fail as empty, not the 1000-task cap: {err}"
-                );
-                return;
-            }
-            assert!(
-                lower.contains("title")
-                    && (lower.contains("too long")
-                        || lower.contains("max")
-                        || lower.contains("200")),
-                "201-char title must fail the 200-char title cap (not the task cap): {err}"
-            );
-            assert!(
-                !lower.contains("too many") && !lower.contains("1000"),
-                "title length is not the 1000-task cap: {err}"
-            );
-        }
-
-        for bad in ["", "   ", over.as_str()] {
-            let err = parse_launch_args(&json!({ "title": bad, "spec": "do it" })).expect_err(
-                "launch_agent_task empty / whitespace / 201-char title must fail closed",
-            );
-            title_err_is_empty_or_too_long(&err, bad);
-        }
-
-        let task_cap = parse_launch_args(&json!({
-            "title": at_cap,
-            "spec": "do it",
-        }))
-        .expect("exactly 200-char launch_agent_task title must still parse");
-        assert_eq!(task_cap.title, at_cap);
-
-        let task_short = parse_launch_args(&json!({
-            "title": "  Fix flaky tests  ",
-            "spec": "details",
-        }))
-        .expect("normal short launch_agent_task title must still parse");
-        assert_eq!(task_short.title, "Fix flaky tests");
-
-        for bad in ["", "   ", over.as_str()] {
-            let err = parse_launch_plan_args(&json!({
-                "tasks": [{ "id": "t1", "title": bad, "spec": "do it" }]
-            }))
-            .expect_err(
-                "launch_agent_plan empty / whitespace / 201-char task title must fail closed",
-            );
-            title_err_is_empty_or_too_long(&err, bad);
-        }
-
-        let plan_cap = parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "t1", "title": at_cap, "spec": "do it" }]
-        }))
-        .expect("exactly 200-char launch_agent_plan task title must still parse");
-        assert_eq!(plan_cap.tasks.len(), 1);
-        assert_eq!(plan_cap.tasks[0].title, at_cap);
-
-        let plan_short = parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "t1", "title": "  Review PR  " }]
-        }))
-        .expect("normal short launch_agent_plan task title must still parse");
-        assert_eq!(plan_short.tasks[0].title.trim(), "Review PR");
-
-        let built = build_chat_plan(Uuid::new_v4(), &at_cap, "do it", "generalist");
-        assert_eq!(built.tasks.len(), 1);
-        assert_eq!(built.tasks[0].title, at_cap);
-        validate::validate_plan(&built)
-            .expect("200-char title must still be a valid 1-task chat plan");
-    }
-
     #[test]
     fn chat_plan_cap_matches_orchestrator() {
         assert_eq!(MAX_CHAT_PLAN_TASKS, MAX_TASKS_PER_PLAN);
         assert!(MAX_CHAT_PLAN_TASKS >= 1000);
-    }
-
-    /// Docs §7.1: `launch_agent_task` ticks up to `MAX_CHAT_TICKS` (24)
-    /// in-request so a stub/local worker can finish. A large
-    /// `launch_agent_plan` DAG only does `MAX_CHAT_TICKS_LARGE` (3)
-    /// in-request ticks; the process background ticker drains the rest.
-    /// Must not drain a many-task plan inside the chat request.
-    #[test]
-    fn chat_ticks_large_plans_three_single_task_uses_twenty_four() {
-        assert_eq!(
-            MAX_CHAT_TICKS, 24,
-            "docs §7.1: single-task launch ticks up to 24 in-request"
-        );
-        assert_eq!(
-            MAX_CHAT_TICKS_LARGE, 3,
-            "docs §7.1: large plans only do 3 in-request ticks"
-        );
-        assert!(
-            MAX_CHAT_TICKS_LARGE < MAX_CHAT_TICKS,
-            "large-plan budget must be strictly smaller than the single-task budget"
-        );
-
-        let single = build_chat_plan(Uuid::new_v4(), "One shot", "do it", "generalist");
-        assert_eq!(
-            single.tasks.len(),
-            1,
-            "launch_agent_task builds a 1-task plan, which must take the 24-tick budget"
-        );
-
-        let src = production_src();
-        let task = fn_src(src, "async fn launch_agent_task");
-        let plan = fn_src(src, "async fn launch_agent_plan");
-        let accept = fn_src(src, "async fn accept_and_drive_plan");
-        let tick = fn_src(src, "async fn tick_until_run_settled");
-        let exec = fn_src(src, "pub async fn execute_tool");
-
-        assert!(
-            task.contains("build_chat_plan") && task.contains("accept_and_drive_plan"),
-            "launch_agent_task must build the 1-task plan and drive it via accept_and_drive_plan:\n{task}"
-        );
-        assert!(
-            plan.contains("accept_and_drive_plan"),
-            "launch_agent_plan must drive via accept_and_drive_plan (same tick budget):\n{plan}"
-        );
-        for (label, body) in [
-            ("launch_agent_task", task),
-            ("launch_agent_plan", plan),
-            ("execute_tool", exec),
-        ] {
-            assert!(
-                !body.contains("tick_until_run_settled") && !body.contains("tick_project"),
-                "{label} must not tick itself — only accept_and_drive_plan may in-request tick:\n{body}"
-            );
-            assert!(
-                !body.contains("MAX_CHAT_TICKS"),
-                "{label} must not pick its own tick budget (would skip the large-plan cap):\n{body}"
-            );
-        }
-
-        assert!(
-            accept.contains("plan.tasks.len()") && accept.contains("task_count"),
-            "accept_and_drive_plan must size the in-request budget from the plan's task count:\n{accept}"
-        );
-        assert_eq!(
-            accept.matches("tick_until_run_settled").count(),
-            1,
-            "exactly one in-request drain — a second loop would finish a large plan in the request:\n{accept}"
-        );
-        let tick_at = accept
-            .find("tick_until_run_settled")
-            .expect("accept_and_drive_plan must tick via tick_until_run_settled");
-        let call = accept[tick_at..]
-            .lines()
-            .next()
-            .expect("tick_until_run_settled call");
-        assert!(
-            call.contains("max_ticks"),
-            "tick_until_run_settled must receive the computed budget, not a constant:\n{call}"
-        );
-        assert!(
-            !call.contains("MAX_CHAT_TICKS"),
-            "must not pass MAX_CHAT_TICKS / MAX_CHAT_TICKS_LARGE directly (skips the branch):\n{call}"
-        );
-        assert!(
-            !accept[tick_at + "tick_until_run_settled".len()..].contains("tick_project")
-                && !accept[tick_at + "tick_until_run_settled".len()..]
-                    .contains("tick_until_run_settled"),
-            "no extra in-request ticks after the capped drain:\n{accept}"
-        );
-
-        assert_eq!(
-            in_request_ticks_for_task_count(accept, 1),
-            MAX_CHAT_TICKS,
-            "single-task launch must use MAX_CHAT_TICKS (24)"
-        );
-        for n in [9usize, 16, 32, 100, 1000, MAX_CHAT_PLAN_TASKS] {
-            assert_eq!(
-                in_request_ticks_for_task_count(accept, n),
-                MAX_CHAT_TICKS_LARGE,
-                "{n}-task plan is large: only MAX_CHAT_TICKS_LARGE (3) in-request ticks, \
-                 not a {MAX_CHAT_TICKS}-tick drain:\n{accept}"
-            );
-        }
-
-        assert!(
-            tick.contains("for i in 0..max_ticks") || tick.contains("for _ in 0..max_ticks"),
-            "tick_until_run_settled must be a finite 0..max_ticks loop (exclusive):\n{tick}"
-        );
-        assert!(
-            !tick.contains("loop {") && !tick.contains("while true"),
-            "tick_until_run_settled must not replace the cap with an unbounded loop:\n{tick}"
-        );
-        assert!(
-            !tick.contains("0..MAX_CHAT_TICKS")
-                && !tick.contains("0..=MAX_CHAT_TICKS")
-                && !tick.contains("0..=max_ticks"),
-            "loop bound must be the passed max_ticks, exclusive — 0..= or MAX_CHAT_TICKS \
-             would overshoot the large-plan cap of 3:\n{tick}"
-        );
-        assert!(
-            tick.contains("tick_project"),
-            "the bounded loop must actually tick the project:\n{tick}"
-        );
-        assert!(
-            !tick.contains("max_ticks +")
-                && !tick.contains("max_ticks *")
-                && !tick.contains("max_ticks.max")
-                && !tick.contains("max_ticks +=")
-                && !tick.contains("MAX_CHAT_TICKS_LARGE +")
-                && !tick.contains("MAX_CHAT_TICKS +"),
-            "must not grow the in-request budget past the caller cap:\n{tick}"
-        );
-
-        let main = include_str!("main.rs");
-        let lib = include_str!("lib.rs");
-        assert!(
-            main.contains("background fleet ticker")
-                && main.contains("list_open_project_ids")
-                && main.contains("tick_project")
-                && main.contains("tokio::spawn"),
-            "binary must keep a background ticker so ticks 4+ of a large plan still drain:\n{}",
-            &main[main.find("Local drain").unwrap_or(0)..]
-                .chars()
-                .take(800)
-                .collect::<String>()
-        );
-        assert!(
-            lib.contains("Does **not** start the background ticker")
-                || lib.contains("Does not start the background ticker"),
-            "HTTP app construction must not be the drain path (tests tick explicitly; \
-             the binary starts the ticker):\n{lib}"
-        );
-    }
-
-    /// Evaluate `accept_and_drive_plan`'s `max_ticks` branch for `task_count`.
-    /// Accepts `if task_count OP N { A } else { B }` (either polarity).
-    fn in_request_ticks_for_task_count(accept: &str, task_count: usize) -> usize {
-        let assign = accept
-            .find("max_ticks")
-            .expect("accept_and_drive_plan must assign max_ticks");
-        let call = accept
-            .find("tick_until_run_settled")
-            .expect("accept_and_drive_plan must call tick_until_run_settled");
-        assert!(
-            assign < call,
-            "max_ticks must be chosen before tick_until_run_settled:\n{accept}"
-        );
-        let block = &accept[assign..call];
-        let if_at = block
-            .find("if task_count")
-            .or_else(|| block.find("if plan.tasks.len()"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "max_ticks must branch on task_count so large plans cannot inherit 24 ticks:\n{block}"
-                )
-            });
-        let if_src = &block[if_at..];
-        let (op, threshold) = parse_task_count_cmp(if_src);
-        let consts = tick_budget_consts(if_src);
-        assert!(
-            consts.len() >= 2,
-            "max_ticks must choose between MAX_CHAT_TICKS and MAX_CHAT_TICKS_LARGE:\n{if_src}"
-        );
-        assert!(
-            consts.contains(&MAX_CHAT_TICKS) && consts.contains(&MAX_CHAT_TICKS_LARGE),
-            "both budgets must appear in the branch (single-task 24, large 3):\n{if_src}"
-        );
-        let take_then = match op {
-            "<=" => task_count <= threshold,
-            "<" => task_count < threshold,
-            ">=" => task_count >= threshold,
-            ">" => task_count > threshold,
-            "==" => task_count == threshold,
-            "!=" => task_count != threshold,
-            other => panic!("unsupported task_count comparison {other:?} in:\n{if_src}"),
-        };
-        if take_then {
-            consts[0]
-        } else {
-            consts[1]
-        }
-    }
-
-    fn parse_task_count_cmp(if_src: &str) -> (&'static str, usize) {
-        let after = if let Some(i) = if_src.find("task_count") {
-            &if_src[i + "task_count".len()..]
-        } else if let Some(i) = if_src.find("plan.tasks.len()") {
-            &if_src[i + "plan.tasks.len()".len()..]
-        } else {
-            panic!("missing task_count in:\n{if_src}");
-        };
-        let trimmed = after.trim_start();
-        let (op, rest) = if let Some(r) = trimmed.strip_prefix("<=") {
-            ("<=", r)
-        } else if let Some(r) = trimmed.strip_prefix(">=") {
-            (">=", r)
-        } else if let Some(r) = trimmed.strip_prefix("!=") {
-            ("!=", r)
-        } else if let Some(r) = trimmed.strip_prefix("==") {
-            ("==", r)
-        } else if let Some(r) = trimmed.strip_prefix('<') {
-            ("<", r)
-        } else if let Some(r) = trimmed.strip_prefix('>') {
-            (">", r)
-        } else {
-            panic!("max_ticks must compare task_count to a cutoff:\n{if_src}");
-        };
-        let digits: String = rest
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let n: usize = digits.parse().unwrap_or_else(|_| {
-            panic!("task_count comparison needs a numeric cutoff (e.g. 8):\n{if_src}")
-        });
-        (op, n)
-    }
-
-    fn tick_budget_consts(s: &str) -> Vec<usize> {
-        let mut out = Vec::new();
-        let mut rest = s;
-        while let Some(i) = rest.find("MAX_CHAT_TICKS") {
-            if rest[i..].starts_with("MAX_CHAT_TICKS_LARGE") {
-                out.push(MAX_CHAT_TICKS_LARGE);
-                rest = &rest[i + "MAX_CHAT_TICKS_LARGE".len()..];
-            } else {
-                out.push(MAX_CHAT_TICKS);
-                rest = &rest[i + "MAX_CHAT_TICKS".len()..];
-            }
-        }
-        out
-    }
-
-    /// Docs §6.2/§7: model tool calls repeat up to a finite cap
-    /// (`MAX_TOOL_ROUNDS`). A tool-only model must not recurse unbounded.
-    /// Extra fail-rounds (Grok/Ollama) stay bounded by `EXTRA_ROUNDS_ON_FAIL`.
-    #[test]
-    fn tool_rounds_cap_is_finite_and_used_by_every_loop() {
-        assert!(
-            (1..=32).contains(&MAX_TOOL_ROUNDS),
-            "MAX_TOOL_ROUNDS must be a small finite cap, got {MAX_TOOL_ROUNDS}"
-        );
-
-        let extra = crate::retry::EXTRA_ROUNDS_ON_FAIL;
-        assert!(
-            extra <= 8,
-            "EXTRA_ROUNDS_ON_FAIL must stay a small add-on, got {extra}"
-        );
-        assert!(
-            MAX_TOOL_ROUNDS.saturating_add(extra) < 64,
-            "even with fail extras the loop must stay finite"
-        );
-
-        let providers = production_src_of(include_str!("providers.rs"));
-        let grok = production_src_of(include_str!("grok.rs"));
-        let chat = include_str!("chat.rs");
-
-        for (label, body) in [
-            (
-                "openai_chat_with_tools",
-                fn_src(providers, "pub async fn openai_chat_with_tools"),
-            ),
-            (
-                "claude_chat_with_tools",
-                fn_src(providers, "pub async fn claude_chat_with_tools"),
-            ),
-            (
-                "grok::chat_with_tools",
-                fn_src(grok, "pub async fn chat_with_tools"),
-            ),
-            (
-                "ollama::chat_with_tools",
-                fn_src(chat, "async fn chat_with_tools("),
-            ),
-        ] {
-            assert_tool_loop_stops_at_max_rounds(label, body);
-        }
-
-        let persist = fn_src(chat, "async fn persist_user_and_assistant");
-        let text_at = persist
-            .rfind("assistant_text")
-            .expect("persist_user_and_assistant must write assistant_text");
-        let insert_at = persist[..text_at]
-            .rfind("insert_message")
-            .expect("assistant_text must be passed to insert_message, not dropped");
-        let window = &persist[insert_at..text_at];
-        assert!(
-            window.contains("\"assistant\""),
-            "insert_message must persist role assistant:\n{window}"
-        );
-        assert!(
-            !gated_on_empty_content(persist),
-            "capped tool-only turns still persist the assistant message:\n{persist}"
-        );
-
-        for (label, sig, loop_call) in [
-            (
-                "chat_complete_openai",
-                "async fn chat_complete_openai(",
-                "openai_chat_with_tools",
-            ),
-            (
-                "chat_complete_claude",
-                "async fn chat_complete_claude(",
-                "claude_chat_with_tools",
-            ),
-            (
-                "chat_complete_grok",
-                "async fn chat_complete_grok(",
-                "chat_with_tools",
-            ),
-            (
-                "chat_complete_ollama",
-                "async fn chat_complete_ollama(",
-                "chat_with_tools",
-            ),
-        ] {
-            let body = fn_src(chat, sig);
-            let loop_at = body
-                .find(loop_call)
-                .unwrap_or_else(|| panic!("{label} must run the tool loop ({loop_call}):\n{body}"));
-            let persist_at = body.find("persist_user_and_assistant").unwrap_or_else(|| {
-                panic!("{label} must persist the assistant turn after the tool loop:\n{body}")
-            });
-            assert!(
-                loop_at < persist_at,
-                "{label} must persist after the tool loop returns, not skip the assistant turn:\n{body}"
-            );
-            let between = &body[loop_at..persist_at];
-            assert!(
-                !between.contains("if content.is_empty()")
-                    && !between.contains("if actions.is_empty()")
-                    && !between.contains("if content.trim().is_empty()"),
-                "{label} must persist a tool-only / cap-hit turn, not only a text reply:\n{between}"
-            );
-        }
-    }
-
-    fn production_src_of(src: &'static str) -> &'static str {
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn assert_tool_loop_stops_at_max_rounds(label: &str, body: &str) {
-        assert!(
-            body.contains("MAX_TOOL_ROUNDS"),
-            "{label} must bound the loop with MAX_TOOL_ROUNDS:\n{body}"
-        );
-        assert!(
-            body.contains("let max_rounds = MAX_TOOL_ROUNDS")
-                || body.contains("let mut max_rounds = MAX_TOOL_ROUNDS"),
-            "{label} must start max_rounds at MAX_TOOL_ROUNDS:\n{body}"
-        );
-        assert!(
-            body.contains("while round < max_rounds"),
-            "{label} must stop at max_rounds (tool-only must not recurse unbounded):\n{body}"
-        );
-        assert!(
-            !body.contains("loop {") && !body.contains("while true"),
-            "{label} must not replace the cap with an unbounded loop:\n{body}"
-        );
-        let sig_end = body.find('{').unwrap_or(0);
-        let after_sig = &body[sig_end..];
-        let short = label.rsplit("::").next().unwrap_or(label);
-        let short_call = format!("{short}(");
-        assert!(
-            !after_sig.contains(&short_call),
-            "{label} must not recurse into itself:\n{body}"
-        );
-        if body.contains("let mut max_rounds") {
-            assert!(
-                body.contains("EXTRA_ROUNDS_ON_FAIL")
-                    && body.contains("extra < ")
-                    && body.contains("max_rounds += 1"),
-                "{label} may grow max_rounds only by EXTRA_ROUNDS_ON_FAIL, one at a time:\n{body}"
-            );
-        } else {
-            assert!(
-                !body.contains("max_rounds +="),
-                "{label} must keep max_rounds pinned at MAX_TOOL_ROUNDS:\n{body}"
-            );
-        }
-        assert!(
-            body.contains(", false)")
-                || body.contains("false,")
-                || body.contains("with_tools: false"),
-            "{label} must make one last no-tools call after the cap, not keep calling tools:\n{body}"
-        );
-        assert!(
-            body.contains("Reached tool round limit"),
-            "{label} must surface the cap so the assistant turn can persist:\n{body}"
-        );
-    }
-
-    fn gated_on_empty_content(src: &str) -> bool {
-        src.contains("if assistant_text.is_empty()")
-            || src.contains("if assistant_text.trim().is_empty()")
     }
 
     #[test]
@@ -3684,11 +2930,13 @@ mod tests {
     fn retry_hint_names_required_text() {
         let h = retry_hint("notion", "append_blocks");
         assert_eq!(h["should_retry"], true);
-        assert!(h["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|x| x == "text"));
+        assert!(
+            h["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x == "text")
+        );
     }
 
     #[test]
@@ -3739,772 +2987,6 @@ mod tests {
         assert!(md.contains("create_page"));
     }
 
-    /// Docs §7.2 `github_create_pr`: open a PR after commits.
-    /// Docs §7.3: github allowlist includes `create_pr`. Unknown op /
-    /// disconnected / decrypt failure → tool `ok: false`. Results are
-    /// sanitized (no token echo). Workspace scoped.
-    ///
-    /// Product may expose the docs name as a dedicated tool or as
-    /// `integration_query` + allowlisted `create_pr`. Dropping `create_pr`
-    /// from the github allowlist or match arm, skipping sanitize, echoing
-    /// the bearer, or letting args retarget another workspace fails this test.
-    #[tokio::test]
-    async fn github_create_pr_is_allowlisted_and_does_not_echo_the_token() {
-        // Hardcoded from docs §7.3 — do not read OPERATIONS / operations_for
-        // when building this list.
-        const DOC_GITHUB_OPS: &[&str] = &[
-            "list_repos",
-            "list_issues",
-            "get_issue",
-            "list_prs",
-            "get_pr",
-            "get_file",
-            "list_commits",
-            "put_file",
-            "commit_files",
-            "create_branch",
-            "create_pr",
-            "create_issue",
-            "add_comment",
-        ];
-        let ops = operations_for("github");
-        for op in DOC_GITHUB_OPS {
-            assert!(
-                ops.contains(op),
-                "docs §7.3 github allowlist must include `{op}` (github_create_pr is create_pr)"
-            );
-        }
-        assert!(
-            ops.contains(&"create_pr"),
-            "docs §7.2 github_create_pr must stay an allowlisted github op"
-        );
-
-        let catalog = connector_catalog_markdown(&["github".into()]);
-        assert!(
-            catalog.contains("create_pr"),
-            "model catalog must advertise create_pr (github_create_pr after commits):\n{catalog}"
-        );
-        let caps = provider_capabilities("github");
-        assert!(
-            caps.contains("create_pr"),
-            "get_integration capabilities must list create_pr: {caps}"
-        );
-        assert!(
-            catalog.contains("commit_files") && caps.contains("commit_files"),
-            "docs §7.2 github_create_pr is the after-commits step; commit_files must stay advertised:\n{catalog}\n{caps}"
-        );
-
-        let tools = tool_definitions();
-        let names: Vec<&str> = tools
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
-            .collect();
-        assert!(
-            names.contains(&"integration_query"),
-            "docs §7.2 github_create_pr runs through integration_query: {names:?}"
-        );
-
-        let session = Uuid::new_v4();
-        let foreign = Uuid::new_v4();
-        let create_pr_args = json!({
-            "provider": "github",
-            "operation": "create_pr",
-            "workspace_id": foreign.to_string(),
-            "args": {
-                "owner": "acme",
-                "repo": "app",
-                "title": "add README",
-                "head": "agent-fleet/changes",
-                "workspace_id": foreign.to_string(),
-            },
-        });
-        let err = require_session_workspace(session, &create_pr_args)
-            .expect_err("github_create_pr must stay workspace-scoped");
-        assert_forbidden(err);
-        require_session_workspace(
-            session,
-            &json!({
-                "provider": "github",
-                "operation": "create_pr",
-                "args": {
-                    "owner": "acme",
-                    "repo": "app",
-                    "title": "add README",
-                    "head": "agent-fleet/changes",
-                },
-            }),
-        )
-        .expect("omitted workspace_id uses the chat session");
-
-        const LEAK: &str = "gho_CREATE_PR_MUST_NOT_ECHO_7f2a9c";
-        let create_pr_payload = json!({
-            "owner": "acme",
-            "repo": "app",
-            "title": "add README",
-            "head": "agent-fleet/changes",
-            "access_token": LEAK,
-            "token": LEAK,
-        });
-
-        // Wired, not only listed. Missing title is local bad_args — never
-        // unknown_op, never a GitHub CONNECT, never echo the bearer.
-        let missing_sink = CreatePrSink::bind();
-        let missing = proxy::dispatch(
-            "github",
-            &missing_sink.http,
-            LEAK,
-            "create_pr",
-            &json!({ "access_token": LEAK, "token": LEAK }),
-            &json!({}),
-        )
-        .await;
-        assert!(
-            !missing.ok,
-            "create_pr bad args must be ok:false: {missing:?}"
-        );
-        assert_eq!(
-            missing.error_code.as_deref(),
-            Some("bad_args"),
-            "create_pr must be dispatched (bad_args), not unknown_op: {missing:?}"
-        );
-        assert_eq!(
-            missing_sink.hits(),
-            0,
-            "create_pr bad_args must not hit GitHub (sink saw {}): {missing:?}",
-            missing_sink.hits()
-        );
-        let missing_s = serde_json::to_string(&missing).expect("serialize missing");
-        assert!(
-            !missing_s.contains(LEAK),
-            "create_pr bad_args must not echo the token: {missing_s}"
-        );
-
-        // Valid create_pr after commits hits outbound HTTP. A local sink is
-        // not GitHub — ok:false, not unknown_op / bad_args, bearer stays out.
-        let sink = CreatePrSink::bind();
-        let forwarded = proxy::dispatch(
-            "github",
-            &sink.http,
-            LEAK,
-            "create_pr",
-            &create_pr_payload,
-            &json!({}),
-        )
-        .await;
-        assert_eq!(forwarded.provider, "github");
-        assert_eq!(forwarded.operation, "create_pr");
-        assert!(
-            !forwarded.ok,
-            "sink is not GitHub — create_pr must be ok:false: {forwarded:?}"
-        );
-        assert_ne!(
-            forwarded.error_code.as_deref(),
-            Some("unknown_op"),
-            "docs §7.2 github_create_pr must stay wired create_pr, not unknown_op: {forwarded:?}"
-        );
-        assert_ne!(
-            forwarded.error_code.as_deref(),
-            Some("bad_args"),
-            "valid create_pr args must reach HTTP, not fail locally: {forwarded:?}"
-        );
-        assert!(
-            sink.hits() > 0,
-            "allowlisted create_pr must attempt GitHub (sink saw 0 hits): {forwarded:?}"
-        );
-        let forwarded_s = serde_json::to_string(&forwarded).expect("serialize forwarded");
-        assert!(
-            !forwarded_s.contains(LEAK),
-            "create_pr upstream result must not echo the token: {forwarded_s}"
-        );
-
-        // Unknown op is fail-closed locally — never forwarded as create_pr,
-        // never a GitHub CONNECT, never echoes a token stuffed in args.
-        let unknown_sink = CreatePrSink::bind();
-        let unknown_dispatch = proxy::dispatch(
-            "github",
-            &unknown_sink.http,
-            LEAK,
-            "dump_access_token",
-            &create_pr_payload,
-            &json!({}),
-        )
-        .await;
-        assert!(
-            !unknown_dispatch.ok,
-            "unknown github op must be ok:false: {unknown_dispatch:?}"
-        );
-        assert_eq!(
-            unknown_dispatch.error_code.as_deref(),
-            Some("unknown_op"),
-            "unknown github op must not be forwarded as create_pr: {unknown_dispatch:?}"
-        );
-        assert_eq!(
-            unknown_sink.hits(),
-            0,
-            "unknown op must not hit GitHub (sink saw {}): {unknown_dispatch:?}",
-            unknown_sink.hits()
-        );
-        let unknown_dispatch_s =
-            serde_json::to_string(&unknown_dispatch).expect("serialize unknown dispatch");
-        assert!(
-            !unknown_dispatch_s.contains(LEAK),
-            "unknown_op dispatch must not echo the token: {unknown_dispatch_s}"
-        );
-
-        let raw_pr = json!({
-            "number": 12,
-            "title": "add README",
-            "html_url": "https://github.com/acme/app/pull/12",
-            "access_token": LEAK,
-            "refresh_token": "refresh_CREATE_PR_MUST_NOT_ECHO",
-            "token": LEAK,
-        });
-        let clean = proxy::sanitize_value(&raw_pr);
-        assert!(
-            !proxy::contains_secret_keys(&clean),
-            "create_pr payload must be sanitized: {clean}"
-        );
-        let clean_s = serde_json::to_string(&clean).expect("serialize sanitized pr");
-        assert!(
-            !clean_s.contains(LEAK) && !clean_s.contains("refresh_CREATE_PR"),
-            "sanitized create_pr data must not echo the token: {clean_s}"
-        );
-        assert_eq!(clean["number"], 12);
-        assert_eq!(clean["html_url"], "https://github.com/acme/app/pull/12");
-
-        // Same shape proxy_tool_result returns to the model.
-        let mut pr = ProxyResult::ok_result(
-            "github",
-            "create_pr",
-            "Opened PR #12: add README",
-            raw_pr,
-            Some(201),
-        );
-        pr.data = proxy::sanitize_value(&pr.data);
-        if proxy::contains_secret_keys(&pr.data) {
-            pr.data = Value::Null;
-        }
-        let tool_payload = json!({
-            "ok": pr.ok,
-            "provider": pr.provider,
-            "operation": pr.operation,
-            "summary": pr.summary,
-            "data": pr.data,
-            "error_code": pr.error_code,
-            "provider_status": pr.provider_status,
-        });
-        let md = format_context_markdown(&[pr.clone()]);
-        let pr_s = serde_json::to_string(&pr).expect("serialize proxy result");
-        let tool_s = serde_json::to_string(&tool_payload).expect("serialize tool payload");
-        assert!(
-            !md.contains(LEAK),
-            "context markdown must not echo token:\n{md}"
-        );
-        assert!(
-            !pr_s.contains(LEAK) && !tool_s.contains(LEAK),
-            "ProxyResult / tool payload for create_pr must not echo token: {pr_s} {tool_s}"
-        );
-
-        // Decrypt fail is ok:false and must not echo the sealed token.
-        // invoke maps credentials_for Err → decrypt_failed with a static
-        // summary (no `{e}` interpolation that could echo material).
-        let seal_key =
-            fleet_integrations::CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .expect("seal key");
-        let wrong_key =
-            fleet_integrations::CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .expect("wrong key");
-        let sealed = seal_key
-            .encrypt(&json!({ "access_token": LEAK, "refresh_token": LEAK }))
-            .expect("seal token");
-        assert!(
-            !serde_json::to_string(&sealed)
-                .expect("sealed")
-                .contains(LEAK),
-            "sealed credentials must not contain the plaintext token"
-        );
-        let decrypt_err = wrong_key
-            .decrypt(&sealed)
-            .expect_err("wrong INTEGRATIONS_ENCRYPTION_KEY must fail")
-            .to_string();
-        assert!(
-            !decrypt_err.contains(LEAK),
-            "decrypt failure must not echo the token: {decrypt_err}"
-        );
-
-        // Unknown op returns before any DB / GitHub call. A token in args
-        // must not appear on the result. create_pr itself is allowlisted
-        // so this is not a tautology that every github op is unknown_op.
-        let pool = fleet_db::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
-            .expect("lazy pool (unknown_op must not acquire)");
-        // Closed pool fails acquire immediately — create_pr is allowlisted so
-        // it reaches find_connected; unknown_op must not.
-        pool.close().await;
-        let key =
-            fleet_integrations::CredentialsKey::from_secret("dev-test-encryption-key-32chars!!")
-                .expect("test credentials key");
-        let unknown = proxy::invoke(
-            &pool,
-            &key,
-            ProxyRequest {
-                workspace_id: session,
-                provider: "github".into(),
-                operation: "dump_access_token".into(),
-                args: json!({
-                    "access_token": LEAK,
-                    "token": LEAK,
-                    "owner": "acme",
-                    "repo": "app",
-                }),
-                caller: ProxyCaller::Chat {
-                    user_id: Uuid::new_v4(),
-                },
-            },
-        )
-        .await;
-        assert!(
-            !unknown.ok,
-            "unknown github op must be ok:false: {unknown:?}"
-        );
-        assert_eq!(
-            unknown.error_code.as_deref(),
-            Some("unknown_op"),
-            "unknown github op must be unknown_op, not forwarded: {unknown:?}"
-        );
-        let unknown_s = serde_json::to_string(&unknown).expect("serialize unknown_op");
-        assert!(
-            !unknown_s.contains(LEAK),
-            "unknown_op result must not echo the token: {unknown_s}"
-        );
-
-        // Allowlisted github_create_pr / create_pr must not be treated as
-        // unknown_op. Dead pool → ok:false before GitHub; args token stays out.
-        let create_pr = proxy::invoke(
-            &pool,
-            &key,
-            ProxyRequest {
-                workspace_id: session,
-                provider: "github".into(),
-                operation: "create_pr".into(),
-                args: json!({
-                    "owner": "acme",
-                    "repo": "app",
-                    "title": "add README",
-                    "head": "agent-fleet/changes",
-                    "access_token": LEAK,
-                    "workspace_id": foreign.to_string(),
-                }),
-                caller: ProxyCaller::Chat {
-                    user_id: Uuid::new_v4(),
-                },
-            },
-        )
-        .await;
-        assert!(
-            !create_pr.ok,
-            "create_pr without a reachable connection must be ok:false: {create_pr:?}"
-        );
-        assert_ne!(
-            create_pr.error_code.as_deref(),
-            Some("unknown_op"),
-            "docs §7.2 github_create_pr is allowlisted create_pr, not unknown_op: {create_pr:?}"
-        );
-        let create_s = serde_json::to_string(&create_pr).expect("serialize create_pr");
-        assert!(
-            !create_s.contains(LEAK),
-            "create_pr result must not echo the token: {create_s}"
-        );
-
-        let github_tools =
-            include_str!("../../fleet-integrations/src/proxy/apps/github/tools/mod.rs");
-        let github_tools = match github_tools.find("#[cfg(test)]") {
-            Some(i) => &github_tools[..i],
-            None => github_tools,
-        };
-        assert!(
-            github_tools.contains("\"create_pr\" => writes::create_pr"),
-            "docs §7.2 github_create_pr must be wired to writes::create_pr:\n{github_tools}"
-        );
-
-        let src = production_src();
-        let exec = fn_src(src, "pub async fn execute_tool");
-        assert!(
-            exec.contains("\"integration_query\" => integration_query("),
-            "github_create_pr / create_pr must run through integration_query:\n{exec}"
-        );
-        assert!(
-            exec.contains("require_session_workspace"),
-            "execute_tool must workspace-scope integration_query:\n{exec}"
-        );
-        if let Some(at) = exec.find("\"github_create_pr\"") {
-            let window: String = exec[at..].lines().take(24).collect::<Vec<_>>().join("\n");
-            assert!(
-                window.contains("proxy_tool_result")
-                    || window.contains("integration_query")
-                    || window.contains("proxy::invoke"),
-                "dedicated github_create_pr must use the sanitized proxy:\n{window}"
-            );
-        }
-
-        let iq = fn_src(src, "async fn integration_query");
-        assert!(
-            iq.contains("require_session_workspace"),
-            "integration_query must reject a foreign workspace_id:\n{iq}"
-        );
-        assert!(
-            iq.contains("proxy_tool_result"),
-            "integration_query must dispatch via proxy_tool_result:\n{iq}"
-        );
-
-        let ptr = fn_src(src, "async fn proxy_tool_result");
-        let invoke_at = ptr
-            .find("proxy::invoke")
-            .expect("proxy_tool_result must call proxy::invoke");
-        assert!(
-            !ptr.contains("access_token") && !ptr.contains("refresh_token"),
-            "proxy_tool_result must not copy credentials into the tool payload:\n{ptr}"
-        );
-        assert!(
-            ptr[invoke_at..].contains("result.data"),
-            "tool payload must use the sanitized ProxyResult, not raw creds:\n{ptr}"
-        );
-
-        let proxy_src = proxy_production_src();
-        let invoke = fn_src(proxy_src, "pub async fn invoke");
-        let unknown_at = invoke
-            .find("unknown_op")
-            .expect("invoke must fail-closed on unknown op");
-        let decrypt_at = invoke
-            .find("decrypt_failed")
-            .expect("invoke must fail-closed on decrypt failure");
-        let find_at = invoke
-            .find("find_connected")
-            .expect("invoke loads the session workspace connection");
-        let dispatch_at = invoke
-            .find("apps::dispatch")
-            .expect("invoke dispatches allowlisted ops only");
-        assert!(
-            unknown_at < find_at && unknown_at < dispatch_at,
-            "unknown op must return before connection load / GitHub:\n{invoke}"
-        );
-        assert!(
-            decrypt_at < dispatch_at,
-            "decrypt failure must return before GitHub:\n{invoke}"
-        );
-        let decrypt_arm: String = invoke[decrypt_at..]
-            .lines()
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            invoke.contains("ProxyResult::err")
-                && decrypt_arm.contains("decrypt_failed")
-                && decrypt_arm.contains("failed to decrypt credentials"),
-            "decrypt failure must be ok:false decrypt_failed:\n{decrypt_arm}"
-        );
-        assert!(
-            !decrypt_arm.contains("{e}") && !decrypt_arm.contains("{e:?}"),
-            "decrypt_failed summary must be a static string (interpolating the decrypt error would echo material):\n{decrypt_arm}"
-        );
-        assert!(
-            invoke.contains("sanitize_value") && invoke.contains("contains_secret_keys"),
-            "create_pr (and every op) results must be sanitized:\n{invoke}"
-        );
-        assert!(
-            invoke.contains("drop(access_token)"),
-            "decrypted token must not live on the ProxyResult:\n{invoke}"
-        );
-
-        // Lookup is ProxyRequest.workspace_id (inlined or via a helper).
-        // `&req.args` is only legal as the dispatch payload, after the
-        // connection is already loaded from the session workspace.
-        let before_dispatch = &invoke[..dispatch_at];
-        assert!(
-            before_dispatch.contains("find_connected")
-                && (before_dispatch.contains("req.workspace_id")
-                    || proxy_src.contains("fn connection_scope")),
-            "lookup must stay on the session workspace:\n{before_dispatch}"
-        );
-        assert!(
-            !before_dispatch.contains("req.args") && !before_dispatch.contains("connection_id"),
-            "args.connection_id / args.workspace_id must not retarget lookup:\n{before_dispatch}"
-        );
-        if proxy_src.contains("fn connection_scope") {
-            let scope = fn_src(proxy_src, "fn connection_scope");
-            assert!(
-                scope.contains("req.workspace_id"),
-                "lookup must stay on the session workspace:\n{scope}"
-            );
-            assert!(
-                !scope.contains("req.args") && !scope.contains("connection_id"),
-                "args.connection_id / args.workspace_id must not retarget lookup:\n{scope}"
-            );
-        }
-    }
-
-    /// Docs §7.3: unknown op / disconnected / decrypt failure → tool
-    /// `ok: false`. `integration_query` decrypts on the control plane and
-    /// the returned body must not contain `access_token`.
-    #[tokio::test]
-    async fn integration_query_decrypts_server_side_and_sanitizes_tokens() {
-        const LEAK: &str = "gho_IQ_CHAT_SANITIZE_MUST_NOT_ECHO_99ab";
-
-        fn assert_no_token_echo(label: &str, body: &str) {
-            assert!(
-                !body.contains("access_token") && !body.contains(LEAK),
-                "{label} must not contain access_token / the decrypted token: {body}"
-            );
-            assert!(
-                !body.contains("refresh_token") && !body.contains("client_secret"),
-                "{label} must not echo other credential keys: {body}"
-            );
-        }
-
-        fn tool_body(result: &ProxyResult) -> Value {
-            json!({
-                "ok": result.ok,
-                "provider": result.provider,
-                "operation": result.operation,
-                "summary": result.summary,
-                "data": result.data,
-                "error_code": result.error_code,
-                "provider_status": result.provider_status,
-                "security": {
-                    "tokens_in_sandbox": false,
-                    "decrypt_on": "control_plane",
-                },
-                "hint": "Tokens stay on the control plane; this payload is sanitized.",
-                "supported_providers": supported_providers(),
-                "operations": operations_for(&result.provider),
-            })
-        }
-
-        let tools = tool_definitions();
-        let names: Vec<&str> = tools
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
-            .collect();
-        assert!(
-            names.contains(&"integration_query"),
-            "docs §7.2/§7.3 integration_query must stay a chat tool: {names:?}"
-        );
-        let iq_def = tools
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["function"]["name"] == "integration_query")
-            .expect("integration_query definition");
-        let desc = iq_def["function"]["description"].as_str().unwrap_or("");
-        assert!(
-            desc.to_ascii_lowercase().contains("control plane")
-                && desc.to_ascii_lowercase().contains("token"),
-            "integration_query must tell the model tokens stay on the control plane: {desc}"
-        );
-
-        let stuffed = json!({
-            "provider": "github",
-            "operation": "raw_http",
-            "args": {
-                "access_token": LEAK,
-                "refresh_token": LEAK,
-                "token": LEAK,
-                "owner": "acme",
-                "repo": "app",
-            },
-        });
-        let session = Uuid::new_v4();
-        require_session_workspace(session, &stuffed)
-            .expect("omitted workspace_id uses the chat session");
-
-        let pool = fleet_db::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
-            .expect("lazy pool");
-        pool.close().await;
-        let key =
-            fleet_integrations::CredentialsKey::from_secret("dev-test-encryption-key-32chars!!")
-                .expect("test credentials key");
-
-        let unknown = proxy::invoke(
-            &pool,
-            &key,
-            ProxyRequest {
-                workspace_id: session,
-                provider: "github".into(),
-                operation: "raw_http".into(),
-                args: stuffed["args"].clone(),
-                caller: ProxyCaller::Chat {
-                    user_id: Uuid::new_v4(),
-                },
-            },
-        )
-        .await;
-        assert!(!unknown.ok, "unknown op must be ok:false: {unknown:?}");
-        assert_eq!(
-            unknown.error_code.as_deref(),
-            Some("unknown_op"),
-            "docs §7.3 unknown op → ok:false unknown_op: {unknown:?}"
-        );
-        let unknown_content = tool_body(&unknown);
-        let unknown_action = ChatAction {
-            tool: "integration_query".into(),
-            ok: unknown.ok,
-            summary: unknown.summary.clone(),
-            run_id: None,
-            sandbox_ids: None,
-            detail: Some(unknown_content.clone()),
-        };
-        let unknown_s = serde_json::to_string(&unknown_content).expect("unknown content");
-        let unknown_act_s = serde_json::to_string(&unknown_action).expect("unknown action");
-        assert_no_token_echo("unknown_op integration_query content", &unknown_s);
-        assert_no_token_echo("unknown_op ChatAction", &unknown_act_s);
-
-        let disconnected = proxy::invoke(
-            &pool,
-            &key,
-            ProxyRequest {
-                workspace_id: session,
-                provider: "github".into(),
-                operation: "list_repos".into(),
-                args: stuffed["args"].clone(),
-                caller: ProxyCaller::Chat {
-                    user_id: Uuid::new_v4(),
-                },
-            },
-        )
-        .await;
-        assert!(
-            !disconnected.ok,
-            "disconnected list_repos must be ok:false: {disconnected:?}"
-        );
-        assert_ne!(
-            disconnected.error_code.as_deref(),
-            Some("unknown_op"),
-            "allowlisted list_repos must not be treated as unknown_op: {disconnected:?}"
-        );
-        assert!(
-            matches!(
-                disconnected.error_code.as_deref(),
-                Some("not_connected") | Some("internal")
-            ),
-            "disconnected is not_connected (or internal if the pool is dead): {disconnected:?}"
-        );
-        let disconnected_s =
-            serde_json::to_string(&tool_body(&disconnected)).expect("disconnected content");
-        assert_no_token_echo("disconnected integration_query body", &disconnected_s);
-
-        let seal_key =
-            fleet_integrations::CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .expect("seal key");
-        let wrong_key =
-            fleet_integrations::CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .expect("wrong key");
-        let sealed = seal_key
-            .encrypt(&json!({ "access_token": LEAK, "refresh_token": LEAK }))
-            .expect("seal");
-        assert!(
-            !serde_json::to_string(&sealed)
-                .expect("sealed")
-                .contains(LEAK),
-            "sealed credentials must not contain the plaintext token"
-        );
-        let decrypt_err = wrong_key
-            .decrypt(&sealed)
-            .expect_err("wrong INTEGRATIONS_ENCRYPTION_KEY must fail")
-            .to_string();
-        assert!(
-            !decrypt_err.contains(LEAK),
-            "decrypt failure must not echo the token: {decrypt_err}"
-        );
-        let decrypt_failed = ProxyResult::err(
-            "github",
-            "list_repos",
-            "decrypt_failed",
-            "failed to decrypt credentials (check INTEGRATIONS_ENCRYPTION_KEY)",
-            None,
-        );
-        assert!(!decrypt_failed.ok);
-        let decrypt_s =
-            serde_json::to_string(&tool_body(&decrypt_failed)).expect("decrypt_failed content");
-        assert_no_token_echo("decrypt_failed integration_query body", &decrypt_s);
-
-        let dirty = json!({
-            "full_name": "acme/app",
-            "access_token": LEAK,
-            "refresh_token": "refresh_IQ_CHAT_MUST_NOT_ECHO",
-        });
-        let mut ok = ProxyResult::ok_result("github", "list_repos", "ok", dirty, Some(200));
-        ok.data = proxy::sanitize_value(&ok.data);
-        if proxy::contains_secret_keys(&ok.data) {
-            ok.data = Value::Null;
-        }
-        let ok_s = serde_json::to_string(&tool_body(&ok)).expect("ok content");
-        assert_no_token_echo("successful integration_query body", &ok_s);
-        assert_eq!(ok.data["full_name"], "acme/app");
-
-        let retry = retry_hint("github", "list_repos");
-        let retry_s = serde_json::to_string(&retry).expect("retry hint");
-        assert_no_token_echo("integration_query retry.example", &retry_s);
-
-        let src = production_src();
-        let exec = fn_src(src, "pub async fn execute_tool");
-        assert!(
-            exec.contains("\"integration_query\" => integration_query("),
-            "execute_tool must run integration_query:\n{exec}"
-        );
-        let iq = fn_src(src, "async fn integration_query");
-        assert!(
-            iq.contains("require_session_workspace") && iq.contains("proxy_tool_result"),
-            "integration_query must stay workspace-scoped and go through the proxy:\n{iq}"
-        );
-        assert!(
-            !iq.contains("credentials_for")
-                && !iq.contains("access_token")
-                && !iq.contains("refresh_token"),
-            "integration_query must not decrypt or copy tokens:\n{iq}"
-        );
-        let ptr = fn_src(src, "async fn proxy_tool_result");
-        assert!(
-            ptr.contains("proxy::invoke")
-                && ptr.contains("result.data")
-                && ptr.contains("decrypt_on")
-                && ptr.contains("control_plane")
-                && !ptr.contains("access_token")
-                && !ptr.contains("credentials_for"),
-            "proxy_tool_result decrypts via invoke on the control plane; body is sanitized:\n{ptr}"
-        );
-
-        let proxy_src = proxy_production_src();
-        let invoke = fn_src(proxy_src, "pub async fn invoke");
-        let unknown_at = invoke.find("unknown_op").expect("unknown_op");
-        let decrypt_at = invoke.find("decrypt_failed").expect("decrypt_failed");
-        let not_connected_at = invoke.find("not_connected").expect("not_connected");
-        let dispatch_at = invoke.find("apps::dispatch").expect("dispatch");
-        assert!(
-            unknown_at < dispatch_at && decrypt_at < dispatch_at && not_connected_at < dispatch_at,
-            "docs §7.3 error paths must be ok:false before provider HTTP:\n{invoke}"
-        );
-        assert!(
-            invoke.contains("credentials_for")
-                && invoke.contains("drop(access_token)")
-                && invoke.contains("sanitize_value(&result.data)"),
-            "invoke must decrypt server-side, drop the token, and sanitize:\n{invoke}"
-        );
-        let decrypt_arm: String = invoke[decrypt_at..]
-            .lines()
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            decrypt_arm.contains("failed to decrypt credentials")
-                && !decrypt_arm.contains("{e}")
-                && !decrypt_arm.contains("{e:?}"),
-            "decrypt_failed summary must be static (no error interpolation):\n{decrypt_arm}"
-        );
-    }
-
     #[test]
     fn multi_task_plan_validates() {
         let plan = build_multi_task_plan(
@@ -4544,451 +3026,5 @@ mod tests {
         plan.project_id = Uuid::new_v4();
         plan.run_id = Uuid::new_v4();
         assert!(validate::validate_plan(&plan).is_ok());
-    }
-
-    /// HTTP client that can only reach a local sink. Any connect is an
-    /// outbound GitHub attempt (`api.github.com` is HTTPS — CONNECT hits us).
-    struct CreatePrSink {
-        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        http: reqwest::Client,
-    }
-
-    impl Drop for CreatePrSink {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    impl CreatePrSink {
-        fn bind() -> Self {
-            use std::io::{Read, Write};
-            use std::net::TcpListener;
-            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-            use std::sync::Arc;
-            use std::thread;
-
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind create_pr sink");
-            listener.set_nonblocking(true).expect("nonblocking sink");
-            let addr = listener.local_addr().expect("sink addr");
-            let hits = Arc::new(AtomicUsize::new(0));
-            let stop = Arc::new(AtomicBool::new(false));
-            let hits_t = hits.clone();
-            let stop_t = stop.clone();
-            thread::spawn(move || {
-                while !stop_t.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            hits_t.fetch_add(1, Ordering::SeqCst);
-                            let _ = stream.set_nonblocking(false);
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-                            let mut buf = [0u8; 128];
-                            let _ = stream.read(&mut buf);
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 503 sink\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                            );
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-            let http = reqwest::Client::builder()
-                .proxy(reqwest::Proxy::all(format!("http://{addr}")).expect("proxy"))
-                .timeout(Duration::from_secs(2))
-                .build()
-                .expect("client");
-            Self { hits, stop, http }
-        }
-
-        fn hits(&self) -> usize {
-            self.hits.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    fn production_src() -> &'static str {
-        let src = include_str!("chat_tools.rs");
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn proxy_production_src() -> &'static str {
-        let src = include_str!("../../fleet-integrations/src/proxy/mod.rs");
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
-        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
-        let after = start + sig.len();
-        let end = src[after..]
-            .find("\npub async fn ")
-            .or_else(|| src[after..].find("\nasync fn "))
-            .or_else(|| src[after..].find("\npub fn "))
-            .or_else(|| src[after..].find("\nfn "))
-            .map(|i| after + i)
-            .unwrap_or(src.len());
-        &src[start..end]
-    }
-
-    fn launch_plan_task_json(i: usize) -> Value {
-        json!({ "id": format!("t{i}"), "title": format!("Task {i}") })
-    }
-
-    fn launch_plan_task(id: &str, depends_on: &[&str]) -> PlanTask {
-        PlanTask {
-            plan_task_id: id.to_string(),
-            title: format!("Task {id}"),
-            summary: String::new(),
-            spec_md: String::new(),
-            depends_on: depends_on.iter().map(|s| (*s).to_string()).collect(),
-            worker_profile: "generalist".into(),
-            acceptance: fleet_orchestrator::orch::default_acceptance("generalist"),
-            priority: 100,
-            external_ref: None,
-            timeout_s: Some(3600),
-            max_retries: Some(1),
-        }
-    }
-
-    /// Docs §7.1: launch_agent_plan max 1000 tasks. A constant-only
-    /// assert is not coverage — 1001 unique ids must error with no
-    /// accepted plan/run; 1000 is allowed. Cycles / unknown deps are
-    /// still rejected by orch validate before insert. Live execute_tool
-    /// + store lock is
-    /// `chat_plan_execute_tool_rejects_over_max_tasks_and_inserts_no_run`.
-    #[test]
-    fn chat_plan_rejects_over_max_tasks() {
-        const DOC_MAX: usize = 1000;
-
-        let at_cap: Vec<Value> = (0..DOC_MAX).map(launch_plan_task_json).collect();
-        assert_eq!(at_cap.len(), 1000);
-        let parsed = parse_launch_plan_args(&json!({
-            "title": "at cap",
-            "tasks": at_cap,
-        }))
-        .expect("1000 unique task ids are allowed");
-        assert_eq!(parsed.tasks.len(), 1000);
-        let cap_ids: std::collections::HashSet<&str> =
-            parsed.tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(cap_ids.len(), 1000, "1000 ids must stay unique");
-
-        let over: Vec<Value> = (0..=DOC_MAX).map(launch_plan_task_json).collect();
-        assert_eq!(over.len(), 1001);
-        let over_ids: std::collections::HashSet<String> = over
-            .iter()
-            .map(|t| t["id"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(over_ids.len(), 1001, "fixture must be 1001 unique ids");
-        let err = parse_launch_plan_args(&json!({
-            "title": "over cap",
-            "tasks": over,
-        }))
-        .expect_err("1001 unique task ids must fail closed");
-        let lower = err.to_ascii_lowercase();
-        assert!(
-            (lower.contains("too many") || lower.contains("exceed"))
-                && (lower.contains("max") || lower.contains("1000")),
-            "1001 must fail the task cap (not a field check): {err}"
-        );
-
-        let cap_plan = build_multi_task_plan(
-            Uuid::new_v4(),
-            None,
-            (0..DOC_MAX)
-                .map(|i| launch_plan_task(&format!("t{i}"), &[]))
-                .collect(),
-        );
-        assert_eq!(cap_plan.tasks.len(), 1000);
-        assert_eq!(cap_plan.status, WorkPlanStatus::Accepted);
-        validate::validate_plan(&cap_plan).expect("1000 unique tasks must pass orch validate");
-
-        let over_plan = build_multi_task_plan(
-            Uuid::new_v4(),
-            None,
-            (0..=DOC_MAX)
-                .map(|i| launch_plan_task(&format!("t{i}"), &[]))
-                .collect(),
-        );
-        assert_eq!(over_plan.tasks.len(), 1001);
-        assert!(
-            validate::validate_plan(&over_plan).is_err(),
-            "1001 unique tasks must fail orch validate so nothing can be accepted"
-        );
-
-        let cycle_args = parse_launch_plan_args(&json!({
-            "tasks": [
-                { "id": "a", "title": "A", "depends_on": ["b"] },
-                { "id": "b", "title": "B", "depends_on": ["a"] }
-            ]
-        }))
-        .expect("a cycle under the cap is parseable; orch validate rejects it");
-        assert_eq!(cycle_args.tasks.len(), 2);
-        let cycle_plan = build_multi_task_plan(
-            Uuid::new_v4(),
-            None,
-            vec![launch_plan_task("a", &["b"]), launch_plan_task("b", &["a"])],
-        );
-        let cycle_err = validate::validate_plan(&cycle_plan)
-            .expect_err("cycles must still be rejected by orch validate")
-            .to_string()
-            .to_ascii_lowercase();
-        assert!(cycle_err.contains("cycle"), "{cycle_err}");
-
-        let unknown_args = parse_launch_plan_args(&json!({
-            "tasks": [
-                { "id": "a", "title": "A", "depends_on": ["ghost"] }
-            ]
-        }))
-        .expect("unknown deps under the cap are parseable; orch validate rejects them");
-        assert_eq!(unknown_args.tasks.len(), 1);
-        let unknown_plan = build_multi_task_plan(
-            Uuid::new_v4(),
-            None,
-            vec![launch_plan_task("a", &["ghost"])],
-        );
-        let unknown_err = validate::validate_plan(&unknown_plan)
-            .expect_err("unknown deps must still be rejected by orch validate")
-            .to_string()
-            .to_ascii_lowercase();
-        assert!(
-            unknown_err.contains("unknown") || unknown_err.contains("depends_on"),
-            "{unknown_err}"
-        );
-    }
-
-    /// Docs §16: Chat `context_from` GitHub while not connected → tool error;
-    /// the model tells the user to Connect. `launch_agent_task` /
-    /// `launch_agent_plan` must be `ok:false` and insert no accepted plan/run.
-    /// Must not launch anyway with `Failed (not_connected)` baked into
-    /// `spec_md`. Prefetched markdown must never contain
-    /// `access_token` / `refresh_token`.
-    #[test]
-    fn context_from_while_not_connected_is_tool_error_and_inserts_no_plan() {
-        const LEAK: &str = "gho_CTX_FROM_MUST_NOT_ECHO_7e3c";
-
-        let prompt = system_prompt_with_tools();
-        let prompt_l = prompt.to_ascii_lowercase();
-        assert!(
-            prompt.contains("Connect")
-                && prompt.contains("Integrations")
-                && prompt_l.contains("disconnect"),
-            "docs §16: model must tell the user to Connect when context_from is disconnected: {prompt}"
-        );
-
-        let tools = tool_definitions();
-        for name in ["launch_agent_task", "launch_agent_plan"] {
-            let def = tools
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|t| t["function"]["name"] == name)
-                .unwrap_or_else(|| panic!("{name} must stay a chat tool"));
-            assert!(
-                def["function"]["parameters"]["properties"]
-                    .get("context_from")
-                    .is_some(),
-                "{name} must accept context_from: {def}"
-            );
-        }
-
-        let task = parse_launch_args(&json!({
-            "title": "Read GitHub issues",
-            "spec": "Summarize open issues.",
-            "context_from": [{
-                "provider": "github",
-                "operation": "list_issues",
-                "args": {
-                    "owner": "acme",
-                    "repo": "app",
-                    "access_token": LEAK,
-                    "refresh_token": LEAK
-                }
-            }]
-        }))
-        .expect("context_from on launch_agent_task must parse");
-        let cf = task
-            .context_from
-            .as_ref()
-            .expect("context_from must be kept");
-        assert_eq!(cf[0].provider, "github");
-        assert_eq!(cf[0].operation, "list_issues");
-
-        let plan = parse_launch_plan_args(&json!({
-            "title": "Read GitHub repos",
-            "context_from": [{
-                "provider": "github",
-                "operation": "list_repos",
-                "args": { "access_token": LEAK, "refresh_token": LEAK }
-            }],
-            "tasks": [{ "id": "t1", "title": "Summarize repos" }]
-        }))
-        .expect("context_from on launch_agent_plan must parse");
-        assert_eq!(
-            plan.context_from.as_ref().map(|v| v[0].provider.as_str()),
-            Some("github")
-        );
-
-        let mut dirty = ProxyResult::ok_result(
-            "github",
-            "list_issues",
-            "ok",
-            json!({
-                "items": [{ "title": "n", "access_token": LEAK, "refresh_token": LEAK }],
-                "access_token": LEAK,
-                "refresh_token": LEAK,
-            }),
-            Some(200),
-        );
-        dirty.data = proxy::sanitize_value(&dirty.data);
-        if proxy::contains_secret_keys(&dirty.data) {
-            dirty.data = Value::Null;
-        }
-        let md = format_context_markdown(&[dirty]);
-        assert!(
-            !md.contains("access_token") && !md.contains("refresh_token") && !md.contains(LEAK),
-            "prefetched markdown must never contain access_token/refresh_token: {md}"
-        );
-
-        let disconnected = ProxyResult::err(
-            "github",
-            "list_issues",
-            "not_connected",
-            "github is not connected — open Workspace → Integrations to connect it",
-            None,
-        );
-        assert!(!disconnected.ok);
-        assert_eq!(disconnected.error_code.as_deref(), Some("not_connected"));
-        let failed_md = format_context_markdown(&[disconnected]);
-        assert!(
-            failed_md.contains("Failed (not_connected)"),
-            "failed prefetch markdown is the hole if it is appended to spec_md: {failed_md}"
-        );
-        assert!(
-            !failed_md.contains("access_token")
-                && !failed_md.contains("refresh_token")
-                && !failed_md.contains(LEAK),
-            "failed prefetch markdown must not echo tokens: {failed_md}"
-        );
-
-        let src = production_src();
-        let prefetch = fn_src(src, "async fn prefetch_context");
-        assert!(
-            prefetch.contains("proxy::invoke"),
-            "prefetch_context must go through the control-plane proxy (tokens stay off the spec):\n{prefetch}"
-        );
-        assert!(
-            !prefetch.contains("access_token") && !prefetch.contains("refresh_token"),
-            "prefetch_context must not copy tokens into markdown:\n{prefetch}"
-        );
-
-        for (label, sig) in [
-            ("launch_agent_task", "async fn launch_agent_task"),
-            ("launch_agent_plan", "async fn launch_agent_plan"),
-        ] {
-            assert_launch_fail_closes_disconnected_context_from(label, fn_src(src, sig), prefetch);
-        }
-
-        let exec = fn_src(src, "pub async fn execute_tool");
-        for name in ["launch_agent_task", "launch_agent_plan"] {
-            assert!(
-                exec.contains(&format!("\"{name}\" =>")),
-                "execute_tool must dispatch {name} so a disconnected context_from is a tool error"
-            );
-        }
-        assert!(
-            exec.contains("ok: false"),
-            "execute_tool must map launch Err to ChatAction ok:false (docs §16 tool error):\n{exec}"
-        );
-    }
-
-    /// Window from `prefetch_context` up to markdown / plan build / insert.
-    /// Plan-validate `return Err` after `build_*_plan` must not count.
-    fn context_from_prefetch_window<'a>(body: &'a str, label: &str) -> &'a str {
-        let prefetch_at = body
-            .find("prefetch_context")
-            .unwrap_or_else(|| panic!("{label} must prefetch context_from before insert:\n{body}"));
-        let rest = &body[prefetch_at..];
-        let end = [
-            rest.find("format_context_markdown"),
-            rest.find("build_chat_plan"),
-            rest.find("build_multi_task_plan"),
-            rest.find("accept_and_drive_plan"),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    fn prefetch_uses_try(window: &str) -> bool {
-        window.contains(".await?")
-            || window.contains("await ?")
-            || window
-                .lines()
-                .any(|l| l.contains("prefetch_context") && l.contains('?'))
-            || (window.contains("prefetch_context")
-                && window.contains("map_err")
-                && window.contains('?'))
-    }
-
-    fn prefetch_fn_fail_closes_disconnected(prefetch: &str) -> bool {
-        let returns_result = prefetch.contains("AppResult") || prefetch.contains("Result<");
-        let checks = prefetch.contains("not_connected")
-            || prefetch.contains("error_code")
-            || ((prefetch.contains(".ok")
-                || prefetch.contains("!r.ok")
-                || prefetch.contains("!result.ok"))
-                && (prefetch.contains("return Err") || prefetch.contains("AppError::")));
-        returns_result && checks
-    }
-
-    fn assert_launch_fail_closes_disconnected_context_from(
-        label: &str,
-        body: &str,
-        prefetch: &str,
-    ) {
-        let prefetch_at = body.find("prefetch_context").unwrap_or_else(|| {
-            panic!("{label} must call prefetch_context for context_from:\n{body}")
-        });
-        let drive_at = body.find("accept_and_drive_plan").unwrap_or_else(|| {
-            panic!("{label} must persist only via accept_and_drive_plan:\n{body}")
-        });
-        assert!(
-            prefetch_at < drive_at,
-            "{label} must prefetch context_from before insert:\n{body}"
-        );
-        assert!(
-            !body.contains("insert_accepted_plan"),
-            "{label} must not insert a plan itself:\n{body}"
-        );
-
-        let window = context_from_prefetch_window(body, label);
-        let uses_try = prefetch_uses_try(window);
-        let explicit = (window.contains("not_connected")
-            || window.contains("error_code")
-            || window.contains(".ok")
-            || window.contains("Connect"))
-            && (window.contains("return Err") || window.contains("AppError::"));
-        assert!(
-            uses_try || explicit,
-            "{label} must fail-close when context_from is not_connected \
-             (return Err / ? before format_context_markdown or plan build); \
-             must not launch with Failed (not_connected) baked into spec_md:\n{window}"
-        );
-        if uses_try {
-            assert!(
-                prefetch_fn_fail_closes_disconnected(prefetch),
-                "{label} uses ? on prefetch_context, so prefetch_context must \
-                 return Err on a disconnected provider (not_connected / !ok):\n{prefetch}"
-            );
-        }
     }
 }

@@ -9,8 +9,6 @@ pub struct FleetSettings {
     pub max_agents: i32,
     #[serde(default = "default_cap")]
     pub max_agents_cap: i32,
-    #[serde(default)]
-    pub sandbox_backend: String,
     #[serde(default = "default_process")]
     pub min_isolation: String,
     #[serde(default = "default_off")]

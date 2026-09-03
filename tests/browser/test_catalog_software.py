@@ -75,12 +75,7 @@ def _require_playwright():
 def _reload_self_hosted(page, workspace_url: str) -> None:
     goto_self_hosted(page, workspace_url)
     wait_dx_ready(page, timeout_ms=45_000)
-    try:
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=30_000)
-    except Exception as e:
-        raise AssertionError(
-            f"Control plane missing: {e}. body={page.inner_text('body')[:800]!r}"
-        ) from e
+    page.get_by_role("button", name="Add worker").wait_for(timeout=30_000)
 
 
 def _article(page, name: str):
@@ -143,11 +138,8 @@ class CatalogSoftwareLineTests(unittest.TestCase):
 
     def test_control_plane_card_has_no_software_line(self) -> None:
         _reload_self_hosted(self.page, self.workspace_url)
-        first = self.page.locator("article").first
-        first.wait_for(timeout=10_000)
-        text = first.inner_text()
-        self.assertIn("Control plane", text)
-        self.assertNotIn("software ", text.lower())
+        n = self.page.locator("article").filter(has_text="Control plane").count()
+        self.assertEqual(n, 0, "synthetic Control plane card must not appear")
 
     def test_paired_card_shows_bake_id_not_bin_hash(self) -> None:
         name = f"sw-paired-{uuid.uuid4().hex[:8]}"
@@ -172,11 +164,8 @@ class CatalogSoftwareLineTests(unittest.TestCase):
         self.assertEqual((row.get("software") or {}).get("git_sha"), BAKE_SHA)
 
         _reload_self_hosted(self.page, self.workspace_url)
-        plane = self.page.locator("article").first
-        plane.wait_for(timeout=10_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertNotIn("software ", plane_text.lower())
+        n = self.page.locator("article").filter(has_text="Control plane").count()
+        self.assertEqual(n, 0, "synthetic Control plane card must not appear")
 
         card = _article(self.page, name)
         self.assertNotIn("Control plane", card.inner_text())

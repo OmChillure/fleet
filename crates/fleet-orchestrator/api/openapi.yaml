@@ -552,8 +552,6 @@ components:
           type: string
         auto_sync_external:
           type: boolean
-        sandbox_backend:
-          type: string
         repo_url:
           type: string
           nullable: true

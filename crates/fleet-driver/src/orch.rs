@@ -38,13 +38,22 @@ impl OrchClient {
         )
     }
 
-    pub async fn post_heartbeat(&self, seq: i32, progress_pct: Option<i32>) -> Result<()> {
+    pub async fn post_heartbeat(
+        &self,
+        seq: i32,
+        progress_pct: Option<i32>,
+        events: &[serde_json::Value],
+    ) -> Result<()> {
         let url = self.worker_url("heartbeat");
         let res = self
             .http
             .post(&url)
             .bearer_auth(&self.token)
-            .json(&json!({ "seq": seq, "progress_pct": progress_pct }))
+            .json(&json!({
+                "seq": seq,
+                "progress_pct": progress_pct,
+                "events": events,
+            }))
             .send()
             .await?;
         if !res.status().is_success() {

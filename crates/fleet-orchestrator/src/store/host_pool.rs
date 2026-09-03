@@ -6,10 +6,8 @@
 //! second spawn path.
 //!
 //! Isolation (`process` < `container` < `vm`) is not placement. A
-//! container-only in-cluster host can meet workspace `min_isolation` on
-//! the host picker. Production tick uses that picker so Kind `fleet-host`
-//! (container-only) can create FleetSandbox CRs. The v1 runner picker
-//! stays host-process-only for Cloud/Partners.
+//! container-only in-cluster host is assignable when it meets workspace
+//! `min_isolation`.
 
 use super::Store;
 use crate::domain::{IsolationClass, pick_isolation};
@@ -46,18 +44,6 @@ pub enum RunnerKind {
 impl RunnerKind {
     pub fn is_assignable(self) -> bool {
         matches!(self, Self::SelfHostedNative)
-    }
-
-    /// Stored `worker_hosts.isolation` or an HTTP/SQL kind slug.
-    /// Cloud / public-cloud / Partners placeholders are never native.
-    pub fn from_stored(raw: &str) -> Self {
-        match raw {
-            fleet_db::WORKER_HOST_ISOLATION_SANDBOXED => Self::SelfHostedSandbox,
-            "cloud" => Self::FleetCloud,
-            "aws" | "gcp" | "azure" => Self::PublicCloud,
-            "partners" => Self::Partners,
-            _ => Self::SelfHostedNative,
-        }
     }
 
     pub fn isolation(self) -> RunnerIsolation {
@@ -274,7 +260,6 @@ async fn workspace_need(store: &Store, project_id: Uuid) -> IsolationClass {
 
 /// Before `begin_spawn_assignment`: lowest load/cap, then oldest heartbeat,
 /// among hosts that meet isolation and are under cap.
-/// `list_assignable` already dropped revoked/disabled/unpaired rows.
 pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
     let hosts = list_assignable_hosts(store, project_id).await?;
     if hosts.is_empty() {
@@ -285,58 +270,20 @@ pub async fn select_assignable_host(store: &Store, project_id: Uuid) -> Option<C
     pick_assignable_host_in(&hosts, &in_flight, need, Some(project_id))
 }
 
-/// Use `preferred` when that host still meets `min_isolation` (host or
-/// container). Otherwise the usual host picker.
-pub async fn select_assignable_host_preferring(
-    store: &Store,
-    project_id: Uuid,
-    preferred: Option<Uuid>,
-) -> Option<ChosenHost> {
-    if let Some(id) = preferred {
-        if let Some(hosts) = list_assignable_hosts(store, project_id).await {
-            let need = workspace_need(store, project_id).await;
-            if let Some(host) = hosts.iter().find(|h| h.id == id) {
-                if let Some(runtime) = effective_runtime_for(host, need) {
-                    return Some(ChosenHost {
-                        host: host.clone(),
-                        runtime,
-                    });
-                }
-            }
-        }
-    }
-    select_assignable_host(store, project_id).await
-}
-
-/// Native + can run **host**. v1 does not enqueue container/k3d.
-fn v1_host_capable(host: &AssignableHost, need: IsolationClass) -> bool {
-    host.isolation.is_assignable() && effective_runtime_for(host, need) == Some(HostRuntime::Host)
-}
-
-fn pick_v1_runner_in(
-    hosts: &[AssignableHost],
-    in_flight: &HashMap<Uuid, i64>,
-    need: IsolationClass,
-    prefer_workspace: Option<Uuid>,
-) -> Option<ChosenHost> {
-    let native: Vec<AssignableHost> = hosts
-        .iter()
-        .filter(|h| v1_host_capable(h, need))
-        .cloned()
-        .collect();
-    pick_assignable_host_in(&native, in_flight, need, prefer_workspace)
-}
-
-/// Today's host picker, then Native-only that can run host. No second list/query.
+/// Today's host picker, then Native-only. No second list/query.
 /// Cloud / Partners / public-cloud cannot be chosen.
-/// Production tick does not fall back to a local SANDBOX_BACKEND.
-/// v1 never emits `runtime=container` or `k3d`.
+/// Production tick does not fall back to an in-process runtime.
 pub fn pick_assignable_runner_for(
     hosts: &[AssignableHost],
     in_flight: &HashMap<Uuid, i64>,
     need: IsolationClass,
 ) -> Option<ChosenHost> {
-    pick_v1_runner_in(hosts, in_flight, need, None)
+    let native: Vec<AssignableHost> = hosts
+        .iter()
+        .filter(|h| h.isolation.is_assignable())
+        .cloned()
+        .collect();
+    pick_assignable_host_for(&native, in_flight, need)
 }
 
 pub fn pick_assignable_runner(
@@ -346,21 +293,15 @@ pub fn pick_assignable_runner(
     pick_assignable_runner_for(hosts, in_flight, IsolationClass::Process)
 }
 
-/// Same list/query as [`select_assignable_host`], then v1 host-only.
+/// Wraps [`select_assignable_host`]. Tick fallback is unchanged.
 /// Cloud / Partners / public-cloud cannot be chosen.
-/// Container-only advertised natives get no job (no container/k3d enqueue).
 pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
-    let hosts = list_assignable_hosts(store, project_id).await?;
-    if hosts.is_empty() {
-        return None;
-    }
-    let in_flight = count_remote_in_flight(store).await?;
-    let need = workspace_need(store, project_id).await;
-    pick_v1_runner_in(&hosts, &in_flight, need, Some(project_id))
+    select_assignable_host(store, project_id)
+        .await
+        .filter(|chosen| chosen.host.isolation.is_assignable())
 }
 
-/// Use `preferred` when that host is still a v1 host-capable native.
-/// Otherwise the usual picker.
+/// Use `preferred` when that host is still assignable; otherwise the usual picker.
 pub async fn select_assignable_runner_preferring(
     store: &Store,
     project_id: Uuid,
@@ -371,12 +312,14 @@ pub async fn select_assignable_runner_preferring(
             let need = workspace_need(store, project_id).await;
             if let Some(host) = hosts
                 .iter()
-                .find(|h| h.id == id && v1_host_capable(h, need))
+                .find(|h| h.id == id && h.isolation.is_assignable())
             {
-                return Some(ChosenHost {
-                    host: host.clone(),
-                    runtime: HostRuntime::Host,
-                });
+                if let Some(runtime) = effective_runtime_for(host, need) {
+                    return Some(ChosenHost {
+                        host: host.clone(),
+                        runtime,
+                    });
+                }
             }
         }
     }
@@ -478,7 +421,10 @@ impl From<&fleet_db::WorkerHost> for AssignableHost {
             max_concurrent: h.max_concurrent,
             advertised_max_concurrent: h.advertised_max_concurrent,
             max_job_timeout_s: h.max_job_timeout_s,
-            isolation: RunnerKind::from_stored(&h.isolation).isolation(),
+            isolation: match h.isolation.as_str() {
+                fleet_db::WORKER_HOST_ISOLATION_SANDBOXED => RunnerIsolation::Sandboxed,
+                _ => RunnerIsolation::Native,
+            },
             last_seen_at: h.last_seen_at,
             workspace_id: h.workspace_id,
         }
@@ -635,35 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn advertised_zero_is_not_unlimited() {
-        let mut zero = host(Uuid::new_v4(), true, false, true, false, 8);
-        zero.advertised_max_concurrent = Some(0);
-        assert!(host_at_capacity(1, &zero));
-        assert!(!host_at_capacity(0, &zero));
-        let free = host(Uuid::new_v4(), true, false, true, false, 8);
-        let mut inflight = HashMap::new();
-        inflight.insert(zero.id, 1);
-        let chosen = pick_assignable_runner(&[zero.clone(), free.clone()], &inflight).unwrap();
-        assert_eq!(chosen.id(), free.id);
-        assert!(pick_assignable_runner(&[zero], &inflight).is_none());
-    }
-
-    #[test]
-    fn at_advertised_cap_picks_other_native() {
-        let mut at_cap = host(Uuid::new_v4(), true, false, true, false, 8);
-        at_cap.advertised_max_concurrent = Some(1);
-        let mut sandboxed = host(Uuid::new_v4(), true, false, true, false, 8);
-        sandboxed.isolation = RunnerIsolation::Sandboxed;
-        let free = host(Uuid::new_v4(), true, false, true, false, 8);
-        let mut inflight = HashMap::new();
-        inflight.insert(at_cap.id, 1);
-        let chosen =
-            pick_assignable_runner(&[at_cap.clone(), sandboxed, free.clone()], &inflight).unwrap();
-        assert_eq!(chosen.id(), free.id);
-        assert!(pick_assignable_runner(&[at_cap], &inflight).is_none());
-    }
-
-    #[test]
     fn pick_skips_full_and_ineffective() {
         let full_id = Uuid::new_v4();
         let none_id = Uuid::new_v4();
@@ -768,93 +685,6 @@ mod tests {
         assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
     }
 
-    fn sample_spawn_req() -> SpawnRequest {
-        SpawnRequest {
-            session_id: Uuid::new_v4(),
-            project_id: Uuid::new_v4(),
-            run_id: Uuid::new_v4(),
-            board_task_id: Uuid::new_v4(),
-            plan_task_id: "t1".into(),
-            worker_profile: "coding".into(),
-            worker_token: "tok".into(),
-            work_dir: std::path::PathBuf::from("/tmp/fleet-v1-host"),
-            env: HashMap::new(),
-            timeout: std::time::Duration::from_secs(120),
-            task_title: Some("t".into()),
-            task_summary: None,
-            task_spec: Some("s".into()),
-            persona_name: None,
-            persona_md: None,
-            agent_backend: None,
-            agent_model: None,
-            io: crate::sandbox::io::IntegrationHandle::none(),
-        }
-    }
-
-    /// Same `runtime` field `enqueue_remote_spawn` writes into `work_claims.payload`.
-    fn enqueue_payload_runtime(chosen: &ChosenHost) -> String {
-        remote::spawn_payload(
-            &sample_spawn_req(),
-            "http://orch.example",
-            chosen.runtime.as_str(),
-            job_timeout_s(120, chosen.host.max_job_timeout_s),
-            chosen.id(),
-        )
-        .runtime
-    }
-
-    #[test]
-    fn v1_spawn_payload_runtime_is_host_never_container_or_k3d() {
-        let mut sandboxed = host(Uuid::new_v4(), true, true, true, true, 4);
-        sandboxed.isolation = RunnerIsolation::Sandboxed;
-        assert!(
-            pick_assignable_runner(&[sandboxed.clone()], &HashMap::new()).is_none(),
-            "sandboxed-only host must get no job"
-        );
-
-        let native_both = host(Uuid::new_v4(), true, true, true, true, 4);
-        let native_host_only = host(Uuid::new_v4(), true, false, true, false, 4);
-        let container_only = host(Uuid::new_v4(), true, true, false, true, 4);
-
-        for (label, pool) in [
-            ("native both advertised", vec![native_both.clone()]),
-            ("native host-only", vec![native_host_only.clone()]),
-            (
-                "sandboxed + native",
-                vec![sandboxed.clone(), native_both.clone()],
-            ),
-            (
-                "container-only advertised native",
-                vec![container_only.clone()],
-            ),
-        ] {
-            let Some(chosen) = pick_assignable_runner(&pool, &HashMap::new()) else {
-                assert!(
-                    pool.iter().all(|h| {
-                        !h.isolation.is_assignable()
-                            || effective_runtime(h) != Some(HostRuntime::Host)
-                    }),
-                    "{label}: picker returned none but a host-capable native was in the pool"
-                );
-                continue;
-            };
-            assert_eq!(
-                chosen.host.isolation,
-                RunnerIsolation::Native,
-                "{label}: must not assign a sandboxed-only host"
-            );
-            assert_eq!(
-                chosen.runtime,
-                HostRuntime::Host,
-                "{label}: v1 picker must not emit container"
-            );
-            let runtime = enqueue_payload_runtime(&chosen);
-            assert_eq!(runtime, "host", "{label}: payload runtime must be host");
-            assert_ne!(runtime, "container", "{label}: no container enqueue in v1");
-            assert_ne!(runtime, "k3d", "{label}: no k3d enqueue in v1");
-        }
-    }
-
     fn worker_host(isolation: &str) -> fleet_db::WorkerHost {
         let now = chrono::Utc::now();
         fleet_db::WorkerHost {
@@ -910,108 +740,5 @@ mod tests {
         assert_eq!(boxed.isolation, RunnerIsolation::Sandboxed);
         let unknown = AssignableHost::from(&worker_host("k8s"));
         assert_eq!(unknown.isolation, RunnerIsolation::Native);
-    }
-
-    /// HTTP/SQL slugs a POST or planted row might use. Cloud / public-cloud /
-    /// Partners placeholders must not become a spawn path. Mapper only — HTTP
-    /// create is locked in `fleet-server` `worker_hosts_http` (`post_kind_cloud`).
-    const CLOUD_PLACEHOLDER_KINDS: &[&str] = &["cloud", "aws", "gcp", "azure", "partners"];
-
-    #[test]
-    fn from_stored_cloud_placeholder_kinds_are_not_assignable() {
-        for kind in CLOUD_PLACEHOLDER_KINDS {
-            let mapped = RunnerKind::from_stored(kind);
-            assert!(
-                !mapped.is_assignable(),
-                "from_stored({kind:?}) must not be assignable (got {mapped:?})"
-            );
-            assert!(
-                !mapped.isolation().is_assignable(),
-                "from_stored({kind:?}).isolation() must not be assignable"
-            );
-            let planted = AssignableHost::from(&worker_host(kind));
-            assert!(
-                !planted.isolation.is_assignable(),
-                "AssignableHost from isolation={kind} must not be assignable"
-            );
-            assert!(
-                pick_assignable_runner(&[planted], &HashMap::new()).is_none(),
-                "pick_assignable_runner must skip planted kind={kind}"
-            );
-        }
-        // Unknown slugs still default native. That default must not be how
-        // cloud/aws slip through — those slugs are mapped above, not `_`.
-        assert_eq!(RunnerKind::from_stored("k8s"), RunnerKind::SelfHostedNative);
-        assert_ne!(
-            RunnerKind::from_stored("cloud"),
-            RunnerKind::SelfHostedNative
-        );
-        assert_ne!(RunnerKind::from_stored("aws"), RunnerKind::SelfHostedNative);
-        assert_ne!(RunnerKind::from_stored("gcp"), RunnerKind::SelfHostedNative);
-        assert_ne!(
-            RunnerKind::from_stored("azure"),
-            RunnerKind::SelfHostedNative
-        );
-        assert_ne!(
-            RunnerKind::from_stored("partners"),
-            RunnerKind::SelfHostedNative
-        );
-    }
-
-    /// Catalog: no assignable guest. Spawn may local-`SANDBOX_BACKEND`
-    /// only if the plane is taking jobs — this picker must return None.
-    #[test]
-    fn no_assignable_guest_is_not_a_remote_host_for_local_spawn() {
-        assert!(
-            pick_assignable_runner(&[], &HashMap::new()).is_none(),
-            "empty pool is not a remote host"
-        );
-
-        let mut sandboxed = host(Uuid::new_v4(), true, true, true, true, 4);
-        sandboxed.isolation = RunnerIsolation::Sandboxed;
-        assert!(
-            pick_assignable_runner(&[sandboxed], &HashMap::new()).is_none(),
-            "sandboxed-only guest is not assignable"
-        );
-
-        let disallowed = host(Uuid::new_v4(), false, false, true, true, 4);
-        assert!(
-            pick_assignable_runner(&[disallowed], &HashMap::new()).is_none(),
-            "plane-disallowed guest is not assignable"
-        );
-
-        let full_id = Uuid::new_v4();
-        let full = host(full_id, true, false, true, false, 1);
-        let mut inflight = HashMap::new();
-        inflight.insert(full_id, 1);
-        assert!(
-            pick_assignable_runner(&[full], &inflight).is_none(),
-            "at-cap native is not a free remote host"
-        );
-
-        for kind in CLOUD_PLACEHOLDER_KINDS {
-            let planted = AssignableHost::from(&worker_host(kind));
-            assert!(
-                pick_assignable_runner(&[planted], &HashMap::new()).is_none(),
-                "planted kind={kind} must not be a remote host"
-            );
-        }
-    }
-
-    #[test]
-    fn pick_assignable_runner_skips_cloud_kinds_and_keeps_native() {
-        let native = AssignableHost::from(&worker_host(fleet_db::WORKER_HOST_ISOLATION_NATIVE));
-        let native_id = native.id;
-        let mut pool = vec![native];
-        for kind in CLOUD_PLACEHOLDER_KINDS {
-            pool.push(AssignableHost::from(&worker_host(kind)));
-        }
-        let chosen = pick_assignable_runner(&pool, &HashMap::new()).unwrap();
-        assert_eq!(chosen.id(), native_id);
-        assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
-        assert!(
-            pick_assignable_runner(&pool[1..], &HashMap::new()).is_none(),
-            "cloud-only pool must not pick"
-        );
     }
 }

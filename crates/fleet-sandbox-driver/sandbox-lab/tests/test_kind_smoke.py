@@ -178,7 +178,7 @@ class KindSmokeContractTests(unittest.TestCase):
 
     def test_kind_smoke_covers_in_cluster_k8s_path(self):
         src = Path(__file__).read_text(encoding="utf-8")
-        self.assertIn("SANDBOX_BACKEND", src)
+        self.assertIn("must not set SANDBOX_BACKEND", src)
         self.assertIn("fleet-api", src)
         self.assertIn("runs/fixture", src)
         self.assertIn("fleet.agentfleet.io/project-id", src)
@@ -257,8 +257,8 @@ class KindSmokeTests(unittest.TestCase):
         backend = _deploy_env("SANDBOX_BACKEND")
         self.assertEqual(
             backend,
-            "stub",
-            f"api deploy SANDBOX_BACKEND={backend!r}; apply infra/overlays/kind",
+            "",
+            f"api deploy must not set SANDBOX_BACKEND (got {backend!r}); apply infra/overlays/kind",
         )
         host = _kubectl(
             "-n",
@@ -306,7 +306,7 @@ class KindSmokeTests(unittest.TestCase):
                 f"host :8080/:3030 is not this tree: {e}. "
                 "Rebuild + apply before treating kind smoke as valid."
             )
-        self.assertEqual(_deploy_env("SANDBOX_BACKEND"), "stub")
+        self.assertEqual(_deploy_env("SANDBOX_BACKEND"), "")
 
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -343,11 +343,7 @@ class KindSmokeTests(unittest.TestCase):
         st, proj, raw = _json_request(opener, "GET", fleet)
         self.assertEqual(st, 200, f"GET fleet {st}: {raw[:400]}")
         self.assertIsInstance(proj, dict)
-        self.assertEqual(
-            (proj or {}).get("sandbox_backend"),
-            "stub",
-            f"runtime backend: {proj}",
-        )
+        self.assertNotIn("sandbox_backend", proj or {})
         deadline = time.monotonic() + 90
         host_online = False
         while time.monotonic() < deadline:

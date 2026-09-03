@@ -21,6 +21,7 @@ pub mod state;
 pub mod tickets;
 pub mod work_io;
 pub mod worker_hosts;
+pub mod workforce;
 
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
@@ -56,6 +57,7 @@ pub fn build_router() -> Router<AppState> {
         .merge(chat::router())
         .merge(cases::router())
         .merge(tickets::router())
+        .merge(workforce::router())
         .merge(fleet_routes::router())
         .merge(worker_hosts::router())
         .merge(partners::router())

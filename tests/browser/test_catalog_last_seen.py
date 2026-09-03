@@ -122,14 +122,11 @@ class CatalogLastSeenE2ETests(unittest.TestCase):
         token = created["pair_token"]
 
         goto_self_hosted(page, workspace_url)
-        page.get_by_text("Control plane", exact=True).first.wait_for(timeout=45_000)
-
-        plane = page.locator("article").first
-        plane.wait_for(timeout=15_000)
-        plane_text = plane.inner_text()
-        self.assertIn("Control plane", plane_text)
-        self.assertIn("this process", plane_text.lower())
-        self.assertNotIn("last seen", plane_text.lower())
+        page.get_by_role("button", name="Add worker").wait_for(timeout=45_000)
+        self.assertEqual(
+            page.locator("article").filter(has_text="Control plane").count(),
+            0,
+        )
 
         pending = _article_for_host(page, name)
         pending.get_by_text("last seen never", exact=False).wait_for(timeout=15_000)
@@ -170,10 +167,10 @@ class CatalogLastSeenE2ETests(unittest.TestCase):
             "live card must show just now or relative last seen after pair+heartbeat",
         )
 
-        plane_after = page.locator("article").first.inner_text()
-        self.assertIn("Control plane", plane_after)
-        self.assertIn("this process", plane_after.lower())
-        self.assertNotIn("last seen", plane_after.lower())
+        self.assertEqual(
+            page.locator("article").filter(has_text="Control plane").count(),
+            0,
+        )
 
 
 if __name__ == "__main__":

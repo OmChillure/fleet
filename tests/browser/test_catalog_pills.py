@@ -201,9 +201,7 @@ class CatalogPillsTests(unittest.TestCase):
 
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
-        page.get_by_text("Control plane", exact=True).first.wait_for(
-            state="attached", timeout=90_000
-        )
+        page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         card = _card(page, name)
         self.assertIn("online", card.inner_text().lower())
         self.assertEqual(

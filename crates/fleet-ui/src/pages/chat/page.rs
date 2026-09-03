@@ -748,7 +748,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
         let ws = ws_hosts.clone();
         spawn(async move {
             loop {
-                if let Ok((list, _, _)) = list_workers_page(&ws).await {
+                if let Ok((list, _)) = list_workers_page(&ws).await {
                     let active: Vec<_> = list
                         .into_iter()
                         .filter(|h| !is_removed(h) && h.kind != "control_plane")
@@ -1351,7 +1351,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                     move |_| {
                                         let ws = ws.clone();
                                         spawn(async move {
-                                            if let Ok((list, _, _)) = list_workers_page(&ws).await {
+                                            if let Ok((list, _)) = list_workers_page(&ws).await {
                                                 let active: Vec<_> = list
                                                     .into_iter()
                                                     .filter(|h| !is_removed(h) && h.kind != "control_plane")
