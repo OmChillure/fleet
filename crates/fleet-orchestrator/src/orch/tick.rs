@@ -1,7 +1,7 @@
 //! Full reconcile tick PR5a–c: lock → … → spawn → stuck → cancel → rollup → reap.
 //! PR10: external board sync after status mutations when `auto_sync_external`.
 
-use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkRunStatus};
+use crate::domain::{BoardTaskStatus, OnTaskFailPolicy, WorkPlanStatus, WorkRunStatus};
 use crate::notify::{LogNotify, NotificationSink};
 use crate::orch::board_sync_step::sync_external_board;
 use crate::orch::cancel::cancel_drain;
@@ -298,8 +298,11 @@ impl TickRunner {
         for p in pending {
             let run_status = WorkRunStatus::from_db(&p.run_status)
                 .ok_or_else(|| TickError::Other(format!("bad run status {}", p.run_status)))?;
+            let plan_status = WorkPlanStatus::from_db(&p.plan_status)
+                .ok_or_else(|| TickError::Other(format!("bad plan status {}", p.plan_status)))?;
             let candidate = PlanMaterializeCandidate {
                 plan_id: p.plan_id,
+                plan_status,
                 run_status,
                 cancel_requested: p.cancel_requested_at.is_some(),
                 already_materialized: p.materialized_at.is_some(),

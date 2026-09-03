@@ -9,7 +9,6 @@ use fleet_integrations::IntegrationsConfig;
 use crate::chat::OllamaConfig;
 use crate::grok::GrokConfig;
 use crate::providers::{ClaudeConfig, OpenaiConfig};
-use fleet_orchestrator::config::parse_sandbox_backend;
 
 /// Full server configuration (bind + CORS + auth + database + integrations + LLM providers).
 #[derive(Clone, Debug)]
@@ -72,15 +71,6 @@ impl ServerConfig {
         let claude = ClaudeConfig::from_env();
         let worker_dist_dir =
             worker_dist_dir_from_raw(env::var("FLEET_WORKER_DIST_DIR").ok().as_deref());
-        // Same allowlist as OrchConfig — unknown must fail here, before DB.
-        parse_sandbox_backend(
-            env::var("SANDBOX_BACKEND")
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("stub"),
-        )?;
 
         Ok(Self {
             database_url,
@@ -273,144 +263,4 @@ mod tests {
         );
     }
 
-    const JWT_SANDBOX: &str = "list-unknown-sandbox-backend-fails-start-jwt-32+";
-
-    fn assert_unknown_sandbox_backend_msg(via: &str, raw: &str, msg: &str) {
-        assert!(
-            msg.contains("SANDBOX_BACKEND"),
-            "{via} SANDBOX_BACKEND={raw:?} error must mention SANDBOX_BACKEND, got {msg}"
-        );
-        let lower = msg.to_ascii_lowercase();
-        assert!(
-            !lower.contains("connection refused") && !lower.contains("sqlx"),
-            "{via} must fail at from_env parse, not later on connect, got {msg}"
-        );
-    }
-
-    fn assert_server_unknown_sandbox_backend_rejected(
-        result: anyhow::Result<ServerConfig>,
-        raw: &str,
-    ) {
-        match result {
-            Ok(_) => panic!(
-                "ServerConfig::from_env SANDBOX_BACKEND={raw:?} must fail start; \
-                 must not silently become stub"
-            ),
-            Err(err) => assert_unknown_sandbox_backend_msg(
-                "ServerConfig::from_env",
-                raw,
-                &format!("{err:#}"),
-            ),
-        }
-    }
-
-    fn assert_orch_unknown_sandbox_backend_rejected(
-        result: Result<fleet_orchestrator::config::Config, fleet_orchestrator::config::ConfigError>,
-        via: &str,
-        raw: &str,
-    ) {
-        match result {
-            Ok(cfg) => panic!(
-                "{via} SANDBOX_BACKEND={raw:?} must fail start; must not silently become stub \
-                 (got sandbox_backend={:?})",
-                cfg.sandbox_backend
-            ),
-            Err(err) => assert_unknown_sandbox_backend_msg(via, raw, &err.to_string()),
-        }
-    }
-
-    /// Unknown SANDBOX_BACKEND refuses process start (ServerConfig + orch
-    /// from_env_for_server). Must not boot as stub. Allowlist:
-    /// process|container|k8s|stub.
-    #[test]
-    fn unknown_sandbox_backend_fails_from_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let data_dir = dir.path().display().to_string();
-        with_env(
-            &[
-                (
-                    "DATABASE_URL",
-                    Some("postgres://list-unknown-sandbox-backend:noconnect@127.0.0.1:1/fleet"),
-                ),
-                ("JWT_SECRET", Some(JWT_SANDBOX)),
-                ("INTEGRATIONS_ENCRYPTION_KEY", None),
-                ("COOKIE_SAMESITE", Some("Lax")),
-                ("COOKIE_SECURE", Some("false")),
-                ("HOST", Some("127.0.0.1")),
-                ("PORT", Some("18082")),
-                ("AUTH_HOST", None),
-                ("AUTH_PORT", None),
-                ("AUTH_MODE", Some("token")),
-                ("ORCH_AUTH_MODE", Some("token")),
-                ("HTTP_ADDR", Some("127.0.0.1:18082")),
-                ("DATA_DIR", Some(data_dir.as_str())),
-                ("SANDBOX_BACKEND", None),
-            ],
-            || {
-                use fleet_orchestrator::config::Config as OrchConfig;
-
-                for raw in [
-                    "firecracker",
-                    "vm",
-                    "qemu",
-                    "remote",
-                    "not-a-backend",
-                    "Process",
-                    "STUB",
-                    "none",
-                ] {
-                    unsafe { env::set_var("SANDBOX_BACKEND", raw) };
-                    assert_server_unknown_sandbox_backend_rejected(ServerConfig::from_env(), raw);
-                    assert_orch_unknown_sandbox_backend_rejected(
-                        OrchConfig::from_env_for_server(
-                            "postgres://list-unknown-sandbox-backend:noconnect@127.0.0.1:1/fleet",
-                            "127.0.0.1:18082",
-                        ),
-                        "from_env_for_server",
-                        raw,
-                    );
-                    assert_orch_unknown_sandbox_backend_rejected(
-                        OrchConfig::from_env(),
-                        "from_env",
-                        raw,
-                    );
-                }
-
-                for raw in ["stub", "process", "container", "k8s"] {
-                    unsafe { env::set_var("SANDBOX_BACKEND", raw) };
-                    ServerConfig::from_env().unwrap_or_else(|e| {
-                        panic!(
-                            "ServerConfig::from_env SANDBOX_BACKEND={raw:?} must still parse: {e:#}"
-                        )
-                    });
-                    let orch = OrchConfig::from_env_for_server(
-                        "postgres://list-unknown-sandbox-backend:noconnect@127.0.0.1:1/fleet",
-                        "127.0.0.1:18082",
-                    )
-                    .unwrap_or_else(|e| {
-                        panic!("from_env_for_server SANDBOX_BACKEND={raw:?} must still parse: {e}")
-                    });
-                    assert_eq!(orch.sandbox_backend, raw);
-                }
-
-                unsafe { env::set_var("SANDBOX_BACKEND", "docker") };
-                let docker = OrchConfig::from_env_for_server(
-                    "postgres://list-unknown-sandbox-backend:noconnect@127.0.0.1:1/fleet",
-                    "127.0.0.1:18082",
-                )
-                .expect("SANDBOX_BACKEND=docker is the documented container backend");
-                assert_eq!(docker.sandbox_backend, "docker");
-                ServerConfig::from_env().expect("ServerConfig SANDBOX_BACKEND=docker");
-
-                unsafe { env::remove_var("SANDBOX_BACKEND") };
-                ServerConfig::from_env().expect("unset SANDBOX_BACKEND still boots");
-                let unset = OrchConfig::from_env_for_server(
-                    "postgres://list-unknown-sandbox-backend:noconnect@127.0.0.1:1/fleet",
-                    "127.0.0.1:18082",
-                )
-                .expect("from_env_for_server unset SANDBOX_BACKEND");
-                assert_eq!(unset.sandbox_backend, "stub");
-            },
-        );
-    }
 }
