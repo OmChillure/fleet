@@ -354,6 +354,32 @@ pub async fn fail_owned(
     Ok(res.rows_affected() == 1)
 }
 
+/// A failed spawn must not stay leaseable: the host can come back minutes
+/// later and run the old session against a retried task.
+pub async fn dead_for_session(pool: &PgPool, session_id: Uuid) -> DbResult<u64> {
+    let sid = session_id.to_string();
+    let res = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET status = 'dead',
+            last_error = 'session spawn failed',
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            version = version + 1,
+            updated_at = now()
+        WHERE kind IN ('spawn_session', 'signal_session')
+          AND payload->>'session_id' = $1
+          AND status IN ('ready', 'leased')
+        "#,
+    )
+    .bind(&sid)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}
+
 /// Reclaim expired leases (background sweeper). Safe under concurrency:
 /// each row update is independent; no multi-row lock order.
 pub async fn reclaim_expired_leases(pool: &PgPool, limit: i64) -> DbResult<u64> {

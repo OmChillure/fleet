@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_STATUS_DISABLED,
-    WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
-    parse_worker_host_isolation,
+    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
+    WorkerHostPairToken, parse_worker_host_isolation,
 };
 use crate::pool::map_query_err;
 
@@ -417,8 +417,9 @@ pub async fn consume_pair_token(
         return Err(DbError::Conflict("host is not pending".into()));
     }
 
-    // Same box pairing again: durable machine.id, or hostname+platform
-    // only when the binary omitted machine.id.
+    // Same box again: machine.id always reclaims. Hostname+platform only
+    // when the binary omitted machine.id, and only a disabled or stale row —
+    // a live same-hostname box must not have its token rotated.
     if let Some(prior) = find_reclaim_target(
         &mut tx,
         host.workspace_id,
@@ -549,6 +550,8 @@ async fn find_reclaim_target(
     if hostname.is_empty() || platform.is_empty() {
         return Ok(None);
     }
+    // Prefer a revoked row; otherwise only a box that already looks offline.
+    let stale_before = Utc::now() - WORKER_HOST_OFFLINE_AFTER;
     let q = format!(
         r#"
         SELECT {HOST_COLS}
@@ -559,11 +562,16 @@ async fn find_reclaim_target(
           AND lower(trim(hostname)) = lower($3)
           AND platform IS NOT NULL
           AND lower(trim(platform)) = lower($4)
+          AND (
+            status = '{WORKER_HOST_STATUS_DISABLED}'
+            OR last_seen_at IS NULL
+            OR last_seen_at < $5
+          )
         ORDER BY
-          CASE WHEN status = '{WORKER_HOST_STATUS_DISABLED}' THEN 1 ELSE 0 END,
-          last_seen_at DESC NULLS LAST,
-          paired_at DESC NULLS LAST,
-          created_at DESC
+          CASE WHEN status = '{WORKER_HOST_STATUS_DISABLED}' THEN 0 ELSE 1 END,
+          last_seen_at ASC NULLS FIRST,
+          paired_at ASC NULLS LAST,
+          created_at ASC
         LIMIT 1
         FOR UPDATE
         "#
@@ -573,6 +581,7 @@ async fn find_reclaim_target(
         .bind(exclude_id)
         .bind(hostname)
         .bind(platform)
+        .bind(stale_before)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_query_err)

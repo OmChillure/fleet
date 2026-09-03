@@ -299,6 +299,82 @@ async fn re_pair_same_hostname_without_machine_id_reclaims_existing_row() {
 }
 
 #[tokio::test]
+async fn re_pair_same_hostname_without_machine_id_does_not_steal_live_row() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-a", expires).await;
+    let paired = pair_host(&pool, &token_a, "ubuntu").await;
+    assert_eq!(paired.host.id, first.id);
+    let first_token = paired.machine_token.clone();
+
+    let (second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-b", expires).await;
+    let other = pair_host(&pool, &token_b, "ubuntu").await;
+    assert_eq!(
+        other.host.id, second.id,
+        "live same-hostname pair must become a new row"
+    );
+    assert_ne!(other.host.id, first.id);
+    assert_eq!(other.host.status, "online");
+
+    let still = worker_hosts::get(&pool, first.id)
+        .await
+        .expect("get first")
+        .expect("first still exists");
+    assert_eq!(still.status, "online");
+    assert_eq!(still.machine_token_hash, paired.host.machine_token_hash);
+
+    let authed = worker_hosts::authenticate_machine(&pool, &first_token)
+        .await
+        .expect("auth")
+        .expect("original token must still work");
+    assert_eq!(authed.id, first.id);
+}
+
+#[tokio::test]
+async fn re_pair_same_hostname_without_machine_id_reclaims_stale_row() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box", expires).await;
+    let paired = pair_host(&pool, &token_a, "studio-pc").await;
+    assert_eq!(paired.host.id, first.id);
+
+    sqlx::query(
+        "UPDATE worker_hosts SET last_seen_at = now() - interval '120 seconds' WHERE id = $1",
+    )
+    .bind(first.id)
+    .execute(&pool)
+    .await
+    .expect("age last_seen");
+
+    let (second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box-again", expires).await;
+    let again = pair_host(&pool, &token_b, "studio-pc").await;
+    assert_eq!(
+        again.host.id, first.id,
+        "stale same-hostname pair must revive the row"
+    );
+    assert_eq!(again.host.status, "online");
+    assert!(again.host.enabled);
+    assert_ne!(
+        again.machine_token, paired.machine_token,
+        "reclaim rotates the token on the stale row"
+    );
+
+    let leftover = worker_hosts::get(&pool, second.id)
+        .await
+        .expect("get leftover")
+        .expect("pending leftover exists");
+    assert_eq!(leftover.status, "disabled");
+}
+
+#[tokio::test]
 async fn two_machine_ids_same_hostname_stay_two_rows() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -1282,6 +1358,75 @@ async fn claim_next_spawn_for_host_is_scoped_to_host_and_kind() {
 }
 
 #[tokio::test]
+async fn dead_for_session_voids_ready_and_leased_spawn_claims() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let host_id = Uuid::now_v7();
+    let session_id = Uuid::now_v7();
+    let other_session = Uuid::now_v7();
+
+    let ready = NewWorkClaim {
+        id: Uuid::now_v7(),
+        workspace_id,
+        kind: "spawn_session".into(),
+        payload: json!({ "host_id": host_id, "session_id": session_id }),
+        max_attempts: 3,
+        available_at: Utc::now(),
+    };
+    let leased = NewWorkClaim {
+        id: Uuid::now_v7(),
+        workspace_id,
+        kind: "spawn_session".into(),
+        payload: json!({ "host_id": host_id, "session_id": session_id }),
+        max_attempts: 3,
+        available_at: Utc::now(),
+    };
+    let other = NewWorkClaim {
+        id: Uuid::now_v7(),
+        workspace_id,
+        kind: "spawn_session".into(),
+        payload: json!({ "host_id": host_id, "session_id": other_session }),
+        max_attempts: 3,
+        available_at: Utc::now(),
+    };
+    work_claims::enqueue(&pool, &ready)
+        .await
+        .expect("enqueue ready");
+    work_claims::enqueue(&pool, &leased)
+        .await
+        .expect("enqueue leased");
+    work_claims::enqueue(&pool, &other)
+        .await
+        .expect("enqueue other");
+
+    let took =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim")
+            .expect("leased one");
+    assert!(took.id == ready.id || took.id == leased.id);
+
+    let n = work_claims::dead_for_session(&pool, session_id)
+        .await
+        .expect("dead_for_session");
+    assert_eq!(n, 2, "ready and leased claims for the session must die");
+
+    let leftover =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim leftover")
+            .expect("other session must still be claimable");
+    assert_eq!(leftover.id, other.id);
+
+    let dead_ready = work_claims::get(&pool, ready.id).await.expect("get ready");
+    let dead_leased = work_claims::get(&pool, leased.id)
+        .await
+        .expect("get leased");
+    assert_eq!(dead_ready.expect("ready row").status, "dead");
+    assert_eq!(dead_leased.expect("leased row").status, "dead");
+}
+
+#[tokio::test]
 async fn complete_owned_rejects_wrong_host() {
     let pool = connect_and_migrate().await;
     let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -1334,11 +1479,15 @@ async fn complete_owned_uses_claim_workspace_not_host_home() {
     let host_id = Uuid::now_v7();
     let claim = spawn_claim(job_ws, host_id, "spawn_session");
     work_claims::enqueue(&pool, &claim).await.expect("enqueue");
-    let leased =
-        work_claims::claim_next_spawn_for_host(&pool, Uuid::now_v7(), host_id, Duration::minutes(2))
-            .await
-            .expect("claim")
-            .expect("cluster host leases by host_id");
+    let leased = work_claims::claim_next_spawn_for_host(
+        &pool,
+        Uuid::now_v7(),
+        host_id,
+        Duration::minutes(2),
+    )
+    .await
+    .expect("claim")
+    .expect("cluster host leases by host_id");
     assert_eq!(leased.workspace_id, job_ws);
     let token = leased.lease_token.expect("lease_token");
     let ok = work_claims::complete_owned(&pool, leased.id, token, host_id, leased.workspace_id)

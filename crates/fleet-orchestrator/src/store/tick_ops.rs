@@ -165,6 +165,36 @@ impl Store {
     /// mark `exited`; a late host "spawn failed" must not overwrite that or the
     /// retry path will reopen the task under a living sibling.
     pub async fn complete_spawn_failure(&self, session_id: Uuid) -> Result<bool> {
+        // Void claims first so a late lease cannot run this session even if the
+        // session row is no longer spawning.
+        if let Err(e) = sqlx::query(
+            r#"
+            UPDATE work_claims
+            SET status = 'dead',
+                last_error = 'session spawn failed',
+                lease_owner = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                version = version + 1,
+                updated_at = now()
+            WHERE kind IN ('spawn_session', 'signal_session')
+              AND payload->>'session_id' = $1
+              AND status IN ('ready', 'leased')
+            "#,
+        )
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        {
+            // Orch-only test DBs have no fleet-db tables. Production always does.
+            let missing = matches!(
+                &e,
+                sqlx::Error::Database(db) if db.code().as_deref() == Some("42P01")
+            );
+            if !missing {
+                return Err(e.into());
+            }
+        }
         let res = sqlx::query(
             r#"
             UPDATE worker_sessions
@@ -977,6 +1007,9 @@ impl Store {
         let Some(s) = self.get_session(session_id).await? else {
             return Ok(None);
         };
+        if matches!(s.status.as_str(), "exited" | "failed_spawn") {
+            return Ok(None);
+        }
         if crate::store::verify_worker_token(token, &s.worker_token_hash) {
             Ok(Some(s))
         } else {
