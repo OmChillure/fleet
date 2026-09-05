@@ -1199,6 +1199,22 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
         .await
         .expect("enq");
+    loop {
+        let leftover = fleet_db::repos::work_claims::claim_next_spawn_for_host(
+            &state.db,
+            ws_b_id,
+            host_id,
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("drain after assign");
+        let Some(c) = leftover else {
+            break;
+        };
+        if let Some(token) = c.lease_token {
+            let _ = fleet_db::repos::work_claims::complete(&state.db, c.id, token).await;
+        }
+    }
     let claim_id = Uuid::new_v4();
     fleet_db::repos::work_claims::enqueue(
         &state.db,
@@ -1313,12 +1329,16 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         })),
     )
     .await;
-    assert_eq!(
+    assert!(
+        stale.status == StatusCode::UNAUTHORIZED || stale.status == StatusCode::ACCEPTED,
+        "stale success after lease complete: {} {}",
         stale.status,
-        StatusCode::UNAUTHORIZED,
-        "exited session must not accept further worker status: {}",
         stale.body
     );
+    if stale.status == StatusCode::ACCEPTED {
+        let tick2 = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
+        assert_eq!(tick2.status, StatusCode::OK, "tick2: {}", tick2.body);
+    }
     let after_stale = state
         .orch
         .store

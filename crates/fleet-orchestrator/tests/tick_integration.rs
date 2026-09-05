@@ -3,11 +3,12 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::models::NewWorkerHost;
 use fleet_db::repos::worker_hosts::{self, generate_pair_token, hash_token};
+use fleet_db::repos::workspaces;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::store::{Store, connect, migrate};
+use fleet_orchestrator::store::{connect, migrate, Store};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -31,7 +32,11 @@ async fn setup() -> Store {
 }
 
 fn runner(store: Store) -> TickRunner {
-    TickRunner::with_store(store)
+    TickRunner::new(
+        store,
+        std::env::temp_dir().join("fleet-orch-tick-int"),
+        "http://192.0.2.10:8080",
+    )
 }
 
 async fn seed_workspace(store: &Store, project_id: Uuid) {
@@ -144,6 +149,10 @@ async fn tick_materializes_and_holds_ready_without_host() {
         .create_project(&format!("tick-{}", Uuid::new_v4()), 3)
         .await
         .unwrap();
+    seed_workspace(&store, project.id).await;
+    workspaces::set_min_isolation(store.pool(), project.id, "vm")
+        .await
+        .expect("pin min_isolation=vm so a shared cluster host is not picked");
     store
         .insert_accepted_plan(project.id, chain_plan(project.id))
         .await
