@@ -998,11 +998,19 @@ class FailClosedContractTests(unittest.TestCase):
         testing = (REPO / "docs" / "testing.md").read_text(encoding="utf-8")
         self.assertIn("All tests must pass before a merge to main", agents)
         self.assertIn("All tests must pass before a merge to main", testing)
+        self.assertIn("All tests must be relevant", agents)
+        self.assertIn("All tests must be relevant", testing)
+        self.assertIn(
+            "If a test is not relevant, decide whether the test or the code should change",
+            agents,
+        )
         self.assertIn("just test", agents)
         self.assertIn("just test-integration", agents)
         merge_gate = REPO / "crates" / "fleet-server" / "src" / "merge_gate.rs"
         self.assertTrue(merge_gate.is_file(), "fleet-server merge_gate.rs is the Rust lock")
-        self.assertIn("merge_to_main_requires_green_tests", merge_gate.read_text(encoding="utf-8"))
+        gate = merge_gate.read_text(encoding="utf-8")
+        self.assertIn("merge_to_main_requires_green_tests", gate)
+        self.assertIn("All tests must be relevant", gate)
 
     def test_gitlab_ci_stays_workflow_when_never(self):
         """No runner: .gitlab-ci.yml must be only workflow.rules when: never."""

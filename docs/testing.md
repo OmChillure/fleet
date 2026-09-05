@@ -60,6 +60,11 @@ until there is a bootable guest.
 - All tests must pass before a merge to main. `just test` and
   `just test-integration` (and the ship-image builds below) must be
   green. Do not merge red tests, ignored failures, or `|| true`.
+- All tests must be relevant. A test locks a live contract, not
+  error-string copy, a removed product fiction, or a tautology.
+  If a test is not relevant, decide whether the test or the code should change.
+  Do not keep a stale assertion to stay green, and do not delete a live
+  contract because the code fails it.
 - Before you open an MR, the last compile and test pass must run **in the
   ship image** (`Dockerfile` / `Dockerfile.ui`, `rust:1.88-bookworm`), not
   only host `cargo` / `just test`. Host-only green is how a tree that does

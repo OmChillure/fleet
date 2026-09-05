@@ -32,6 +32,8 @@ framework.
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not add jobs.
 All tests must pass before a merge to main (`just test` + `just test-integration`).
+All tests must be relevant.
+If a test is not relevant, decide whether the test or the code should change.
 
 ## Fail closed
 
@@ -88,6 +90,9 @@ Before you write a test, pick the row in the table. Then:
 5. Prefer constructing config in-struct over `unsafe { env::set_var }`.
 6. `fleet-ui` stays WASM: chrome in Playwright; pure helpers in a host crate
    (`fleet-chat-md` for markdown).
+7. All tests must be relevant. If a red or stale case is not locking the
+   product anymore, decide whether the test or the code should change
+   before you rewrite either.
 
 ## Closed on this branch
 

@@ -1,4 +1,5 @@
-//! Lock: all tests must pass before a merge to main.
+//! Lock: all tests must pass before a merge to main, and every test
+//! must be relevant.
 //!
 //! This GitLab has no runner (`.gitlab-ci.yml` is `when: never`). The
 //! merge gate is the text in AGENTS.md / docs/testing.md plus this scan.
@@ -23,6 +24,14 @@ fn merge_to_main_requires_green_tests() {
         assert!(
             src.contains("just test") && src.contains("just test-integration"),
             "{label} must name just test and just test-integration"
+        );
+        assert!(
+            src.contains("All tests must be relevant"),
+            "{label} must lock that all tests must be relevant"
+        );
+        assert!(
+            src.contains("If a test is not relevant, decide whether the test or the code should change"),
+            "{label} must say a stale test is a product-or-test decision, not a keep-or-silence choice"
         );
     }
 
