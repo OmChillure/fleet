@@ -619,23 +619,6 @@ impl ChatProgress {
     }
 }
 
-/// Ollama provider entry (available or offline with error).
-fn ollama_provider(
-    cfg: &OllamaConfig,
-    models: Vec<ChatModelInfo>,
-    error: Option<String>,
-) -> ChatProviderInfo {
-    ChatProviderInfo {
-        id: "ollama".into(),
-        name: "Ollama (local)".into(),
-        available: error.is_none() && !models.is_empty(),
-        coming_soon: false,
-        error,
-        default_model: cfg.default_model.clone(),
-        models,
-    }
-}
-
 /// One-shot text completion (no tools). Used by the case wake loop.
 pub async fn complete_text(
     cfg: &OllamaConfig,

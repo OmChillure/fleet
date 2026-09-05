@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::pages::auth::api::auth_base_url;
+use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 #[derive(Debug, Clone)]
 pub enum DashError {
@@ -49,14 +49,6 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct WorkforceSnapshot {

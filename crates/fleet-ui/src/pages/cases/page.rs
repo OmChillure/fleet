@@ -80,7 +80,11 @@ fn cases_view(workspace_id: String, selected: Option<String>) -> Element {
             loop {
                 match list_cases(&ws).await {
                     Ok(resp) => {
-                        let n = resp.cases.len();
+                        let n = if resp.count > 0 {
+                            resp.count
+                        } else {
+                            resp.cases.len() as i64
+                        };
                         rows.set(resp.cases);
                         status_line.set(format!("{n} case(s)"));
                     }

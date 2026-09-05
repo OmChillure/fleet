@@ -324,6 +324,8 @@ struct ChatMessage {
     actions: Vec<ChatActionDto>,
     /// Send → reply, milliseconds. Assistant turns only.
     latency_ms: Option<u64>,
+    /// Server timestamp when the turn was stored.
+    created_at: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -426,6 +428,7 @@ fn send_on_existing_session(
         model: None,
         actions: vec![],
         latency_ms: None,
+        created_at: None,
     });
     messages.set(list);
     draft.set(String::new());
@@ -456,6 +459,7 @@ fn send_on_existing_session(
             model: Some(model_for_api.clone()),
             actions: vec![],
             latency_ms: None,
+            created_at: None,
         });
         messages.set(list);
     }
@@ -506,11 +510,14 @@ fn send_on_existing_session(
                     let mut list = messages();
                     if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
                         last.content = res.message.content.clone();
-                        last.model = Some(if res.model.is_empty() {
-                            model_for_api.clone()
-                        } else {
+                        last.model = Some(if !res.model.is_empty() {
                             res.model.clone()
+                        } else if !res.provider.is_empty() {
+                            res.provider.clone()
+                        } else {
+                            model_for_api.clone()
                         });
+
                         if !res.actions.is_empty() {
                             last.actions = res.actions.clone();
                         }
@@ -849,13 +856,31 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                         };
                         let actions: Vec<ChatActionDto> =
                             serde_json::from_value(m.actions).unwrap_or_default();
+                        let model = m.model.filter(|s| !s.is_empty()).or_else(|| {
+                            m.provider.filter(|s| !s.is_empty())
+                        });
+                        let id = if m.id.is_empty() {
+                            nid
+                        } else {
+                            let mut h = 0xcbf29ce484222325u64;
+                            for b in m.id.bytes() {
+                                h ^= b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            if h == 0 { nid } else { h }
+                        };
                         list.push(ChatMessage {
-                            id: nid,
+                            id,
                             role,
                             content: m.content,
-                            model: m.model,
+                            model,
                             actions,
                             latency_ms: None,
+                            created_at: if m.created_at.is_empty() {
+                                None
+                            } else {
+                                Some(m.created_at)
+                            },
                         });
                         nid += 1;
                     }
@@ -1495,16 +1520,31 @@ fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
                         }
                     }
                 }
-                if message.model.is_some() || message.latency_ms.is_some() {
+                if message.model.is_some()
+                    || message.latency_ms.is_some()
+                    || message.created_at.is_some()
+                {
                     p { class: "m-0 mt-3 text-[11px] text-[var(--app-muted)]",
                         {
-                            match (&message.model, message.latency_ms) {
-                                (Some(model), Some(ms)) => {
+                            let when = message
+                                .created_at
+                                .as_deref()
+                                .map(|s| s.get(..19).unwrap_or(s).replace('T', " "));
+                            match (&message.model, message.latency_ms, when) {
+                                (Some(model), Some(ms), Some(ts)) => {
+                                    format!("{model} · {} · {ts}", format_chat_elapsed(ms))
+                                }
+                                (Some(model), Some(ms), None) => {
                                     format!("{model} · {}", format_chat_elapsed(ms))
                                 }
-                                (Some(model), None) => model.clone(),
-                                (None, Some(ms)) => format_chat_elapsed(ms),
-                                (None, None) => String::new(),
+                                (Some(model), None, Some(ts)) => format!("{model} · {ts}"),
+                                (Some(model), None, None) => model.clone(),
+                                (None, Some(ms), Some(ts)) => {
+                                    format!("{} · {ts}", format_chat_elapsed(ms))
+                                }
+                                (None, Some(ms), None) => format_chat_elapsed(ms),
+                                (None, None, Some(ts)) => ts,
+                                (None, None, None) => String::new(),
                             }
                         }
                     }
@@ -1946,7 +1986,7 @@ fn CodeBlock(lang: String, code: String) -> Element {
                         if copy_text(&code_for_copy) {
                             copied.set(true);
                         } else {
-                            show_toast().error("Copy failed. Select the code and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the code and copy it yourself.");
                         }
                     },
                     if copied() { "Copied" } else { "Copy" }

@@ -57,6 +57,13 @@ until there is a bootable guest.
 
 ## Rules
 
+- Before you open an MR, the last compile and test pass must run **in the
+  ship image** (`Dockerfile` / `Dockerfile.ui`, `rust:1.88-bookworm`), not
+  only host `cargo` / `just test`. Host-only green is how a tree that does
+  not build in VPS/Kind reaches `main`.
+  `docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile .`
+  (and `-f Dockerfile.ui`); `./scripts/run-every-test.sh --prepare-kind`
+  already does both.
 - Rust behavior is tested in Rust. Python tests the Python workspace agent and compose/kind YAML.
 - No silent `eprintln!("skip"); return;` in `crates/**/tests/*.rs`. Missing `DATABASE_URL` panics with a one-line how-to.
 - Do not use `|| true` around `cargo test`.

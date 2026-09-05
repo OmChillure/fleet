@@ -144,6 +144,12 @@ impl AgentJob {
         let talk = load_team_talk(&req.work_dir).or_else(|| infer_talk(req));
         let io = req.io.clone();
         let workspace_id = req.project_id;
+        let ship = is_ship_role(&req.plan_task_id, &req.worker_profile);
+        let ship_spec = req
+            .task_spec
+            .clone()
+            .or_else(|| req.task_title.clone())
+            .unwrap_or_default();
         let exit_code = Arc::new(Mutex::new(None));
         let exit2 = exit_code.clone();
         let hb_dir = req.work_dir.clone();
@@ -155,17 +161,23 @@ impl AgentJob {
         });
         let hb_abort = hb.abort_handle();
         let handle = tokio::spawn(async move {
-            let code = run_loop(
-                &work_dir,
-                timeout,
-                &backend,
-                model.as_deref(),
-                talk.as_ref(),
-                io,
-                workspace_id,
-            )
-            .await
-            .unwrap_or(1);
+            let code = if ship {
+                run_ship(&work_dir, io, workspace_id, &ship_spec)
+                    .await
+                    .unwrap_or(1)
+            } else {
+                run_loop(
+                    &work_dir,
+                    timeout,
+                    &backend,
+                    model.as_deref(),
+                    talk.as_ref(),
+                    io,
+                    workspace_id,
+                )
+                .await
+                .unwrap_or(1)
+            };
             hb.abort();
             if let Ok(mut g) = exit2.lock() {
                 *g = Some(code);
@@ -421,7 +433,6 @@ async fn run_loop(
     Ok(0)
 }
 
-#[allow(dead_code)]
 fn is_ship_role(plan_task_id: &str, worker_profile: &str) -> bool {
     let id = plan_task_id.to_ascii_lowercase();
     let p = worker_profile.to_ascii_lowercase();

@@ -99,6 +99,7 @@ pub fn parse_chat_row(value: &Value) -> Result<ChatHistoryRow, serde_json::Error
 }
 
 /// Sidebar "Live sessions" is the same route as Chat history (`/{ws}/sessions`).
+#[cfg(test)]
 pub fn live_sessions_nav_path(workspace_id: &str) -> String {
     chat_history_path(workspace_id)
 }

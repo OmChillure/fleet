@@ -127,6 +127,21 @@ install, tests, sandbox/lab, or operator scripts, it is not a small tweak
 
 Do not merge unless a human asks you to merge.
 
+The last compile and test pass before you open the MR must run **in the
+ship image**, not only on the host. VPS and Kind build
+`Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`). Host `cargo` /
+`just test` can be green while that image does not compile (OpenSSL,
+glibc, sqlx migration versions, locked bins). That is how a tree that
+cannot ship reached `main`.
+
+```bash
+docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile .
+docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile.ui .
+```
+
+`./scripts/run-every-test.sh --prepare-kind` already does those builds.
+A host-only green is not enough to open the MR.
+
 ## Demo video (agent records it)
 
 The **coding agent** records the demo, not the human.

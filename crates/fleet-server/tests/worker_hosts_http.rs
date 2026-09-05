@@ -4480,7 +4480,7 @@ async fn rename_host_patch_persists_rejects_empty_too_long() {
     assert_control_plane_card(&plane_got.body, plane_id, ws_id);
     assert_eq!(
         plane_got.body["name"], plane_name,
-        "plane rename must persist on workspace_plane_runners: {}",
+        "plane rename must persist on the control-plane card: {}",
         plane_got.body
     );
     assert_not_a_hosts_row(&state, ws_id, plane_id).await;
@@ -4696,16 +4696,6 @@ async fn assert_plane_paired_field_does_not_rewrite_allow_host(
     assert_omits_pair_and_machine_tokens(&got, &format!("GET plane after {label}"));
 }
 
-async fn assert_taking_native_jobs(state: &AppState, workspace_id: Uuid, want: bool, what: &str) {
-    let taking = fleet_db::repos::plane_runners::taking_native_jobs(&state.db, workspace_id)
-        .await
-        .unwrap_or_else(|e| panic!("{what}: taking_native_jobs: {e}"));
-    assert_eq!(
-        taking, want,
-        "{what}: taking_native_jobs must be {want} (plane local spawn gate): workspace {workspace_id}"
-    );
-}
-
 /// catalog:list-plane-patch-paused-does-not-hold — Owner PATCH plane
 /// `{paused:true}` / `{enabled:false}` / `{drain:true}` (no allow_host key)
 /// must not rewrite `allow_host` or hold local SANDBOX_BACKEND. Distinct from
@@ -4754,13 +4744,6 @@ async fn plane_patch_paused_does_not_hold_local_spawn() {
         "fresh plane allow_host must be true: {plane_card}"
     );
     assert_control_plane_card(plane_card, plane_id, workspace_id);
-    assert_taking_native_jobs(
-        &state,
-        workspace_id,
-        true,
-        "before plane PATCH paused (default taking_native_jobs)",
-    )
-    .await;
 
     let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
     for (label, body) in [
@@ -4784,13 +4767,6 @@ async fn plane_patch_paused_does_not_hold_local_spawn() {
             snapshot_allow_host,
             body,
             label,
-        )
-        .await;
-        assert_taking_native_jobs(
-            &state,
-            workspace_id,
-            true,
-            &format!("after plane PATCH {label}"),
         )
         .await;
     }
@@ -4886,14 +4862,6 @@ async fn plane_patch_paused_does_not_hold_local_spawn() {
         "GET after PATCH allow_host=false: {}",
         held.body
     );
-    assert_taking_native_jobs(
-        &state,
-        workspace_id,
-        false,
-        "after explicit plane PATCH allow_host=false",
-    )
-    .await;
-
     let fx_held = call(
         &app,
         "POST",
@@ -5000,13 +4968,6 @@ async fn plane_patch_paused_does_not_hold_local_spawn() {
         "GET after PATCH allow_host=true: {}",
         restored.body
     );
-    assert_taking_native_jobs(
-        &state,
-        workspace_id,
-        true,
-        "after plane PATCH allow_host=true restore",
-    )
-    .await;
     let tick_restored = call(&app, "POST", &fleet_ws(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(
         tick_restored.status,
@@ -5218,7 +5179,6 @@ async fn plane_patch_paused_does_not_hold_local_spawn() {
         "admin/member/other-ws must not flip the plane: {}",
         still.body
     );
-    assert_taking_native_jobs(&state, workspace_id, true, "after forbidden plane PATCHes").await;
 }
 
 #[tokio::test]

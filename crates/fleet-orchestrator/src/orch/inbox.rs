@@ -8,13 +8,19 @@ use uuid::Uuid;
 use super::can_apply_task_terminal;
 use super::tick::TickError;
 
+pub struct InboxApply {
+    pub applied: usize,
+    pub reviews_bounced: usize,
+}
+
 pub async fn apply_inbox(
     store: &Store,
     project_id: Uuid,
     data_dir: &Path,
-) -> Result<usize, TickError> {
+) -> Result<InboxApply, TickError> {
     let reports = store.list_unapplied_reports(project_id).await?;
     let mut applied = 0usize;
+    let mut reviews_bounced = 0usize;
     for r in &reports {
         match r.kind.as_str() {
             "heartbeat" => {
@@ -135,6 +141,22 @@ pub async fn apply_inbox(
                                     applied += 1;
                                     continue;
                                 }
+                                if let Some(req) =
+                                    crate::sandbox::share::read_changes_request(&work)
+                                {
+                                    let snap = store.load_board_snapshot(project_id).await?;
+                                    reviews_bounced += super::review::apply_review_bounce(
+                                        store,
+                                        &snap,
+                                        r.board_task_id,
+                                        &req,
+                                        data_dir,
+                                    )
+                                    .await?;
+                                    store.mark_report_applied(r.id).await?;
+                                    applied += 1;
+                                    continue;
+                                }
                                 store
                                     .apply_task_terminal(
                                         r.board_task_id,
@@ -232,7 +254,10 @@ pub async fn apply_inbox(
         applied += 1;
         let _ = Value::Null;
     }
-    Ok(applied)
+    Ok(InboxApply {
+        applied,
+        reviews_bounced,
+    })
 }
 
 /// Write `result.md` / `work/` from a guest status payload onto the plane

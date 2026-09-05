@@ -14,8 +14,8 @@ use fleet_runners_view::{
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTag,
-    LocalModelTags, PackageInventory, create_host, fetch_local_model_tags, fetch_local_models,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTags,
+    PackageInventory, create_host, fetch_local_model_tags, fetch_local_models,
     install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
 };
 use crate::clipboard::copy_text;
@@ -372,7 +372,7 @@ fn PairPanel(
                         if copy_text(&unix_copy) {
                             show_toast().success("Command copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -397,7 +397,7 @@ fn PairPanel(
                         if copy_text(&windows_copy) {
                             show_toast().success("Command copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -422,7 +422,7 @@ fn PairPanel(
                         if copy_text(&token) {
                             show_toast().success("Token copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the token and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the token and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -544,27 +544,27 @@ fn HostDetailPanel(
     let mut d_accepting = use_signal(|| accepting_jobs(&host) && !host.paused && !host.drain);
     let mut d_auto = use_signal(|| host.auto_update);
     let mut d_max = use_signal(|| host.max_concurrent);
-    let mut d_allow_host = use_signal(|| host.allow_host);
-    let mut d_allow_container = use_signal(|| host.allow_container);
-    let mut d_timeout = use_signal(|| host.max_job_timeout_s);
-    let mut d_work_dir = use_signal(|| filled_work_dir(&host));
-    let mut d_models_dir = use_signal(|| filled_models_dir(&host));
-    let mut d_backend = use_signal(|| filled_runtime(&host, "container_backend", "k3d"));
-    let mut d_image = use_signal(|| filled_runtime(&host, "docker_image", "agent-fleet-api:local"));
-    let mut d_network = use_signal(|| filled_runtime(&host, "docker_network", "bridge"));
-    let mut d_namespace = use_signal(|| filled_runtime(&host, "k8s_namespace", "agent-fleet"));
-    let mut d_k3d_cluster = use_signal(|| filled_runtime(&host, "k3d_cluster", "agent-fleet"));
-    let mut d_k3d_memory = use_signal(|| filled_runtime(&host, "k3d_memory", "4g"));
-    let mut d_k3d_agents = use_signal(|| {
+    let d_allow_host = use_signal(|| host.allow_host);
+    let d_allow_container = use_signal(|| host.allow_container);
+    let d_timeout = use_signal(|| host.max_job_timeout_s);
+    let d_work_dir = use_signal(|| filled_work_dir(&host));
+    let d_models_dir = use_signal(|| filled_models_dir(&host));
+    let d_backend = use_signal(|| filled_runtime(&host, "container_backend", "k3d"));
+    let d_image = use_signal(|| filled_runtime(&host, "docker_image", "agent-fleet-api:local"));
+    let d_network = use_signal(|| filled_runtime(&host, "docker_network", "bridge"));
+    let d_namespace = use_signal(|| filled_runtime(&host, "k8s_namespace", "agent-fleet"));
+    let d_k3d_cluster = use_signal(|| filled_runtime(&host, "k3d_cluster", "agent-fleet"));
+    let d_k3d_memory = use_signal(|| filled_runtime(&host, "k3d_memory", "4g"));
+    let d_k3d_agents = use_signal(|| {
         runtime_value(&host, "k3d_agents")
             .and_then(|v| v.as_i64())
             .unwrap_or(0)
     });
-    let mut d_privileged = use_signal(|| runtime_bool(&host, "allow_privileged", false));
-    let mut d_cpu = use_signal(|| filled_runtime(&host, "k8s_cpu", "250m"));
-    let mut d_memory = use_signal(|| filled_runtime(&host, "k8s_memory", "256Mi"));
-    let mut d_ephemeral = use_signal(|| filled_runtime(&host, "k8s_ephemeral", "1Gi"));
-    let mut d_egress = use_signal(|| filled_runtime(&host, "egress_mode", "none"));
+    let d_privileged = use_signal(|| runtime_bool(&host, "allow_privileged", false));
+    let d_cpu = use_signal(|| filled_runtime(&host, "k8s_cpu", "250m"));
+    let d_memory = use_signal(|| filled_runtime(&host, "k8s_memory", "256Mi"));
+    let d_ephemeral = use_signal(|| filled_runtime(&host, "k8s_ephemeral", "1Gi"));
+    let d_egress = use_signal(|| filled_runtime(&host, "egress_mode", "none"));
     let plane = is_control_plane(&host);
     let sandbox_dirty = !plane
         && (d_allow_host() != host.allow_host
@@ -1188,7 +1188,7 @@ fn OllamaInstallPicker(
 ) -> Element {
     let mut pull_draft = use_signal(|| String::new());
     let mut filter = use_signal(|| String::new());
-    let mut installing = use_signal(|| false);
+    let installing = use_signal(|| false);
     let mut catalog = use_signal(|| None::<LocalModelCatalog>);
     let mut tags = use_signal(|| None::<LocalModelTags>);
     let mut tags_loading = use_signal(|| false);
@@ -1332,7 +1332,16 @@ fn OllamaInstallPicker(
             div { class: "mt-1 space-y-1",
                 span {
                     class: "text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                    "Tags for {selected_slug}"
+                    {
+                        let tg = tags();
+                        let slug = selected_slug();
+                        let name = tg
+                            .as_ref()
+                            .map(|t| t.name.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(slug.as_str());
+                        format!("Tags for {name}")
+                    }
                 }
                 if tags_loading() {
                     p { class: "m-0 text-[11px] text-[var(--app-muted)]", "Loading tags…" }
@@ -1665,7 +1674,7 @@ fn SandboxBlock(
     ephemeral: Signal<String>,
     egress: Signal<String>,
 ) -> Element {
-    let mut work_dir = work_dir;
+    let work_dir = work_dir;
     let mut allow_host = allow_host;
     let mut allow_container = allow_container;
     let mut timeout = timeout;

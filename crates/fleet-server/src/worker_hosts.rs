@@ -215,6 +215,10 @@ fn should_withhold_desired(
     staged: &fleet_db::WorkerSoftwareManifest,
     local: &str,
 ) -> bool {
+    // Already running this process's bake: staged tarball is often older.
+    if host_reports_plane_bake(host) {
+        return true;
+    }
     host_is_this_machine(host, local)
         && host_on_manifest_versions(host.software_bins.as_ref(), staged)
 }
@@ -1395,5 +1399,20 @@ mod plane_bake_tests {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
         assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+    }
+
+    #[test]
+    fn host_on_this_process_bake_withholds_even_when_remote() {
+        let Some(plane) = super::plane_git_sha() else {
+            // Host cargo test without FLEET_GIT_SHA: bake check is off.
+            return;
+        };
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host("x1", None);
+        host.software_git_sha = Some(plane.to_string());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g"),
+            "a host already on this process bake must not get an older staged tarball"
+        );
     }
 }

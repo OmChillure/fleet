@@ -256,7 +256,6 @@ struct HttpOut {
     status: StatusCode,
     headers: HeaderMap,
     body: Value,
-    #[allow(dead_code)]
     raw: String,
 }
 
@@ -368,7 +367,7 @@ async fn signup_and_login(app: &axum::Router) -> (String, CookieJar, String) {
         created.status,
         StatusCode::CREATED,
         "signup: {}",
-        created.body
+        created.raw
     );
     let (login_out, jar) = login(app, &email, TEST_PASSWORD).await;
     assert_eq!(

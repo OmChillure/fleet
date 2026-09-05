@@ -8,7 +8,7 @@ use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
-use crate::theme::{Theme, use_theme};
+use crate::theme::use_theme;
 use fleet_runners_view::routes::{
     RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
 };
@@ -433,7 +433,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
     let mut menu_open = use_signal(|| false);
     let navigator = use_navigator();
     let mut theme = use_theme();
-    let is_black = matches!(theme(), Theme::Black);
 
     let email = user
         .as_ref()
@@ -512,7 +511,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                         },
                         span { "Appearance" }
                         span { class: "text-xs text-[var(--app-muted)]",
-                            if is_black { "Dark" } else { "Light" }
+                            {theme().label()}
                         }
                     }
 
