@@ -134,8 +134,11 @@ same change. The walkthrough is allowed to go stale only if the product did.
 17. **Inbox** — `/{ws}/inbox` tickets from connected boards. Empty is OK.
     Start monitor follows every connected inbox app (new Connects are picked
     up on the next poll or instantly via the webhook URL on the page).
+    Uncheck follow-connected and Save to pin the current watch set.
     Tickets auto-launch work+review; Slack/Teams one ops task;
     Notion/Confluence one analysis task. Finish still starts one by hand.
+    A second Finish on the same row must conflict. Closed-on-board while
+    launched should mark the row done.
 18. **Chat history** — `/{ws}/sessions` lists **chats**, not worker hosts.
 19. **User menu** — theme Black/White (not persisted), Log out → `/login`.
 20. **This MR** — do the new thing this change added. If the script has no
