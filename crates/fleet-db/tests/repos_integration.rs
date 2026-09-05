@@ -324,7 +324,7 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
             filters: serde_json::json!({}),
             launch_limit: 8,
             poll_limit: 20,
-            hook_token: "tok-monitor-1".into(),
+            hook_token: format!("tok-monitor-1-{}", Uuid::now_v7()),
             started_by: Some(user_id),
         },
     )
@@ -402,6 +402,44 @@ async fn ticket_monitor_and_inbox_upsert_and_launch() {
 }
 
 #[tokio::test]
+async fn claim_launch_blocks_a_second_claim() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "github".into(),
+            external_key: "acme/app#1".into(),
+            title: "One".into(),
+            url: None,
+            summary: "s".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("upsert");
+    let first = tickets::claim_launch(&pool, workspace_id, "github", "acme/app#1")
+        .await
+        .expect("claim")
+        .expect("row");
+    assert_eq!(first.state, "launched");
+    assert!(first.run_id.is_none());
+    assert!(
+        tickets::claim_launch(&pool, workspace_id, "github", "acme/app#1")
+            .await
+            .expect("second")
+            .is_none()
+    );
+    let run = Uuid::now_v7();
+    let attached = tickets::attach_launch_run(&pool, workspace_id, "github", "acme/app#1", run)
+        .await
+        .expect("attach")
+        .expect("row");
+    assert_eq!(attached.run_id, Some(run));
+}
+
+#[tokio::test]
 async fn ticket_reopen_after_failed_run_and_mark_done() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
@@ -420,7 +458,7 @@ async fn ticket_reopen_after_failed_run_and_mark_done() {
             filters: serde_json::json!({"jira": {"jql": "project = ENG AND status != Done"}}),
             launch_limit: 8,
             poll_limit: 20,
-            hook_token: "tok-monitor-2".into(),
+            hook_token: format!("tok-monitor-2-{}", Uuid::now_v7()),
             started_by: Some(user_id),
         },
     )

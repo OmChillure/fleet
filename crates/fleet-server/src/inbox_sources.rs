@@ -105,7 +105,7 @@ pub fn resolve_watching(
         .filter(|s| is_inbox_provider(s))
         .collect();
 
-    let mut out = if follow_connected || allow.is_empty() {
+    let mut out = if follow_connected {
         connected
     } else {
         connected
@@ -264,7 +264,7 @@ pub fn trello_boards(filters: &Value) -> Vec<String> {
     string_list(filters, "trello", "boards")
 }
 
-fn listed_hit(allow: &[String], value: &str) -> bool {
+pub fn listed_hit(allow: &[String], value: &str) -> bool {
     if allow.is_empty() {
         return true;
     }
@@ -314,8 +314,11 @@ pub fn webhook_provider_allowed(
     if !is_inbox_provider(provider) {
         return false;
     }
-    if follow_connected || allowlist.is_empty() {
+    if follow_connected {
         return true;
+    }
+    if allowlist.is_empty() {
+        return false;
     }
     let provider = provider.trim().to_ascii_lowercase();
     allowlist
@@ -375,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_allowlist_means_all_connected() {
+    fn empty_allowlist_without_follow_watches_nothing() {
         let watching = resolve_watching(false, &[], &["trello".into(), "github".into()]);
-        assert_eq!(watching, vec!["github", "trello"]);
+        assert!(watching.is_empty());
     }
 
     #[test]
@@ -426,7 +429,7 @@ mod tests {
     #[test]
     fn pinned_webhook_rejects_other_providers() {
         assert!(webhook_provider_allowed(true, &["slack".into()], "github"));
-        assert!(webhook_provider_allowed(false, &[], "jira"));
+        assert!(!webhook_provider_allowed(false, &[], "jira"));
         assert!(webhook_provider_allowed(
             false,
             &["slack".into(), "linear".into()],
@@ -438,5 +441,14 @@ mod tests {
             "github"
         ));
         assert!(!webhook_provider_allowed(true, &[], "figma"));
+    }
+
+    #[test]
+    fn trello_board_allowlist_is_exact() {
+        let filters = json!({ "trello": { "boards": ["abc"] } });
+        assert!(listed_hit(&trello_boards(&filters), "abc"));
+        assert!(listed_hit(&trello_boards(&filters), "ABC"));
+        assert!(!listed_hit(&trello_boards(&filters), "other"));
+        assert!(listed_hit(&[], "anything"));
     }
 }

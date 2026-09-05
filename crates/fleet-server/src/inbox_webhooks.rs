@@ -165,7 +165,9 @@ async fn resolve_workspace(
             .await
             .map_err(|e| e.to_string())?
         {
-            if !verify_optional_signature(provider, token, headers, body) {
+            if !token_path_signature_ok(state, provider, mon.workspace_id, token, headers, body)
+                .await?
+            {
                 return Ok(None);
             }
             return Ok(Some(mon.workspace_id));
@@ -215,31 +217,75 @@ async fn match_github_app_signature(
     Ok(None)
 }
 
-fn verify_optional_signature(
+/// Path token is the capability. Provider HMAC, when present, is checked
+/// against the stored app secret — never against `hook_token`.
+async fn token_path_signature_ok(
+    state: &AppState,
     provider: &str,
+    workspace_id: Uuid,
     token: &str,
     headers: &HeaderMap,
     body: &[u8],
-) -> bool {
+) -> Result<bool, String> {
     match provider {
-        "github" => match header_str(headers, "x-hub-signature-256") {
-            Some(sig) => github_signature_ok(token, sig, body),
-            None => true,
-        },
-        "gitlab" => match header_str(headers, "x-gitlab-token") {
+        "gitlab" => Ok(match header_str(headers, "x-gitlab-token") {
             Some(got) => secure_eq(got.trim(), token),
             None => true,
-        },
-        "linear" => match header_str(headers, "linear-signature") {
-            Some(sig) => linear_signature_ok(token, sig, body),
-            None => true,
-        },
-        "slack" => match header_str(headers, "x-slack-signature") {
-            Some(sig) => slack_signature_ok(token, headers, sig, body),
-            None => true,
-        },
-        _ => true,
+        }),
+        "github" | "linear" | "slack" => {
+            let stored = provider_signing_secret(state, workspace_id, provider).await?;
+            Ok(match provider {
+                "github" => match header_str(headers, "x-hub-signature-256") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => github_signature_ok(secret, sig, body),
+                        None => true,
+                    },
+                    None => stored.is_none(),
+                },
+                "linear" => match header_str(headers, "linear-signature") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => linear_signature_ok(secret, sig, body),
+                        None => true,
+                    },
+                    None => stored.is_none(),
+                },
+                "slack" => match header_str(headers, "x-slack-signature") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => slack_signature_ok(secret, headers, sig, body),
+                        None => slack_timestamp_fresh(headers),
+                    },
+                    None => stored.is_none(),
+                },
+                _ => true,
+            })
+        }
+        _ => Ok(true),
     }
+}
+
+async fn provider_signing_secret(
+    state: &AppState,
+    workspace_id: Uuid,
+    provider: &str,
+) -> Result<Option<String>, String> {
+    let Some(app) =
+        fleet_db::repos::integrations::get_oauth_app(&state.db, workspace_id, provider)
+            .await
+            .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let Ok(plain) = state.integrations.credentials_key.decrypt(&app.client_secret) else {
+        return Ok(None);
+    };
+    let secret = plain
+        .get("webhook_secret")
+        .or_else(|| plain.get("signing_secret"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(secret)
 }
 
 fn github_signature_ok(secret: &str, header: &str, body: &[u8]) -> bool {
@@ -256,7 +302,24 @@ fn linear_signature_ok(secret: &str, header: &str, body: &[u8]) -> bool {
     secure_eq(header.trim(), &expect)
 }
 
+fn slack_timestamp_fresh(headers: &HeaderMap) -> bool {
+    slack_timestamp_fresh_at(headers, chrono::Utc::now().timestamp())
+}
+
+fn slack_timestamp_fresh_at(headers: &HeaderMap, now: i64) -> bool {
+    let Some(ts) = header_str(headers, "x-slack-request-timestamp") else {
+        return false;
+    };
+    let Ok(ts) = ts.trim().parse::<i64>() else {
+        return false;
+    };
+    (now - ts).unsigned_abs() <= 300
+}
+
 fn slack_signature_ok(secret: &str, headers: &HeaderMap, header: &str, body: &[u8]) -> bool {
+    if !slack_timestamp_fresh(headers) {
+        return false;
+    }
     let Some(ts) = header_str(headers, "x-slack-request-timestamp") else {
         return false;
     };
@@ -869,6 +932,20 @@ mod tests {
             }
             other => panic!("expected comment items, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn slack_rejects_stale_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-slack-request-timestamp", HeaderValue::from_static("1"));
+        assert!(!slack_timestamp_fresh_at(&headers, 1_000_000));
+        headers.insert(
+            "x-slack-request-timestamp",
+            HeaderValue::from_static("1000000"),
+        );
+        assert!(slack_timestamp_fresh_at(&headers, 1_000_000));
+        assert!(slack_timestamp_fresh_at(&headers, 1_000_280));
+        assert!(!slack_timestamp_fresh_at(&headers, 1_000_301));
     }
 
     #[test]

@@ -1609,6 +1609,7 @@ mod token_paste_tests {
                 refresh_ttl: std::time::Duration::from_secs(604_800),
                 cookie_secure: false,
                 cookie_samesite: axum_extra::extract::cookie::SameSite::Lax,
+                signup_token: None,
             },
             config: paste_config(),
         }

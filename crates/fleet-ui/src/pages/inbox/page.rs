@@ -301,6 +301,9 @@ pub fn Inbox(workspace_id: String) -> Element {
                             let trello = csv_list(trello_boards());
                             let launch = auto_launch();
                             let follow = follow_connected();
+                            let watching = monitor()
+                                .map(|m| m.watching.clone())
+                                .unwrap_or_default();
                             spawn(async move {
                                 match update_monitor(
                                     &ws,
@@ -314,6 +317,11 @@ pub fn Inbox(workspace_id: String) -> Element {
                                         trello_boards: Some(trello),
                                         auto_launch: Some(launch),
                                         follow_connected: Some(follow),
+                                        providers: Some(if follow {
+                                            Vec::new()
+                                        } else {
+                                            watching
+                                        }),
                                         ..MonitorPatch::default()
                                     },
                                 )

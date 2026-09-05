@@ -581,6 +581,7 @@ pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -
                     workspace_id,
                     &caller,
                     item_limit,
+                    target_limit,
                     &inbox_sources::gitlab_projects(filters),
                 )
                 .await
@@ -700,16 +701,19 @@ async fn drive_inbox(
         };
         for item in launched_rows {
             let Some(run_id) = item.run_id else {
-                if ticket_repo::reopen_ticket(
-                    &state.db,
-                    workspace_id,
-                    &item.provider,
-                    &item.external_key,
-                )
-                .await
-                .ok()
-                .flatten()
-                .is_some()
+                let stale = Utc::now().signed_duration_since(item.last_seen_at)
+                    > chrono::Duration::minutes(2);
+                if stale
+                    && ticket_repo::reopen_ticket(
+                        &state.db,
+                        workspace_id,
+                        &item.provider,
+                        &item.external_key,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
                 {
                     out.reopened += 1;
                 }
@@ -739,7 +743,15 @@ async fn drive_inbox(
                         out.reopened += 1;
                     }
                 }
-                "completed" => {}
+                "completed" => {
+                    let _ = ticket_repo::mark_inbox_done(
+                        &state.db,
+                        workspace_id,
+                        &item.provider,
+                        &item.external_key,
+                    )
+                    .await;
+                }
                 _ => {}
             }
         }
@@ -1147,18 +1159,44 @@ async fn poll_gitlab(
     workspace_id: Uuid,
     caller: &ProxyCaller,
     item_limit: usize,
+    target_limit: usize,
     projects: &[String],
 ) -> Result<usize, String> {
-    let projects: Vec<String> = projects
+    let mut targets: Vec<String> = projects
         .iter()
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    if projects.is_empty() {
-        return Err("gitlab project is required".into());
+    if targets.is_empty() {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "gitlab",
+            "list_repos",
+            json!({ "per_page": target_limit }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        if let Some(arr) = listed.data.get("items").and_then(|v| v.as_array()) {
+            for r in arr {
+                if let Some(name) = r
+                    .get("path_with_namespace")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    targets.push(name.to_string());
+                }
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Ok(0);
     }
     let mut n = 0usize;
-    for project in &projects {
+    for project in targets.iter().take(target_limit) {
         let listed = proxy_op(
             state,
             workspace_id,
@@ -1487,13 +1525,7 @@ async fn poll_trello(
         if board_id.is_empty() {
             continue;
         }
-        if !board_allow.is_empty()
-            && !inbox_sources::item_matches_filters(
-                &json!({ "trello": { "boards": board_allow } }),
-                "trello",
-                &board_id,
-            )
-        {
+        if !inbox_sources::listed_hit(board_allow, &board_id) {
             continue;
         }
         let cards = proxy_op(
@@ -2073,6 +2105,17 @@ pub async fn finish_and_launch(
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
+    let claimed = ticket_repo::claim_launch(
+        &state.db,
+        workspace_id,
+        &prep.item.provider,
+        &prep.item.external_key,
+    )
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    if claimed.is_none() {
+        return Err(AppError::conflict("ticket already launched"));
+    }
     state
         .orch
         .store
@@ -2088,12 +2131,39 @@ pub async fn finish_and_launch(
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = true;
     stamp_inbox_llm(&mut plan, state, workspace_id).await;
-    let (run, _) = state
-        .orch
-        .store
-        .insert_accepted_plan(workspace_id, plan)
-        .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let (run, _) = match state.orch.store.insert_accepted_plan(workspace_id, plan).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = ticket_repo::reopen_ticket(
+                &state.db,
+                workspace_id,
+                &prep.item.provider,
+                &prep.item.external_key,
+            )
+            .await;
+            return Err(AppError::bad_request(e.to_string()));
+        }
+    };
+    let attached = ticket_repo::attach_launch_run(
+        &state.db,
+        workspace_id,
+        &prep.item.provider,
+        &prep.item.external_key,
+        run.id,
+    )
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    if attached.is_none() {
+        let _ = state.orch.store.request_cancel(workspace_id, run.id).await;
+        let _ = ticket_repo::reopen_ticket(
+            &state.db,
+            workspace_id,
+            &prep.item.provider,
+            &prep.item.external_key,
+        )
+        .await;
+        return Err(AppError::conflict("ticket already launched"));
+    }
     let _ = crate::workforce::attach_run_to_goal(
         state,
         workspace_id,
@@ -2104,14 +2174,6 @@ pub async fn finish_and_launch(
         None,
     )
     .await;
-    mark_ticket_launched(
-        state,
-        workspace_id,
-        &prep.item.provider,
-        &prep.item.external_key,
-        run.id,
-    )
-    .await?;
     let _ = state.orch.tick.tick_project(workspace_id).await;
     Ok(json!({
         "ok": true,
