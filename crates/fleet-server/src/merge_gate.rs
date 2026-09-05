@@ -72,6 +72,7 @@ fn merge_to_main_requires_green_tests() {
         "assignable_runner",
         "git_config_patch",
         "host_picker_product",
+        "mock_runner",
     ] {
         assert!(
             integration.contains(needle),

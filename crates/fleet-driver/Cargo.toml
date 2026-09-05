@@ -16,6 +16,7 @@ name = "mock-acp-agent"
 path = "src/bin/mock_acp_agent.rs"
 
 [dependencies]
+agent-fleet-contracts = { path = "../agent-fleet-contracts" }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }

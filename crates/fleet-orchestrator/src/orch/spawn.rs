@@ -160,17 +160,17 @@ pub async fn schedule_and_spawn(
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
-        // Guest is fleet-driver (ACP). Harness from the plane, else mock.
+        // Guest is fleet-driver on the paired runner. Harness follows the
+        // plan/chat provider (grok / claude / ollama). Unknown → mock.
         if req
             .env
             .get("FLEET_HARNESS")
             .map(|s| s.trim().is_empty())
             .unwrap_or(true)
         {
-            let harness = match req.agent_backend.as_deref() {
-                Some("grok") => "grok",
-                _ => "mock",
-            };
+            let harness = crate::sandbox::agent_loop::harness_for_backend(
+                req.agent_backend.as_deref(),
+            );
             req.env.insert("FLEET_HARNESS".into(), harness.into());
         }
         if let Some(model) = req.agent_model.as_deref().filter(|s| !s.is_empty()) {

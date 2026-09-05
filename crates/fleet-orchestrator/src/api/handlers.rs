@@ -11,9 +11,9 @@ use crate::domain::WorkPlanBody;
 use crate::orch::TickError;
 use crate::store::StoreError;
 
-type ApiError = (StatusCode, Json<Value>);
+pub(super) type ApiError = (StatusCode, Json<Value>);
 
-fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
+pub(super) fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
     let msg = msg.into();
     if status.is_server_error() {
         tracing::error!(status = status.as_u16(), error = %msg, "orchestrator api error");
@@ -23,7 +23,7 @@ fn err(status: StatusCode, msg: impl Into<String>) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-fn map_store(e: StoreError) -> ApiError {
+pub(super) fn map_store(e: StoreError) -> ApiError {
     match e {
         StoreError::NotFound(m) => err(StatusCode::NOT_FOUND, m),
         StoreError::Validation(m) => err(StatusCode::BAD_REQUEST, m),

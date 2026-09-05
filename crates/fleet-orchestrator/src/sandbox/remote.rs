@@ -58,6 +58,10 @@ pub struct SpawnPayload {
     pub git_ref: Option<String>,
     #[serde(default)]
     pub persona_md: Option<String>,
+    /// Relative text files the guest must see (TEAM.md, work/, handoffs).
+    /// The plane disk is not shared with the runner.
+    #[serde(default)]
+    pub workspace_files: HashMap<String, String>,
     pub env: HashMap<String, String>,
 }
 
@@ -118,8 +122,29 @@ pub fn spawn_payload(
             .cloned()
             .filter(|s| !s.trim().is_empty()),
         persona_md: req.persona_md.clone().filter(|s| !s.trim().is_empty()),
+        workspace_files: collect_workspace_files(&req.work_dir, req.persona_md.as_deref()),
         env,
     }
+}
+
+/// Pack the session workdir the tick just prepared so the runner can
+/// recreate it. Caps live in `agent_fleet_contracts`.
+pub fn collect_workspace_files(
+    work_dir: &std::path::Path,
+    persona_md: Option<&str>,
+) -> HashMap<String, String> {
+    let mut files: HashMap<String, String> = agent_fleet_contracts::collect_guest_files(work_dir)
+        .into_iter()
+        .collect();
+    if let Some(md) = persona_md.map(str::trim).filter(|s| !s.is_empty()) {
+        files
+            .entry("PERSONA.md".into())
+            .or_insert_with(|| md.to_string());
+    }
+    files
+        .entry("fleet-tool.sh".into())
+        .or_insert_with(|| agent_fleet_contracts::FLEET_TOOL_SH.to_string());
+    files
 }
 
 #[cfg(test)]
@@ -202,5 +227,23 @@ mod tests {
         assert!(v["repo_url"].is_null());
         assert!(v["git_ref"].is_null());
         assert!(v["env"].get("FLEET_WORK_DIR").is_none());
+        assert!(
+            p.workspace_files.contains_key("fleet-tool.sh"),
+            "guest must ship fleet-tool.sh: {:?}",
+            p.workspace_files.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn workspace_files_include_team_and_work() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("TEAM.md"), "you are t1\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        std::fs::write(dir.path().join("work/app.rs"), "fn main() {}\n").unwrap();
+        let files = collect_workspace_files(dir.path(), Some("# persona\n"));
+        assert_eq!(files.get("TEAM.md").unwrap(), "you are t1\n");
+        assert_eq!(files.get("work/app.rs").unwrap(), "fn main() {}\n");
+        assert!(files.get("PERSONA.md").unwrap().contains("persona"));
+        assert!(files.get("fleet-tool.sh").unwrap().contains("fleet-tool"));
     }
 }

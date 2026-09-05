@@ -446,6 +446,8 @@ mod tests {
             git_ref: None,
             env: HashMap::new(),
             privileged: false,
+            persona_md: None,
+            workspace_files: HashMap::new(),
         }
     }
 

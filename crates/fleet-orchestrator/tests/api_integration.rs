@@ -1317,3 +1317,123 @@ async fn machine_token_v1_worker_heartbeat_status_rejected() {
         "valid home heartbeat must not append on the other project: {reports_other:?}"
     );
 }
+
+#[tokio::test]
+async fn worker_io_team_chat_roundtrip_and_rejects_bad_token() {
+    use fleet_orchestrator::store::NewWorkerSession;
+
+    let (app, store) = app_and_store().await;
+    let admin = "test-admin";
+    let (st, proj) = json_req(
+        app.clone(),
+        "POST",
+        "/v1/projects",
+        Some(admin),
+        Some(json!({"name": format!("worker-io-{}", Uuid::new_v4()), "max_agents": 1})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{proj}");
+    let pid = proj["id"].as_str().expect("project id");
+    let project_id = Uuid::parse_str(pid).expect("project uuid");
+    let run_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let plan = json!({
+        "plan_id": plan_id,
+        "project_id": pid,
+        "run_id": run_id,
+        "version": 1,
+        "status": "accepted",
+        "source": "fixture",
+        "tasks": [{
+            "plan_task_id": "t1",
+            "title": "IO",
+            "depends_on": [],
+            "worker_profile": "coding",
+            "priority": 100
+        }],
+        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false }
+    });
+    let (st, body) = json_req(
+        app.clone(),
+        "POST",
+        &format!("/v1/projects/{pid}/runs/fixture"),
+        Some(admin),
+        Some(json!({ "plan": plan })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    store
+        .materialize_plan(project_id, plan_id)
+        .await
+        .expect("materialize");
+    let snap = store.load_board_snapshot(project_id).await.expect("snap");
+    let task = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "t1")
+        .expect("t1");
+    let session_id = Uuid::new_v4();
+    let token = "fleet-worker-session-token-io-gate";
+    store
+        .insert_session_spawning(&NewWorkerSession {
+            id: session_id,
+            project_id,
+            run_id,
+            board_task_id: task.id,
+            attempt: 1,
+            runtime_backend: "remote".into(),
+            worker_token: token.into(),
+            worker_profile: "coding".into(),
+            work_dir: Some("/tmp/worker-io".into()),
+        })
+        .await
+        .expect("insert session");
+
+    let io = format!("/v1/projects/{pid}/workers/{session_id}/io");
+    let (st, v) = json_req(
+        app.clone(),
+        "POST",
+        &io,
+        None,
+        Some(json!({"op": "team_chat_list", "all": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "missing bearer: {v}");
+
+    let (st, v) = json_req(
+        app.clone(),
+        "POST",
+        &io,
+        Some("wrong-token"),
+        Some(json!({"op": "team_chat_list", "all": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "bad token: {v}");
+
+    let (st, v) = json_req(
+        app.clone(),
+        "POST",
+        &io,
+        Some(token),
+        Some(json!({"op": "team_chat_post", "to": "*", "body": "hello from tiny"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "post: {v}");
+    assert_eq!(v["ok"], true, "{v}");
+
+    let (st, v) = json_req(
+        app.clone(),
+        "POST",
+        &io,
+        Some(token),
+        Some(json!({"op": "team_chat_list", "all": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "list: {v}");
+    let msgs = v["messages"].as_array().expect("messages");
+    assert!(
+        msgs.iter()
+            .any(|m| m["body"].as_str() == Some("hello from tiny")),
+        "{v}"
+    );
+}

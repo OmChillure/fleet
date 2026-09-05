@@ -87,7 +87,7 @@ async fn run() -> Result<()> {
         }
     });
 
-    let work = execute_agent(&cfg, live_out.clone()).await;
+    let work = execute_agent(&cfg, &client, live_out.clone()).await;
     stop.store(true, Ordering::Relaxed);
     let _ = tokio::time::timeout(Duration::from_secs(2), hb).await;
 
@@ -126,10 +126,8 @@ async fn run() -> Result<()> {
 }
 
 fn guest_files(work_dir: &std::path::Path) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let mut files = serde_json::Map::new();
-    if work_dir.join("work").is_dir() {
-        files.insert("work/.keep".into(), serde_json::Value::String("ok".into()));
-    }
+    let packed = agent_fleet_contracts::collect_guest_files(work_dir);
+    let files = agent_fleet_contracts::files_as_json_map(&packed);
     if files.is_empty() { None } else { Some(files) }
 }
 
@@ -179,7 +177,11 @@ fn restore_live(buf: &acp::LiveOut, mut events: Vec<serde_json::Value>) {
     }
 }
 
-async fn execute_agent(cfg: &DriverConfig, live_out: acp::LiveOut) -> Result<String, WorkError> {
+async fn execute_agent(
+    cfg: &DriverConfig,
+    client: &OrchClient,
+    live_out: acp::LiveOut,
+) -> Result<String, WorkError> {
     let agent_cwd = provision_if_needed(cfg).await?;
     let prompt = prompt::load_prompt(&cfg.work_dir);
     let mut spec = harness::resolve(
@@ -192,6 +194,42 @@ async fn execute_agent(cfg: &DriverConfig, live_out: acp::LiveOut) -> Result<Str
         cfg.reasoning_effort.as_deref(),
     )
     .map_err(|e| WorkError::Failed(format!("harness: {e:#}")))?;
+    if spec.name == "ollama" {
+        let model = cfg.model.clone().unwrap_or_default();
+        return fleet_driver::ollama_loop::run_ollama(
+            &cfg.work_dir,
+            &model,
+            &prompt,
+            cfg.timeout,
+            client,
+        )
+        .await
+        .map_err(|e| WorkError::Failed(format!("ollama: {e:#}")));
+    }
+    if spec.name == "claude" {
+        let out = fleet_driver::cli_session::run_cli(&spec, &agent_cwd, &prompt, cfg.timeout)
+            .await
+            .map_err(|e| WorkError::Failed(format!("claude: {e:#}")))?;
+        if let Err(e) = report::write_artifacts(
+            &cfg.work_dir,
+            &json!({
+                "worker": "fleet-driver",
+                "ok": out.ok,
+                "harness": "claude",
+                "session_id": cfg.session_id,
+            }),
+            &out.stdout,
+        ) {
+            warn!(error = %e, "failed to write artifacts");
+        }
+        if !cfg.work_dir.join("result.md").is_file() && !out.stdout.trim().is_empty() {
+            let _ = std::fs::write(cfg.work_dir.join("result.md"), out.stdout.trim());
+        }
+        return Ok(format!(
+            "claude ok chars={}",
+            out.stdout.chars().count()
+        ));
+    }
     if spec.name == "grok" && cfg.grok_debug {
         let dbg = cfg.work_dir.join("grok-acp.debug.log");
         // `grok agent [OPTIONS] stdio` — insert before the subcommand.

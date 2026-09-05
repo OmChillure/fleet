@@ -96,7 +96,8 @@ test-integration: _require-env db-up
       --test host_update_tick \
       --test assignable_runner \
       --test git_config_patch \
-      --test host_picker_product
+      --test host_picker_product \
+      --test mock_runner
     cargo test -p fleet-auth --locked --tests
     cargo test -p fleet-server --locked --tests
     cargo test -p fleet-db --locked --tests

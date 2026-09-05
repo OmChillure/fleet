@@ -52,7 +52,7 @@ pub struct SpawnRequest {
     pub persona_md: Option<String>,
     /// Resolved worker LLM: `grok` (env) or `ollama` (settings). None = bash worker.
     pub agent_backend: Option<String>,
-    /// Model id for the worker LLM (e.g. grok-4.5, llama3.2).
+    /// Model id for the worker LLM (runner CLI / Ollama tag).
     pub agent_model: Option<String>,
     /// Control-plane integration proxy (tokens never enter the sandbox).
     pub io: io::IntegrationHandle,

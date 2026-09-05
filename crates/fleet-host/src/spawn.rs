@@ -291,6 +291,28 @@ fn sigterm_pid(pid: u32) -> Result<()> {
     }
 }
 
+fn materialize_workspace_files(session_dir: &Path, payload: &SpawnPayload) {
+    let mut files: std::collections::BTreeMap<String, String> = payload
+        .workspace_files
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if let Some(md) = payload
+        .persona_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        files
+            .entry("PERSONA.md".into())
+            .or_insert_with(|| md.to_string());
+    }
+    if !files.is_empty() {
+        let _ = agent_fleet_contracts::write_guest_files(session_dir, &files);
+    }
+    let _ = agent_fleet_contracts::ensure_fleet_tool(session_dir);
+}
+
 pub async fn run_claim(
     cfg: &LocalConfig,
     payload: &SpawnPayload,
@@ -361,6 +383,8 @@ pub async fn run_claim_with(
     if !payload.task_title.is_empty() {
         let _ = tokio::fs::write(session_dir.join("task.md"), &payload.task_title).await;
     }
+    materialize_workspace_files(&session_dir, payload);
+
     let task_json = serde_json::json!({
         "title": payload.task_title,
         "spec": payload.task_spec,
@@ -572,6 +596,13 @@ pub async fn publish_guest_proof(payload: &SpawnPayload, session_dir: &Path) -> 
         .timeout(Duration::from_secs(15))
         .build()
         .context("proof http client")?;
+    let packed = agent_fleet_contracts::collect_guest_files(session_dir);
+    let files = agent_fleet_contracts::files_as_json_map(&packed);
+    let files = if files.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(files)
+    };
     let res = client
         .post(&url)
         .bearer_auth(&payload.worker_token)
@@ -580,11 +611,7 @@ pub async fn publish_guest_proof(payload: &SpawnPayload, session_dir: &Path) -> 
             "status": "proof",
             "reason": "guest proof",
             "result_md": md,
-            "files": if session_dir.join("work").is_dir() {
-                serde_json::json!({ "work/.keep": "ok" })
-            } else {
-                serde_json::Value::Null
-            },
+            "files": files,
         }))
         .send()
         .await
@@ -695,6 +722,8 @@ mod tests {
             git_ref: None,
             env: HashMap::new(),
             privileged: false,
+            persona_md: None,
+            workspace_files: HashMap::new(),
         }
     }
 
@@ -891,6 +920,34 @@ mod tests {
             !args.iter().any(|a| a.contains("FLEET_WORK_CMD=")),
             "FLEET_WORK_CMD is host-only: {args:?}"
         );
+    }
+
+    #[test]
+    fn materialize_writes_team_and_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut payload = sample_payload();
+        payload
+            .workspace_files
+            .insert("TEAM.md".into(), "you are t1\n".into());
+        payload
+            .workspace_files
+            .insert("work/app.rs".into(), "fn main() {}\n".into());
+        payload.persona_md = Some("# coder\n".into());
+        materialize_workspace_files(dir.path(), &payload);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("TEAM.md")).unwrap(),
+            "you are t1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/app.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("PERSONA.md"))
+                .unwrap()
+                .contains("coder")
+        );
+        assert!(dir.path().join("fleet-tool.sh").is_file());
     }
 
     #[test]

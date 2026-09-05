@@ -2108,6 +2108,8 @@ pub async fn finish_and_launch(
     args: FinishTicketArgs,
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
+    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
+    crate::chat_tools::require_taking_runner(&llm)?;
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
     let claimed = ticket_repo::claim_launch(
         &state.db,
@@ -2134,7 +2136,7 @@ pub async fn finish_and_launch(
     let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = true;
-    stamp_inbox_llm(&mut plan, state, workspace_id).await;
+    crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
     let (run, _) = match state
         .orch
         .store
@@ -2196,19 +2198,7 @@ pub async fn finish_and_launch(
     }))
 }
 
-async fn stamp_inbox_llm(
-    plan: &mut fleet_orchestrator::domain::WorkPlanBody,
-    state: &AppState,
-    workspace_id: Uuid,
-) {
-    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
-    if !llm.provider.is_empty() {
-        plan.policy.llm_provider = Some(llm.provider);
-    }
-    if !llm.model.is_empty() {
-        plan.policy.llm_model = Some(llm.model);
-    }
-}
+
 
 #[cfg(test)]
 mod tests {

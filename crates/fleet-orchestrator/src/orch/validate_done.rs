@@ -1,8 +1,8 @@
 //! Gate: a task is not `done_success` until the workspace proves it.
 //!
-//! Only `stub` skips file checks (in-process timer, no workspace). k8s/remote
-//! guests must still leave `result.md` (and acceptance) on the session work
-//! dir the plane can read. HTTP ok / CR phase is not proof.
+//! Remote guests must leave `result.md` (and acceptance) on the session work
+//! dir the plane can read — via status `result_md` / `files` proof. HTTP ok
+//! / lease complete is not proof.
 
 use std::path::Path;
 

@@ -37,6 +37,7 @@
 mod agent;
 mod driver;
 mod envelope;
+mod guest_files;
 mod ids;
 mod integration;
 mod isolation;
@@ -49,6 +50,7 @@ mod types;
 pub use agent::*;
 pub use driver::*;
 pub use envelope::*;
+pub use guest_files::*;
 pub use ids::*;
 pub use integration::*;
 pub use isolation::*;

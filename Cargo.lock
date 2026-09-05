@@ -1821,6 +1821,7 @@ dependencies = [
 name = "fleet-driver"
 version = "0.1.0"
 dependencies = [
+ "agent-fleet-contracts",
  "anyhow",
  "axum",
  "chrono",
@@ -1919,6 +1920,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "fleet-db",
+ "fleet-driver",
  "hex",
  "http-body-util",
  "reqwest",

@@ -54,6 +54,14 @@ pub fn compose_prompt(title: &str, summary: &str, spec_md: &str, acceptance: &[S
     if out.trim().is_empty() {
         return "Inspect this workspace and complete the assigned task.".into();
     }
+    out.push_str(
+        "\n## Plane I/O\n\n\
+         You are on a paired runner. Tokens stay on the control plane.\n\
+         `./fleet-tool.sh integration PROVIDER OPERATION [ARGS_JSON]`\n\
+         `./fleet-tool.sh chat-post TO BODY` / `chat-list`\n\
+         `./fleet-tool.sh request-changes REASON`\n\
+         Put artifacts in `work/` and finish with `result.md`.\n",
+    );
     out
 }
 

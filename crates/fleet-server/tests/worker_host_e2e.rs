@@ -1759,8 +1759,8 @@ async fn min_isolation_container_does_not_assign_process_only_host() {
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
-    // Plane SANDBOX_BACKEND may still take the job; the process-only
-    // paired host must not.
+    // The API does not local-spawn. A process-only paired host must not
+    // take a container-isolation job.
     let workspace_id = Uuid::parse_str(&ws).expect("ws");
     let sessions = state
         .orch

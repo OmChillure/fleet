@@ -1,6 +1,6 @@
 //! Product contracts for host assignment: lowest load/cap, oldest heartbeat,
 //! min_isolation, no loopback for off-box host-runtime, no loopback for
-//! container guests, plan LLM → FLEET_HARNESS.
+//! container guests, plan LLM → FLEET_HARNESS (Ollama fixture, not a cloud SKU).
 //!
 //! Required by `just test-integration` / merge-to-main. Requires DATABASE_URL.
 
@@ -516,7 +516,7 @@ async fn tick_loopback_assigns_this_machine_not_offbox() {
 }
 
 #[tokio::test]
-async fn grok_plan_sets_guest_harness_even_when_plane_env_is_mock() {
+async fn ollama_plan_sets_guest_harness_even_when_plane_env_is_mock() {
     let store = setup().await;
     let project = store
         .create_project(&format!("pp-harness-{}", Uuid::new_v4()), 4)
@@ -525,8 +525,8 @@ async fn grok_plan_sets_guest_harness_even_when_plane_env_is_mock() {
     seed_workspace(&store, project.id).await;
     let _ = pair_host(&store, project.id, "box", true, false).await;
     let mut plan = one_task_plan(project.id);
-    plan.policy.llm_provider = Some("grok".into());
-    plan.policy.llm_model = Some("grok-4.5".into());
+    plan.policy.llm_provider = Some("ollama".into());
+    plan.policy.llm_model = Some(fleet_driver::mock_ollama::TEST_MODEL.into());
     store.insert_accepted_plan(project.id, plan).await.unwrap();
 
     unsafe {
@@ -555,7 +555,20 @@ async fn grok_plan_sets_guest_harness_even_when_plane_env_is_mock() {
         .and_then(|v| v.as_str());
     assert_eq!(
         harness,
-        Some("grok"),
-        "plan LLM is grok; plane FLEET_HARNESS=mock must not win: {payload}"
+        Some("ollama"),
+        "plan LLM is ollama; plane FLEET_HARNESS=mock must not win: {payload}"
+    );
+    assert_eq!(
+        payload
+            .get("env")
+            .and_then(|e| e.get("FLEET_MODEL"))
+            .and_then(|v| v.as_str()),
+        Some(fleet_driver::mock_ollama::TEST_MODEL),
+        "must carry the fixture model, not a cloud SKU: {payload}"
+    );
+    let files = payload.get("workspace_files").and_then(|v| v.as_object());
+    assert!(
+        files.is_some_and(|f| f.contains_key("fleet-tool.sh")),
+        "spawn claim must pack fleet-tool.sh: {payload}"
     );
 }

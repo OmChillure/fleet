@@ -107,7 +107,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "launch_agent_task",
-                "description": "Create a single-task agent run, multi-tick until the stub sandbox finishes, then destroy it. Prefer launch_agent_plan for multi-agent fan-out. Optional context_from prefetches a connected integration into the task spec (tokens stay on the control plane).",
+                "description": "Create a single-task agent run on a paired runner, tick until it finishes or queues. Prefer launch_agent_plan for multi-agent fan-out. Optional context_from prefetches a connected integration into the task spec (tokens stay on the control plane).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -711,13 +711,14 @@ pub struct ChatLlmContext {
 
 /// Composer dropdown first (last chat in this workspace), then Grok/Ollama host defaults.
 pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatLlmContext {
-    if let Ok(conns) =
+    let mut llm = if let Ok(conns) =
         fleet_db::repos::integrations::list_for_workspace(&state.db, workspace_id).await
     {
+        let mut found = None;
         for c in conns {
             let d = fleet_db::IntegrationAgentDefaults::from_config(&c.config);
             if let (Some(provider), Some(model)) = (d.default_provider, d.default_model) {
-                return ChatLlmContext {
+                found = Some(ChatLlmContext {
                     provider,
                     model,
                     runner_id: d
@@ -725,37 +726,82 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
                         .as_deref()
                         .and_then(|s| Uuid::parse_str(s).ok()),
                     effort: None,
-                };
+                });
+                break;
             }
         }
+        found
+    } else {
+        None
+    };
+    if llm.is_none() {
+        if let Ok(Some((provider, model))) =
+            fleet_db::repos::chats::latest_composer_llm(&state.db, workspace_id).await
+        {
+            llm = Some(ChatLlmContext {
+                provider,
+                model,
+                runner_id: None,
+                effort: None,
+            });
+        }
     }
-    if let Ok(Some((provider, model))) =
-        fleet_db::repos::chats::latest_composer_llm(&state.db, workspace_id).await
-    {
-        return ChatLlmContext {
-            provider,
-            model,
-            runner_id: None,
-            effort: None,
-        };
-    }
-    if state.grok.enabled {
-        return ChatLlmContext {
+    if llm.is_none() && state.grok.enabled {
+        llm = Some(ChatLlmContext {
             provider: "grok".into(),
             model: crate::grok::default_model(),
             runner_id: None,
             effort: None,
-        };
+        });
     }
-    if state.ollama.enabled {
-        return ChatLlmContext {
+    if llm.is_none() && state.ollama.enabled {
+        llm = Some(ChatLlmContext {
             provider: "ollama".into(),
             model: state.ollama.default_model.clone().unwrap_or_default(),
             runner_id: None,
             effort: None,
-        };
+        });
     }
-    ChatLlmContext::default()
+    let mut llm = llm.unwrap_or_default();
+    if llm.runner_id.is_none() {
+        if let Some(chosen) =
+            fleet_orchestrator::store::select_assignable_runner(&state.orch.store, workspace_id)
+                .await
+        {
+            llm.runner_id = Some(chosen.id());
+        }
+    }
+    llm
+}
+
+/// Fleet workers run on a paired runner CLI. OpenAI chat stays on the plane.
+/// Chat launch may omit `runner_id` — the task stays ready until a host
+/// appears. Inbox/cases must call [`require_taking_runner`] so a ticket is
+/// not marked launched while nothing can run.
+pub fn require_runner_worker_llm(llm: &ChatLlmContext) -> AppResult<()> {
+    let p = llm.provider.trim().to_ascii_lowercase();
+    if p.is_empty() || p == "off" || p == "none" || p == "bash" || p == "mock" {
+        return Ok(());
+    }
+    if crate::runner_chat::runner_cli_provider(&p) {
+        return Ok(());
+    }
+    Err(AppError::bad_request(
+        "fleet workers run Grok, Claude, or Ollama on a paired runner — OpenAI is chat-only on the control plane"
+            .to_string(),
+    ))
+}
+
+pub fn require_taking_runner(llm: &ChatLlmContext) -> AppResult<()> {
+    require_runner_worker_llm(llm)?;
+    let p = llm.provider.trim().to_ascii_lowercase();
+    if crate::runner_chat::runner_cli_provider(&p) && llm.runner_id.is_none() {
+        return Err(AppError::bad_request(
+            "no paired runner taking jobs — pair a fleet-host for Grok / Claude / Ollama workers"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Reject a tool `workspace_id` that is not this chat's workspace.
@@ -1390,7 +1436,7 @@ pub fn build_chat_plan(
     )
 }
 
-fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
+pub(crate) fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
     let provider = llm.provider.trim();
     let model = llm.model.trim();
     if !provider.is_empty() {
@@ -2354,6 +2400,7 @@ async fn launch_agent_task(
         spec.push_str(&format_context_markdown(&ctx));
     }
 
+    require_runner_worker_llm(llm)?;
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
     accept_and_drive_plan(
@@ -2440,6 +2487,7 @@ async fn launch_agent_plan(
         })
         .collect();
 
+    require_runner_worker_llm(llm)?;
     let mut plan = build_multi_task_plan(workspace_id, args.max_agents, tasks);
     if let Some(outs) = args.outputs {
         plan.policy.outputs = outs
@@ -2821,17 +2869,61 @@ mod tests {
     #[test]
     fn stamp_plan_llm_writes_provider_and_model() {
         let mut plan = build_chat_plan(Uuid::nil(), "T", "S", "coding");
+        let runner = Uuid::now_v7();
         stamp_plan_llm(
             &mut plan,
             &ChatLlmContext {
-                provider: "Grok".into(),
-                model: "grok-4.5".into(),
-                runner_id: None,
+                provider: "Ollama".into(),
+                model: "tiny".into(),
+                runner_id: Some(runner),
                 effort: None,
             },
         );
-        assert_eq!(plan.policy.llm_provider.as_deref(), Some("grok"));
-        assert_eq!(plan.policy.llm_model.as_deref(), Some("grok-4.5"));
+        assert_eq!(plan.policy.llm_provider.as_deref(), Some("ollama"));
+        assert_eq!(plan.policy.llm_model.as_deref(), Some("tiny"));
+        assert_eq!(plan.policy.preferred_host_id, Some(runner));
+    }
+
+    #[test]
+    fn runner_worker_llm_refuses_openai_and_missing_runner() {
+        assert!(require_runner_worker_llm(&ChatLlmContext::default()).is_ok());
+        assert!(
+            require_runner_worker_llm(&ChatLlmContext {
+                provider: "openai".into(),
+                model: "any".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
+        assert!(
+            require_runner_worker_llm(&ChatLlmContext {
+                provider: "ollama".into(),
+                model: "tiny".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_ok(),
+            "chat may queue ollama work until a runner appears"
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "ollama".into(),
+                model: "tiny".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "ollama".into(),
+                model: "tiny".into(),
+                runner_id: Some(Uuid::now_v7()),
+                effort: None,
+            })
+            .is_ok()
+        );
     }
 
     #[test]

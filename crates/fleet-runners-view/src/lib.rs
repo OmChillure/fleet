@@ -683,7 +683,7 @@ pub fn accept_jobs_title(holding: bool) -> &'static str {
     if holding {
         "This worker will take new jobs again. Jobs already running were never stopped."
     } else {
-        "Does not stop jobs already running here. New jobs go to another worker, or run on the control plane if none are free."
+        "Does not stop jobs already running here. New jobs go to another worker that is taking jobs, or stay ready until one is free."
     }
 }
 

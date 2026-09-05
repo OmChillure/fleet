@@ -16,6 +16,8 @@ pub struct HarnessSpec {
 /// * `FLEET_HARNESS_CMD` (whitespace-split) overrides command+args entirely.
 /// * `mock` looks next to the current executable, then PATH.
 /// * `grok` → `grok agent --no-leader [--always-approve] [--reasoning-effort E] [-m MODEL] stdio`
+/// * `claude` → official `claude -p` with tools (not chat's no-tools print)
+/// * `ollama` → local HTTP tool loop (no ACP)
 pub fn resolve(
     name: &str,
     harness_cmd: Option<&str>,
@@ -71,7 +73,39 @@ pub fn resolve(
                 args,
             })
         }
-        other => bail!("unknown harness {other:?}; expected mock|grok"),
+        "claude" | "anthropic" => {
+            let mut args = vec![
+                "-p".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--permission-mode".into(),
+                if auto_approve {
+                    "dontAsk".into()
+                } else {
+                    "acceptEdits".into()
+                },
+                "--no-session-persistence".into(),
+            ];
+            if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+                args.push("--model".into());
+                args.push(m.to_string());
+            }
+            if let Some(e) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
+                args.push("--effort".into());
+                args.push(e.to_string());
+            }
+            Ok(HarnessSpec {
+                name: "claude".into(),
+                command: "claude".into(),
+                args,
+            })
+        }
+        "ollama" => Ok(HarnessSpec {
+            name: "ollama".into(),
+            command: "ollama".into(),
+            args: Vec::new(),
+        }),
+        other => bail!("unknown harness {other:?}; expected mock|grok|claude|ollama"),
     }
 }
 
@@ -187,5 +221,23 @@ mod tests {
     #[test]
     fn unknown_harness_errs() {
         assert!(resolve("opencode", None, None, true, None, None, None).is_err());
+    }
+
+    #[test]
+    fn claude_print_keeps_tools() {
+        let h = resolve("claude", None, Some("sonnet"), true, None, None, Some("high"))
+            .unwrap();
+        assert_eq!(h.name, "claude");
+        assert_eq!(h.command, "claude");
+        assert!(h.args.contains(&"-p".into()));
+        assert!(!h.args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(h.args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+    }
+
+    #[test]
+    fn ollama_is_named_loop() {
+        let h = resolve("ollama", None, Some("llama3.2"), true, None, None, None).unwrap();
+        assert_eq!(h.name, "ollama");
+        assert!(h.args.is_empty());
     }
 }

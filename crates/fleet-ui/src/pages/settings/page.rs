@@ -148,7 +148,7 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 if grok_env() {
                     p { class: "mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-[var(--app-fg)]",
-                        "Host has FLEET_AGENT_BACKEND=grok — workers use Grok until that env is unset. The Ollama pick below is saved but not used while Grok env is on."
+                        "This API process has FLEET_AGENT_BACKEND=grok as a fallback label. Fleet workers still run on a paired runner — pick Grok / Claude / Ollama in Chat and select that box."
                     }
                 } else if let Some(b) = effective().filter(|b| b != "off") {
                     p { class: "mt-4 text-xs text-[var(--app-muted)]",
@@ -156,7 +156,7 @@ pub fn Settings(workspace_id: String) -> Element {
                     }
                 } else {
                     p { class: "mt-4 text-xs text-[var(--app-muted)]",
-                        "Workers are bash-only until you pick a fleet LLM."
+                        "Workers use the Chat composer model on the selected runner. This page is only a fallback when a run has no chat model."
                     }
                 }
 

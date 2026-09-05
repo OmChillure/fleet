@@ -1,5 +1,8 @@
-//! Control-plane coding-agent loop (true multi-agent).
-//! LLM + file/bash tools scoped to the session workdir. API keys stay here.
+//! Legacy in-process coding-agent loop.
+//!
+//! Production workers run on a paired `fleet-host` (`fleet-driver`). This
+//! module still owns provider/harness resolution used by tick spawn. Do not
+//! start [`AgentJob`] on the control plane.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -59,6 +62,18 @@ pub fn normalize_provider(provider: &str) -> Option<String> {
         "ollama" => Some("ollama".into()),
         "claude" | "anthropic" => Some("claude".into()),
         other => Some(other.to_string()),
+    }
+}
+
+/// Guest harness on a paired runner. OpenAI and unknown stay mock — they
+/// have no official runner CLI. Callers that launch fleet work must refuse
+/// those providers instead of silently mocking.
+pub fn harness_for_backend(backend: Option<&str>) -> &'static str {
+    match backend.map(str::trim).map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("grok" | "xai") => "grok",
+        Some("claude" | "anthropic") => "claude",
+        Some("ollama") => "ollama",
+        _ => "mock",
     }
 }
 
@@ -1483,41 +1498,36 @@ mod tests {
 
     #[test]
     fn settings_ollama_picks_model() {
-        let w = resolve_worker_llm(None, None, "ollama", "qwen2.5-coder");
+        let w = resolve_worker_llm(None, None, "ollama", "tiny");
         assert_eq!(w.backend.as_deref(), Some("ollama"));
-        assert_eq!(w.model.as_deref(), Some("qwen2.5-coder"));
+        assert_eq!(w.model.as_deref(), Some("tiny"));
     }
 
     #[test]
     fn chat_selection_wins_over_settings() {
-        let w = resolve_worker_llm(
-            Some("grok"),
-            Some("grok-4.5-internal"),
-            "ollama",
-            "llama3.2",
-        );
-        assert_eq!(w.backend.as_deref(), Some("grok"));
-        assert_eq!(w.model.as_deref(), Some("grok-4.5-internal"));
+        let w = resolve_worker_llm(Some("ollama"), Some("tiny"), "ollama", "other");
+        assert_eq!(w.backend.as_deref(), Some("ollama"));
+        assert_eq!(w.model.as_deref(), Some("tiny"));
     }
 
     #[test]
     fn future_claude_provider_is_preserved() {
-        let w = resolve_worker_llm(Some("claude"), Some("claude-opus-4"), "off", "");
+        let w = resolve_worker_llm(Some("claude"), Some("any"), "off", "");
         assert_eq!(w.backend.as_deref(), Some("claude"));
-        assert_eq!(w.model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(w.model.as_deref(), Some("any"));
     }
 
     #[test]
-    fn plan_grok_wins_over_workspace_ollama_and_off() {
-        let w = resolve_worker_llm(Some("grok"), Some("grok-4.5"), "ollama", "llama3.2");
+    fn plan_ollama_wins_over_workspace_and_off() {
+        let w = resolve_worker_llm(Some("ollama"), Some("tiny"), "ollama", "other");
         assert_eq!(
             w.backend.as_deref(),
-            Some("grok"),
+            Some("ollama"),
             "plan LLM is the product source of truth, not Settings / API env"
         );
-        assert_eq!(w.model.as_deref(), Some("grok-4.5"));
-        let off = resolve_worker_llm(Some("grok"), Some("grok-4.5"), "off", "");
-        assert_eq!(off.backend.as_deref(), Some("grok"));
+        assert_eq!(w.model.as_deref(), Some("tiny"));
+        let off = resolve_worker_llm(Some("ollama"), Some("tiny"), "off", "");
+        assert_eq!(off.backend.as_deref(), Some("ollama"));
     }
 
     #[test]
@@ -1527,6 +1537,10 @@ mod tests {
         assert_eq!(normalize_provider("none"), None);
         assert_eq!(normalize_provider("bash"), None);
         assert_eq!(normalize_provider("xai").as_deref(), Some("grok"));
+        assert_eq!(harness_for_backend(Some("claude")), "claude");
+        assert_eq!(harness_for_backend(Some("ollama")), "ollama");
+        assert_eq!(harness_for_backend(Some("openai")), "mock");
+        assert_eq!(harness_for_backend(None), "mock");
         assert_eq!(normalize_provider("GROK").as_deref(), Some("grok"));
         assert_eq!(normalize_provider("ollama").as_deref(), Some("ollama"));
     }
@@ -1800,8 +1814,8 @@ mod tests {
             task_spec: None,
             persona_name: None,
             persona_md: None,
-            agent_backend: Some("grok".into()),
-            agent_model: Some("grok-4.5".into()),
+            agent_backend: Some("ollama".into()),
+            agent_model: Some("tiny".into()),
             io: crate::sandbox::io::IntegrationHandle::none(),
         };
         let job = AgentJob::start(&req);

@@ -94,10 +94,11 @@ pub fn render_team_md(you: &str, members: &[TeamMember]) -> String {
     out.push_str(
         "## How to work together\n\
          - Do **only your** task. Do not redo a teammate’s job.\n\
-         - **Talk to live teammates.** Use `send_message` (to=`t1` or to=`*` for everyone) and `ask_teammate` when you need a contract, path, or decision *now*. They see it on their next thinking round.\n\
-         - If someone asks you a question, reply with `send_message` and `reply_to` set to their message id. Do not ignore asks.\n\
+         - **Talk to live teammates.** Run `./fleet-tool.sh chat-post t1 'question'` (or to=`*`). Read replies with `./fleet-tool.sh chat-list`.\n\
+         - If someone asks you a question, reply — do not ignore asks.\n\
          - **Shared artifacts live in `work/`.** That is the same folder the whole team is building. Read it before writing. Dependents inherit those files.\n\
-         - Reviewers: if the work is not good enough, call `request_changes` (they get sent back with your notes). Do not rubber-stamp.\n\
+         - Reviewers: if the work is not good enough, run `./fleet-tool.sh request-changes 'why'` (they get sent back with your notes). Do not rubber-stamp.\n\
+         - Connected apps: `./fleet-tool.sh integration github list_issues '{}'` — tokens stay on the control plane.\n\
          - If someone is `in progress`, ask them — do not silently redo their slice.\n\
          - If you depend on others, read `work/`, `handoff/`, and `TEAM_CHAT.md` before continuing.\n\
          - End with `result.md` so the next specialist can pick up.\n\
@@ -406,7 +407,7 @@ mod tests {
         assert!(md.contains("Do **only your** task"));
         assert!(md.contains("Talk to live teammates"));
         assert!(md.contains("work/"));
-        assert!(md.contains("request_changes"));
+        assert!(md.contains("request-changes"));
         assert!(md.contains("You wait on / use output from: `t1`"));
     }
 
