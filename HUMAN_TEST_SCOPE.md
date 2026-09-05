@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `124fd7dc7865e925b1e0d831732eb886c52bdf00`
-- Tree-id: `062b42f7114b7af705cf88c79809fefef6a02bcf`
+- Tree-id: `bb95f8588eca7c9876fde3395ae9f131ecfa461a-87c4939e483b`
 
 ## Scenes
 
@@ -59,6 +59,7 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-chat-md/src/lib.rs` | `chat` |
 | `crates/fleet-driver/tests/worker_protocol.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-host/src/hardware.rs` | `runners` |
+| `crates/fleet-host/src/paths.rs` | `runners` |
 | `crates/fleet-integrations/src/proxy/apps/asana/client.rs` | `integrations` |
 | `crates/fleet-integrations/src/proxy/apps/asana/mod.rs` | `integrations` |
 | `crates/fleet-integrations/src/proxy/apps/asana/tools/tasks.rs` | `integrations` |
@@ -117,11 +118,14 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-orchestrator/src/store/mod.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/store/pool.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/store/tick_ops.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/api_integration.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/assignable_runner.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/e2e_matrix.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/git_config_patch.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/host_picker_product.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/host_pool_spawn.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/host_update_tick.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/tick_integration.rs` | `fleet` |
 | `crates/fleet-runners-view/src/lib.rs` | `runners` |
 | `crates/fleet-runners-view/src/placeholders.rs` | `runners` |
 | `crates/fleet-server/src/cases.rs` | `cases` |
@@ -144,7 +148,6 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-ui/src/pages/inbox/api.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/inbox/page.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/integrations/api.rs` | `integrations` |
-| `crates/fleet-ui/src/pages/integrations/oauth_done.rs` | `integrations` |
 | `crates/fleet-ui/src/pages/runners/partners/api.rs` | `partners` |
 | `crates/fleet-ui/src/pages/runners/self_hosted/api.rs` | `runners` |
 | `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |

@@ -297,12 +297,28 @@ pub fn pick_assignable_runner(
     pick_assignable_runner_for(hosts, in_flight, IsolationClass::Process)
 }
 
-/// Wraps [`select_assignable_host`]. Tick fallback is unchanged.
+/// V1 tick: native host-runtime only. A box that only advertises
+/// container must not win `select_assignable_runner`.
 /// Cloud / Partners / public-cloud cannot be chosen.
 pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
-    select_assignable_host(store, project_id)
-        .await
-        .filter(|chosen| chosen.host.isolation.is_assignable())
+    let hosts = list_assignable_hosts(store, project_id).await?;
+    let need = workspace_need(store, project_id).await;
+    let host_only: Vec<AssignableHost> = hosts
+        .into_iter()
+        .filter(|h| h.isolation.is_assignable())
+        .filter(|h| effective_runtime_for(h, need) == Some(HostRuntime::Host))
+        .collect();
+    if host_only.is_empty() {
+        return None;
+    }
+    let in_flight = count_remote_in_flight(store).await?;
+    pick_assignable_host_in(
+        &host_only,
+        &in_flight,
+        IsolationClass::Process,
+        Some(project_id),
+    )
+    .filter(|chosen| chosen.runtime == HostRuntime::Host)
 }
 
 /// Use `preferred` when that host is still assignable on this plane URL;

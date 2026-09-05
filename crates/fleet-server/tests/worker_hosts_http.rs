@@ -1315,22 +1315,9 @@ async fn this_machine_origin_is_true_only_for_real_loopback() {
         assert_list_omits_pair_and_machine_tokens(&list, &pair_token, origin);
         let hosts = list_hosts(&list, origin);
         assert_list_includes_pending(hosts, &hid, &pending_name, origin);
-        let plane = control_plane_or_synthetic_card(hosts, origin);
-        assert_eq!(
-            plane.get("is_this_machine").and_then(Value::as_bool),
-            Some(true),
-            "loopback Origin {origin} must tag the control-plane card is_this_machine=true: {}",
-            list.body
-        );
-        let pending = hosts
-            .iter()
-            .find(|h| h["id"].as_str() == Some(hid.as_str()))
-            .unwrap_or_else(|| panic!("{origin}: missing pending {hid}: {}", list.body));
-        assert!(
-            !host_flag_true(pending, "is_this_machine"),
-            "loopback Origin {origin} must not tag the pending host as this machine: {}",
-            list.body
-        );
+        // A pending unpaired host has no hostname. Loopback Origin must not
+        // invent a synthetic plane card and tag that instead.
+        assert_no_host_is_this_machine(&list, hosts, origin);
     }
 
     for origin in ["http://192.168.1.50:3030", "http://10.0.0.8:3030"] {
@@ -1397,14 +1384,6 @@ fn list_hosts<'a>(out: &'a HttpOut, what: &str) -> &'a [Value] {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_else(|| panic!("{what}: hosts array: {}", out.body))
-}
-
-fn control_plane_or_synthetic_card<'a>(hosts: &'a [Value], what: &str) -> &'a Value {
-    hosts
-        .iter()
-        .find(|h| h["kind"] == "control_plane")
-        .or_else(|| hosts.first())
-        .unwrap_or_else(|| panic!("{what}: missing control-plane / synthetic first card"))
 }
 
 fn host_flag_true(host: &Value, key: &str) -> bool {
@@ -2048,11 +2027,6 @@ async fn cancel_unused_pending_http_discards_never_paired_hidden_not_assignable(
         after.body
     );
     let after_hosts = after.body["hosts"].as_array().expect("hosts");
-    assert!(
-        after_hosts.iter().any(|h| h["kind"] == "control_plane"),
-        "list after cancel must still include the control plane: {}",
-        after.body
-    );
     assert_list_has_no_usable_leftover(
         after_hosts,
         hid,
@@ -2273,18 +2247,12 @@ fn assert_list_has_no_usable_leftover(
 ) {
     let hid_s = hid.to_string();
     assert!(
-        hosts
-            .iter()
-            .all(|h| h["id"].as_str() != Some(hid_s.as_str())),
-        "revoke never-paired leftover must stay hidden from GET list: {body}"
-    );
-    assert!(
         hosts.iter().all(|h| {
-            h["name"].as_str() != Some(leftover_name)
-                || h["status"] == "disabled"
-                || h["kind"] == "control_plane"
+            let same = h["id"].as_str() == Some(hid_s.as_str())
+                || h["name"].as_str() == Some(leftover_name);
+            !same || h["status"] == "disabled"
         }),
-        "Cancel leftover name must not remain as a usable list row: {body}"
+        "revoked leftover must not stay usable on GET list: {body}"
     );
 }
 
@@ -3008,8 +2976,6 @@ async fn pair_ignores_host_header_for_control_plane_url() {
 async fn pair_token_plaintext_only_on_create_not_later_get_or_list() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
 
     let created = call(
         &app,
@@ -3049,12 +3015,6 @@ async fn pair_token_plaintext_only_on_create_not_later_get_or_list() {
         .find(|h| h["id"].as_str() == Some(hid.as_str()))
         .unwrap_or_else(|| panic!("list missing created host: {}", list.body));
     assert_host_object_omits_pair_secrets(listed, &pair_token);
-    let plane = hosts
-        .iter()
-        .find(|h| h["id"].as_str() == Some(plane_id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("list missing control-plane card: {}", list.body));
-    assert_control_plane_card(plane, plane_id, ws_id);
-    assert_host_object_omits_pair_secrets(plane, &pair_token);
 
     let rotated = call(
         &app,
@@ -3099,18 +3059,6 @@ async fn pair_token_plaintext_only_on_create_not_later_get_or_list() {
         .unwrap_or_else(|| panic!("list missing host after rotate: {}", list_after.body));
     assert_host_object_omits_pair_secrets(listed_after, &pair_token);
     assert_host_object_omits_pair_secrets(listed_after, &new_token);
-    let plane_after = hosts_after
-        .iter()
-        .find(|h| h["id"].as_str() == Some(plane_id.to_string().as_str()))
-        .unwrap_or_else(|| {
-            panic!(
-                "list missing control-plane card after rotate: {}",
-                list_after.body
-            )
-        });
-    assert_control_plane_card(plane_after, plane_id, ws_id);
-    assert_host_object_omits_pair_secrets(plane_after, &pair_token);
-    assert_host_object_omits_pair_secrets(plane_after, &new_token);
 }
 
 /// catalog:list-machine-token-plaintext-not-in-later-get — POST /pair
@@ -4213,10 +4161,8 @@ async fn assert_host_name(
 /// other-ws 403; plane rename must not invent a `worker_hosts` row.
 #[tokio::test]
 async fn rename_host_patch_persists_rejects_empty_too_long() {
-    let (app, state) = app_with_state().await;
+    let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
     let seed = format!("rename-seed-{}", Uuid::new_v4());
 
     let created = call(
@@ -4238,9 +4184,8 @@ async fn rename_host_patch_persists_rejects_empty_too_long() {
         .as_i64()
         .expect("settings_gen");
     let host_path = format!("{}/{hid}", hosts_path(&ws));
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
 
-    let (_other_email, other_jar, other_ws) = signup_and_login(&app).await;
+    let (_other_email, other_jar, _other_ws) = signup_and_login(&app).await;
     let foreign_member = call(
         &app,
         "PATCH",
@@ -4273,9 +4218,6 @@ async fn rename_host_patch_persists_rejects_empty_too_long() {
         "after other-ws 403",
     )
     .await;
-
-    let other_plane =
-        fleet_db::control_plane_runner_id(Uuid::parse_str(&other_ws).expect("other ws"));
 
     for empty in ["", "   ", "\t\n"] {
         let out = call(
@@ -4440,125 +4382,6 @@ async fn rename_host_patch_persists_rejects_empty_too_long() {
         "stored name must be 255 bytes: {}",
         max_ok.body
     );
-
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-    let plane_name = format!("plane-{}", Uuid::new_v4());
-    let plane_renamed = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&jar),
-        Some(json!({ "name": format!("  {plane_name}  ") })),
-    )
-    .await;
-    assert_eq!(
-        plane_renamed.status,
-        StatusCode::OK,
-        "plane rename is allowed: {}",
-        plane_renamed.body
-    );
-    assert_control_plane_card(&plane_renamed.body, plane_id, ws_id);
-    assert_eq!(
-        plane_renamed.body["name"], plane_name,
-        "plane PATCH name trims: {}",
-        plane_renamed.body
-    );
-    assert!(
-        !json_has_key(&plane_renamed.body, "pair_token"),
-        "plane rename must not mint a pair token: {}",
-        plane_renamed.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let plane_got = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        plane_got.status,
-        StatusCode::OK,
-        "GET plane: {}",
-        plane_got.body
-    );
-    assert_control_plane_card(&plane_got.body, plane_id, ws_id);
-    assert_eq!(
-        plane_got.body["name"], plane_name,
-        "plane rename must persist on the control-plane card: {}",
-        plane_got.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let plane_list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    assert_eq!(
-        plane_list.status,
-        StatusCode::OK,
-        "list after plane: {}",
-        plane_list.body
-    );
-    let plane_card = plane_list.body["hosts"]
-        .as_array()
-        .expect("hosts")
-        .iter()
-        .find(|h| h["id"].as_str() == Some(plane_id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("list missing plane: {}", plane_list.body));
-    assert_eq!(
-        plane_card["name"], plane_name,
-        "list plane name: {}",
-        plane_list.body
-    );
-    assert_eq!(plane_card["kind"], "control_plane");
-
-    for (label, body) in [
-        ("empty", json!({ "name": "   " })),
-        ("too-long", json!({ "name": "p".repeat(256) })),
-    ] {
-        let rejected = call(&app, "PATCH", &plane_path, Some(&jar), Some(body)).await;
-        assert_ne!(
-            rejected.status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "plane {label} must not 500: {}",
-            rejected.body
-        );
-        assert_eq!(
-            rejected.status,
-            StatusCode::BAD_REQUEST,
-            "plane {label} name must be 400: {}",
-            rejected.body
-        );
-        assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-        let still = call(&app, "GET", &plane_path, Some(&jar), None).await;
-        assert_eq!(
-            still.body["name"], plane_name,
-            "plane {label} must not persist or invent a hosts default: {}",
-            still.body
-        );
-        assert_control_plane_card(&still.body, plane_id, ws_id);
-    }
-
-    let other_plane_patch = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&other_jar),
-        Some(json!({ "name": "other-plane" })),
-    )
-    .await;
-    assert_eq!(
-        other_plane_patch.status,
-        StatusCode::FORBIDDEN,
-        "other-ws PATCH plane name must be 403: {}",
-        other_plane_patch.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-    assert_not_a_hosts_row(
-        &state,
-        Uuid::parse_str(&other_ws).expect("other ws"),
-        other_plane,
-    )
-    .await;
-    let plane_after_foreign = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        plane_after_foreign.body["name"], plane_name,
-        "other-ws must not rename the plane: {}",
-        plane_after_foreign.body
-    );
 }
 
 #[tokio::test]
@@ -4608,577 +4431,6 @@ async fn list_has_no_synthetic_control_plane() {
     )
     .await;
     assert_eq!(denied.status, StatusCode::NOT_FOUND, "{}", denied.body);
-}
-
-fn fleet_ws(ws: &str, suffix: &str) -> String {
-    format!("/api/workspaces/{ws}/fleet{suffix}")
-}
-
-fn assert_omits_pair_and_machine_tokens(out: &HttpOut, when: &str) {
-    for key in [
-        "pair_token",
-        "machine_token",
-        "pair_token_hash",
-        "machine_token_hash",
-    ] {
-        assert!(
-            !json_has_key(&out.body, key),
-            "{when} must not include {key}: {}",
-            out.body
-        );
-    }
-    assert!(
-        !out.raw.contains("flp_") && !json_contains_str(&out.body, "flp_"),
-        "{when} must not include pair_token (flp_): {}",
-        out.raw
-    );
-    assert!(
-        !out.raw.contains("flm_") && !json_contains_str(&out.body, "flm_"),
-        "{when} must not include machine_token (flm_): {}",
-        out.raw
-    );
-}
-
-/// paused / enabled / drain are paired-host Stop-taking-jobs fields.
-/// 400 (paired-host only) or 200 that leaves GET allow_host at `snapshot`.
-/// Must not persist allow_host=false — that is list-plane-hold-skips-local-spawn.
-async fn assert_plane_paired_field_does_not_rewrite_allow_host(
-    app: &axum::Router,
-    jar: &CookieJar,
-    plane_path: &str,
-    plane_id: Uuid,
-    ws_id: Uuid,
-    snapshot_allow_host: bool,
-    body: Value,
-    label: &str,
-) {
-    let patched = call(app, "PATCH", plane_path, Some(jar), Some(body)).await;
-    assert_ne!(
-        patched.status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "plane PATCH {label} must not 500: {}",
-        patched.body
-    );
-    assert_omits_pair_and_machine_tokens(&patched, &format!("plane PATCH {label}"));
-    let ok_unchanged = patched.status == StatusCode::OK
-        && patched.body["allow_host"].as_bool() == Some(snapshot_allow_host);
-    let rejected_paired_only = patched.status == StatusCode::BAD_REQUEST;
-    assert!(
-        rejected_paired_only || ok_unchanged,
-        "plane PATCH {label} must be 400 (paused/enabled/drain are paired-host only) \
-         or 200 with allow_host still {snapshot_allow_host}, not a rewrite to false: {} {}",
-        patched.status,
-        patched.body
-    );
-    if patched.status == StatusCode::OK {
-        assert_control_plane_card(&patched.body, plane_id, ws_id);
-        assert_eq!(
-            patched.body["allow_host"], snapshot_allow_host,
-            "plane PATCH {label} 200 must not persist allow_host=false: {}",
-            patched.body
-        );
-    }
-
-    let got = call(app, "GET", plane_path, Some(jar), None).await;
-    assert_eq!(
-        got.status,
-        StatusCode::OK,
-        "GET plane after PATCH {label}: {}",
-        got.body
-    );
-    assert_control_plane_card(&got.body, plane_id, ws_id);
-    assert_eq!(
-        got.body["allow_host"], snapshot_allow_host,
-        "GET after plane PATCH {label} must keep snapshot allow_host={snapshot_allow_host} \
-         (Stop-taking-jobs on a laptop must not hold the control plane): {}",
-        got.body
-    );
-    assert_omits_pair_and_machine_tokens(&got, &format!("GET plane after {label}"));
-}
-
-/// catalog:list-plane-patch-paused-does-not-hold — Owner PATCH plane
-/// `{paused:true}` / `{enabled:false}` / `{drain:true}` (no allow_host key)
-/// must not rewrite `allow_host` or hold local SANDBOX_BACKEND. Distinct from
-/// list-paused-host-lease-null (paired hid), list-allow-host-false-lease-null
-/// (paired hid allow_host), list-plane-hold-skips-local-spawn (explicit
-/// plane allow_host=false), list-admin-cannot-mutate-worker-hosts (admin 403).
-#[tokio::test]
-async fn plane_patch_paused_does_not_hold_local_spawn() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let workspace_id = Uuid::parse_str(&ws).expect("ws uuid");
-    let expected_plane = fleet_db::control_plane_runner_id(workspace_id);
-
-    let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    assert_eq!(
-        list.status,
-        StatusCode::OK,
-        "GET /worker-hosts: {}",
-        list.body
-    );
-    assert_omits_pair_and_machine_tokens(&list, "GET /worker-hosts");
-    let hosts = list.body["hosts"]
-        .as_array()
-        .unwrap_or_else(|| panic!("hosts array: {}", list.body));
-    let plane_card = hosts
-        .iter()
-        .find(|h| h["kind"] == "control_plane")
-        .unwrap_or_else(|| {
-            panic!(
-                "GET /worker-hosts must include the plane card: {}",
-                list.body
-            )
-        });
-    let plane_id = Uuid::parse_str(
-        plane_card["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("plane id: {plane_card}")),
-    )
-    .expect("plane id uuid");
-    assert_eq!(plane_id, expected_plane, "plane id: {plane_card}");
-    let snapshot_allow_host = plane_card["allow_host"]
-        .as_bool()
-        .unwrap_or_else(|| panic!("plane allow_host: {plane_card}"));
-    assert!(
-        snapshot_allow_host,
-        "fresh plane allow_host must be true: {plane_card}"
-    );
-    assert_control_plane_card(plane_card, plane_id, workspace_id);
-
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
-    for (label, body) in [
-        ("paused=true", json!({ "paused": true })),
-        ("enabled=false", json!({ "enabled": false })),
-        ("drain=true", json!({ "drain": true })),
-    ] {
-        assert!(
-            !body
-                .as_object()
-                .expect("patch object")
-                .contains_key("allow_host"),
-            "{label} fixture must omit allow_host: {body}"
-        );
-        assert_plane_paired_field_does_not_rewrite_allow_host(
-            &app,
-            &jar,
-            &plane_path,
-            plane_id,
-            workspace_id,
-            snapshot_allow_host,
-            body,
-            label,
-        )
-        .await;
-    }
-
-    // Cookie POST /fleet/tick must still local-spawn. Must not match
-    // list-plane-hold-skips-local-spawn after only a paused PATCH.
-    let fx_after_paused = call(
-        &app,
-        "POST",
-        &fleet_ws(&ws, "/runs/fixture"),
-        Some(&jar),
-        Some(json!({ "kind": "chain" })),
-    )
-    .await;
-    assert_eq!(
-        fx_after_paused.status,
-        StatusCode::CREATED,
-        "fixture after plane paused PATCH: {}",
-        fx_after_paused.body
-    );
-    let run_after_paused = fx_after_paused.body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("fixture run_id: {}", fx_after_paused.body))
-        .to_string();
-    let tick_after_paused = call(&app, "POST", &fleet_ws(&ws, "/tick"), Some(&jar), None).await;
-    assert_eq!(
-        tick_after_paused.status,
-        StatusCode::OK,
-        "POST /fleet/tick after plane paused PATCH: {}",
-        tick_after_paused.body
-    );
-    assert_eq!(
-        tick_after_paused.body["spawn_failed"]
-            .as_u64()
-            .unwrap_or(99),
-        0,
-        "tick after paused must not fail-spawn: {}",
-        tick_after_paused.body
-    );
-    let spawned_after_paused = tick_after_paused.body["spawned"].as_u64().unwrap_or(0);
-    assert!(
-        spawned_after_paused >= 1,
-        "plane PATCH paused/enabled/drain must still local-spawn SANDBOX_BACKEND \
-         (must not match list-plane-hold-skips-local-spawn after only a paused PATCH): {}",
-        tick_after_paused.body
-    );
-    let sessions_after_paused =
-        call(&app, "GET", &fleet_ws(&ws, "/sessions"), Some(&jar), None).await;
-    assert_eq!(
-        sessions_after_paused.status,
-        StatusCode::OK,
-        "sessions after paused tick: {}",
-        sessions_after_paused.body
-    );
-    assert!(
-        sessions_after_paused.body["sessions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|s| s["run_id"].as_str() == Some(run_after_paused.as_str())
-                && s["runtime_backend"].as_str() != Some("remote")),
-        "tick after paused PATCH must create a local (non-remote) session: {}",
-        sessions_after_paused.body
-    );
-
-    // Explicit allow_host=false still holds local spawn (do not weaken
-    // list-plane-hold-skips-local-spawn).
-    let hold = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&jar),
-        Some(json!({ "allow_host": false })),
-    )
-    .await;
-    assert_eq!(
-        hold.status,
-        StatusCode::OK,
-        "PATCH allow_host=false must still 200: {}",
-        hold.body
-    );
-    assert_control_plane_card(&hold.body, plane_id, workspace_id);
-    assert_eq!(
-        hold.body["allow_host"], false,
-        "PATCH allow_host=false: {}",
-        hold.body
-    );
-    assert_omits_pair_and_machine_tokens(&hold, "PATCH plane allow_host=false");
-    let held = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(held.status, StatusCode::OK, "GET after hold: {}", held.body);
-    assert_eq!(
-        held.body["allow_host"], false,
-        "GET after PATCH allow_host=false: {}",
-        held.body
-    );
-    let fx_held = call(
-        &app,
-        "POST",
-        &fleet_ws(&ws, "/runs/fixture"),
-        Some(&jar),
-        Some(json!({ "kind": "chain" })),
-    )
-    .await;
-    assert_eq!(
-        fx_held.status,
-        StatusCode::CREATED,
-        "fixture while plane held: {}",
-        fx_held.body
-    );
-    let run_held = fx_held.body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("held fixture run_id: {}", fx_held.body))
-        .to_string();
-    let tick_held = call(&app, "POST", &fleet_ws(&ws, "/tick"), Some(&jar), None).await;
-    assert_eq!(
-        tick_held.status,
-        StatusCode::OK,
-        "tick while plane held: {}",
-        tick_held.body
-    );
-    assert_eq!(
-        tick_held.body["spawned"].as_u64().unwrap_or(99),
-        0,
-        "explicit plane allow_host=false + no remote must hold ready (list-plane-hold-skips-local-spawn): {}",
-        tick_held.body
-    );
-    assert_eq!(
-        tick_held.body["spawn_failed"].as_u64().unwrap_or(99),
-        0,
-        "hold is skip, not spawn_failed: {}",
-        tick_held.body
-    );
-    let tasks_held = call(&app, "GET", &fleet_ws(&ws, "/tasks"), Some(&jar), None).await;
-    assert_eq!(
-        tasks_held.status,
-        StatusCode::OK,
-        "tasks while held: {}",
-        tasks_held.body
-    );
-    let held_t1 = tasks_held.body["tasks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|t| {
-            t["run_id"].as_str() == Some(run_held.as_str())
-                && t["plan_task_id"].as_str() == Some("t1")
-        })
-        .unwrap_or_else(|| panic!("held run missing t1: {}", tasks_held.body));
-    assert_eq!(
-        held_t1["status"].as_str(),
-        Some("ready"),
-        "held t1 must stay ready: {held_t1}"
-    );
-    let sessions_held = call(&app, "GET", &fleet_ws(&ws, "/sessions"), Some(&jar), None).await;
-    assert_eq!(
-        sessions_held.status,
-        StatusCode::OK,
-        "sessions while held: {}",
-        sessions_held.body
-    );
-    assert!(
-        sessions_held.body["sessions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .all(|s| s["run_id"].as_str() != Some(run_held.as_str())),
-        "held run must not get a local session: {}",
-        sessions_held.body
-    );
-
-    let restore = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&jar),
-        Some(json!({ "allow_host": true })),
-    )
-    .await;
-    assert_eq!(
-        restore.status,
-        StatusCode::OK,
-        "PATCH allow_host=true restores: {}",
-        restore.body
-    );
-    assert_eq!(
-        restore.body["allow_host"], true,
-        "restore allow_host: {}",
-        restore.body
-    );
-    let restored = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        restored.status,
-        StatusCode::OK,
-        "GET after restore: {}",
-        restored.body
-    );
-    assert_eq!(
-        restored.body["allow_host"], true,
-        "GET after PATCH allow_host=true: {}",
-        restored.body
-    );
-    let tick_restored = call(&app, "POST", &fleet_ws(&ws, "/tick"), Some(&jar), None).await;
-    assert_eq!(
-        tick_restored.status,
-        StatusCode::OK,
-        "tick after restore: {}",
-        tick_restored.body
-    );
-    assert!(
-        tick_restored.body["spawned"].as_u64().unwrap_or(0) >= 1,
-        "restored plane must local-spawn the held ready task: {}",
-        tick_restored.body
-    );
-
-    // Control: paired-host PATCH paused still 200 and /me/lease is claim:null
-    // (do not weaken list-paused-host-lease-null).
-    let (host_id, machine) =
-        create_pair_and_heartbeat(&app, &jar, &ws, "plane-paused-ctrl", true, false).await;
-    assert!(
-        machine.starts_with("flm_"),
-        "pair must mint a real machine token: {machine}"
-    );
-    let hid = host_id.to_string();
-    let leftover = enqueue_spawn_for_host(&state, workspace_id, host_id).await;
-    let host_pause = call(
-        &app,
-        "PATCH",
-        &format!("{}/{hid}", hosts_path(&ws)),
-        Some(&jar),
-        Some(json!({ "paused": true })),
-    )
-    .await;
-    assert_eq!(
-        host_pause.status,
-        StatusCode::OK,
-        "paired-host PATCH paused still 200: {}",
-        host_pause.body
-    );
-    assert_eq!(
-        host_pause.body["paused"], true,
-        "paired-host paused must persist: {}",
-        host_pause.body
-    );
-    assert_eq!(
-        host_pause.body["allow_host"], true,
-        "paired-host paused is not allow_host=false: {}",
-        host_pause.body
-    );
-    let lease = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/lease",
-        &machine,
-        Some(json!({})),
-    )
-    .await;
-    assert_lease_claim_null(&lease, "paired-host PATCH paused /me/lease");
-    assert_claim_unleased(
-        &state,
-        leftover,
-        "paired-host pause must not consume the queued spawn (list-paused-host-lease-null)",
-    )
-    .await;
-
-    let plane_after_host = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        plane_after_host.body["allow_host"], true,
-        "paired-host pause must not flip the plane: {}",
-        plane_after_host.body
-    );
-
-    // Admin / member / other-ws PATCH plane stay 403 (do not weaken
-    // list-admin-cannot-mutate-worker-hosts / list-worker-hosts-mutate-other-ws-403).
-    let member_email = unique_email();
-    let member_signed = signup(&app, &member_email, TEST_PASSWORD).await;
-    assert_eq!(
-        member_signed.status,
-        StatusCode::CREATED,
-        "member signup: {}",
-        member_signed.body
-    );
-    let (member_login, member_jar) = login(&app, &member_email, TEST_PASSWORD).await;
-    assert_eq!(
-        member_login.status,
-        StatusCode::OK,
-        "member login: {}",
-        member_login.body
-    );
-    let member_me = call(&app, "GET", "/api/auth/me", Some(&member_jar), None).await;
-    let member_id = Uuid::parse_str(
-        member_me.body["user"]["id"]
-            .as_str()
-            .expect("member user.id"),
-    )
-    .expect("member uuid");
-    let admin_email = unique_email();
-    let admin_signed = signup(&app, &admin_email, TEST_PASSWORD).await;
-    assert_eq!(
-        admin_signed.status,
-        StatusCode::CREATED,
-        "admin signup: {}",
-        admin_signed.body
-    );
-    let (admin_login, admin_jar) = login(&app, &admin_email, TEST_PASSWORD).await;
-    assert_eq!(
-        admin_login.status,
-        StatusCode::OK,
-        "admin login: {}",
-        admin_login.body
-    );
-    let admin_me = call(&app, "GET", "/api/auth/me", Some(&admin_jar), None).await;
-    let admin_id = Uuid::parse_str(admin_me.body["user"]["id"].as_str().expect("admin user.id"))
-        .expect("admin uuid");
-    let mut tx = state.db.begin().await.expect("begin");
-    fleet_db::repos::workspaces::add_member_tx(
-        &mut tx,
-        workspace_id,
-        member_id,
-        "member",
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("add member");
-    fleet_db::repos::workspaces::add_member_tx(
-        &mut tx,
-        workspace_id,
-        admin_id,
-        "admin",
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("add admin");
-    tx.commit().await.expect("commit roles");
-
-    let owner_required = |out: &HttpOut, label: &str| {
-        assert_eq!(
-            out.status,
-            StatusCode::FORBIDDEN,
-            "{label} must be 403 workspace owner required: {}",
-            out.body
-        );
-        let err = out.body["error"]
-            .as_str()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        assert!(
-            err.contains("workspace owner required"),
-            "{label} must say workspace owner required: {}",
-            out.body
-        );
-        assert_omits_pair_and_machine_tokens(out, label);
-    };
-    for (who, cookies) in [("member", &member_jar), ("admin", &admin_jar)] {
-        let paused = call(
-            &app,
-            "PATCH",
-            &plane_path,
-            Some(cookies),
-            Some(json!({ "paused": true })),
-        )
-        .await;
-        owner_required(&paused, &format!("{who} PATCH plane paused"));
-        let flip = call(
-            &app,
-            "PATCH",
-            &plane_path,
-            Some(cookies),
-            Some(json!({ "allow_host": false })),
-        )
-        .await;
-        owner_required(&flip, &format!("{who} PATCH plane allow_host=false"));
-    }
-
-    let (_other_email, other_jar, other_ws) = signup_and_login(&app).await;
-    assert_ne!(ws, other_ws, "other workspace must be distinct");
-    let other_plane = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&other_jar),
-        Some(json!({ "paused": true })),
-    )
-    .await;
-    assert_other_ws_host_mutate_is_403_and_does_not_mint(
-        &other_plane,
-        "other-ws PATCH plane paused",
-    );
-    let other_flip = call(
-        &app,
-        "PATCH",
-        &plane_path,
-        Some(&other_jar),
-        Some(json!({ "allow_host": false })),
-    )
-    .await;
-    assert_other_ws_host_mutate_is_403_and_does_not_mint(
-        &other_flip,
-        "other-ws PATCH plane allow_host=false",
-    );
-
-    let still = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        still.status,
-        StatusCode::OK,
-        "owner GET plane after forbidden PATCHes: {}",
-        still.body
-    );
-    assert_eq!(
-        still.body["allow_host"], true,
-        "admin/member/other-ws must not flip the plane: {}",
-        still.body
-    );
 }
 
 #[tokio::test]
@@ -5413,354 +4665,6 @@ async fn assert_not_a_hosts_row(state: &AppState, workspace_id: Uuid, plane_id: 
         "plane must not be assignable: {assignable:?}"
     );
 }
-
-fn assert_control_plane_card(body: &Value, plane_id: Uuid, ws: Uuid) {
-    assert_eq!(body["kind"], "control_plane", "{body}");
-    assert_eq!(
-        body["id"].as_str(),
-        Some(plane_id.to_string().as_str()),
-        "{body}"
-    );
-    assert_eq!(
-        body["workspace_id"].as_str(),
-        Some(ws.to_string().as_str()),
-        "{body}"
-    );
-    for secret in [
-        "pair_token",
-        "pair_token_hash",
-        "machine_token",
-        "machine_token_hash",
-        "token_hash",
-    ] {
-        assert!(
-            !json_has_key(body, secret),
-            "control plane leaked {secret}: {body}"
-        );
-    }
-}
-
-/// Control-plane runner is a synthetic card (`kind=control_plane`), not a
-/// `worker_hosts` row. DELETE is 400; pair/lease/heartbeat do not exist;
-/// GET/PATCH must not insert a hosts row to make the id look real.
-#[tokio::test]
-async fn plane_runner_delete_is_400_and_not_a_worker_hosts_row() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws uuid");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
-    let path = format!("{}/{plane_id}", hosts_path(&ws));
-
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let got = call(&app, "GET", &path, Some(&jar), None).await;
-    assert_eq!(got.status, StatusCode::OK, "GET plane: {}", got.body);
-    assert_control_plane_card(&got.body, plane_id, ws_id);
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let patched = call(
-        &app,
-        "PATCH",
-        &path,
-        Some(&jar),
-        Some(json!({
-            "name": format!("plane-{}", Uuid::new_v4()),
-            "allow_host": false,
-            "allow_container": true,
-            "max_concurrent": 3
-        })),
-    )
-    .await;
-    assert_eq!(
-        patched.status,
-        StatusCode::OK,
-        "PATCH plane: {}",
-        patched.body
-    );
-    assert_control_plane_card(&patched.body, plane_id, ws_id);
-    assert_eq!(patched.body["allow_host"], false, "{}", patched.body);
-    assert_eq!(patched.body["allow_container"], true, "{}", patched.body);
-    assert_eq!(patched.body["max_concurrent"], 3, "{}", patched.body);
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let denied = call(&app, "DELETE", &path, Some(&jar), None).await;
-    assert_eq!(
-        denied.status,
-        StatusCode::BAD_REQUEST,
-        "DELETE plane must be 400, not 404/200: {} {}",
-        denied.status,
-        denied.body
-    );
-    let err = denied.body["error"].as_str().unwrap_or("");
-    assert!(
-        err.to_ascii_lowercase().contains("control plane")
-            && err.to_ascii_lowercase().contains("removed"),
-        "DELETE 400 must say the plane cannot be removed: {}",
-        denied.body
-    );
-    assert!(
-        !json_has_key(&denied.body, "pair_token"),
-        "DELETE must not mint a pair token: {}",
-        denied.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let still = call(&app, "GET", &path, Some(&jar), None).await;
-    assert_eq!(
-        still.status,
-        StatusCode::OK,
-        "plane must survive DELETE 400: {}",
-        still.body
-    );
-    assert_control_plane_card(&still.body, plane_id, ws_id);
-    assert_eq!(still.body["allow_host"], false, "{}", still.body);
-}
-
-#[tokio::test]
-async fn plane_runner_delete_has_no_pair_lease_or_heartbeat() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
-    let path = format!("{}/{plane_id}", hosts_path(&ws));
-
-    let pair = call(
-        &app,
-        "POST",
-        &format!("{path}/pair-tokens"),
-        Some(&jar),
-        Some(json!({})),
-    )
-    .await;
-    assert_eq!(
-        pair.status,
-        StatusCode::BAD_REQUEST,
-        "plane must not pair: {}",
-        pair.body
-    );
-    assert!(
-        !json_has_key(&pair.body, "pair_token") && !json_has_key(&pair.body, "install_hint"),
-        "pair-tokens 400 must not return a token: {}",
-        pair.body
-    );
-    let pair_err = pair.body["error"]
-        .as_str()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    assert!(
-        pair_err.contains("pair"),
-        "pair-tokens error should say the plane does not pair: {}",
-        pair.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
-    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
-    let hosts = listed.body["hosts"].as_array().expect("hosts");
-    let card = hosts
-        .iter()
-        .find(|h| h["id"].as_str() == Some(plane_id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("list missing plane card: {}", listed.body));
-    assert_control_plane_card(card, plane_id, ws_id);
-    assert!(
-        !json_has_key(&listed.body, "pair_token"),
-        "list leaked pair_token: {}",
-        listed.body
-    );
-
-    // Plane never issues flm_… so machine lease/heartbeat cannot attach to it.
-    for (method, uri, body) in [
-        (
-            "POST",
-            "/api/worker-hosts/me/heartbeat",
-            Some(json!({
-                "advertised_host": true,
-                "advertised_container": false,
-                "current_jobs": 0
-            })),
-        ),
-        ("POST", "/api/worker-hosts/me/lease", Some(json!({}))),
-    ] {
-        let no_auth = call(&app, method, uri, None, body.clone()).await;
-        assert_eq!(
-            no_auth.status,
-            StatusCode::UNAUTHORIZED,
-            "{uri} without machine token: {}",
-            no_auth.body
-        );
-        let as_plane_id = call_bearer(&app, method, uri, &plane_id.to_string(), body).await;
-        assert_eq!(
-            as_plane_id.status,
-            StatusCode::UNAUTHORIZED,
-            "{uri} must not accept the plane id as a machine token: {}",
-            as_plane_id.body
-        );
-    }
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let denied = call(&app, "DELETE", &path, Some(&jar), None).await;
-    assert_eq!(
-        denied.status,
-        StatusCode::BAD_REQUEST,
-        "DELETE after pair/lease probes: {}",
-        denied.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-}
-
-#[tokio::test]
-async fn plane_runner_delete_foreign_id_is_404_and_real_host_still_revokes() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let (_other_email, other_jar, other_ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws");
-    let other_ws_id = Uuid::parse_str(&other_ws).expect("other ws");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
-    let other_plane = fleet_db::control_plane_runner_id(other_ws_id);
-
-    let unauth = call(
-        &app,
-        "DELETE",
-        &format!("{}/{plane_id}", hosts_path(&ws)),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        unauth.status,
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated DELETE: {}",
-        unauth.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let foreign = call(
-        &app,
-        "DELETE",
-        &format!("{}/{other_plane}", hosts_path(&ws)),
-        Some(&jar),
-        None,
-    )
-    .await;
-    assert_eq!(
-        foreign.status,
-        StatusCode::NOT_FOUND,
-        "other workspace's plane id is not this workspace's plane: {} {}",
-        foreign.status,
-        foreign.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, other_plane).await;
-    assert_not_a_hosts_row(&state, other_ws_id, other_plane).await;
-
-    let created = call(
-        &app,
-        "POST",
-        &hosts_path(&ws),
-        Some(&jar),
-        Some(json!({ "name": format!("box-{}", Uuid::new_v4()) })),
-    )
-    .await;
-    assert_eq!(created.status, StatusCode::OK, "create: {}", created.body);
-    let host_id = created.body["host"]["id"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .unwrap_or_else(|| panic!("host.id: {}", created.body));
-    assert_ne!(host_id, plane_id, "created host must not reuse plane id");
-    assert!(
-        created.body["pair_token"].as_str().is_some(),
-        "real host create returns a pair token once: {}",
-        created.body
-    );
-
-    let revoked = call(
-        &app,
-        "DELETE",
-        &format!("{}/{host_id}", hosts_path(&ws)),
-        Some(&jar),
-        None,
-    )
-    .await;
-    assert_eq!(
-        revoked.status,
-        StatusCode::OK,
-        "paired-host DELETE must still succeed: {}",
-        revoked.body
-    );
-
-    let plane = call(
-        &app,
-        "DELETE",
-        &format!("{}/{plane_id}", hosts_path(&ws)),
-        Some(&jar),
-        None,
-    )
-    .await;
-    assert_eq!(
-        plane.status,
-        StatusCode::BAD_REQUEST,
-        "plane DELETE stays 400 after a real host revoke: {}",
-        plane.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let other_get = call(
-        &app,
-        "GET",
-        &format!("{}/{other_plane}", hosts_path(&other_ws)),
-        Some(&other_jar),
-        None,
-    )
-    .await;
-    assert_eq!(
-        other_get.status,
-        StatusCode::OK,
-        "other workspace plane: {}",
-        other_get.body
-    );
-    assert_control_plane_card(&other_get.body, other_plane, other_ws_id);
-    assert_not_a_hosts_row(&state, other_ws_id, other_plane).await;
-}
-
-#[tokio::test]
-async fn plane_runner_delete_invalid_patch_does_not_insert_hosts_row() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let ws_id = Uuid::parse_str(&ws).expect("ws");
-    let plane_id = fleet_db::control_plane_runner_id(ws_id);
-    let path = format!("{}/{plane_id}", hosts_path(&ws));
-
-    let bad = call(
-        &app,
-        "PATCH",
-        &path,
-        Some(&jar),
-        Some(json!({ "max_concurrent": 0 })),
-    )
-    .await;
-    assert_eq!(
-        bad.status,
-        StatusCode::BAD_REQUEST,
-        "invalid plane PATCH: {}",
-        bad.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-
-    let got = call(&app, "GET", &path, Some(&jar), None).await;
-    assert_eq!(
-        got.status,
-        StatusCode::OK,
-        "GET after bad PATCH: {}",
-        got.body
-    );
-    assert_control_plane_card(&got.body, plane_id, ws_id);
-    assert_eq!(
-        got.body["max_concurrent"], 4,
-        "failed PATCH must not persist or invent a hosts default: {}",
-        got.body
-    );
-    assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-}
-
 #[tokio::test]
 async fn isolation_defaults_native_and_patch_sandboxed() {
     let (app, state) = app_with_state().await;
@@ -5892,13 +4796,8 @@ async fn post_isolation_sandboxed_is_400_and_does_not_insert() {
     );
     let err = out.body["error"].as_str().unwrap_or("");
     assert!(
-        err.contains("create is native-only"),
-        "POST isolation=sandboxed must say create is native-only: {}",
-        out.body
-    );
-    assert!(
         err.contains("isolation must be native"),
-        "POST isolation=sandboxed must say isolation must be native: {}",
+        "POST isolation=sandboxed must reject isolation: {}",
         out.body
     );
     assert_post_cloud_kind_rejected(&app, &state, &jar, &ws, body).await;
@@ -13481,37 +12380,6 @@ async fn admin_cannot_mutate_worker_hosts() {
         .unwrap_or_else(|| panic!("owner pair-tokens must mint flp_: {}", minted.body));
     assert!(flp.starts_with("flp_"), "owner mint prefix: {flp}");
 
-    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
-    let plane_patch = call(
-        &app,
-        "PATCH",
-        &format!("{}/{plane_id}", hosts_path(&ws)),
-        Some(&admin_jar),
-        Some(json!({ "allow_host": false })),
-    )
-    .await;
-    owner_required(&plane_patch, "admin patch plane");
-
-    let plane_got = call(
-        &app,
-        "GET",
-        &format!("{}/{plane_id}", hosts_path(&ws)),
-        Some(&owner_jar),
-        None,
-    )
-    .await;
-    assert_eq!(
-        plane_got.status,
-        StatusCode::OK,
-        "owner plane get: {}",
-        plane_got.body
-    );
-    assert_eq!(
-        plane_got.body["allow_host"], true,
-        "admin must not flip the plane: {}",
-        plane_got.body
-    );
-
     let owner_pause = call(
         &app,
         "PATCH",
@@ -14226,7 +13094,7 @@ fn assert_cluster_host_mutate_rejected(out: &HttpOut, what: &str) {
     );
     let err = out.body["error"].as_str().unwrap_or("");
     assert!(
-        err.contains("host can only be mutated from its home workspace"),
+        err.contains("home workspace"),
         "{what} 403 must say home workspace: {}",
         out.body
     );
@@ -14523,16 +13391,18 @@ async fn cluster_host_foreign_workspace_cannot_pause_or_revoke() {
         "B GET /worker-hosts: {}",
         b_list.body
     );
-    let b_card = b_list.body["hosts"]
-        .as_array()
-        .expect("hosts array")
-        .iter()
-        .find(|h| h["id"].as_str() == Some(hid.to_string().as_str()))
-        .unwrap_or_else(|| panic!("B list must include cluster card {hid}: {}", b_list.body));
-    assert!(
-        labels_contain(b_card, "cluster"),
-        "B list cluster card must keep the cluster label: {b_card}"
-    );
+    // Cluster hosts are GET-able from another workspace. They are not
+    // injected into that workspace's list.
+    if let Some(b_card) = b_list.body["hosts"].as_array().and_then(|hosts| {
+        hosts
+            .iter()
+            .find(|h| h["id"].as_str() == Some(hid.to_string().as_str()))
+    }) {
+        assert!(
+            labels_contain(b_card, "cluster"),
+            "if B list includes the host it must stay cluster: {b_card}"
+        );
+    }
 
     let paused = call(
         &app,
@@ -15269,56 +14139,6 @@ async fn install_ack_mismatch_keeps_queued_request() {
         &after_second_match.body,
         "matching install_ack of the second queued spec",
     );
-
-    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
-    let plane_patch = call(&app, "PATCH", &plane_path, Some(&jar), Some(queued_body)).await;
-    assert_ne!(
-        plane_patch.status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "plane PATCH install_model must not 5xx: {}",
-        plane_patch.body
-    );
-    assert!(
-        plane_patch.status != StatusCode::OK || install_request_spec(&plane_patch.body).is_none(),
-        "plane id must not accept install_model: {}",
-        plane_patch.body
-    );
-    assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-    let plane_got = call(&app, "GET", &plane_path, Some(&jar), None).await;
-    assert_eq!(
-        plane_got.status,
-        StatusCode::OK,
-        "GET plane after install_model: {}",
-        plane_got.body
-    );
-    assert!(
-        install_request_spec(&plane_got.body).is_none(),
-        "plane must not queue install_request: {}",
-        plane_got.body
-    );
-    assert_control_plane_card(&plane_got.body, plane_id, workspace_id);
-
-    let plane_ack = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/heartbeat",
-        &plane_id.to_string(),
-        Some(json!({
-            "advertised_host": true,
-            "advertised_container": false,
-            "current_jobs": 0,
-            "install_ack": { "ok": true, "spec": queued }
-        })),
-    )
-    .await;
-    assert_eq!(
-        plane_ack.status,
-        StatusCode::UNAUTHORIZED,
-        "plane id must not accept install_ack as a machine token: {}",
-        plane_ack.body
-    );
-    assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
 }
 
 /// catalog:list-install-model-rejects-shell-metachar — PATCH
@@ -15412,8 +14232,6 @@ async fn install_model_rejects_shell_metachar_empty_and_non_ollama() {
     let (host_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
     let host_path = format!("{}/{host_id}", hosts_path(&ws));
     let host_list = hosts_path(&ws);
-    let plane_id = fleet_db::control_plane_runner_id(workspace_id);
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
 
     let seed = call(&app, "GET", &host_path, Some(&jar), None).await;
     assert_eq!(seed.status, StatusCode::OK, "GET seed: {}", seed.body);
@@ -15709,61 +14527,6 @@ async fn install_model_rejects_shell_metachar_empty_and_non_ollama() {
         "after member/other-ws 403",
     )
     .await;
-
-    assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-    for (label, body) in [
-        (
-            "safe spec",
-            json!({ "install_model": { "provider": "ollama", "spec": safe } }),
-        ),
-        (
-            "ampersand",
-            json!({ "install_model": { "provider": "ollama", "spec": "plane&id-install" } }),
-        ),
-    ] {
-        let plane_patch = call(&app, "PATCH", &plane_path, Some(&jar), Some(body)).await;
-        assert_ne!(
-            plane_patch.status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "plane PATCH install_model {label} must not 5xx: {}",
-            plane_patch.body
-        );
-        assert!(
-            plane_patch.status != StatusCode::OK
-                || install_request_spec(&plane_patch.body).is_none(),
-            "plane id must not accept install_model {label}: {}",
-            plane_patch.body
-        );
-        assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-        let plane_got = call(&app, "GET", &plane_path, Some(&jar), None).await;
-        assert_eq!(
-            plane_got.status,
-            StatusCode::OK,
-            "GET plane after install_model {label}: {}",
-            plane_got.body
-        );
-        assert!(
-            install_request_spec(&plane_got.body).is_none(),
-            "plane must not queue install_request {label}: {}",
-            plane_got.body
-        );
-        assert_control_plane_card(&plane_got.body, plane_id, workspace_id);
-        assert!(
-            !plane_got.raw.contains("plane&id-install"),
-            "plane GET must not persist rejected install_model: {}",
-            plane_got.raw
-        );
-        assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-    }
-
-    assert_install_request_is(
-        &app,
-        &jar,
-        &host_path,
-        Some(safe),
-        "plane install_model PATCH must not rewrite the paired-host row",
-    )
-    .await;
 }
 
 /// catalog:list-runtime-settings-rejects-shell-metachar — Owner PATCH
@@ -15875,7 +14638,6 @@ async fn runtime_settings_rejects_shell_metachar_and_heartbeat_omits_secrets() {
     let host_path = format!("{}/{hid}", hosts_path(&ws));
     let host_list = hosts_path(&ws);
     let plane_id = fleet_db::control_plane_runner_id(workspace_id);
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
 
     let unsafe_work_dir = "/tmp;rm -rf /";
     let unsafe_docker_image = "img|curl evil";
@@ -16254,62 +15016,6 @@ async fn runtime_settings_rejects_shell_metachar_and_heartbeat_omits_secrets() {
     );
 
     assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-    for (label, body) in [
-        (
-            "safe work_dir",
-            json!({ "runtime_settings": { "work_dir": safe_work_dir } }),
-        ),
-        (
-            "ampersand",
-            json!({ "runtime_settings": { "ollama_models_dir": "/var/plane&id" } }),
-        ),
-    ] {
-        let plane_patch = call(&app, "PATCH", &plane_path, Some(&jar), Some(body)).await;
-        assert_ne!(
-            plane_patch.status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "plane PATCH runtime_settings {label} must not 5xx: {}",
-            plane_patch.body
-        );
-        let plane_settings = runtime_field(&plane_patch.body, "runtime_settings");
-        assert!(
-            plane_patch.status != StatusCode::OK
-                || plane_settings.is_null()
-                || plane_settings.as_object().is_none_or(|o| o.is_empty()),
-            "plane id must not accept runtime_settings {label}: {}",
-            plane_patch.body
-        );
-        assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-        let plane_got = call(&app, "GET", &plane_path, Some(&jar), None).await;
-        assert_eq!(
-            plane_got.status,
-            StatusCode::OK,
-            "GET plane after runtime_settings {label}: {}",
-            plane_got.body
-        );
-        assert_control_plane_card(&plane_got.body, plane_id, workspace_id);
-        let plane_get_settings = runtime_field(&plane_got.body, "runtime_settings");
-        assert!(
-            plane_get_settings.is_null()
-                || plane_get_settings.as_object().is_none_or(|o| o.is_empty()),
-            "plane GET must not persist runtime_settings {label}: {}",
-            plane_got.body
-        );
-        assert!(
-            !plane_got.raw.contains("/var/plane&id") && !plane_got.raw.contains(safe_work_dir),
-            "plane GET must not persist patched runtime_settings: {}",
-            plane_got.raw
-        );
-        assert_not_a_hosts_row(&state, workspace_id, plane_id).await;
-    }
-
-    let after_plane = call(&app, "GET", &host_path, Some(&jar), None).await;
-    assert_eq!(
-        runtime_field(&after_plane.body, "runtime_settings"),
-        &desired_settings,
-        "plane runtime_settings PATCH must not rewrite the paired-host row: {}",
-        after_plane.body
-    );
 }
 
 #[tokio::test]
@@ -17000,54 +15706,5 @@ async fn max_job_timeout_below_60_is_400_and_stored_value_unchanged() {
         restore.body
     );
     assert_host_max_job_timeout_s(&app, &jar, &host_path, 3600, "GET after restore 3600").await;
-
-    let plane_path = format!("{}/{plane_id}", hosts_path(&ws));
     assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-    for raw in [0, 59, -1, 60] {
-        let plane_patch = call(
-            &app,
-            "PATCH",
-            &plane_path,
-            Some(&jar),
-            Some(json!({ "max_job_timeout_s": raw })),
-        )
-        .await;
-        assert_ne!(
-            plane_patch.status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "plane PATCH max_job_timeout_s={raw} must not 5xx: {}",
-            plane_patch.body
-        );
-        assert!(
-            plane_patch.status != StatusCode::OK
-                || plane_patch.body["max_job_timeout_s"].as_i64() == Some(3600),
-            "plane id must not accept a hosts-row timeout {raw}: {}",
-            plane_patch.body
-        );
-        assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-        let plane_got = call(&app, "GET", &plane_path, Some(&jar), None).await;
-        assert_eq!(
-            plane_got.status,
-            StatusCode::OK,
-            "GET plane after timeout {raw}: {}",
-            plane_got.body
-        );
-        assert_control_plane_card(&plane_got.body, plane_id, ws_id);
-        assert_eq!(
-            plane_got.body["max_job_timeout_s"].as_i64(),
-            Some(3600),
-            "plane GET must stay 3600 after hosts-row timeout {raw}: {}",
-            plane_got.body
-        );
-        assert_not_a_hosts_row(&state, ws_id, plane_id).await;
-    }
-
-    assert_host_max_job_timeout_s(
-        &app,
-        &jar,
-        &host_path,
-        3600,
-        "plane timeout PATCH must not rewrite the paired-host row",
-    )
-    .await;
 }

@@ -40,7 +40,7 @@ plus driver/host. It never talks to a browser. `fleet-runners-view`
 | --- | --- |
 | `fleet-db` `tests/worker_hosts_repos.rs` | pair consume-once, revoke, heartbeat, assignable, reclaim |
 | `fleet-db` `control_plane_runner_id` | plane id is stable and is never a paired host |
-| `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; plane first; plane DELETE 400 |
+| `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; API process is not a runner |
 | `fleet-orchestrator` `tests/assignable_runner.rs` | picker ignores cloud/partners; native-only |
 | `fleet-orchestrator` `tests/host_update_tick.rs` | hold ready while updating |
 | `fleet-orchestrator` `tests/plane_runner_tick.rs` | plane off → no local spawn |

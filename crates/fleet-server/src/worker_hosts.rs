@@ -354,6 +354,11 @@ fn host_json_for_viewer(
     // Only the browser on the plane box (localhost UI) is "this machine".
     // Opening the LAN URL from another PC must not tag the plane.
     public.is_this_machine = plane_box && viewer_loopback;
+    if let Some(rt) = public.runtime_reported.as_ref() {
+        let clean = sanitize_runtime_object(rt);
+        public.runtime_reported = Some(clean)
+            .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+    }
     public
 }
 
@@ -488,11 +493,12 @@ fn validate_runtime_path(key: &str, raw: &str) -> AppResult<String> {
     Ok(s.to_string())
 }
 
-fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+/// Keep only allowlisted runtime keys. Drop secrets, unknown keys, and
+/// path values that contain shell metacharacters. Used for both desired
+/// PATCH (after a 400 on unsafe paths) and reported heartbeat (never 400).
+fn sanitize_runtime_object(v: &Value) -> Value {
     let Some(obj) = v.as_object() else {
-        return Err(AppError::bad_request(
-            "runtime_settings must be an object".to_string(),
-        ));
+        return json!({});
     };
     let mut out = serde_json::Map::new();
     for (k, val) in obj {
@@ -523,12 +529,38 @@ fn validate_runtime_settings(v: Value) -> AppResult<Value> {
                 }
             }
             other => {
-                let s = val.as_str().unwrap_or("");
-                out.insert(other.to_string(), json!(validate_runtime_path(other, s)?));
+                if let Some(s) = val.as_str() {
+                    if let Ok(clean) = validate_runtime_path(other, s) {
+                        out.insert(other.to_string(), json!(clean));
+                    }
+                }
             }
         }
     }
-    Ok(Value::Object(out))
+    Value::Object(out)
+}
+
+fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+    let Some(obj) = v.as_object() else {
+        return Err(AppError::bad_request(
+            "runtime_settings must be an object".to_string(),
+        ));
+    };
+    for (k, val) in obj {
+        if !RUNTIME_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        match k.as_str() {
+            "run_host" | "run_container" | "allow_privileged" | "k3d_agents"
+            | "container_backend" | "egress_mode" => {}
+            other => {
+                if let Some(s) = val.as_str() {
+                    let _ = validate_runtime_path(other, s)?;
+                }
+            }
+        }
+    }
+    Ok(sanitize_runtime_object(&v))
 }
 
 #[derive(Debug, Deserialize)]
@@ -784,12 +816,29 @@ pub(crate) async fn load_visible_host(
         return Ok(host);
     }
     match host_repo::get(&state.db, host_id).await? {
-        Some(host) if host.labels.iter().any(|l| l == "cluster") => Ok(host),
-        Some(host) => Err(AppError::not_found(format!(
-            "worker belongs to another workspace ({})",
-            host.workspace_id
-        ))),
+        Some(host) if host.is_cluster_host() => Ok(host),
+        // Do not name the other workspace — that is a tenant leak.
+        Some(_) | None => Err(AppError::not_found("worker host not found")),
+    }
+}
+
+/// Mutate only from the home workspace. Cluster hosts are visible elsewhere;
+/// a regular host in another workspace looks like it does not exist.
+async fn require_mutable_host(
+    state: &AppState,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorkerHost> {
+    match host_repo::get(&state.db, host_id).await? {
         None => Err(AppError::not_found("worker host not found")),
+        Some(h) if h.workspace_id != workspace_id => {
+            if h.is_cluster_host() {
+                Err(AppError::forbidden("home workspace"))
+            } else {
+                Err(AppError::not_found("worker host not found"))
+            }
+        }
+        Some(h) => Ok(h),
     }
 }
 
@@ -810,15 +859,7 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    match host_repo::get(&state.db, host_id).await? {
-        None => {
-            return Err(AppError::not_found("worker host not found"));
-        }
-        Some(h) if h.workspace_id != workspace_id => {
-            return Err(AppError::forbidden("home workspace"));
-        }
-        Some(_) => {}
-    }
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -902,19 +943,7 @@ async fn http_delete(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    match load_in_workspace(&state, workspace_id, host_id).await {
-        Ok(_) => {}
-        Err(e) => {
-            // Already gone from this workspace.
-            if let Ok(Some(existing)) = host_repo::get(&state.db, host_id).await {
-                return Err(AppError::not_found(format!(
-                    "worker belongs to another workspace ({})",
-                    existing.workspace_id
-                )));
-            }
-            return Err(e);
-        }
-    }
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     let host = host_repo::revoke(&state.db, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -925,7 +954,7 @@ async fn http_new_pair_token(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
         .await?;
@@ -1144,7 +1173,8 @@ async fn http_heartbeat(
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, rt).await;
+        let _ = host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt))
+            .await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1172,6 +1202,9 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     if !host_accepts_leases(&host) {
         return Ok(Json(json!({ "claim": null })));
     }
+    // Lease poll is the reclaim path. A sweeper-only helper would never run
+    // in this process; expired rows must return to ready before this claim.
+    let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
     let claim = if host.is_cluster_host() {
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
