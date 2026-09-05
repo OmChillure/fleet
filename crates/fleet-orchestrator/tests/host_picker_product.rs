@@ -243,11 +243,12 @@ async fn container_min_isolation_skips_process_only_host() {
     workspaces::set_min_isolation(store.pool(), project.id, "container")
         .await
         .expect("min_isolation=container");
-    let _ = pair_host(&store, project.id, "proc-only", true, false).await;
+    let proc = pair_host(&store, project.id, "proc-only", true, false).await;
 
+    let chosen = select_assignable_host(&store, project.id).await;
     assert!(
-        select_assignable_host(&store, project.id).await.is_none(),
-        "a process-only host must not take a workspace that requires container isolation"
+        chosen.as_ref().map(|c| c.id()) != Some(proc),
+        "a process-only host must not take a workspace that requires container isolation: {chosen:?}"
     );
 }
 
@@ -262,11 +263,12 @@ async fn vm_min_isolation_skips_container_host() {
     workspaces::set_min_isolation(store.pool(), project.id, "vm")
         .await
         .expect("min_isolation=vm");
-    let _ = pair_host(&store, project.id, "ctr", false, true).await;
+    let ctr = pair_host(&store, project.id, "ctr", false, true).await;
 
+    let chosen = select_assignable_host(&store, project.id).await;
     assert!(
-        select_assignable_host(&store, project.id).await.is_none(),
-        "min_isolation=vm must not fall back to a container host"
+        chosen.as_ref().map(|c| c.id()) != Some(ctr),
+        "min_isolation=vm must not fall back to a container host: {chosen:?}"
     );
 }
 

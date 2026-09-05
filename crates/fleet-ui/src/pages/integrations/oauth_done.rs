@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 #[component]
 pub fn OAuthDone() -> Element {
     let mut status = use_signal(|| "Finishing…".to_string());
-    let ok = use_signal(|| true);
+    let mut ok = use_signal(|| true);
 
     use_effect(move || {
         #[cfg(target_arch = "wasm32")]

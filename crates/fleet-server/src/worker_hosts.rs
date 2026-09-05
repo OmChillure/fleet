@@ -541,6 +541,12 @@ pub struct CreateWorkerHostBody {
     pub allow_container: Option<bool>,
     #[serde(default)]
     pub max_concurrent: Option<i32>,
+    /// Rejected on create. Cloud / Partners are not worker_hosts rows.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Rejected on create. Isolation is a PATCH of a paired native box.
+    #[serde(default)]
+    pub isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -682,6 +688,24 @@ async fn http_create(
     Json(body): Json<CreateWorkerHostBody>,
 ) -> AppResult<Json<Value>> {
     let user = require_owner(&state, &jar, workspace_id).await?;
+    if body
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request(
+            "kind is not a create field (self-hosted pair only)",
+        ));
+    }
+    if body
+        .isolation
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request("isolation must be native"));
+    }
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -690,8 +714,10 @@ async fn http_create(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+        .ok_or_else(|| AppError::bad_request("name is required"))?;
+    if name.len() > 255 {
+        return Err(AppError::bad_request("name is too long"));
+    }
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name, Some(user.id));
     if let Some(v) = body.allow_host {
         new.allow_host = v;
@@ -784,7 +810,15 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    match host_repo::get(&state.db, host_id).await? {
+        None => {
+            return Err(AppError::not_found("worker host not found"));
+        }
+        Some(h) if h.workspace_id != workspace_id => {
+            return Err(AppError::forbidden("home workspace"));
+        }
+        Some(_) => {}
+    }
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -795,11 +829,26 @@ async fn http_patch(
         None => None,
         Some(raw) => Some(validate_isolation(raw)?.to_string()),
     };
+    let name = match body.name {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::bad_request("name is required"));
+            }
+            if trimmed.len() > 255 {
+                return Err(AppError::bad_request("name is too long"));
+            }
+            Some(trimmed.to_string())
+        }
+    };
+    let labels = body.labels.map(|ls| {
+        ls.into_iter()
+            .filter(|l| !fleet_db::label_is_cluster(l))
+            .collect()
+    });
     let patch = HostCpSettings {
-        name: body
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        name,
         enabled: body.enabled,
         paused: body.paused,
         drain: body.drain,
@@ -808,7 +857,7 @@ async fn http_patch(
         allow_container: body.allow_container,
         max_concurrent: body.max_concurrent,
         max_job_timeout_s: body.max_job_timeout_s,
-        labels: body.labels,
+        labels,
         auto_update: body.auto_update,
         request_update: body.request_update,
         runtime_settings: match body.runtime_settings {
@@ -1113,7 +1162,9 @@ fn host_accepts_leases(host: &WorkerHost) -> bool {
         && !host.drain
         && host.is_native_isolation()
         && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && (host.effective_host() || host.effective_container())
+        && host.effective_host()
+        && !host.software_updating
+        && !host_repo::at_job_cap(host)
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {

@@ -38,7 +38,7 @@ async fn app_and_store() -> (axum::Router, fleet_orchestrator::store::Store) {
         admin_token: "test-admin".into(),
         auth_mode: AuthMode::Token,
         http_addr: "127.0.0.1:0".into(),
-        orchestrator_public_url: "http://127.0.0.1:0".into(),
+        orchestrator_public_url: "http://192.0.2.10:8080".into(),
         data_dir: dir.path().to_path_buf(),
         tick_interval: Duration::from_secs(5),
         max_agents: 3,
