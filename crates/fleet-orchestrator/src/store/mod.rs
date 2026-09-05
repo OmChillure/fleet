@@ -1,4 +1,4 @@
-//! Postgres store layer (PR3).
+//! Postgres store layer.
 
 mod host_pool;
 mod models;

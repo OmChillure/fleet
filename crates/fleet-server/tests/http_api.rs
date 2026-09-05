@@ -358,6 +358,39 @@ async fn call(
     call_inner(app, method, uri, cookies, None, body).await
 }
 
+async fn call_raw(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    extra: &[(&str, &str)],
+    body: Vec<u8>,
+) -> HttpOut {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (k, v) in extra {
+        builder = builder.header(*k, *v);
+    }
+    if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    let req = builder.body(Body::from(body)).unwrap();
+    let res = app.clone().oneshot(req).await.expect("oneshot");
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    let body = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({ "raw": raw }))
+    };
+    HttpOut {
+        status,
+        headers,
+        body,
+        raw,
+    }
+}
+
 async fn call_bearer(
     app: &axum::Router,
     method: &str,
@@ -2881,6 +2914,19 @@ async fn inbox_monitor_defaults_auto_launch_and_preserves_filters() {
         "Start monitor (no flag) must keep working tickets: {}",
         first.body
     );
+    assert_eq!(
+        first.body["follow_connected"], true,
+        "Start monitor must follow live connections: {}",
+        first.body
+    );
+    assert!(
+        first.body["providers"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "empty allowlist means all connected, must not snapshot: {}",
+        first.body
+    );
 
     let saved = call(
         &app,
@@ -2916,6 +2962,143 @@ async fn inbox_monitor_defaults_auto_launch_and_preserves_filters() {
         again.body["jira_jql"], "project = ENG",
         "omitted jira_jql must keep the saved filter: {}",
         again.body
+    );
+}
+
+#[tokio::test]
+async fn inbox_monitor_follow_connected_watches_whatever_is_connected() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let started = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    assert_eq!(started.body["follow_connected"], true);
+    assert_eq!(started.body["watching"], json!([]));
+    assert_eq!(started.body["launch_limit"], 8);
+    assert_eq!(started.body["poll_limit"], 20);
+
+    let listed = call(&app, "GET", &inbox_path(&ws, ""), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["monitor"]["follow_connected"], true);
+    assert_eq!(listed.body["monitor"]["watching"], json!([]));
+}
+
+fn github_issue_body() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "action": "opened",
+        "issue": {
+            "number": 7,
+            "title": "Hook ticket",
+            "html_url": "https://github.com/acme/app/issues/7",
+            "body": "from hook",
+            "state": "open"
+        },
+        "repository": { "full_name": "acme/app" }
+    }))
+    .expect("github body")
+}
+
+async fn seed_inbox_connection(state: &AppState, workspace_id: Uuid, provider: &str) {
+    let credentials = state
+        .integrations
+        .credentials_key
+        .encrypt(&json!({ "token": "test-not-used" }))
+        .expect("encrypt");
+    fleet_db::repos::integrations::upsert(
+        &state.db,
+        &fleet_db::repos::integrations::UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id,
+            provider: provider.into(),
+            account_label: Some("test".into()),
+            config: json!({}),
+            credentials,
+            connected_by: None,
+            at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("seed connection");
+}
+
+#[tokio::test]
+async fn inbox_webhook_token_auth_and_pinned_provider() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("ws");
+    seed_inbox_connection(&state, ws_id, "github").await;
+    seed_inbox_connection(&state, ws_id, "slack").await;
+
+    let started = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({ "enabled": true, "follow_connected": true })),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    let token = started.body["hook_token"]
+        .as_str()
+        .expect("hook_token")
+        .to_string();
+    assert!(!token.is_empty());
+
+    let bad = call_raw(
+        &app,
+        "POST",
+        "/api/integrations/webhooks/github/not-the-token",
+        &[("x-github-event", "issues")],
+        github_issue_body(),
+    )
+    .await;
+    assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
+
+    let ok = call_raw(
+        &app,
+        "POST",
+        &format!("/api/integrations/webhooks/github/{token}"),
+        &[("x-github-event", "issues")],
+        github_issue_body(),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    assert_eq!(ok.body["ingested"], 1);
+
+    let pin = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, ""),
+        Some(&jar),
+        Some(json!({
+            "enabled": true,
+            "follow_connected": false,
+            "providers": ["slack"]
+        })),
+    )
+    .await;
+    assert_eq!(pin.status, StatusCode::OK, "{}", pin.body);
+
+    let dropped = call_raw(
+        &app,
+        "POST",
+        &format!("/api/integrations/webhooks/github/{token}"),
+        &[("x-github-event", "issues")],
+        github_issue_body(),
+    )
+    .await;
+    assert_eq!(dropped.status, StatusCode::OK, "{}", dropped.body);
+    assert_eq!(
+        dropped.body["ingested"], 0,
+        "pinned slack must drop github: {}",
+        dropped.body
     );
 }
 

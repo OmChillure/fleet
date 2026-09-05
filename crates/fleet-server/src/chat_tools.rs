@@ -466,16 +466,20 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "monitor_tickets",
-                "description": "Start or update the workspace ticket inbox. Polls connected boards (Jira, Linear, GitHub, …) and by default auto-launches a work+review fleet on each open ticket. The poller keeps watching. Tokens stay on the control plane.",
+                "description": "Start or update the workspace inbox. By default it follows every connected inbox app (GitHub, Jira, Slack, …) — newly connected apps are picked up on the next poll without restarting. Tickets auto-launch work+review; Slack/Teams get one ops task; Notion/Confluence get one analysis task. Tokens stay on the control plane.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "enabled": { "type": "boolean" },
-                        "providers": { "type": "array", "items": { "type": "string" } },
+                        "follow_connected": { "type": "boolean", "description": "true (default): watch whatever is connected now. false: only the providers allowlist." },
+                        "providers": { "type": "array", "items": { "type": "string" }, "description": "Optional allowlist. Empty + follow_connected watches all connected inbox apps." },
+                        "filters": { "type": "object", "description": "Per-provider filters, e.g. {\"github\":{\"repos\":[\"acme/api\"]},\"jira\":{\"jql\":\"project=ENG\"}}" },
                         "github_repos": { "type": "array", "items": { "type": "string" } },
                         "jira_jql": { "type": "string" },
                         "slack_channels": { "type": "array", "items": { "type": "string" } },
-                        "auto_launch": { "type": "boolean" }
+                        "auto_launch": { "type": "boolean" },
+                        "launch_limit": { "type": "integer" },
+                        "poll_limit": { "type": "integer" }
                     },
                     "additionalProperties": false
                 }
@@ -754,6 +758,24 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
     ChatLlmContext::default()
 }
 
+/// Reject a tool `workspace_id` that is not this chat's workspace.
+pub fn require_session_workspace(session: Uuid, arguments: &Value) -> AppResult<()> {
+    let Some(raw) = arguments.get("workspace_id") else {
+        return Ok(());
+    };
+    if raw.is_null() {
+        return Ok(());
+    }
+    let parsed = raw
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .or_else(|| serde_json::from_value::<Uuid>(raw.clone()).ok());
+    match parsed {
+        Some(id) if id == session => Ok(()),
+        _ => Err(AppError::forbidden("workspace_id does not match this chat")),
+    }
+}
+
 pub async fn execute_tool(
     state: &AppState,
     workspace_id: Uuid,
@@ -762,6 +784,20 @@ pub async fn execute_tool(
     arguments: &Value,
     llm: &ChatLlmContext,
 ) -> (Value, ChatAction) {
+    if let Err(e) = require_session_workspace(workspace_id, arguments) {
+        let msg = e.to_string();
+        return (
+            json!({ "error": msg }),
+            ChatAction {
+                tool: name.to_string(),
+                ok: false,
+                summary: msg,
+                run_id: None,
+                sandbox_ids: None,
+                detail: None,
+            },
+        );
+    }
     let result = match name {
         "list_sandboxes" => list_sandboxes(state, workspace_id).await,
         "list_tasks" => {
@@ -841,7 +877,14 @@ pub async fn execute_tool(
                     jira_jql: None,
                     slack_channels: None,
                     notion_databases: None,
+                    gitlab_projects: None,
+                    linear_teams: None,
+                    trello_boards: None,
                     auto_launch: None,
+                    follow_connected: None,
+                    filters: None,
+                    launch_limit: None,
+                    poll_limit: None,
                 });
             match crate::tickets::monitor_tickets(state, workspace_id, user_id, args).await {
                 Ok(v) => Ok((

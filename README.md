@@ -128,7 +128,7 @@ dx serve --package fleet-ui --port 3030
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor watches boards and auto-launches work) |
+| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor follows connected apps and auto-launches by kind) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent) |

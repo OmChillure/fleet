@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
 };
 use crate::state::AppState;
 
@@ -1093,13 +1093,9 @@ mod tests {
         let pool = fleet_db::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
             .expect("lazy pool (tool-only loop must not need Postgres)");
         let store = fleet_orchestrator::store::Store::new(pool.clone());
-        let runtime = Arc::new(fleet_orchestrator::sandbox::StubRuntime::new(
-            Duration::ZERO,
-        ));
         let data_dir = std::env::temp_dir().join(format!("fleet-tool-rounds-{}", Uuid::new_v4()));
         let tick = Arc::new(fleet_orchestrator::orch::TickRunner::new(
             store.clone(),
-            runtime,
             data_dir,
             "http://127.0.0.1:0",
         ));
@@ -1118,6 +1114,7 @@ mod tests {
                 refresh_ttl: Duration::from_secs(3600),
                 cookie_secure: false,
                 cookie_samesite: cookie::SameSite::Lax,
+                signup_token: None,
             },
             integrations: fleet_integrations::IntegrationsConfig {
                 api_public_base: "http://127.0.0.1:0".into(),
@@ -1182,8 +1179,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::thread;
             use std::time::Duration;
 

@@ -241,11 +241,27 @@ class InboxE2ETests(unittest.TestCase):
             after_start = _wait_monitor_enabled(page, ws, True)
             mon = after_start.get("monitor") or {}
             self.assertTrue(mon.get("enabled"), after_start)
+            self.assertTrue(mon.get("follow_connected"), after_start)
+            watching = [str(p).lower() for p in (mon.get("watching") or [])]
+            self.assertIn("github", watching, after_start)
             providers = [str(p).lower() for p in (mon.get("providers") or [])]
-            self.assertIn("github", providers, after_start)
+            self.assertEqual(
+                providers,
+                [],
+                f"follow-connected must not snapshot providers: {after_start}",
+            )
             page.get_by_text(re.compile(r"monitor on")).first.wait_for(timeout=15_000)
             stop = page.get_by_role("button", name="Stop monitor")
             self.assertTrue(stop.first.is_enabled(), "Stop monitor stayed disabled after start")
+
+            # Refresh/poll auto-launches when this is on. Turn it off so Finish
+            # is a real click, not a race with drive_inbox.
+            keep = page.locator("label").filter(has_text="Keep working open tickets")
+            box = keep.locator("input[type='checkbox']")
+            if box.count() and box.first.is_checked():
+                box.first.uncheck()
+                page.get_by_role("button", name="Save filters").first.click()
+                page.wait_for_timeout(400)
 
             key = f"inbox-e2e-{uuid.uuid4().hex[:10]}/board#1"
             title = f"e2e-inbox-{uuid.uuid4().hex[:10]}"

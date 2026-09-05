@@ -484,6 +484,7 @@ mod tests {
             refresh_ttl: Duration::from_secs(604_800),
             cookie_secure: false,
             cookie_samesite: cookie::SameSite::Lax,
+            signup_token: None,
         }
     }
 

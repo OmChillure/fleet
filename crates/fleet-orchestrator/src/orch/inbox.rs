@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::path::Path;
 use uuid::Uuid;
 
+use super::can_apply_task_terminal;
 use super::tick::TickError;
 
 pub async fn apply_inbox(
@@ -88,6 +89,15 @@ pub async fn apply_inbox(
                                         .matches("Task validation failed")
                                         .count();
                                     if bounces >= 2 {
+                                        if !can_apply_task_terminal(
+                                            &task,
+                                            r.session_id,
+                                            "done_failed",
+                                        ) {
+                                            store.mark_report_applied(r.id).await?;
+                                            applied += 1;
+                                            continue;
+                                        }
                                         store
                                             .set_task_done_failed(
                                                 r.board_task_id,
@@ -95,6 +105,15 @@ pub async fn apply_inbox(
                                             )
                                             .await?;
                                     } else {
+                                        if !can_apply_task_terminal(
+                                            &task,
+                                            r.session_id,
+                                            "done_success",
+                                        ) {
+                                            store.mark_report_applied(r.id).await?;
+                                            applied += 1;
+                                            continue;
+                                        }
                                         store
                                             .reopen_task_for_changes(
                                                 r.board_task_id,
@@ -103,6 +122,15 @@ pub async fn apply_inbox(
                                             )
                                             .await?;
                                     }
+                                    store.mark_report_applied(r.id).await?;
+                                    applied += 1;
+                                    continue;
+                                }
+                                if !can_apply_task_terminal(
+                                    &task,
+                                    r.session_id,
+                                    "done_success",
+                                ) {
                                     store.mark_report_applied(r.id).await?;
                                     applied += 1;
                                     continue;
@@ -142,6 +170,19 @@ pub async fn apply_inbox(
                             .get("reason")
                             .and_then(|v| v.as_str())
                             .unwrap_or("worker_failed");
+                        let snap = store.load_board_snapshot(project_id).await?;
+                        if let Some(task) = snap.tasks.iter().find(|t| t.id == r.board_task_id) {
+                            if !can_apply_task_terminal(task, r.session_id, "done_failed")
+                            {
+                                store.mark_report_applied(r.id).await?;
+                                applied += 1;
+                                continue;
+                            }
+                        } else {
+                            store.mark_report_applied(r.id).await?;
+                            applied += 1;
+                            continue;
+                        }
                         store
                             .apply_task_terminal(
                                 r.board_task_id,
@@ -158,6 +199,18 @@ pub async fn apply_inbox(
                             .get("reason")
                             .and_then(|v| v.as_str())
                             .unwrap_or("blocked");
+                        let snap = store.load_board_snapshot(project_id).await?;
+                        if let Some(task) = snap.tasks.iter().find(|t| t.id == r.board_task_id) {
+                            if !can_apply_task_terminal(task, r.session_id, "blocked") {
+                                store.mark_report_applied(r.id).await?;
+                                applied += 1;
+                                continue;
+                            }
+                        } else {
+                            store.mark_report_applied(r.id).await?;
+                            applied += 1;
+                            continue;
+                        }
                         store
                             .apply_task_terminal(
                                 r.board_task_id,

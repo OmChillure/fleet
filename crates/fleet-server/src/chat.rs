@@ -21,17 +21,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::User;
 use fleet_db::WorkerAgentRuntime;
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    system_prompt_with_tools, tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
+    tool_definitions,
 };
 use crate::state::AppState;
 
@@ -1141,6 +1142,20 @@ mod chat_tool_scope_tests {
             assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
         }
     }
+
+    #[test]
+    fn chat_tool_unparseable_workspace_id_is_forbidden() {
+        let session = Uuid::new_v4();
+        for raw in [
+            json!({ "workspace_id": "not-a-uuid" }),
+            json!({ "workspace_id": 12 }),
+            json!({ "workspace_id": {"id": session.to_string()} }),
+        ] {
+            let err = require_session_workspace(session, &tool_args_value(&raw))
+                .expect_err("unparseable workspace_id must not pass");
+            assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1301,9 +1316,7 @@ async fn chat_complete(
             continue;
         }
         if content.len() > 32_000 {
-            return Err(AppError::bad_request(
-                "message too long (max 32k bytes)",
-            ));
+            return Err(AppError::bad_request("message too long (max 32k bytes)"));
         }
         // System messages from the client are folded into the first user turn context;
         // server always injects its own system prompt for tools.
@@ -1592,9 +1605,7 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
             continue;
         }
         if content.len() > 32_000 {
-            return Err(AppError::bad_request(
-                "message too long (max 32k bytes)",
-            ));
+            return Err(AppError::bad_request("message too long (max 32k bytes)"));
         }
         if role == "system" {
             pairs.push(("user".into(), format!("[context]\n{content}")));

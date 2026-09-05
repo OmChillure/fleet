@@ -2,7 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use fleet_auth::AuthConfig;
 use fleet_integrations::IntegrationsConfig;
 
@@ -262,5 +262,4 @@ mod tests {
             Some(PathBuf::from("/opt/fleet/dist"))
         );
     }
-
 }

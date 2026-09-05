@@ -179,6 +179,7 @@ pub async fn process_sessions(
                 store
                     .mark_session_killing(session.id, exit_reason, grace)
                     .await?;
+                let _ = store.void_spawn_claims(session.id).await;
                 if let Some(host_id) = crate::sandbox::remote::host_id_from_handle(
                     session.runtime_handle.as_deref().unwrap_or(""),
                 ) {

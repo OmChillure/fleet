@@ -1,4 +1,4 @@
-//! Step 6–7 capacity schedule + spawn protocol.
+//! Capacity schedule + spawn protocol.
 
 use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
 use crate::sandbox::remote::{self, RemoteHostHandle};
@@ -119,14 +119,7 @@ pub async fn schedule_and_spawn(
         crate::sandbox::team::prepare_agent_workspace(data_dir, &session_work, task, snap).await;
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
-        let mut persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
-        if let Ok(Some((name, body))) = store
-            .find_workspace_persona(project_id, &task.worker_profile)
-            .await
-        {
-            persona.name = name;
-            persona.body = body;
-        }
+        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
         let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
             cached.clone()
         } else {
@@ -293,6 +286,7 @@ pub async fn signal_retired_sessions(
         else {
             continue;
         };
+        let _ = store.void_spawn_claims(s.id).await;
         let _ =
             crate::store::enqueue_signal_session(store, project_id, s.id, host_id, "kill").await;
     }

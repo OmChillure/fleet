@@ -276,9 +276,12 @@ cmd_guide() {
     "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
-    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
-    "Start monitor watches the boards and auto-launches work+review on open tickets." \
-    "Refresh now polls. Finish still starts one by hand. Empty is OK until Integrations are connected." || return 0
+    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion/GitLab/Trello." \
+    "Start monitor follows every connected inbox app (checkbox on) and auto-launches by kind." \
+    "Uncheck Follow every connected inbox app → Save filters: watch set pins to the current apps." \
+    "Webhook URL on the page: paste into the provider. Slack/Linear HMAC uses the stored signing secret, not the URL token." \
+    "Refresh now polls. Finish starts one open row by hand. A closed board item on a launched row should go done." \
+    "Empty is OK until Integrations are connected. Start monitor without a Connect is 400." || return 0
 
   pause_step "Settings members" \
     "/{ws}/settings — Members: invite by email (member/admin)." \
@@ -300,7 +303,8 @@ cmd_guide() {
     "Agent drive: python3 -m unittest tests.browser.test_unify_usability (artifacts in .tmp/usability/)." || return 0
 
   pause_step "This merge request" \
-    "Do the new thing this change added." \
+    "Inbox: follow-connected, pin on uncheck, webhook URL, Finish on an open row." \
+    "A second Finish on the same row must conflict, not start another fleet." \
     "If this list has no step for it, add one in scripts/human-test.sh and a" \
     "scene in tests/browser/record_demo.py in the same change." || return 0
 

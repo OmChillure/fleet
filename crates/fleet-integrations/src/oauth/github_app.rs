@@ -59,13 +59,13 @@ pub fn manifest_value(cfg: &IntegrationsConfig, workspace_id: Uuid) -> Value {
             "checks": "read",
             "statuses": "read"
         },
-        "default_events": [],
+        "default_events": ["issues", "issue_comment", "pull_request"],
         "request_oauth_on_install": true
     });
     // GitHub rejects localhost / private hook URLs even when active=false.
     let hook = webhook_url(cfg);
     if github_accepts_webhook_url(&hook) {
-        manifest["hook_attributes"] = json!({ "url": hook, "active": false });
+        manifest["hook_attributes"] = json!({ "url": hook, "active": true });
     }
     manifest
 }
@@ -305,6 +305,11 @@ mod tests {
         assert_eq!(
             v["hook_attributes"]["url"],
             "https://fleet.example.com/api/integrations/webhooks/github"
+        );
+        assert_eq!(v["hook_attributes"]["active"], true);
+        assert_eq!(
+            v["default_events"],
+            json!(["issues", "issue_comment", "pull_request"])
         );
     }
 

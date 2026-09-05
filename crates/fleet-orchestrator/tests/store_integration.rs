@@ -3,9 +3,9 @@
 //!   DATABASE_URL=postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable cargo test --test store_integration
 
 use fleet_orchestrator::domain::{
-    stable_board_task_id, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
+    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, stable_board_task_id,
 };
-use fleet_orchestrator::store::{connect, migrate, Store};
+use fleet_orchestrator::store::{Store, connect, migrate};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -24,6 +24,7 @@ async fn setup() -> Store {
     let url = require_database_url();
     let pool = connect(&url).await.expect("connect");
     migrate(&pool).await.expect("migrate");
+    fleet_db::migrate(&pool).await.expect("fleet-db migrate");
     Store::new(pool)
 }
 
@@ -93,15 +94,24 @@ async fn create_project_and_materialize_idempotent() {
         .set_project_git_remote(project.id, Some(&remote))
         .await
         .unwrap();
-    assert_eq!(cfg.repo_url.as_deref(), Some("https://github.com/acme/app.git"));
+    assert_eq!(
+        cfg.repo_url.as_deref(),
+        Some("https://github.com/acme/app.git")
+    );
     assert_eq!(cfg.git_ref, "develop");
-    let cfg = store.set_project_git_remote(project.id, None).await.unwrap();
+    let cfg = store
+        .set_project_git_remote(project.id, None)
+        .await
+        .unwrap();
     assert!(cfg.repo_url.is_none());
     assert_eq!(cfg.git_ref, "main");
 
     let body = sample_body(project.id);
     let plan_id = body.plan_id;
-    let (_run, plan) = store.insert_accepted_plan(project.id, body.clone()).await.unwrap();
+    let (_run, plan) = store
+        .insert_accepted_plan(project.id, body.clone())
+        .await
+        .unwrap();
     assert_eq!(plan.status, "accepted");
     assert!(plan.materialized_at.is_none());
 
@@ -113,7 +123,11 @@ async fn create_project_and_materialize_idempotent() {
 
     assert_eq!(cfg.fleet_llm, "off");
     assert_eq!(cfg.fleet_llm_model, "");
-    let loaded = store.get_plan_body(plan_id).await.unwrap().expect("plan body");
+    let loaded = store
+        .get_plan_body(plan_id)
+        .await
+        .unwrap()
+        .expect("plan body");
     assert_eq!(loaded.plan_id, plan_id);
     assert_eq!(loaded.tasks.len(), 2);
 
@@ -173,7 +187,10 @@ async fn worker_report_inbox_idempotent_seq() {
     let session_id = Uuid::new_v4();
     let ok = store.cas_assign_task(task.id, session_id, 1).await.unwrap();
     assert!(ok);
-    let ok2 = store.cas_assign_task(task.id, Uuid::new_v4(), 1).await.unwrap();
+    let ok2 = store
+        .cas_assign_task(task.id, Uuid::new_v4(), 1)
+        .await
+        .unwrap();
     assert!(!ok2, "CAS fails if not ready");
 
     use fleet_orchestrator::store::NewWorkerSession;
@@ -328,14 +345,13 @@ async fn live_events_persist_and_duplicate_seq_is_noop() {
     assert_eq!(act.len(), 3);
     let keys: std::collections::HashSet<String> = act
         .iter()
-        .map(|e| {
-            format!(
-                "{}-{}-{}",
-                e["session_id"], e["report_seq"], e["idx"]
-            )
-        })
+        .map(|e| format!("{}-{}-{}", e["session_id"], e["report_seq"], e["idx"]))
         .collect();
-    assert_eq!(keys.len(), act.len(), "activity rows must be uniquely keyed");
+    assert_eq!(
+        keys.len(),
+        act.len(),
+        "activity rows must be uniquely keyed"
+    );
 }
 
 #[tokio::test]
@@ -380,10 +396,12 @@ async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
         .await
         .unwrap();
     assert_eq!(retired.len(), 1);
-    assert!(!store
-        .complete_spawn_failure(first.session_id)
-        .await
-        .unwrap());
+    assert!(
+        !store
+            .complete_spawn_failure(first.session_id)
+            .await
+            .unwrap()
+    );
 
     sqlx::query("UPDATE board_tasks SET status = 'ready', claimed_session_id = NULL WHERE id = $1")
         .bind(task.id)
@@ -427,4 +445,99 @@ async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
             .unwrap()
     );
     assert!(store.task_has_live_session(task.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn complete_spawn_failure_voids_claims_and_rejects_late_worker() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("spawn-fail-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let slug = format!("sf{}", project.id.as_simple());
+    sqlx::query(
+        r#"
+        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
+        VALUES ($1, $2, $3, now(), now())
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(project.id)
+    .bind(&slug)
+    .bind("spawn-fail")
+    .execute(store.pool())
+    .await
+    .expect("insert workspace");
+
+    let body = sample_body(project.id);
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+
+    sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
+        .bind(task.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let session_id = Uuid::new_v4();
+    assert!(store.cas_assign_task(task.id, session_id, 1).await.unwrap());
+    store
+        .insert_session_spawning(&fleet_orchestrator::store::NewWorkerSession {
+            id: session_id,
+            project_id: project.id,
+            run_id: task.run_id,
+            board_task_id: task.id,
+            attempt: 1,
+            runtime_backend: "remote".into(),
+            worker_token: "tok-late".into(),
+            worker_profile: "coding".into(),
+            work_dir: None,
+        })
+        .await
+        .unwrap();
+
+    let claim = fleet_db::NewWorkClaim {
+        id: Uuid::now_v7(),
+        workspace_id: project.id,
+        kind: "spawn_session".into(),
+        payload: serde_json::json!({
+            "host_id": Uuid::now_v7(),
+            "session_id": session_id,
+        }),
+        max_attempts: 3,
+        available_at: chrono::Utc::now(),
+    };
+    fleet_db::repos::work_claims::enqueue(store.pool(), &claim)
+        .await
+        .expect("enqueue spawn claim");
+
+    let flipped = store
+        .complete_spawn_failure(session_id)
+        .await
+        .expect("complete_spawn_failure");
+    assert!(flipped, "spawning session must become failed_spawn");
+
+    let dead = fleet_db::repos::work_claims::get(store.pool(), claim.id)
+        .await
+        .expect("get claim")
+        .expect("claim row");
+    assert_eq!(
+        dead.status, "dead",
+        "timed-out spawn must not stay leaseable"
+    );
+
+    let session = store.get_session(session_id).await.unwrap().unwrap();
+    assert_eq!(session.status, "failed_spawn");
+
+    let authed = store
+        .authenticate_worker_session(session_id, "tok-late")
+        .await
+        .expect("auth");
+    assert!(
+        authed.is_none(),
+        "failed_spawn session must not accept worker heartbeats"
+    );
 }

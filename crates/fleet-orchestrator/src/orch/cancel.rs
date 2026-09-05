@@ -1,4 +1,4 @@
-//! Step 2 / PR5c — cancel drain for runs with cancel_requested_at.
+//! Cancel drain for runs with cancel_requested_at.
 
 use crate::store::{BoardSnapshot, Store};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -40,6 +40,7 @@ pub async fn cancel_drain(
             store
                 .mark_session_killing(session.id, "cancel", grace)
                 .await?;
+            let _ = store.void_spawn_claims(session.id).await;
             if session.runtime_backend == crate::sandbox::remote::BACKEND {
                 if let Some(host_id) = crate::sandbox::remote::host_id_from_handle(
                     session.runtime_handle.as_deref().unwrap_or(""),
