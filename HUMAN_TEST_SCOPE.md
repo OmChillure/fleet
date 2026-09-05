@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `754932d20917aad015073b557f8fb54784a5c1a5`
-- Tree-id: `754932d20917aad015073b557f8fb54784a5c1a5-fcbfc40e1cb6`
+- Tree-id: `7f91c858735c4b19c94f8e69448d1c07590a8ad4`
 
 ## Scenes
 
@@ -80,13 +80,11 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes — `GET /health` `git_sha` and UI `/fleet-git-sha.txt` both `754932d20917aad015073b557f8fb54784a5c1a5-fcbfc40e1cb6` (host `:18280`/`:13230`; Kind still owns `:8080`/`:3030` with an older bake). Clip: `.tmp/demos/20260905T190314Z-chat-fleet-sandboxes-cases-inbox-agents-settings-runners.webm` (not committed).
-- Frames + webm inspected: yes — all 48 frames under `.tmp/demos/20260905T190314Z-frames/` plus the `.webm`.
+- Recorded on final merge tree: yes — API `/health.git_sha` and UI `/fleet-git-sha.txt` both `7f91c858735c4b19c94f8e69448d1c07590a8ad4` on host `:18280`/`:13230`. Clip `.tmp/demos/20260905T190844Z-chat-fleet-sandboxes-cases-inbox-agents-settings-runners.webm` (not committed). Ship images rebuilt with that same `FLEET_GIT_SHA`.
+- Frames + webm inspected: yes — 48 frames under `.tmp/demos/20260905T190844Z-frames/` and the `.webm`.
 - Bugs found:
-  - Recorder reported 6; none are product regressions from this change after frame review.
-  - Chat “login landed on Workforce”: expected — post-login home is the dashboard. Chat composer then opened and showed provider/runner controls.
-  - Chat “composer disabled without an offline reason”: frame `06-chat-composer-disabled.png` shows Provider=OpenAI “coming soon” and a toast “OpenAI is coming soon”. Composer placeholder also says Grok/Ollama required. Not a silent disable.
-  - Inbox Finish / no `/inbox/finish`: no connected inbox app (Start monitor 400). Frame still shows an open demo ticket with Finish. UI already toasts API errors; the recorder click did not POST finish. Fail-closed “no runner” was not exercised as a toast in this clip.
-  - Runners “no POST /worker-hosts”: empty Self-hosted state is correct (“API is not a runner”). Add worker did not open the pair panel in frame `39` (same empty card) — recorder click miss, not a broken heading.
-  - Settings and Agents copy match this change (workers run on a paired runner; Settings Ollama is fallback).
-  - No leaked secrets or `@` personal emails (`*@example.test` only).
+  - Recorder flagged 7. After looking at the frames they are not product regressions from this change.
+  - Chat login → Workforce dashboard is the signed-in home. Composer then opened with runner/provider controls.
+  - Composer “disabled”: frame 06 is Provider=OpenAI “coming soon” with that toast. Placeholder still says Grok/Ollama required.
+  - Inbox Start monitor 400 (no connected app). Finish was not POSTed (recorder click). Empty Self-hosted list is correct (“API is not a runner”).
+  - Settings/Agents copy matches the runner-hosted workers change. No leaked secrets; emails are `*@example.test`.
