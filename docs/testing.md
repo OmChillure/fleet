@@ -57,6 +57,9 @@ until there is a bootable guest.
 
 ## Rules
 
+- All tests must pass before a merge to main. `just test` and
+  `just test-integration` (and the ship-image builds below) must be
+  green. Do not merge red tests, ignored failures, or `|| true`.
 - Before you open an MR, the last compile and test pass must run **in the
   ship image** (`Dockerfile` / `Dockerfile.ui`, `rust:1.88-bookworm`), not
   only host `cargo` / `just test`. Host-only green is how a tree that does

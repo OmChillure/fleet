@@ -8,17 +8,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode, header};
-use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
-use fleet_db::{PoolConfig, connect_and_migrate_with};
+use axum::http::{header, HeaderMap, Request, StatusCode};
+use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
+use fleet_db::{connect_and_migrate_with, PoolConfig};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
 };
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1120,6 +1120,33 @@ async fn cluster_host_completes_claim_in_other_workspace() {
     )
     .await
     .expect("label cluster");
+    let labeled = fleet_db::repos::worker_hosts::get(&state.db, host_id)
+        .await
+        .expect("reload host")
+        .expect("host");
+    assert!(
+        labeled.is_cluster_host(),
+        "test host must carry the cluster label: {:?}",
+        labeled.labels
+    );
+    // Drain leftover spawn/signal/chat claims addressed to this host_id
+    // (shared DB / prior runs) so lease returns the claim we enqueue.
+    loop {
+        let leftover = fleet_db::repos::work_claims::claim_next_spawn_for_host(
+            &state.db,
+            Uuid::parse_str(&ws_a).expect("ws a"),
+            host_id,
+            chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("drain leftover");
+        let Some(c) = leftover else {
+            break;
+        };
+        if let Some(token) = c.lease_token {
+            let _ = fleet_db::repos::work_claims::complete(&state.db, c.id, token).await;
+        }
+    }
     let (_b, jar_b, ws_b) = signup_and_login(&app).await;
     let ws_b_id = Uuid::parse_str(&ws_b).expect("ws b");
     call(&app, "GET", &fleet(&ws_b, ""), Some(&jar_b), None).await;
@@ -1286,9 +1313,12 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         })),
     )
     .await;
-    assert_eq!(stale.status, StatusCode::ACCEPTED, "{}", stale.body);
-    let tick2 = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
-    assert_eq!(tick2.status, StatusCode::OK, "tick2: {}", tick2.body);
+    assert_eq!(
+        stale.status,
+        StatusCode::UNAUTHORIZED,
+        "exited session must not accept further worker status: {}",
+        stale.body
+    );
     let after_stale = state
         .orch
         .store

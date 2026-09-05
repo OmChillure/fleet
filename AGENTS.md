@@ -127,6 +127,12 @@ install, tests, sandbox/lab, or operator scripts, it is not a small tweak
 
 Do not merge unless a human asks you to merge.
 
+All tests must pass before a merge to main. `just test` and
+`just test-integration` must be green on the merge tree. Do not merge
+with a red test, an ignored failure, `|| true` around `cargo test`, or
+a skip that hides a broken path. This GitLab has no runner — the lock
+is local (and the source-scan in `fleet-server` `merge_gate`).
+
 The last compile and test pass before you open the MR must run **in the
 ship image**, not only on the host. VPS and Kind build
 `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`). Host `cargo` /

@@ -6,18 +6,18 @@ mod pool;
 mod tick_ops;
 
 pub use host_pool::{
-    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
-    host_at_capacity, pick_assignable_host, pick_assignable_host_for, pick_assignable_runner,
-    select_assignable_host, select_assignable_runner, select_assignable_runner_preferring,
-    workspace_has_updating_host,
+    host_at_capacity, host_is_this_machine, pick_assignable_host, pick_assignable_host_for,
+    pick_assignable_runner, select_assignable_host, select_assignable_runner,
+    select_assignable_runner_preferring, workspace_has_updating_host, AssignableHost, ChosenHost,
+    HostRuntime, RunnerIsolation, RunnerKind, HOST_UPDATE_HOLD_SECS,
 };
 pub use models::*;
 pub use pool::*;
 pub use tick_ops::SpawnAssignment;
 
 use crate::domain::{
-    BoardTaskStatus, WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id, transition,
+    stable_board_task_id, transition, BoardTaskStatus, WorkPlanBody, WorkPlanStatus, WorkRunStatus,
 };
 use crate::validate::validate_plan;
 use sha2::{Digest, Sha256};

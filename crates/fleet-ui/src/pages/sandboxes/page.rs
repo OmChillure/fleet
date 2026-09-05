@@ -3,36 +3,17 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{SandboxRow, kill_sandbox, list_sandboxes};
+use super::api::{list_sandboxes, SandboxRow};
+use super::shape::{
+    list_status_line, sandbox_card_model, EMPTY_HEADING, EMPTY_HINT, LOAD_ERROR, PAGE_HEADING,
+    PAGE_SUBTITLE,
+};
 use crate::Route;
-
-fn short_id(id: &str) -> String {
-    id.get(..8).unwrap_or(id).to_string()
-}
-
-fn status_pill_class(status: &str) -> &'static str {
-    match status {
-        "healthy" | "spawning" => "bg-sky-500/15 text-sky-400 border-sky-500/30",
-        "stuck" | "killing" => "bg-amber-500/15 text-amber-400 border-amber-500/30",
-        "exited" => "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-        "failed_spawn" => "bg-red-500/15 text-red-400 border-red-500/30",
-        _ => "bg-[var(--app-bg-hover)] text-[var(--app-muted)] border-[var(--app-border)]",
-    }
-}
-
-fn format_ts(ts: &Option<String>) -> String {
-    match ts {
-        Some(s) if !s.is_empty() => {
-            // Show date-time without full fractional precision if present
-            s.get(..19).unwrap_or(s).replace('T', " ")
-        }
-        _ => "—".into(),
-    }
-}
 
 #[component]
 pub fn Sandboxes(workspace_id: String) -> Element {
     let mut rows = use_signal(|| Vec::<SandboxRow>::new());
+    let mut backend = use_signal(String::new);
     let mut status_line = use_signal(|| "Loading sandboxes…".to_string());
     let mut busy = use_signal(|| false);
     let mut ready = use_signal(|| false);
@@ -44,9 +25,10 @@ pub fn Sandboxes(workspace_id: String) -> Element {
         spawn(async move {
             match list_sandboxes(&ws).await {
                 Ok(resp) => {
+                    backend.set(resp.display_backend());
                     let n = resp.sandboxes.len();
                     rows.set(resp.sandboxes);
-                    status_line.set(format!("{n} sandbox session(s)"));
+                    status_line.set(list_status_line(n));
                     ready.set(true);
                 }
                 Err(e) => {
@@ -65,6 +47,7 @@ pub fn Sandboxes(workspace_id: String) -> Element {
             loop {
                 TimeoutFuture::new(2500).await;
                 if let Ok(resp) = list_sandboxes(&ws).await {
+                    backend.set(resp.display_backend());
                     rows.set(resp.sandboxes);
                 }
             }
@@ -76,13 +59,16 @@ pub fn Sandboxes(workspace_id: String) -> Element {
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]",
-                        "Sandboxes"
+                        "{PAGE_HEADING}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Worker sessions on paired hosts (chat launch or Fleet fixture)."
+                        "{PAGE_SUBTITLE}"
                     }
                     p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]",
-                        "workspace {workspace_id} · plane is not a runner"
+                        "workspace {workspace_id}"
+                        if !backend().is_empty() {
+                            " · backend {backend}"
+                        }
                     }
                 }
                 div { class: "flex flex-wrap gap-2",
@@ -98,9 +84,10 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                                 spawn(async move {
                                     match list_sandboxes(&ws).await {
                                         Ok(resp) => {
+                                            backend.set(resp.display_backend());
                                             let n = resp.sandboxes.len();
                                             rows.set(resp.sandboxes);
-                                            status_line.set(format!("{n} sandbox session(s)"));
+                                            status_line.set(list_status_line(n));
                                             ready.set(true);
                                         }
                                         Err(e) => {
@@ -122,14 +109,14 @@ pub fn Sandboxes(workspace_id: String) -> Element {
             if !ready() && rows().is_empty() {
                 div {
                     class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-8 text-center text-sm text-[var(--app-muted)]",
-                    "Could not load sandboxes. Check API connectivity and workspace membership."
+                    "{LOAD_ERROR}"
                 }
             } else if rows().is_empty() {
                 div {
                     class: "rounded-xl border border-dashed border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-8 text-center",
-                    p { class: "m-0 text-sm font-medium text-[var(--app-fg)]", "No sandboxes yet" }
+                    p { class: "m-0 text-sm font-medium text-[var(--app-fg)]", "{EMPTY_HEADING}" }
                     p { class: "mt-2 text-sm text-[var(--app-muted)]",
-                        "From Chat, ask the assistant to launch work in a sandbox, or use Fleet → Start 2-task run → Run tick."
+                        "{EMPTY_HINT}"
                     }
                 }
             } else {
@@ -139,9 +126,6 @@ pub fn Sandboxes(workspace_id: String) -> Element {
                             key: "{s.id}",
                             workspace_id: workspace_id.clone(),
                             row: s,
-                            busy: busy,
-                            status_line: status_line,
-                            rows: rows,
                         }
                     }
                 }
@@ -151,18 +135,9 @@ pub fn Sandboxes(workspace_id: String) -> Element {
 }
 
 #[component]
-fn SandboxCard(
-    workspace_id: String,
-    row: SandboxRow,
-    mut busy: Signal<bool>,
-    mut status_line: Signal<String>,
-    mut rows: Signal<Vec<SandboxRow>>,
-) -> Element {
-    let pill = status_pill_class(&row.status);
-    let live = matches!(
-        row.status.as_str(),
-        "spawning" | "healthy" | "stuck" | "killing"
-    );
+fn SandboxCard(workspace_id: String, row: SandboxRow) -> Element {
+    let card = sandbox_card_model(&row);
+    let pill = card.pill_class;
     rsx! {
         div {
             class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
@@ -170,18 +145,18 @@ fn SandboxCard(
                 div { class: "flex flex-wrap items-center gap-2",
                     span {
                         class: "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium {pill}",
-                        "{row.status}"
+                        "{card.status}"
                     }
                     span { class: "text-sm font-medium text-[var(--app-fg)]",
-                        "{row.worker_profile}"
+                        "{card.worker_profile}"
                     }
                     span { class: "font-mono text-xs text-[var(--app-muted)]",
-                        "{row.runtime_backend}"
+                        "{card.runtime_backend}"
                     }
                 }
                 div { class: "flex items-center gap-2",
                     span { class: "text-xs text-[var(--app-muted)]",
-                        "{row.progress_pct}%"
+                        "{card.progress_label}"
                     }
                     Link {
                         to: Route::SessionDetail {
@@ -191,56 +166,22 @@ fn SandboxCard(
                         class: "text-[11px] text-[var(--app-accent)] underline",
                         "Watch"
                     }
-                    if live {
-                        button {
-                            class: "rounded-md border border-red-500/40 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-500/10 disabled:opacity-50",
-                            r#type: "button",
-                            disabled: busy(),
-                            onclick: {
-                                let workspace_id = workspace_id.clone();
-                                let sid = row.id.clone();
-                                move |_| {
-                                    if busy() { return; }
-                                    busy.set(true);
-                                    let ws = workspace_id.clone();
-                                    let sid = sid.clone();
-                                    spawn(async move {
-                                        match kill_sandbox(&ws, &sid).await {
-                                            Ok(()) => {
-                                                status_line.set(format!("Killed {sid}"));
-                                                if let Ok(resp) = list_sandboxes(&ws).await {
-                                                    rows.set(resp.sandboxes);
-                                                }
-                                            }
-                                            Err(e) => status_line.set(e.message()),
-                                        }
-                                        busy.set(false);
-                                    });
-                                }
-                            },
-                            "Kill"
-                        }
-                    }
                 }
             }
-            div { class: "mt-3 grid gap-1 font-mono text-xs text-[var(--app-muted)] sm:grid-cols-2",
-                div { "session  {short_id(&row.id)}…" }
-                div { "run      {short_id(&row.run_id)}…" }
-                div { "task     {short_id(&row.board_task_id)}…" }
-                div { "attempt  {row.attempt}" }
-                div { "started  {format_ts(&row.started_at)}" }
-                div { "exited   {format_ts(&row.exited_at)}" }
+            div { class: "mt-3 grid gap-1 whitespace-pre font-mono text-xs text-[var(--app-muted)] sm:grid-cols-2",
+                div { "session  {card.session_short}…" }
+                div { "run      {card.run_short}…" }
+                div { "task     {card.task_short}…" }
+                div { "attempt  {card.attempt}" }
+                div { "started  {card.started}" }
+                div { "exited   {card.exited}" }
             }
-            if let Some(reason) = &row.exit_reason {
-                if !reason.is_empty() {
-                    p { class: "mt-2 text-xs text-amber-300/90", "exit: {reason}" }
-                }
+            if let Some(reason) = &card.exit_reason {
+                p { class: "mt-2 text-xs text-amber-300/90", "exit: {reason}" }
             }
-            if let Some(dir) = &row.work_dir {
-                if !dir.is_empty() {
-                    p { class: "mt-1 truncate font-mono text-[10px] text-[var(--app-muted)]",
-                        "{dir}"
-                    }
+            if let Some(dir) = &card.work_dir {
+                p { class: "mt-1 truncate font-mono text-[10px] text-[var(--app-muted)]",
+                    "{dir}"
                 }
             }
         }

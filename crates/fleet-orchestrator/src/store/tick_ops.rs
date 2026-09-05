@@ -1,6 +1,6 @@
 //! Store operations used by the reconcile tick (PR5b/c).
 
-use super::{Result, Store, WorkerSessionRow, hash_worker_token};
+use super::{hash_worker_token, Result, Store, WorkerSessionRow};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -925,49 +925,6 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    /// Workspace custom persona (Agents page) by slug. Same DB, project_id == workspace_id.
-    pub async fn find_workspace_persona(
-        &self,
-        workspace_id: Uuid,
-        slug: &str,
-    ) -> Result<Option<(String, String)>> {
-        let key = slug.trim();
-        if key.is_empty() {
-            return Ok(None);
-        }
-        let row = sqlx::query_as::<_, (String, String, String)>(
-            r#"
-            SELECT name, role_prompt, COALESCE(description, '')
-            FROM personas
-            WHERE workspace_id = $1 AND status = 'active'
-              AND (slug = $2 OR lower(name) = lower($2))
-            LIMIT 1
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await;
-        match row {
-            Ok(Some((name, role, desc))) => {
-                let mut body = format!("# {name}\n\n");
-                if !desc.trim().is_empty() {
-                    body.push_str(desc.trim());
-                    body.push_str("\n\n");
-                }
-                body.push_str("## Role\n\n");
-                body.push_str(role.trim());
-                body.push('\n');
-                Ok(Some((name, body)))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => {
-                tracing::debug!(error = %e, "workspace persona lookup skipped");
-                Ok(None)
-            }
-        }
     }
 
     /// HITL resume intent only (Model A). Returns false if task not blocked.

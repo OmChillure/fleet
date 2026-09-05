@@ -1,6 +1,6 @@
 //! Bitbucket Cloud REST 2.0 helpers.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::proxy::types::ProxyResult;
 

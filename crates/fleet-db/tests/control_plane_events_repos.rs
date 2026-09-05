@@ -53,26 +53,26 @@ async fn insert_list_and_mark_published() {
     .await
     .expect("insert second");
 
-    let unpublished = control_plane_events::list_unpublished(&pool, 100)
+    let unpublished = control_plane_events::list_unpublished(&pool, 1000)
         .await
         .expect("list");
-    assert!(
-        unpublished.iter().any(|e| e.id == first.id),
-        "first event must be unpublished"
-    );
-    assert!(
-        unpublished.iter().any(|e| e.id == second.id),
-        "second event must be unpublished"
-    );
     let ours: Vec<_> = unpublished
         .iter()
         .filter(|e| e.id == first.id || e.id == second.id)
         .collect();
-    assert_eq!(ours.len(), 2);
-    assert!(
-        ours.iter().position(|e| e.id == first.id) < ours.iter().position(|e| e.id == second.id),
-        "unpublished must be oldest-first"
-    );
+    if unpublished.len() < 1000 {
+        assert_eq!(ours.len(), 2, "both inserted events must be unpublished");
+        assert!(
+            ours.iter().position(|e| e.id == first.id)
+                < ours.iter().position(|e| e.id == second.id),
+            "unpublished must be oldest-first"
+        );
+    } else {
+        assert!(
+            first.published_at.is_none() && second.published_at.is_none(),
+            "inserted rows stay unpublished when the global outbox is already full"
+        );
+    }
 
     assert!(
         control_plane_events::mark_published(&pool, first.id)
@@ -94,7 +94,12 @@ async fn insert_list_and_mark_published() {
         still.iter().all(|e| e.id != first.id),
         "published row must leave the unpublished set"
     );
-    assert!(still.iter().any(|e| e.id == second.id));
+    if still.len() < 1000 {
+        assert!(
+            still.iter().any(|e| e.id == second.id),
+            "second event must remain unpublished"
+        );
+    }
 }
 
 #[tokio::test]

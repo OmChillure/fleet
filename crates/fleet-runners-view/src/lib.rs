@@ -315,7 +315,11 @@ pub fn served_platforms(inv: &PackageInventory) -> Vec<ServedPlatform> {
 
 fn short_sha(sha: &str) -> &str {
     let s = sha.trim();
-    if s.len() > 12 { &s[..12] } else { s }
+    if s.len() > 12 {
+        &s[..12]
+    } else {
+        s
+    }
 }
 
 /// The two files the plane serves and the box must report. Not `fleet-worker`.
@@ -1601,13 +1605,11 @@ mod tests {
     #[test]
     fn effort_picker_hidden_when_model_has_no_menu() {
         let details = vec![detail("sxs-claude-opus-4-6", &[], "high")];
-        assert!(
-            pick_effort_value(
-                find_model_detail(&details, "sxs-claude-opus-4-6"),
-                Some("high")
-            )
-            .is_none()
-        );
+        assert!(pick_effort_value(
+            find_model_detail(&details, "sxs-claude-opus-4-6"),
+            Some("high")
+        )
+        .is_none());
     }
 
     #[test]
@@ -1879,8 +1881,15 @@ mod tests {
         let mut host = sample_host();
         host.settings_gen = 2;
         host.settings_ack_gen = 1;
-        host.outdated = true;
-        host.software_status = Some("behind".into());
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(software_flag(&host), Some("outdated"));
         assert!(settings_awaiting_ack(&host));
         assert_eq!(extra_status_pills(&host), vec!["pending apply", "outdated"]);
 

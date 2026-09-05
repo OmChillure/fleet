@@ -5,16 +5,16 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
+    format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyResult,
 };
-use fleet_integrations::{IntegrationAvailability, catalog};
+use fleet_integrations::{catalog, IntegrationAvailability};
 use fleet_orchestrator::domain::{
-    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
-    WorkPlanStatus,
+    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
+    MAX_TASKS_PER_PLAN,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -1193,7 +1193,11 @@ pub fn coerce_integration_args(
             }
         }
     }
-    if changed { Some(next) } else { None }
+    if changed {
+        Some(next)
+    } else {
+        None
+    }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -2833,12 +2837,10 @@ mod tests {
     #[test]
     fn parse_launch_plan_rejects_empty_and_blank_ids() {
         assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
-        assert!(
-            parse_launch_plan_args(&json!({
-                "tasks": [{ "id": " ", "title": "X" }]
-            }))
-            .is_err()
-        );
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": " ", "title": "X" }]
+        }))
+        .is_err());
         let ok = parse_launch_plan_args(&json!({
             "outputs": [{
                 "provider": "notion",
@@ -2973,13 +2975,11 @@ mod tests {
     fn retry_hint_names_required_text() {
         let h = retry_hint("notion", "append_blocks");
         assert_eq!(h["should_retry"], true);
-        assert!(
-            h["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|x| x == "text")
-        );
+        assert!(h["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x == "text"));
     }
 
     #[test]

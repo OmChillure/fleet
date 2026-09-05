@@ -21,7 +21,7 @@ mod types;
 
 pub use apps::{dispatch, operations_catalog_text, operations_for, supported_providers};
 pub use sanitize::{contains_secret_keys, sanitize_value};
-pub use types::{MAX_PROXY_DATA_BYTES, ProxyCaller, ProxyRequest, ProxyResult};
+pub use types::{ProxyCaller, ProxyRequest, ProxyResult, MAX_PROXY_DATA_BYTES};
 
 use std::time::Duration;
 
@@ -301,8 +301,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::Arc;
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use std::sync::Arc;
             use std::thread;
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind create_pr sink");
@@ -1011,8 +1011,12 @@ mod tests {
         );
         let ptr = fn_src(chat_src, "async fn proxy_tool_result");
         assert!(
-            ptr.contains("proxy::invoke"),
-            "proxy_tool_result must call proxy::invoke:\n{ptr}"
+            ptr.contains("gated_invoke"),
+            "proxy_tool_result must call gated_invoke (workforce gate, then proxy::invoke):\n{ptr}"
+        );
+        assert!(
+            !ptr.contains("proxy::invoke"),
+            "proxy_tool_result must not call proxy::invoke directly (tokens stay behind gated_invoke):\n{ptr}"
         );
         assert!(
             !ptr.contains("access_token")

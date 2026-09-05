@@ -31,6 +31,7 @@ framework.
 | Agent MR demo | `./scripts/human-test.sh record` on the **final merge tree**; scope scenes, not a random walk; then **review the film** for bugs |
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not add jobs.
+All tests must pass before a merge to main (`just test` + `just test-integration`).
 
 ## Fail closed
 
