@@ -13,12 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::cases as case_repo;
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{Case, CaseEvent};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use fleet_integrations::proxy::ProxyCaller;
@@ -409,16 +409,15 @@ pub fn case_json(case: &Case, events: Option<&[CaseEvent]>) -> Value {
         "updated_at": case.updated_at,
     });
     if let Some(ev) = events {
-        v["events"] = json!(
-            ev.iter()
-                .map(|e| json!({
-                    "id": e.id,
-                    "kind": e.kind,
-                    "payload": e.payload,
-                    "created_at": e.created_at,
-                }))
-                .collect::<Vec<_>>()
-        );
+        v["events"] = json!(ev
+            .iter()
+            .map(|e| json!({
+                "id": e.id,
+                "kind": e.kind,
+                "payload": e.payload,
+                "created_at": e.created_at,
+            }))
+            .collect::<Vec<_>>());
     }
     v
 }
@@ -1758,12 +1757,10 @@ mod tests {
         let arr = ctx["observations"].as_array().expect("arr");
         assert_eq!(arr.len(), MAX_OBSERVATIONS);
         assert!(arr[0]["note"].as_str().unwrap().contains("note 20"));
-        assert!(
-            arr.last().unwrap()["note"]
-                .as_str()
-                .unwrap()
-                .contains("note 59")
-        );
+        assert!(arr.last().unwrap()["note"]
+            .as_str()
+            .unwrap()
+            .contains("note 59"));
     }
 
     #[test]

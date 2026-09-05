@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -268,14 +268,17 @@ async fn provider_signing_secret(
     workspace_id: Uuid,
     provider: &str,
 ) -> Result<Option<String>, String> {
-    let Some(app) =
-        fleet_db::repos::integrations::get_oauth_app(&state.db, workspace_id, provider)
-            .await
-            .map_err(|e| e.to_string())?
+    let Some(app) = fleet_db::repos::integrations::get_oauth_app(&state.db, workspace_id, provider)
+        .await
+        .map_err(|e| e.to_string())?
     else {
         return Ok(None);
     };
-    let Ok(plain) = state.integrations.credentials_key.decrypt(&app.client_secret) else {
+    let Ok(plain) = state
+        .integrations
+        .credentials_key
+        .decrypt(&app.client_secret)
+    else {
         return Ok(None);
     };
     let secret = plain

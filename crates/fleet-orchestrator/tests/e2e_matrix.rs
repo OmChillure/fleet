@@ -16,7 +16,7 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::store::{Store, connect, migrate};
+use fleet_orchestrator::store::{connect, migrate, Store};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -41,7 +41,13 @@ async fn setup() -> Store {
 }
 
 fn runner(store: Store) -> TickRunner {
-    TickRunner::with_store(store)
+    // Not loopback: these tests pair a fixture host (`e2e-host`), not this
+    // machine. Loopback would drop that host and starve the chain.
+    TickRunner::new(
+        store,
+        std::env::temp_dir().join("fleet-orch-e2e"),
+        "http://192.0.2.10:8080",
+    )
 }
 
 async fn seed_workspace(store: &Store, project_id: Uuid) {

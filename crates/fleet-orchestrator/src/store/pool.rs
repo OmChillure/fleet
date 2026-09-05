@@ -1,6 +1,6 @@
 use super::StoreError;
-use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::PgPool;
 use std::str::FromStr;
 use std::time::Duration;
 

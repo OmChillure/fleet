@@ -65,7 +65,12 @@ pub fn Login() -> Element {
                     }
                     loading.set(false);
                     if let Some(id) = ws_id {
-                        show_toast().success("Signed in.");
+                        let hello = if res.message.trim().is_empty() {
+                            format!("Signed in as {}.", res.user.email)
+                        } else {
+                            res.message
+                        };
+                        show_toast().success(hello);
                         navigator.push(Route::Dashboard { workspace_id: id });
                     } else {
                         show_toast().error("Logged in, but no workspace was found. Try again.");
@@ -73,7 +78,11 @@ pub fn Login() -> Element {
                 }
                 Err(e) => {
                     loading.set(false);
-                    show_toast().error(e.message());
+                    if e.is_unauthorized() {
+                        show_toast().error("Email or password is wrong.");
+                    } else {
+                        show_toast().error(e.message());
+                    }
                 }
             }
         });

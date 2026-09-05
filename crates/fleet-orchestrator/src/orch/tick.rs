@@ -46,6 +46,7 @@ pub struct TickReport {
     pub completed_via_runtime: usize,
     pub killed: usize,
     pub retried: usize,
+    pub reviews_bounced: usize,
     pub cancel_tasks: usize,
     pub retry_promoted: usize,
     pub reaped: usize,
@@ -271,7 +272,9 @@ impl TickRunner {
         let cfg = self.store.get_project_config(project_id).await?;
 
         // Step 1 — inbox
-        report.inbox_applied = apply_inbox(&self.store, project_id, &self.data_dir).await?;
+        let inbox = apply_inbox(&self.store, project_id, &self.data_dir).await?;
+        report.inbox_applied = inbox.applied;
+        report.reviews_bounced = inbox.reviews_bounced;
         notify_new_blocks(&self.store, &self.notify, project_id).await;
 
         // Step 1b — repair assigned+healthy

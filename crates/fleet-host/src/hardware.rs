@@ -280,8 +280,10 @@ fn read_cpu_times() -> Option<CpuTimes> {
     {
         return win_cpu_times();
     }
-    #[allow(unreachable_code)]
-    None
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
 }
 
 fn parse_proc_stat_cpu(text: &str) -> Option<CpuTimes> {
@@ -326,8 +328,10 @@ fn mem_total_bytes() -> Option<u64> {
     {
         return win_mem().map(|m| m.0);
     }
-    #[allow(unreachable_code)]
-    None
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
+    {
+        None
+    }
 }
 
 fn mem_used_pct() -> Option<u8> {
@@ -345,8 +349,10 @@ fn mem_used_pct() -> Option<u8> {
     {
         return win_mem().map(|m| m.1);
     }
-    #[allow(unreachable_code)]
-    None
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -709,8 +715,10 @@ fn platform_gpus() -> Vec<Gpu> {
     {
         return macos_gpus();
     }
-    #[allow(unreachable_code)]
-    Vec::new()
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    {
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1249,7 +1257,7 @@ fn macos_mem_speed() -> Option<(Option<u32>, Option<String>)> {
     parse_macos_memory(&text)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn parse_macos_memory(text: &str) -> Option<(Option<u32>, Option<String>)> {
     let mut speeds = Vec::new();
     let mut types = Vec::new();
@@ -1289,7 +1297,7 @@ fn macos_gpus() -> Vec<Gpu> {
     parse_macos_displays(&text)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn parse_macos_displays(text: &str) -> Vec<Gpu> {
     let mut out = Vec::new();
     let mut name: Option<String> = None;
@@ -1324,7 +1332,7 @@ fn parse_macos_displays(text: &str) -> Vec<Gpu> {
     out
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, target_os = "macos"))]
 fn parse_macos_vram(s: &str) -> Option<u64> {
     let mut toks = s.split_whitespace();
     let n: f64 = toks.next()?.replace(',', "").parse().ok()?;
@@ -1464,7 +1472,7 @@ fn win_mem_speed() -> Option<(Option<u32>, Option<String>)> {
     parse_wmic_memory(&text)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, windows))]
 fn parse_wmic_memory(text: &str) -> Option<(Option<u32>, Option<String>)> {
     let mut speeds = Vec::new();
     let mut types = Vec::new();
@@ -1547,7 +1555,7 @@ fn win_cim_videocontrollers() -> Option<String> {
     None
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, windows))]
 fn parse_wmic_gpus(text: &str) -> Vec<Gpu> {
     let mut out = Vec::new();
     let mut name: Option<String> = None;

@@ -6,17 +6,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode, header};
-use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
-use fleet_db::{PoolConfig, connect_and_migrate_with};
+use axum::http::{header, HeaderMap, Request, StatusCode};
+use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
+use fleet_db::{connect_and_migrate_with, PoolConfig};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
 };
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -178,7 +178,7 @@ async fn app() -> axum::Router {
 
 /// JWT shaped like OAuth state but with `typ: "access"` (must be rejected by callback).
 fn oauth_state_with_typ_access(secret: &str, provider: &str) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{encode, EncodingKey, Header};
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -369,7 +369,10 @@ async fn call_raw(
     for (k, v) in extra {
         builder = builder.header(*k, *v);
     }
-    if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+    if !extra
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
     }
     let req = builder.body(Body::from(body)).unwrap();
@@ -480,6 +483,20 @@ fn partners_disclaimer(ws: &str) -> String {
     format!("/api/workspaces/{ws}/partners/disclaimer")
 }
 
+fn this_machine_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "test-box".into())
+}
+
 async fn pair_test_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String {
     let created = call(
         app,
@@ -499,6 +516,7 @@ async fn pair_test_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String
         .as_str()
         .unwrap_or_else(|| panic!("pair_token: {}", created.body))
         .to_string();
+    let hostname = this_machine_hostname();
     let paired = call(
         app,
         "POST",
@@ -506,7 +524,7 @@ async fn pair_test_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String
         None,
         Some(json!({
             "token": token,
-            "hostname": "test-box",
+            "hostname": hostname,
             "platform": "linux-x86_64",
             "advertised_host": true,
             "advertised_container": false
@@ -1292,7 +1310,8 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         disc.body
     );
 
-    // Callback without code/state: HTML close page, no token leak, not 5xx.
+    // Callback without a session cookie: 401 HTML close page, no token leak.
+    // Stolen state JWT + code must not exchange (oauth_callback_requires_session_cookie).
     let cb = call(
         &app,
         "GET",
@@ -1307,10 +1326,10 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         cb.status,
         cb.raw
     );
-    assert!(
-        cb.status == StatusCode::OK || cb.status == StatusCode::BAD_REQUEST,
-        "oauth callback status {}: {}",
+    assert_eq!(
         cb.status,
+        StatusCode::UNAUTHORIZED,
+        "oauth callback without a session must be 401: {}",
         cb.raw
     );
     assert!(
@@ -1331,7 +1350,7 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
         &app,
         "GET",
         &format!("/api/integrations/oauth/callback/github?code=fake-code&state={bad_state}"),
-        None,
+        Some(&jar),
         None,
     )
     .await;
@@ -1343,8 +1362,8 @@ async fn integrations_catalog_oauth_start_delete_and_callback_contracts() {
     );
     assert_eq!(
         cb_access.status,
-        StatusCode::OK,
-        "callback always returns HTML close page: {}",
+        StatusCode::UNAUTHORIZED,
+        "typ=access state is invalid oauth state (401 HTML close page): {}",
         cb_access.raw
     );
     let lower = cb_access.raw.to_ascii_lowercase();
@@ -1378,9 +1397,16 @@ async fn chat_status_create_list_delete_other_user_forbidden() {
     let status = call(&app, "GET", &format!("{chat}/status"), Some(&jar), None).await;
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
     let providers = status.body["providers"].as_array().expect("providers");
-    assert!(
-        providers.is_empty(),
-        "without runner_id, inventory is empty (not the control plane): {}",
+    assert_eq!(
+        providers.len(),
+        1,
+        "without runner_id, inventory is exactly one control-plane OpenAI row: {}",
+        status.body
+    );
+    assert_eq!(
+        providers[0]["id"].as_str(),
+        Some("openai"),
+        "without runner_id, inventory is control-plane OpenAI only (not runner Grok/Claude/Ollama): {}",
         status.body
     );
     let hint = status.body["hint"].as_str().unwrap_or("");
@@ -1523,6 +1549,12 @@ async fn chat_tool_launch_agent_task_waits_for_host_then_inbox() {
     .expect("user id uuid");
     let workspace_id = Uuid::parse_str(&ws).expect("workspace uuid");
 
+    // Pin isolation above process so a shared cluster host (this-machine)
+    // is not selected. Launch would otherwise enqueue onto that box.
+    fleet_db::repos::workspaces::set_min_isolation(&state.db, workspace_id, "vm")
+        .await
+        .expect("pin min_isolation=vm");
+
     let (content, action) = fleet_server::chat_tools::execute_tool(
         &state,
         workspace_id,
@@ -1553,7 +1585,7 @@ async fn chat_tool_launch_agent_task_waits_for_host_then_inbox() {
     );
     assert_eq!(
         content["run_terminal"], false,
-        "no host → run must stay open: {content}"
+        "run must stay open until inbox completes: {content}"
     );
     assert_eq!(content["task_count"], 1, "{content}");
     let hint = content["hint"].as_str().unwrap_or("");
@@ -1573,6 +1605,9 @@ async fn chat_tool_launch_agent_task_waits_for_host_then_inbox() {
         "chat plan t1 should stay ready without a host: {content}"
     );
 
+    fleet_db::repos::workspaces::set_min_isolation(&state.db, workspace_id, "process")
+        .await
+        .expect("restore min_isolation=process");
     let machine = pair_test_host(&app, &jar, &ws).await;
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "assign tick: {}", tick.body);
@@ -2152,6 +2187,14 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
     let (_email, jar, ws) = signup_and_login(&app).await;
     let workspace_id = Uuid::parse_str(&ws).expect("ws");
 
+    let assignable_before = fleet_db::repos::worker_hosts::list_assignable(
+        &state.db,
+        workspace_id,
+        chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("list_assignable before");
+
     let posted = call(
         &app,
         "POST",
@@ -2206,9 +2249,11 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
     )
     .await
     .expect("list_assignable");
-    assert!(
-        assignable.is_empty(),
-        "ack must not create assignable hosts: {assignable:?}"
+    let before_ids: Vec<Uuid> = assignable_before.iter().map(|h| h.id).collect();
+    let after_ids: Vec<Uuid> = assignable.iter().map(|h| h.id).collect();
+    assert_eq!(
+        after_ids, before_ids,
+        "ack must not create or drop assignable hosts (cluster hosts from the shared DB may already be listed): before={assignable_before:?} after={assignable:?}"
     );
 
     let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
@@ -3234,14 +3279,12 @@ async fn session_live_comes_from_worker_ingest_not_plane_file() {
         "t1 queued→ready"
     );
     let sid = Uuid::new_v4();
-    assert!(
-        state
-            .orch
-            .store
-            .cas_assign_task(task.id, sid, 1)
-            .await
-            .expect("cas")
-    );
+    assert!(state
+        .orch
+        .store
+        .cas_assign_task(task.id, sid, 1)
+        .await
+        .expect("cas"));
     let token = "live-worker-token";
     state
         .orch

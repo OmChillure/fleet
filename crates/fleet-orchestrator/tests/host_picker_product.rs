@@ -1,9 +1,8 @@
-//! Product contracts for host assignment. These encode intended behavior
-//! (lowest load/cap, oldest heartbeat, min_isolation, no loopback for
-//! container guests, plan LLM → FLEET_HARNESS). They are allowed to fail
-//! when the current picker/spawn path does not match.
+//! Product contracts for host assignment: lowest load/cap, oldest heartbeat,
+//! min_isolation, no loopback for off-box host-runtime, no loopback for
+//! container guests, plan LLM → FLEET_HARNESS.
 //!
-//! Requires DATABASE_URL.
+//! Required by `just test-integration` / merge-to-main. Requires DATABASE_URL.
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::models::NewWorkerHost;
@@ -13,7 +12,9 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::store::{Store, connect, migrate, select_assignable_host};
+use fleet_orchestrator::store::{
+    connect, host_is_this_machine, migrate, select_assignable_host, AssignableHost, Store,
+};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -242,11 +243,12 @@ async fn container_min_isolation_skips_process_only_host() {
     workspaces::set_min_isolation(store.pool(), project.id, "container")
         .await
         .expect("min_isolation=container");
-    let _ = pair_host(&store, project.id, "proc-only", true, false).await;
+    let proc = pair_host(&store, project.id, "proc-only", true, false).await;
 
+    let chosen = select_assignable_host(&store, project.id).await;
     assert!(
-        select_assignable_host(&store, project.id).await.is_none(),
-        "a process-only host must not take a workspace that requires container isolation"
+        chosen.as_ref().map(|c| c.id()) != Some(proc),
+        "a process-only host must not take a workspace that requires container isolation: {chosen:?}"
     );
 }
 
@@ -261,11 +263,12 @@ async fn vm_min_isolation_skips_container_host() {
     workspaces::set_min_isolation(store.pool(), project.id, "vm")
         .await
         .expect("min_isolation=vm");
-    let _ = pair_host(&store, project.id, "ctr", false, true).await;
+    let ctr = pair_host(&store, project.id, "ctr", false, true).await;
 
+    let chosen = select_assignable_host(&store, project.id).await;
     assert!(
-        select_assignable_host(&store, project.id).await.is_none(),
-        "min_isolation=vm must not fall back to a container host"
+        chosen.as_ref().map(|c| c.id()) != Some(ctr),
+        "min_isolation=vm must not fall back to a container host: {chosen:?}"
     );
 }
 
@@ -341,6 +344,18 @@ async fn spawn_claim_count(store: &Store, workspace_id: Uuid) -> i64 {
     .unwrap()
 }
 
+async fn spawn_claim_count_for_host(store: &Store, workspace_id: Uuid, host_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_claims \
+         WHERE workspace_id = $1 AND kind = 'spawn_session' AND payload->>'host_id' = $2",
+    )
+    .bind(workspace_id)
+    .bind(host_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .unwrap()
+}
+
 /// Documented follow-up: fail-closed assign when the plane URL
 /// (`WORKER_PUBLIC_BASE` / orchestrator URL) is loopback and the paired
 /// host is not this machine. Off-box workers cannot heartbeat to
@@ -361,6 +376,33 @@ async fn tick_must_not_assign_offbox_host_when_plane_url_is_loopback() {
             .unwrap();
         seed_workspace(&store, project.id).await;
         let off = pair_host(&store, project.id, "off-box-remote", true, false).await;
+        let off_row = worker_hosts::get(store.pool(), off)
+            .await
+            .expect("get off-box")
+            .expect("off-box");
+        assert!(
+            !host_is_this_machine(&AssignableHost::from(&off_row)),
+            "off-box fixture must not match this machine"
+        );
+
+        let assignable = worker_hosts::list_assignable(
+            store.pool(),
+            project.id,
+            fleet_db::WORKER_HOST_OFFLINE_AFTER,
+        )
+        .await
+        .expect("list_assignable");
+        let foreign_local: Vec<_> = assignable
+            .iter()
+            .filter(|h| h.id != off)
+            .filter(|h| host_is_this_machine(&AssignableHost::from(*h)))
+            .collect();
+        if !foreign_local.is_empty() {
+            // Shared live cluster host is this-machine. Ticking would enqueue
+            // onto that box. Mixed-pool test covers the pick; do not tick.
+            continue;
+        }
+
         store
             .insert_accepted_plan(project.id, one_task_plan(project.id))
             .await
@@ -371,6 +413,11 @@ async fn tick_must_not_assign_offbox_host_when_plane_url_is_loopback() {
             .await
             .unwrap();
         let claims = spawn_claim_count(&store, project.id).await;
+        let off_claims = spawn_claim_count_for_host(&store, project.id, off).await;
+        assert_eq!(
+            off_claims, 0,
+            "must not enqueue onto off-box {off} while plane URL {url} is loopback: {r:?}"
+        );
         assert_eq!(
             r.spawned, 0,
             "must not assign off-box host {off} while plane URL {url} is loopback: {r:?}"
@@ -420,6 +467,51 @@ async fn tick_may_assign_this_machine_host_when_plane_url_is_loopback() {
         r.spawned >= 1 || claims >= 1,
         "this-machine host {local} ({local_name}) must still be assignable \
          when the plane URL is loopback (local fleet-dev): {r:?} claims={claims}"
+    );
+}
+
+/// Mixed pool: unfiltered pick prefers the older off-box heartbeat. Filter
+/// before pick so the local box still gets the claim.
+#[tokio::test]
+async fn tick_loopback_assigns_this_machine_not_offbox() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("pp-lb-mix-{}", Uuid::new_v4()), 4)
+        .await
+        .unwrap();
+    seed_workspace(&store, project.id).await;
+    let off = pair_host(&store, project.id, "off-box-remote", true, false).await;
+    let local_name = std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| panic!("mixed-pool loopback assign needs HOSTNAME or /etc/hostname"));
+    let local = pair_host(&store, project.id, &local_name, true, false).await;
+    store
+        .insert_accepted_plan(project.id, one_task_plan(project.id))
+        .await
+        .unwrap();
+
+    let r = runner(store.clone(), "http://127.0.0.1:8080")
+        .tick_project(project.id)
+        .await
+        .unwrap();
+    let off_claims = spawn_claim_count_for_host(&store, project.id, off).await;
+    let local_claims = spawn_claim_count_for_host(&store, project.id, local).await;
+    assert_eq!(
+        off_claims, 0,
+        "must not enqueue onto off-box {off} on loopback: {r:?}"
+    );
+    assert!(
+        r.spawned >= 1 && local_claims >= 1,
+        "this-machine {local} ({local_name}) must take the claim, not stay ready: \
+         {r:?} local_claims={local_claims}"
     );
 }
 

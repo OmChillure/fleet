@@ -174,6 +174,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn session_and_cmd_keys() {
         assert_eq!(
             key_for_session_event("default", "sid", "state_changed"),

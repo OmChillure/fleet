@@ -25,6 +25,9 @@ pub mod work_io;
 pub mod worker_hosts;
 pub mod workforce;
 
+#[cfg(test)]
+mod merge_gate;
+
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
 pub use grok::GrokConfig;

@@ -10,7 +10,7 @@ use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
 use fleet_orchestrator::orch::TickRunner;
-use fleet_orchestrator::store::{Store, connect, migrate};
+use fleet_orchestrator::store::{connect, migrate, Store};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -196,6 +196,24 @@ async fn tick_offline_host_without_updating_leaves_ready() {
         .insert_accepted_plan(project.id, one_task_plan(project.id))
         .await
         .unwrap();
+
+    let assignable = worker_hosts::list_assignable(
+        store.pool(),
+        project.id,
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+    )
+    .await
+    .expect("list_assignable");
+    assert!(
+        assignable.iter().all(|h| h.id != host_id),
+        "offline host must not be assignable: {assignable:?}"
+    );
+    let foreign: Vec<_> = assignable.iter().filter(|h| h.id != host_id).collect();
+    if !foreign.is_empty() {
+        // Shared live DB (cluster-labeled host). Do not tick — that would
+        // enqueue a spawn claim onto someone else's paired box.
+        return;
+    }
 
     let r = runner(store.clone())
         .tick_project(project.id)

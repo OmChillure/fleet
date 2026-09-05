@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
-    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
+    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
+    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -1179,8 +1179,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::Arc;
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use std::sync::Arc;
             use std::thread;
             use std::time::Duration;
 

@@ -193,22 +193,16 @@ mod apply_task_terminal_tests {
         }
 
         let inbox = production_src(include_str!("inbox.rs"));
-        let stuck = production_src(include_str!("stuck.rs"));
-        for (label, src, sig) in [
-            ("inbox", inbox, "pub async fn apply_inbox"),
-            ("stuck", stuck, "pub async fn process_sessions"),
-        ] {
-            let apply_fn = fn_src(src, sig);
-            let apply_calls = assert_fail_closed_gate(label, apply_fn, "apply_task_terminal(");
-            assert!(
-                apply_calls > 0,
-                "{label} must still call apply_task_terminal"
-            );
-            // Validation bounce/fail on a blocked HITL or a stale claim overwrites
-            // the card even when apply_task_terminal's SQL would no-op.
-            assert_fail_closed_gate(label, apply_fn, "reopen_task_for_changes(");
-            assert_fail_closed_gate(label, apply_fn, "set_task_done_failed(");
-        }
+        let apply_fn = fn_src(inbox, "pub async fn apply_inbox");
+        let apply_calls = assert_fail_closed_gate("inbox", apply_fn, "apply_task_terminal(");
+        assert!(
+            apply_calls > 0,
+            "inbox must still call apply_task_terminal"
+        );
+        // Validation bounce/fail on a blocked HITL or a stale claim overwrites
+        // the card even when apply_task_terminal's SQL would no-op.
+        assert_fail_closed_gate("inbox", apply_fn, "reopen_task_for_changes(");
+        assert_fail_closed_gate("inbox", apply_fn, "set_task_done_failed(");
 
         // A new orch caller must not complete the wrong claim either.
         for (label, src) in [

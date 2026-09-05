@@ -1,6 +1,6 @@
 //! Sanitize proxy responses so secrets never reach chat / agents / logs.
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use super::types::MAX_PROXY_DATA_BYTES;
 

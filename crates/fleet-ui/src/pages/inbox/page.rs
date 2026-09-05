@@ -10,7 +10,11 @@ use super::api::{
 use crate::components::toast::show_toast;
 
 fn status_for(resp: &InboxResponse) -> String {
-    let n = resp.tickets.len();
+    let n = if resp.count > 0 {
+        resp.count
+    } else {
+        resp.tickets.len() as i64
+    };
     match resp.monitor.as_ref() {
         Some(m) => {
             let extra = if m.enabled {
@@ -23,7 +27,12 @@ fn status_for(resp: &InboxResponse) -> String {
                 .as_deref()
                 .map(|s| s.get(..19).unwrap_or(s).replace('T', " "))
                 .unwrap_or_else(|| "never".into());
-            format!("{n} ticket(s) · {extra} · last poll {poll}")
+            let hook = if m.hook_token.is_empty() { "no hook" } else { "hook on" };
+            let watching = m.providers.len();
+            format!(
+                "{n} ticket(s) · {extra} · last poll {poll} · launch {}/poll {} · {hook} · {watching} provider(s)",
+                m.launch_limit, m.poll_limit
+            )
         }
         None => format!("{n} ticket(s)"),
     }

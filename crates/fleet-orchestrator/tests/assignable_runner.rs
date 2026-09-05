@@ -3,8 +3,8 @@
 //! Cloud / Partners / public-cloud are not a second spawn path.
 
 use fleet_orchestrator::store::{
-    AssignableHost, HostRuntime, RunnerIsolation, RunnerKind, pick_assignable_host,
-    pick_assignable_runner,
+    pick_assignable_host, pick_assignable_runner, AssignableHost, HostRuntime, RunnerIsolation,
+    RunnerKind,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -28,6 +28,8 @@ fn host(
         isolation: RunnerIsolation::Native,
         last_seen_at: None,
         workspace_id: Uuid::nil(),
+        hostname: None,
+        addrs: vec![],
     }
 }
 

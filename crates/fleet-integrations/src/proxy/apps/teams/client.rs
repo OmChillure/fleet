@@ -1,6 +1,6 @@
 //! Microsoft Graph helpers for Teams (control plane only).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::proxy::types::ProxyResult;
 

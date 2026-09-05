@@ -14,7 +14,6 @@ pub struct StuckOutcome {
     pub killed: usize,
     pub completed_via_runtime: usize,
     pub retried: usize,
-    pub reviews_bounced: usize,
 }
 
 pub async fn process_sessions(
@@ -32,7 +31,6 @@ pub async fn process_sessions(
         killed: 0,
         completed_via_runtime: 0,
         retried: 0,
-        reviews_bounced: 0,
     };
     let now = Utc::now();
     let tasks: HashMap<Uuid, _> = snap.tasks.iter().map(|t| (t.id, t)).collect();

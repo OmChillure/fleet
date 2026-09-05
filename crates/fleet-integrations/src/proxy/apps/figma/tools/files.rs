@@ -1,6 +1,6 @@
 //! Figma file / project read tools. Full file trees are truncated.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;

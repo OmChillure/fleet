@@ -1,6 +1,6 @@
 //! GitLab HTTP helpers (gitlab.com REST v4).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::proxy::types::ProxyResult;
 

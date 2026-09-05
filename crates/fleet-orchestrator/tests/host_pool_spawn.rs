@@ -1,12 +1,12 @@
 //! Host selection and spawn payload shape (no Postgres).
 
-use fleet_orchestrator::sandbox::SpawnRequest;
 use fleet_orchestrator::sandbox::remote::{
-    BACKEND, host_id_from_handle, runtime_handle, spawn_payload,
+    host_id_from_handle, runtime_handle, spawn_payload, BACKEND,
 };
+use fleet_orchestrator::sandbox::SpawnRequest;
 use fleet_orchestrator::store::{
-    AssignableHost, HostRuntime, RunnerIsolation, host_at_capacity, pick_assignable_host,
-    pick_assignable_runner,
+    host_at_capacity, pick_assignable_host, pick_assignable_runner, AssignableHost, HostRuntime,
+    RunnerIsolation,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ fn host(
         isolation: RunnerIsolation::Native,
         last_seen_at: None,
         workspace_id: Uuid::nil(),
+        hostname: None,
+        addrs: vec![],
     }
 }
 

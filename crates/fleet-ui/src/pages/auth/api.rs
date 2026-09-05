@@ -3,8 +3,6 @@
 //! Dev: call same-origin `/api/*` so `dx serve` can proxy to the backend and cookies
 //! stay first-party (reload-safe). Production: set `FLEET_AUTH_URL` at build time.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 /// API origin for browser requests.
@@ -110,13 +108,15 @@ fn client() -> reqwest::Client {
 }
 
 /// Attach credentials so httpOnly auth cookies are sent/stored.
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+pub(crate) fn with_credentials(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     #[cfg(target_arch = "wasm32")]
     {
-        req = req.fetch_credentials_include();
+        return req.fetch_credentials_include();
     }
-    req
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        req
+    }
 }
 
 async fn parse_json_or_error<T: for<'de> Deserialize<'de>>(

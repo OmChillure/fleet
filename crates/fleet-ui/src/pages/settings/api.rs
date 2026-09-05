@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct FleetSettings {
@@ -55,14 +55,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
     let first = with_credentials(client().get(api_url(path)))

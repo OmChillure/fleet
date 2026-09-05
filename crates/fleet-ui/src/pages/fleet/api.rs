@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::pages::auth::api::auth_base_url;
+use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 #[derive(Debug, Clone)]
 pub enum FleetError {
@@ -42,14 +42,6 @@ pub fn start_fixture_body() -> Value {
     })
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn parse(res: reqwest::Response) -> Result<Value, FleetError> {
     let status = res.status();
@@ -142,29 +134,6 @@ pub async fn list_sessions(workspace_id: &str) -> Result<Value, FleetError> {
     let res = with_credentials(client().get(api_url(&format!(
         "/api/workspaces/{workspace_id}/fleet/sessions"
     ))))
-    .send()
-    .await
-    .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;
-    parse(res).await
-}
-
-#[allow(dead_code)]
-pub async fn update_fleet_config(
-    workspace_id: &str,
-    repo_url: Option<&str>,
-    git_ref: Option<&str>,
-) -> Result<Value, FleetError> {
-    let body = serde_json::json!({
-        "repo_url": repo_url,
-        "git_ref": git_ref,
-    });
-    let res = with_credentials(
-        client()
-            .patch(api_url(&format!(
-                "/api/workspaces/{workspace_id}/fleet/config"
-            )))
-            .json(&body),
-    )
     .send()
     .await
     .map_err(|e| FleetError::Network(format!("could not reach API: {e}")))?;

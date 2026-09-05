@@ -32,7 +32,8 @@ pub const CLOUD_CARD_GCP: CloudCardCopy = CloudCardCopy {
 
 pub const CLOUD_CARD_AZURE: CloudCardCopy = CloudCardCopy {
     name: "Azure",
-    body: "Bring-your-own Azure. Customer keys stay in the workspace; secrets never enter a sandbox.",
+    body:
+        "Bring-your-own Azure. Customer keys stay in the workspace; secrets never enter a sandbox.",
 };
 
 pub const CLOUD_CARD_FLEET: CloudCardCopy = CloudCardCopy {

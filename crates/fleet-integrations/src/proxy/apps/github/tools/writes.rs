@@ -2,8 +2,8 @@
 
 use serde_json::{json, Value};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
@@ -67,7 +67,10 @@ pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) 
     }
     let (get_status, existing) = github_get(http, token, &get_url).await;
     let sha = if (200..300).contains(&get_status) {
-        existing.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+        existing
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
@@ -163,8 +166,12 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("commit_files", st, &repo_body);
     }
@@ -398,7 +405,11 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
     )
 }
 
-pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+pub(crate) async fn create_branch(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_branch", "bad_args", e, None),
@@ -415,8 +426,12 @@ pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Va
             )
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_branch", st, &repo_body);
     }
@@ -491,15 +506,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     };
     let title = match args.get("title").and_then(|v| v.as_str()).map(str::trim) {
         Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            return ProxyResult::err(
-                "github",
-                "create_pr",
-                "bad_args",
-                "title is required",
-                None,
-            )
-        }
+        _ => return ProxyResult::err("github", "create_pr", "bad_args", "title is required", None),
     };
     let head = match args
         .get("head")
@@ -518,8 +525,12 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
             )
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_pr", st, &repo_body);
     }
@@ -539,10 +550,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
         .and_then(|v| v.as_str())
         .unwrap_or("Opened by Agent Fleet (control-plane integration; no tokens in sandboxes).")
         .to_string();
-    let draft = args
-        .get("draft")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let draft = args.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (st, pr) = github_post(
         http,
@@ -573,11 +581,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     )
 }
 
-pub(crate) async fn create_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_issue", "bad_args", e, None),
@@ -623,11 +627,7 @@ pub(crate) async fn create_issue(
     )
 }
 
-pub(crate) async fn update_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "update_issue", "bad_args", e, None),
@@ -705,11 +705,7 @@ pub(crate) async fn update_issue(
     )
 }
 
-pub(crate) async fn add_comment(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "add_comment", "bad_args", e, None),
@@ -780,8 +776,10 @@ pub(crate) async fn merge_pr(http: &reqwest::Client, token: &str, args: &Value) 
         .get("number")
         .or_else(|| args.get("pr"))
         .or_else(|| args.get("pull_number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
         Some(n) => n,
         None => {
             return ProxyResult::err(
@@ -840,4 +838,3 @@ pub(crate) async fn merge_pr(http: &reqwest::Client, token: &str, args: &Value) 
         Some(status),
     )
 }
-

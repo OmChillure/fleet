@@ -2,7 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use fleet_auth::AuthConfig;
 use fleet_integrations::IntegrationsConfig;
 

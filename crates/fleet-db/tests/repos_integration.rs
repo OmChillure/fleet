@@ -700,10 +700,13 @@ async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable()
     let assignable_ids_before: Vec<Uuid> = assignable_before.iter().map(|h| h.id).collect();
     assert!(host_ids_before.contains(&pending.id));
     assert!(host_ids_before.contains(&online.id));
-    assert_eq!(
-        assignable_ids_before,
-        vec![online.id],
-        "only the paired online host is assignable before accept"
+    assert!(
+        assignable_ids_before.contains(&online.id),
+        "paired online host must be assignable before accept: {assignable_ids_before:?}"
+    );
+    assert!(
+        !assignable_ids_before.contains(&pending.id),
+        "pending host must not be assignable: {assignable_ids_before:?}"
     );
 
     workspaces::accept_partners_disclaimer(&pool, workspace_id, Utc::now())

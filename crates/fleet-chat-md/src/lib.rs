@@ -94,7 +94,7 @@ pub fn markdown_to_parts(input: &str) -> Vec<MdPart> {
     parts
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn markdown_to_html(input: &str) -> String {
     markdown_to_parts(input)
         .into_iter()

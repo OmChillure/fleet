@@ -992,6 +992,26 @@ class FailClosedContractTests(unittest.TestCase):
         self.assertIn("LABEL fleet.git_sha=${FLEET_GIT_SHA}", runtime)
         self.assertNotIn("ENV FLEET_GIT_SHA", runtime)
 
+    def test_merge_to_main_requires_green_tests(self):
+        """No GitLab runner: AGENTS.md + testing docs lock a green suite before main."""
+        agents = AGENTS.read_text(encoding="utf-8")
+        testing = (REPO / "docs" / "testing.md").read_text(encoding="utf-8")
+        self.assertIn("All tests must pass before a merge to main", agents)
+        self.assertIn("All tests must pass before a merge to main", testing)
+        self.assertIn("All tests must be relevant", agents)
+        self.assertIn("All tests must be relevant", testing)
+        self.assertIn(
+            "If a test is not relevant, decide whether the test or the code should change",
+            agents,
+        )
+        self.assertIn("just test", agents)
+        self.assertIn("just test-integration", agents)
+        merge_gate = REPO / "crates" / "fleet-server" / "src" / "merge_gate.rs"
+        self.assertTrue(merge_gate.is_file(), "fleet-server merge_gate.rs is the Rust lock")
+        gate = merge_gate.read_text(encoding="utf-8")
+        self.assertIn("merge_to_main_requires_green_tests", gate)
+        self.assertIn("All tests must be relevant", gate)
+
     def test_gitlab_ci_stays_workflow_when_never(self):
         """No runner: .gitlab-ci.yml must be only workflow.rules when: never."""
         self.assertTrue(

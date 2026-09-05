@@ -4,20 +4,20 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{header, HeaderMap};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, parse_worker_host_isolation,
+    parse_worker_host_isolation, HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -26,80 +26,78 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let name = obj.get("name")?.as_str()?.trim();
-                if name.is_empty() {
-                    return None;
-                }
-                let efforts: Vec<Value> = obj
-                    .get("efforts")
-                    .and_then(|e| e.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|e| {
-                                let value = e
-                                    .get("value")
-                                    .or_else(|| e.get("id"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .trim();
-                                if value.is_empty() {
-                                    return None;
-                                }
-                                Some(json!({
-                                    "value": value,
-                                    "label": e.get("label").and_then(|l| l.as_str()),
-                                }))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(json!({
-                    "name": name,
-                    "efforts": efforts,
-                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let efforts: Vec<Value> = obj
+                .get("efforts")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let value = e
+                                .get("value")
+                                .or_else(|| e.get("id"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if value.is_empty() {
+                                return None;
+                            }
+                            Some(json!({
+                                "value": value,
+                                "label": e.get("label").and_then(|l| l.as_str()),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "name": name,
+                "efforts": efforts,
+                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let id = obj.get("id")?.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                let models: Vec<String> = obj
-                    .get("models")
-                    .and_then(|m| m.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model_details = sanitize_model_details(obj.get("model_details"));
-                Some(json!({
-                    "id": id,
-                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "models": models,
-                    "model_details": model_details,
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let id = obj.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let models: Vec<String> = obj
+                .get("models")
+                .and_then(|m| m.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let model_details = sanitize_model_details(obj.get("model_details"));
+            Some(json!({
+                "id": id,
+                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                "models": models,
+                "model_details": model_details,
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 const PAIR_TTL: Duration = Duration::hours(1);
@@ -215,6 +213,10 @@ fn should_withhold_desired(
     staged: &fleet_db::WorkerSoftwareManifest,
     local: &str,
 ) -> bool {
+    // Already running this process's bake: staged tarball is often older.
+    if host_reports_plane_bake(host) {
+        return true;
+    }
     host_is_this_machine(host, local)
         && host_on_manifest_versions(host.software_bins.as_ref(), staged)
 }
@@ -352,6 +354,11 @@ fn host_json_for_viewer(
     // Only the browser on the plane box (localhost UI) is "this machine".
     // Opening the LAN URL from another PC must not tag the plane.
     public.is_this_machine = plane_box && viewer_loopback;
+    if let Some(rt) = public.runtime_reported.as_ref() {
+        let clean = sanitize_runtime_object(rt);
+        public.runtime_reported = Some(clean)
+            .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+    }
     public
 }
 
@@ -486,11 +493,12 @@ fn validate_runtime_path(key: &str, raw: &str) -> AppResult<String> {
     Ok(s.to_string())
 }
 
-fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+/// Keep only allowlisted runtime keys. Drop secrets, unknown keys, and
+/// path values that contain shell metacharacters. Used for both desired
+/// PATCH (after a 400 on unsafe paths) and reported heartbeat (never 400).
+fn sanitize_runtime_object(v: &Value) -> Value {
     let Some(obj) = v.as_object() else {
-        return Err(AppError::bad_request(
-            "runtime_settings must be an object".to_string(),
-        ));
+        return json!({});
     };
     let mut out = serde_json::Map::new();
     for (k, val) in obj {
@@ -521,12 +529,38 @@ fn validate_runtime_settings(v: Value) -> AppResult<Value> {
                 }
             }
             other => {
-                let s = val.as_str().unwrap_or("");
-                out.insert(other.to_string(), json!(validate_runtime_path(other, s)?));
+                if let Some(s) = val.as_str() {
+                    if let Ok(clean) = validate_runtime_path(other, s) {
+                        out.insert(other.to_string(), json!(clean));
+                    }
+                }
             }
         }
     }
-    Ok(Value::Object(out))
+    Value::Object(out)
+}
+
+fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+    let Some(obj) = v.as_object() else {
+        return Err(AppError::bad_request(
+            "runtime_settings must be an object".to_string(),
+        ));
+    };
+    for (k, val) in obj {
+        if !RUNTIME_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        match k.as_str() {
+            "run_host" | "run_container" | "allow_privileged" | "k3d_agents"
+            | "container_backend" | "egress_mode" => {}
+            other => {
+                if let Some(s) = val.as_str() {
+                    let _ = validate_runtime_path(other, s)?;
+                }
+            }
+        }
+    }
+    Ok(sanitize_runtime_object(&v))
 }
 
 #[derive(Debug, Deserialize)]
@@ -539,6 +573,12 @@ pub struct CreateWorkerHostBody {
     pub allow_container: Option<bool>,
     #[serde(default)]
     pub max_concurrent: Option<i32>,
+    /// Rejected on create. Cloud / Partners are not worker_hosts rows.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Rejected on create. Isolation is a PATCH of a paired native box.
+    #[serde(default)]
+    pub isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -680,6 +720,24 @@ async fn http_create(
     Json(body): Json<CreateWorkerHostBody>,
 ) -> AppResult<Json<Value>> {
     let user = require_owner(&state, &jar, workspace_id).await?;
+    if body
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request(
+            "kind is not a create field (self-hosted pair only)",
+        ));
+    }
+    if body
+        .isolation
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request("isolation must be native"));
+    }
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -688,8 +746,10 @@ async fn http_create(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+        .ok_or_else(|| AppError::bad_request("name is required"))?;
+    if name.len() > 255 {
+        return Err(AppError::bad_request("name is too long"));
+    }
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name, Some(user.id));
     if let Some(v) = body.allow_host {
         new.allow_host = v;
@@ -756,12 +816,29 @@ pub(crate) async fn load_visible_host(
         return Ok(host);
     }
     match host_repo::get(&state.db, host_id).await? {
-        Some(host) if host.labels.iter().any(|l| l == "cluster") => Ok(host),
-        Some(host) => Err(AppError::not_found(format!(
-            "worker belongs to another workspace ({})",
-            host.workspace_id
-        ))),
+        Some(host) if host.is_cluster_host() => Ok(host),
+        // Do not name the other workspace — that is a tenant leak.
+        Some(_) | None => Err(AppError::not_found("worker host not found")),
+    }
+}
+
+/// Mutate only from the home workspace. Cluster hosts are visible elsewhere;
+/// a regular host in another workspace looks like it does not exist.
+async fn require_mutable_host(
+    state: &AppState,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorkerHost> {
+    match host_repo::get(&state.db, host_id).await? {
         None => Err(AppError::not_found("worker host not found")),
+        Some(h) if h.workspace_id != workspace_id => {
+            if h.is_cluster_host() {
+                Err(AppError::forbidden("home workspace"))
+            } else {
+                Err(AppError::not_found("worker host not found"))
+            }
+        }
+        Some(h) => Ok(h),
     }
 }
 
@@ -782,7 +859,7 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -793,11 +870,26 @@ async fn http_patch(
         None => None,
         Some(raw) => Some(validate_isolation(raw)?.to_string()),
     };
+    let name = match body.name {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::bad_request("name is required"));
+            }
+            if trimmed.len() > 255 {
+                return Err(AppError::bad_request("name is too long"));
+            }
+            Some(trimmed.to_string())
+        }
+    };
+    let labels = body.labels.map(|ls| {
+        ls.into_iter()
+            .filter(|l| !fleet_db::label_is_cluster(l))
+            .collect()
+    });
     let patch = HostCpSettings {
-        name: body
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        name,
         enabled: body.enabled,
         paused: body.paused,
         drain: body.drain,
@@ -806,7 +898,7 @@ async fn http_patch(
         allow_container: body.allow_container,
         max_concurrent: body.max_concurrent,
         max_job_timeout_s: body.max_job_timeout_s,
-        labels: body.labels,
+        labels,
         auto_update: body.auto_update,
         request_update: body.request_update,
         runtime_settings: match body.runtime_settings {
@@ -851,19 +943,7 @@ async fn http_delete(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    match load_in_workspace(&state, workspace_id, host_id).await {
-        Ok(_) => {}
-        Err(e) => {
-            // Already gone from this workspace.
-            if let Ok(Some(existing)) = host_repo::get(&state.db, host_id).await {
-                return Err(AppError::not_found(format!(
-                    "worker belongs to another workspace ({})",
-                    existing.workspace_id
-                )));
-            }
-            return Err(e);
-        }
-    }
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     let host = host_repo::revoke(&state.db, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
@@ -874,7 +954,7 @@ async fn http_new_pair_token(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
         .await?;
@@ -1093,7 +1173,8 @@ async fn http_heartbeat(
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, rt).await;
+        let _ = host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt))
+            .await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1111,7 +1192,9 @@ fn host_accepts_leases(host: &WorkerHost) -> bool {
         && !host.drain
         && host.is_native_isolation()
         && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && (host.effective_host() || host.effective_container())
+        && host.effective_host()
+        && !host.software_updating
+        && !host_repo::at_job_cap(host)
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -1119,6 +1202,9 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     if !host_accepts_leases(&host) {
         return Ok(Json(json!({ "claim": null })));
     }
+    // Lease poll is the reclaim path. A sweeper-only helper would never run
+    // in this process; expired rows must return to ready before this claim.
+    let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
     let claim = if host.is_cluster_host() {
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
@@ -1395,5 +1481,20 @@ mod plane_bake_tests {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
         assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+    }
+
+    #[test]
+    fn host_on_this_process_bake_withholds_even_when_remote() {
+        let Some(plane) = super::plane_git_sha() else {
+            // Host cargo test without FLEET_GIT_SHA: bake check is off.
+            return;
+        };
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host("x1", None);
+        host.software_git_sha = Some(plane.to_string());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g"),
+            "a host already on this process bake must not get an older staged tarball"
+        );
     }
 }

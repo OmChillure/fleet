@@ -14,7 +14,6 @@ const TOAST_MS: u32 = 4000;
 const MAX_TOASTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ToastKind {
     Info,
     Success,
@@ -58,7 +57,6 @@ impl Toaster {
         self.push(ToastKind::Success, message.into());
     }
 
-    #[allow(dead_code)]
     pub fn warn(self, message: impl Into<String>) {
         self.push(ToastKind::Warn, message.into());
     }

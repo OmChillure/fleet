@@ -31,6 +31,9 @@ framework.
 | Agent MR demo | `./scripts/human-test.sh record` on the **final merge tree**; scope scenes, not a random walk; then **review the film** for bugs |
 
 There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not add jobs.
+All tests must pass before a merge to main (`just test` + `just test-integration`).
+All tests must be relevant.
+If a test is not relevant, decide whether the test or the code should change.
 
 ## Fail closed
 
@@ -55,6 +58,9 @@ There is **no GitLab runner**. Keep `.gitlab-ci.yml` as `when: never`; do not ad
 - Live/e2e/every-test is valid only after the install script or
   `--prepare-kind` (+ host `dx`) baked `scripts/tree-id.sh` into the
   running stack. A green run on yesterday's images is not verification.
+- The last pass before an MR is the **bookworm ship image**, not host
+  `just test`. `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) is
+  what VPS and Kind compile. Host-only green is a drift, not a gate.
 - Do not create a recurring test-writer loop. Do not spawn one agent
   per catalog row on a timer. Harvest from `just test` /
   `scripts/harvest-runner-catalog.sh` / Playwright. A missing child id
@@ -84,6 +90,9 @@ Before you write a test, pick the row in the table. Then:
 5. Prefer constructing config in-struct over `unsafe { env::set_var }`.
 6. `fleet-ui` stays WASM: chrome in Playwright; pure helpers in a host crate
    (`fleet-chat-md` for markdown).
+7. All tests must be relevant. If a red or stale case is not locking the
+   product anymore, decide whether the test or the code should change
+   before you rewrite either.
 
 ## Closed on this branch
 

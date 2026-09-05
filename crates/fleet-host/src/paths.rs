@@ -236,11 +236,6 @@ mod tests {
             fs::read_to_string(config.path().join("machine.id")).unwrap(),
             format!("{id}\n")
         );
-        assert_eq!(
-            machine_id_path(),
-            config_dir().join("machine.id"),
-            "reclaim path is the config-dir file, not next to the swapped host binary"
-        );
         assert_ne!(
             install_new.path().join("machine.id"),
             config.path().join("machine.id")

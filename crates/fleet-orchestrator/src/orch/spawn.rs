@@ -1,11 +1,11 @@
 //! Capacity schedule + spawn protocol.
 
-use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
+use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
 use crate::sandbox::remote::{self, RemoteHostHandle};
-use crate::sandbox::{SpawnRequest, fleet_worker_env};
+use crate::sandbox::{fleet_worker_env, SpawnRequest};
 use crate::store::{
-    BoardSnapshot, Store, enqueue_remote_spawn, hold_ready_for_host_update,
-    select_assignable_runner_preferring, workspace_has_updating_host,
+    enqueue_remote_spawn, hold_ready_for_host_update, select_assignable_runner_preferring,
+    workspace_has_updating_host, BoardSnapshot, Store,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -69,7 +69,9 @@ pub async fn schedule_and_spawn(
         // Missing worker_hosts must not fail the tick.
         let plan_hint = store.get_plan_body(task.plan_id).await.ok().flatten();
         let preferred = plan_hint.as_ref().and_then(|p| p.policy.preferred_host_id);
-        let remote_host = select_assignable_runner_preferring(store, project_id, preferred).await;
+        let remote_host =
+            select_assignable_runner_preferring(store, project_id, preferred, orchestrator_url)
+                .await;
         let updating = workspace_has_updating_host(store, project_id).await;
         if hold_ready_for_host_update(remote_host.is_some(), updating) {
             tracing::info!(
@@ -323,7 +325,7 @@ pub async fn apply_retry_after_failure(
     cancel_requested: bool,
     exit_reason: crate::domain::ExitReason,
 ) -> Result<(), TickError> {
-    use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
+    use crate::domain::{should_retry, BoardTaskStatus, RetryAction};
 
     if store.live_claim_is_other_attempt(task_id, attempt).await? {
         return Ok(());

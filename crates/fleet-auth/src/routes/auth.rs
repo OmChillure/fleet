@@ -22,8 +22,8 @@ use crate::routes::workspaces::{
 };
 use crate::state::AuthState;
 use crate::tokens::{
-    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, generate_refresh_token, hash_refresh_token,
-    issue_access_token,
+    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, decode_access_token_for_logout,
+    generate_refresh_token, hash_refresh_token, issue_access_token,
 };
 
 /// Resolve the authenticated user from access-cookie JWT + live session row.
@@ -320,10 +320,17 @@ pub async fn login(
 }
 
 pub async fn logout(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Response> {
+    let now = Utc::now();
     if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
         let hash = hash_refresh_token(&refresh);
-        let now = Utc::now();
         session_repo::revoke_by_refresh_hash(&state.db, &hash, now).await?;
+    } else if let Some(access) = jar.get(ACCESS_COOKIE).map(|c| c.value().to_string())
+        && let Ok(claims) = decode_access_token_for_logout(&state.config.jwt_secret, &access)
+        && let Ok(sid) = Uuid::parse_str(&claims.sid)
+    {
+        // Refresh cookie missing (cleared, blocked, or already rotated).
+        // Still revoke the session named in the access JWT, even if `exp` passed.
+        session_repo::revoke_by_id(&state.db, sid, now).await?;
     }
 
     let mut headers = HeaderMap::new();
