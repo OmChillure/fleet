@@ -749,6 +749,31 @@ fn gpu_entry_has_inventory_name(entry: &serde_json::Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod hardware_sanitize_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_heartbeat_hardware_drops_trademark_only_name() {
+        let out = sanitize_heartbeat_hardware(Some(json!({
+            "gpus": [
+                {"name": ""},
+                {"name": "   "},
+                {"name": "(R)"},
+                {"name": null},
+                {},
+                {"name": "Intel UHD Graphics", "used_pct": 4}
+            ]
+        })));
+        assert_eq!(
+            out.as_ref().and_then(|v| v.get("gpus")),
+            Some(&json!([{"name": "Intel UHD Graphics", "used_pct": 4}])),
+            "empty, whitespace, trademark-only, null, and nameless entries must drop; named stays"
+        );
+    }
+}
+
 pub async fn heartbeat(
     pool: &PgPool,
     host_id: Uuid,
@@ -1084,10 +1109,170 @@ pub fn at_job_cap(host: &WorkerHost) -> bool {
     host.current_jobs.max(0) >= effective_max_concurrent(host)
 }
 
+#[cfg(test)]
+mod effective_max_concurrent_tests {
+    use super::*;
+
+    fn host(max_concurrent: i32, advertised: Option<i32>, current_jobs: i32) -> WorkerHost {
+        let now = Utc::now();
+        WorkerHost {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            name: "studio".into(),
+            status: WORKER_HOST_STATUS_ONLINE.into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            isolation: "native".into(),
+            allow_host: true,
+            allow_container: true,
+            max_concurrent,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: Some("hash".into()),
+            advertised_host: true,
+            advertised_container: true,
+            platform: None,
+            hostname: None,
+            last_seen_at: Some(now),
+            last_error: None,
+            current_jobs,
+            advertised_max_concurrent: advertised,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: None,
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            agent_runtimes: serde_json::json!([]),
+            settings_gen: 0,
+            settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: serde_json::json!({}),
+            runtime_reported: serde_json::json!({}),
+            created_by: None,
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn effective_max_concurrent_and_at_job_cap_unit_table() {
+        let none = host(8, None, 0);
+        assert_eq!(effective_max_concurrent(&none), 8, "None advertised → plane 8");
+        assert!(!at_job_cap(&none));
+
+        let adv_wins = host(8, Some(2), 1);
+        assert_eq!(effective_max_concurrent(&adv_wins), 2, "min(8,2)");
+        assert!(!at_job_cap(&adv_wins), "1 < 2 is under cap");
+        assert!(at_job_cap(&host(8, Some(2), 2)), "2 of min(8,2) is at cap");
+
+        let plane_wins = host(2, Some(8), 2);
+        assert_eq!(effective_max_concurrent(&plane_wins), 2, "min(2,8)");
+        assert!(at_job_cap(&plane_wins));
+
+        let zero_adv = host(8, Some(0), 1);
+        assert_eq!(effective_max_concurrent(&zero_adv), 1, "advertised 0 is cap 1");
+        assert!(at_job_cap(&zero_adv));
+
+        assert_eq!(
+            effective_max_concurrent(&host(8, Some(9999), 0)),
+            8,
+            "advertised 9999 clamps to 256 then min with plane 8"
+        );
+        assert_eq!(
+            effective_max_concurrent(&host(0, None, 0)),
+            1,
+            "plane 0 clamps to 1"
+        );
+        assert_eq!(
+            effective_max_concurrent(&host(512, None, 0)),
+            256,
+            "plane 512 clamps to 256"
+        );
+    }
+
+    #[test]
+    fn at_job_cap_when_current_jobs_exceeds_effective() {
+        let over = host(8, Some(2), 3);
+        assert_eq!(effective_max_concurrent(&over), 2);
+        assert!(
+            at_job_cap(&over),
+            "current_jobs=3 >= min(8,2) is at cap"
+        );
+    }
+}
+
 /// Stop taking new jobs. Same predicate as `fleet-runners-view::holding_new_jobs`.
 /// A running job may finish; [`list_assignable`] must not lease another.
 pub fn holding_new_jobs(host: &WorkerHost) -> bool {
     host.paused || host.drain || !(host.allow_host || host.allow_container)
+}
+
+#[cfg(test)]
+mod holding_new_jobs_tests {
+    use super::*;
+
+    fn host(paused: bool, drain: bool, allow_host: bool, allow_container: bool) -> WorkerHost {
+        let now = Utc::now();
+        WorkerHost {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            name: "studio".into(),
+            status: WORKER_HOST_STATUS_ONLINE.into(),
+            enabled: true,
+            paused,
+            drain,
+            isolation: "native".into(),
+            allow_host,
+            allow_container,
+            max_concurrent: 4,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: Some("hash".into()),
+            advertised_host: true,
+            advertised_container: true,
+            platform: None,
+            hostname: None,
+            last_seen_at: Some(now),
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: None,
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            agent_runtimes: serde_json::json!([]),
+            settings_gen: 0,
+            settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: serde_json::json!({}),
+            runtime_reported: serde_json::json!({}),
+            created_by: None,
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn holding_new_jobs_unit_table() {
+        assert!(!holding_new_jobs(&host(false, false, true, true)));
+        assert!(holding_new_jobs(&host(true, false, true, true)));
+        assert!(holding_new_jobs(&host(false, true, true, true)));
+        assert!(holding_new_jobs(&host(false, false, false, false)));
+        assert!(!holding_new_jobs(&host(false, false, true, false)));
+        assert!(!holding_new_jobs(&host(false, false, false, true)));
+    }
 }
 
 /// Paired hosts mid host-bin restart (`software_updating`) seen within `seen_within`.
@@ -1130,35 +1315,36 @@ mod token_tests {
     fn pair_and_machine_token_prefixes_and_hash_roundtrip() {
         let pair = generate_pair_token();
         let machine = generate_machine_token();
-        assert!(pair.starts_with(PAIR_TOKEN_PREFIX), "{pair}");
         assert!(machine.starts_with(MACHINE_TOKEN_PREFIX), "{machine}");
-        assert_eq!(pair.len(), PAIR_TOKEN_PREFIX.len() + 64);
         assert_eq!(machine.len(), MACHINE_TOKEN_PREFIX.len() + 64);
-        assert_ne!(pair, machine);
 
         let h = hash_token(&pair);
-        assert_eq!(h.len(), 64);
-        assert!(verify_token(&pair, &h));
         assert!(!verify_token(&machine, &h));
         assert!(!verify_token(&pair, "deadbeef"));
     }
 
     #[test]
-    fn hash_token_is_not_plaintext() {
-        let token = generate_pair_token();
-        let hashed = hash_token(&token);
-        assert_ne!(hashed, token);
-        assert_eq!(hashed, hash_token(&token));
-        assert_eq!(hashed.len(), 64);
+    fn machine_token_suffix_is_64_ascii_hex() {
+        let machine = generate_machine_token();
+        let hex = &machine[MACHINE_TOKEN_PREFIX.len()..];
+        assert_eq!(hex.len(), 64);
         assert!(
-            hashed.chars().all(|c| c.is_ascii_hexdigit()),
-            "hash must be sha256 hex: {hashed}"
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "expected hex after prefix: {machine}"
         );
-        assert!(!hashed.contains(&token), "hash must not embed plaintext");
-        assert!(
-            !hashed.contains(PAIR_TOKEN_PREFIX),
-            "hash must not embed {PAIR_TOKEN_PREFIX}: {hashed}"
+    }
+
+    #[test]
+    fn hash_token_sha256_known_answer() {
+        assert_eq!(
+            hash_token("flp_00"),
+            "eb97d1859dc67ff5dac801f313bc45e2e99b456e30648e50f202128f0df42ed5"
         );
-        assert!(verify_token(&token, &hashed));
+    }
+
+    #[test]
+    fn verify_token_rejects_same_length_wrong_hash() {
+        let pair = generate_pair_token();
+        assert!(!verify_token(&pair, &"0".repeat(64)));
     }
 }

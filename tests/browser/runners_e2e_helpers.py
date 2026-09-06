@@ -54,7 +54,18 @@ def signup_login(page, *, prefix: str) -> tuple[str, str]:
     page.locator("#email").fill(email, force=True)
     page.locator("#password").fill(password, force=True)
     page.get_by_role("button", name="Sign up").click(force=True)
-    page.wait_for_url("**/login", timeout=15_000)
+    try:
+        page.wait_for_url("**/login", timeout=15_000)
+    except Exception as nav_err:
+        body = ""
+        try:
+            body = page.locator("body").inner_text(timeout=2_000)
+        except Exception:  # noqa: BLE001 — best-effort toast/body
+            body = page.url
+        lowered = body.lower()
+        if "too many attempts" in lowered or "try again later" in lowered:
+            raise RuntimeError(f"signup rate-limited: {body[:500]}") from nav_err
+        raise
     page.locator("#email").fill(email, force=True)
     page.locator("#password").fill(password, force=True)
     page.get_by_role("button", name="Log in").click(force=True)

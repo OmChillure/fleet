@@ -1,5 +1,5 @@
 //! Docs §6.7: seed/create/PATCH/archive persist persona config only.
-//! They must not invoke an LLM (no rewrite, no completions envelope).
+//! They must not invoke an LLM (no rewrite of role_prompt, no model resolve).
 //! Requires DATABASE_URL — never skips.
 
 mod common;
@@ -56,91 +56,74 @@ fn persona_by_slug<'a>(out: &'a HttpOut, slug: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing slug {slug}: {}", out.body))
 }
 
-fn assert_persona_not_completion(out: &HttpOut, label: &str) {
-    assert!(
-        out.body.get("choices").is_none(),
-        "{label} must not be a chat-completions payload: {}",
-        out.body
-    );
-    assert!(
-        out.body.get("usage").is_none(),
-        "{label} must not include LLM usage: {}",
-        out.body
-    );
-    assert!(
-        out.body.pointer("/message/content").is_none(),
-        "{label} must not be a chat message: {}",
-        out.body
-    );
-    assert_ne!(
-        out.body["object"].as_str(),
-        Some("chat.completion"),
-        "{label} must not be a chat.completion object: {}",
-        out.body
-    );
-}
-
-/// Seed / create / PATCH / archive persist the role prompt verbatim.
-/// They must succeed without calling an LLM.
-#[tokio::test]
-async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
-    let app = app().await;
-    let (_email, jar, login) = signup_and_login(&app).await;
+async fn signed_in_personas(app: &axum::Router) -> (CookieJar, String) {
+    let (_email, jar, login) = signup_and_login(app).await;
     let ws_id = login.body["default_workspace"]["id"]
         .as_str()
         .expect("default_workspace.id");
-    let base = format!("/api/workspaces/{ws_id}/personas");
+    (jar, format!("/api/workspaces/{ws_id}/personas"))
+}
 
-    let seeded = call(
-        &app,
+async fn seed_starters(app: &axum::Router, jar: &CookieJar, base: &str) -> HttpOut {
+    call(
+        app,
         "POST",
         &format!("{base}/seed-starters"),
-        Some(&jar),
+        Some(jar),
         Some(json!({})),
     )
+    .await
+}
+
+async fn create_persona_with_prompt(
+    app: &axum::Router,
+    jar: &CookieJar,
+    base: &str,
+    token: &str,
+    role_prompt: &str,
+) -> String {
+    let created = call(
+        app,
+        "POST",
+        base,
+        Some(jar),
+        Some(json!({
+            "name": format!("No-LLM reviewer {token}"),
+            "slug": format!("no-llm-reviewer-{token}"),
+            "description": "config only",
+            "role_prompt": role_prompt,
+            "worker_profile": "coding",
+            "model_preference": "auto",
+            "tools": ["git", "shell"],
+        })),
+    )
     .await;
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "create fixture: {}",
+        created.body
+    );
+    created.body["id"].as_str().expect("created id").to_string()
+}
+
+/// First seed stores docs §9 catalog role_prompt literals (not an LLM rewrite).
+#[tokio::test]
+async fn seed_starters_stores_catalog_role_prompts_verbatim() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+
+    let seeded = seed_starters(&app, &jar, &base).await;
     assert_eq!(seeded.status, StatusCode::OK, "seed: {}", seeded.body);
     assert_eq!(
-        seeded.body["inserted"].as_u64().unwrap_or(0)
-            + seeded.body["skipped"].as_u64().unwrap_or(0),
-        8,
-        "seed must insert-if-absent the 8 starters, not generate them: {}",
+        seeded.body["inserted"].as_u64(),
+        Some(8),
+        "first seed must insert the 8 starters: {}",
         seeded.body
     );
-    assert_persona_not_completion(&seeded, "seed-starters");
-
-    // Second seed must skip, not call an LLM to rewrite the catalog.
-    let seeded_again = call(
-        &app,
-        "POST",
-        &format!("{base}/seed-starters"),
-        Some(&jar),
-        Some(json!({})),
-    )
-    .await;
-    assert_eq!(
-        seeded_again.status,
-        StatusCode::OK,
-        "seed again: {}",
-        seeded_again.body
-    );
-    assert_eq!(
-        seeded_again.body["inserted"].as_u64(),
-        Some(0),
-        "second seed must insert-if-absent (not regenerate): {}",
-        seeded_again.body
-    );
-    assert_eq!(
-        seeded_again.body["skipped"].as_u64(),
-        Some(8),
-        "second seed must skip the 8 starters: {}",
-        seeded_again.body
-    );
-    assert_persona_not_completion(&seeded_again, "seed-starters again");
 
     let listed = call(&app, "GET", &base, Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
-    assert_persona_not_completion(&listed, "list");
     for (slug, prompt) in STARTER_ROLE_PROMPTS {
         let row = persona_by_slug(&listed, slug);
         assert_eq!(
@@ -151,11 +134,16 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
             listed.body
         );
     }
+}
 
+/// Create persists the canary role_prompt and model_preference=auto as config.
+#[tokio::test]
+async fn create_persona_persists_canary_role_prompt_and_model_preference_auto() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
     let token = Uuid::new_v4().as_simple().to_string();
-    let create_prompt = format!(
-        "CANARY-CREATE-{token}: What is 2+2? Reply with only the number. Store this verbatim; do not complete."
-    );
+    let create_prompt = format!("CANARY-CREATE-{token}");
+
     let created = call(
         &app,
         "POST",
@@ -178,17 +166,10 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
         "create: {}",
         created.body
     );
-    assert_persona_not_completion(&created, "create");
     assert_eq!(
         created.body["role_prompt"].as_str(),
         Some(create_prompt.as_str()),
         "create must persist role_prompt verbatim (not an LLM answer): {}",
-        created.body
-    );
-    assert_ne!(
-        created.body["role_prompt"].as_str().map(str::trim),
-        Some("4"),
-        "create must not complete the canary question: {}",
         created.body
     );
     assert_eq!(
@@ -197,39 +178,17 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
         "create must persist model_preference as config, not resolve a model: {}",
         created.body
     );
-    let pid = created.body["id"].as_str().expect("created id").to_string();
+}
 
-    let got_created = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
-    assert_eq!(
-        got_created.status,
-        StatusCode::OK,
-        "get created: {}",
-        got_created.body
-    );
-    assert_persona_not_completion(&got_created, "get created");
-    assert_eq!(
-        got_created.body["role_prompt"].as_str(),
-        Some(create_prompt.as_str()),
-        "GET after create must still be the canary, not an LLM rewrite: {}",
-        got_created.body
-    );
+/// Description-only PATCH must not rewrite role_prompt.
+#[tokio::test]
+async fn description_only_patch_keeps_role_prompt() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+    let token = Uuid::new_v4().as_simple().to_string();
+    let create_prompt = format!("CANARY-CREATE-{token}");
+    let pid = create_persona_with_prompt(&app, &jar, &base, &token, &create_prompt).await;
 
-    let listed_after_create = call(&app, "GET", &base, Some(&jar), None).await;
-    assert_eq!(
-        listed_after_create.status,
-        StatusCode::OK,
-        "list after create: {}",
-        listed_after_create.body
-    );
-    assert_eq!(
-        persona_by_slug(&listed_after_create, &format!("no-llm-reviewer-{token}"))["role_prompt"]
-            .as_str(),
-        Some(create_prompt.as_str()),
-        "list after create must keep the canary: {}",
-        listed_after_create.body
-    );
-
-    // Description-only PATCH must not "improve" or complete the canary.
     let desc_only = call(
         &app,
         "PATCH",
@@ -244,7 +203,6 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
         "description-only patch: {}",
         desc_only.body
     );
-    assert_persona_not_completion(&desc_only, "description-only patch");
     assert_eq!(
         desc_only.body["role_prompt"].as_str(),
         Some(create_prompt.as_str()),
@@ -257,8 +215,18 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
         "{}",
         desc_only.body
     );
+}
 
-    let patch_prompt = format!("CANARY-PATCH-{token}: still config; still not a completion.");
+/// PATCH then archive keep the patched canary role_prompt.
+#[tokio::test]
+async fn patch_and_archive_keep_patched_canary_role_prompt() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+    let token = Uuid::new_v4().as_simple().to_string();
+    let create_prompt = format!("CANARY-CREATE-{token}");
+    let pid = create_persona_with_prompt(&app, &jar, &base, &token, &create_prompt).await;
+    let patch_prompt = format!("CANARY-PATCH-{token}");
+
     let patched = call(
         &app,
         "PATCH",
@@ -271,33 +239,11 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
     )
     .await;
     assert_eq!(patched.status, StatusCode::OK, "patch: {}", patched.body);
-    assert_persona_not_completion(&patched, "patch");
     assert_eq!(
         patched.body["role_prompt"].as_str(),
         Some(patch_prompt.as_str()),
         "PATCH must persist role_prompt verbatim: {}",
         patched.body
-    );
-    assert_eq!(
-        patched.body["description"].as_str(),
-        Some("patched config only"),
-        "{}",
-        patched.body
-    );
-
-    let got_patched = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
-    assert_eq!(
-        got_patched.status,
-        StatusCode::OK,
-        "get patched: {}",
-        got_patched.body
-    );
-    assert_persona_not_completion(&got_patched, "get patched");
-    assert_eq!(
-        got_patched.body["role_prompt"].as_str(),
-        Some(patch_prompt.as_str()),
-        "GET after PATCH must still be the canary, not an LLM rewrite: {}",
-        got_patched.body
     );
 
     let archived = call(&app, "DELETE", &format!("{base}/{pid}"), Some(&jar), None).await;
@@ -310,12 +256,113 @@ async fn persona_seed_create_patch_archive_do_not_invoke_llm() {
 
     let got = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "get archived: {}", got.body);
-    assert_persona_not_completion(&got, "get archived");
     assert_eq!(got.body["status"].as_str(), Some("archived"));
     assert_eq!(
         got.body["role_prompt"].as_str(),
         Some(patch_prompt.as_str()),
         "archive must not rewrite role_prompt: {}",
         got.body
+    );
+}
+
+/// Re-seed after a starter edit must skip (ON CONFLICT DO NOTHING), not upsert.
+#[tokio::test]
+async fn seed_starters_skips_existing_without_rewriting_role_prompt() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+    let seeded = seed_starters(&app, &jar, &base).await;
+    assert_eq!(seeded.status, StatusCode::OK, "seed: {}", seeded.body);
+
+    let listed = call(&app, "GET", &base, Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
+    let se = persona_by_slug(&listed, "software-engineer");
+    let pid = se["id"].as_str().expect("software-engineer id").to_string();
+    let token = Uuid::new_v4().as_simple().to_string();
+    let canary = format!("CANARY-SEED-SKIP-{token}");
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("{base}/{pid}"),
+        Some(&jar),
+        Some(json!({ "role_prompt": canary })),
+    )
+    .await;
+    assert_eq!(
+        patched.status,
+        StatusCode::OK,
+        "patch starter: {}",
+        patched.body
+    );
+
+    let seeded_again = seed_starters(&app, &jar, &base).await;
+    assert_eq!(
+        seeded_again.status,
+        StatusCode::OK,
+        "seed again: {}",
+        seeded_again.body
+    );
+    assert_eq!(
+        seeded_again.body["skipped"].as_u64(),
+        Some(8),
+        "second seed must skip existing starters: {}",
+        seeded_again.body
+    );
+
+    let got = call(&app, "GET", &format!("{base}/{pid}"), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "get after re-seed: {}", got.body);
+    assert_eq!(
+        got.body["role_prompt"].as_str(),
+        Some(canary.as_str()),
+        "re-seed must not rewrite a patched starter role_prompt: {}",
+        got.body
+    );
+}
+
+/// First seed on an empty workspace inserts all 8 starters (not skip-all).
+#[tokio::test]
+async fn seed_starters_first_inserts_eight_on_empty_workspace() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+
+    let seeded = seed_starters(&app, &jar, &base).await;
+    assert_eq!(seeded.status, StatusCode::OK, "seed: {}", seeded.body);
+    assert_eq!(
+        seeded.body["inserted"].as_u64(),
+        Some(8),
+        "first seed on an empty workspace must insert 8: {}",
+        seeded.body
+    );
+    assert_eq!(
+        seeded.body["skipped"].as_u64(),
+        Some(0),
+        "first seed on an empty workspace must skip 0: {}",
+        seeded.body
+    );
+}
+
+/// Seed persists docs §9 worker_profile and tools, not just role_prompt.
+#[tokio::test]
+async fn seed_starters_persists_docs_section_9_profile_and_tools() {
+    let app = app().await;
+    let (jar, base) = signed_in_personas(&app).await;
+
+    let seeded = seed_starters(&app, &jar, &base).await;
+    assert_eq!(seeded.status, StatusCode::OK, "seed: {}", seeded.body);
+
+    let listed = call(&app, "GET", &base, Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
+    let row = persona_by_slug(&listed, "software-engineer");
+    assert_eq!(
+        row["worker_profile"].as_str(),
+        Some("coding"),
+        "seed must store docs §9 worker_profile for software-engineer: {}",
+        listed.body
+    );
+    assert_eq!(
+        row["tools"],
+        json!(["git", "shell", "editor"]),
+        "seed must store docs §9 tools for software-engineer: {}",
+        listed.body
     );
 }

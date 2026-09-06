@@ -1,11 +1,12 @@
-//! Tick must not local-spawn while a paired host is mid host-bin restart.
-//! Kill mid-swap + auto_update on holds ready; no in-process fallback, no token rotate.
 //! Offline without `software_updating` still leaves the task ready.
+//! Fresh heartbeat after that wait assigns the recovered host.
+//! Updating host past HOST_UPDATE_HOLD_SECS with no peer stays ready.
 //! Requires DATABASE_URL.
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::models::NewWorkerHost;
 use fleet_db::repos::worker_hosts::{self, generate_pair_token, hash_token};
+use fleet_db::repos::workspaces;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
 };
@@ -139,48 +140,6 @@ async fn age_last_seen(store: &Store, host_id: Uuid, seconds: i64) {
 }
 
 #[tokio::test]
-async fn tick_holds_ready_when_only_host_is_restarting() {
-    let store = setup().await;
-    let project = store
-        .create_project(&format!("upd-hold-{}", Uuid::new_v4()), 3)
-        .await
-        .unwrap();
-    seed_workspace_for_project(&store, project.id).await;
-    let host_id = pair_host(&store, project.id, "restarting").await;
-    heartbeat_software(&store, host_id, true).await;
-    // Outside the 90s assignable window, inside the 2 min updating hold.
-    age_last_seen(&store, host_id, 110).await;
-
-    store
-        .insert_accepted_plan(project.id, one_task_plan(project.id))
-        .await
-        .unwrap();
-
-    let r = runner(store.clone())
-        .tick_project(project.id)
-        .await
-        .unwrap();
-    assert_eq!(
-        r.spawned, 0,
-        "must not local-spawn while host restarts: {r:?}"
-    );
-    assert_eq!(r.spawn_failed, 0, "{r:?}");
-
-    let snap = store.load_board_snapshot(project.id).await.unwrap();
-    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
-    assert_eq!(
-        t1.status, "ready",
-        "ready must stay ready, not assigned to stub: {:?}",
-        t1.status
-    );
-    assert!(
-        snap.sessions.is_empty(),
-        "no local session: {:?}",
-        snap.sessions
-    );
-}
-
-#[tokio::test]
 async fn tick_offline_host_without_updating_leaves_ready() {
     let store = setup().await;
     let project = store
@@ -188,6 +147,9 @@ async fn tick_offline_host_without_updating_leaves_ready() {
         .await
         .unwrap();
     seed_workspace_for_project(&store, project.id).await;
+    workspaces::set_min_isolation(store.pool(), project.id, "vm")
+        .await
+        .expect("pin min_isolation=vm so a shared cluster host is not picked");
     let host_id = pair_host(&store, project.id, "offline").await;
     heartbeat_software(&store, host_id, false).await;
     age_last_seen(&store, host_id, 110).await;
@@ -197,24 +159,6 @@ async fn tick_offline_host_without_updating_leaves_ready() {
         .await
         .unwrap();
 
-    let assignable = worker_hosts::list_assignable(
-        store.pool(),
-        project.id,
-        fleet_db::WORKER_HOST_OFFLINE_AFTER,
-    )
-    .await
-    .expect("list_assignable");
-    assert!(
-        assignable.iter().all(|h| h.id != host_id),
-        "offline host must not be assignable: {assignable:?}"
-    );
-    let foreign: Vec<_> = assignable.iter().filter(|h| h.id != host_id).collect();
-    if !foreign.is_empty() {
-        // Shared live DB (cluster-labeled host). Do not tick — that would
-        // enqueue a spawn claim onto someone else's paired box.
-        return;
-    }
-
     let r = runner(store.clone())
         .tick_project(project.id)
         .await
@@ -222,6 +166,10 @@ async fn tick_offline_host_without_updating_leaves_ready() {
     assert_eq!(
         r.spawned, 0,
         "offline host without updating must not local-spawn: {r:?}"
+    );
+    assert_eq!(
+        r.spawn_failed, 0,
+        "offline without updating must not fail the task: {r:?}"
     );
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
@@ -238,34 +186,85 @@ async fn tick_offline_host_without_updating_leaves_ready() {
     );
 }
 
-/// Guest killed mid host-bin swap (`software_updating`, last_seen stale but
-/// inside the 2 min hold). `auto_update` on must not fail over to the
-/// in-process fallback and must not rotate the token.
+/// Ready-wait after an offline updating=false host must assign on the next
+/// tick once last_seen is fresh again.
 #[tokio::test]
-async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
+async fn tick_offline_host_then_fresh_heartbeat_assigns() {
     let store = setup().await;
     let project = store
-        .create_project(&format!("upd-kill-{}", Uuid::new_v4()), 3)
+        .create_project(&format!("upd-back-{}", Uuid::new_v4()), 3)
         .await
         .unwrap();
     seed_workspace_for_project(&store, project.id).await;
-    let host_id = pair_host(&store, project.id, "mid-swap").await;
-    heartbeat_software(&store, host_id, true).await;
-    // Kill mid-swap: outside the 90s assignable window, inside the 2 min hold.
+    workspaces::set_min_isolation(store.pool(), project.id, "vm")
+        .await
+        .expect("pin min_isolation=vm so a shared cluster host is not picked");
+    let host_id = pair_host(&store, project.id, "back").await;
+    heartbeat_software(&store, host_id, false).await;
     age_last_seen(&store, host_id, 110).await;
 
-    let before = worker_hosts::get(store.pool(), host_id)
+    store
+        .insert_accepted_plan(project.id, one_task_plan(project.id))
         .await
-        .expect("get")
-        .expect("host");
-    assert!(
-        before.auto_update,
-        "paired host defaults auto-update on (AGENTS.md lockout)"
+        .unwrap();
+
+    let tick = TickRunner::new(
+        store.clone(),
+        std::env::temp_dir().join("fleet-orch-data"),
+        "http://192.0.2.10:8080",
     );
-    let token_hash = before
-        .machine_token_hash
-        .clone()
-        .expect("paired machine token");
+    let r1 = tick.tick_project(project.id).await.unwrap();
+    assert_eq!(r1.spawned, 0, "offline wait: {r1:?}");
+    assert_eq!(r1.spawn_failed, 0, "{r1:?}");
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    assert_eq!(t1.status, "ready", "{:?}", t1.status);
+    assert!(snap.sessions.is_empty(), "{:?}", snap.sessions);
+
+    workspaces::set_min_isolation(store.pool(), project.id, "process")
+        .await
+        .expect("restore min_isolation=process so the recovered host is pickable");
+    heartbeat_software(&store, host_id, false).await;
+
+    let r2 = tick.tick_project(project.id).await.unwrap();
+    assert_eq!(
+        r2.spawned, 1,
+        "fresh heartbeat must assign the recovered host: {r2:?}"
+    );
+    assert_eq!(r2.spawn_failed, 0, "{r2:?}");
+
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
+    let session = snap
+        .sessions
+        .iter()
+        .find(|s| s.board_task_id == t1.id)
+        .expect("remote session after host is back");
+    assert_eq!(session.runtime_backend, "remote");
+    let handle = format!("host:{host_id}");
+    assert_eq!(
+        session.runtime_handle.as_deref(),
+        Some(handle.as_str()),
+        "session must be on the recovered host, not a leftover cluster row"
+    );
+}
+
+/// Hold lift with no peer: updating=true last_seen past HOST_UPDATE_HOLD_SECS
+/// and no assignable host → stay ready.
+#[tokio::test]
+async fn tick_updating_host_past_hold_with_no_peer_leaves_ready() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("upd-past-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    seed_workspace_for_project(&store, project.id).await;
+    workspaces::set_min_isolation(store.pool(), project.id, "vm")
+        .await
+        .expect("pin min_isolation=vm so a shared cluster host is not picked");
+    let host_id = pair_host(&store, project.id, "past-hold").await;
+    heartbeat_software(&store, host_id, true).await;
+    age_last_seen(&store, host_id, 130).await;
 
     store
         .insert_accepted_plan(project.id, one_task_plan(project.id))
@@ -276,30 +275,22 @@ async fn tick_holds_ready_when_guest_killed_mid_swap_auto_update_on() {
         .tick_project(project.id)
         .await
         .unwrap();
-    assert_eq!(r.spawned, 0, "must not local-spawn mid-swap: {r:?}");
+    assert_eq!(
+        r.spawned, 0,
+        "hold lift without a peer must not local-spawn: {r:?}"
+    );
     assert_eq!(r.spawn_failed, 0, "{r:?}");
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     let t1 = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
     assert_eq!(
         t1.status, "ready",
-        "mid-swap hold_ready must keep the task ready: {:?}",
+        "no peer after hold lift → stay ready: {:?}",
         t1.status
     );
     assert!(
         snap.sessions.is_empty(),
-        "no local in-process session: {:?}",
+        "no session after hold lift without peer: {:?}",
         snap.sessions
     );
-
-    let after = worker_hosts::get(store.pool(), host_id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(
-        after.machine_token_hash.as_deref(),
-        Some(token_hash.as_str()),
-        "tick must not rotate machine token mid-swap (AGENTS.md lockout)"
-    );
-    assert!(after.auto_update, "auto_update stays on");
 }

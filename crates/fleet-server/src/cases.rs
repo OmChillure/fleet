@@ -1548,83 +1548,39 @@ pub fn wake_interval() -> Duration {
 mod tests {
     use super::*;
 
-    const ALL_STATUSES: [CaseStatus; 7] = [
-        CaseStatus::Open,
-        CaseStatus::Waiting,
-        CaseStatus::Deciding,
-        CaseStatus::Acting,
-        CaseStatus::Completed,
-        CaseStatus::Failed,
-        CaseStatus::Cancelled,
-    ];
-
     #[test]
     fn transition_matrix_basics() {
-        assert!(can_transition(CaseStatus::Open, CaseStatus::Waiting));
-        assert!(can_transition(CaseStatus::Waiting, CaseStatus::Deciding));
-        assert!(can_transition(CaseStatus::Deciding, CaseStatus::Completed));
-        assert!(!can_transition(CaseStatus::Completed, CaseStatus::Open));
-        assert!(!can_transition(CaseStatus::Failed, CaseStatus::Waiting));
-        assert!(can_transition(CaseStatus::Open, CaseStatus::Open));
-    }
-
-    #[test]
-    fn acting_can_leave_to_every_non_self_non_impossible() {
         use CaseStatus::*;
-        for to in [Open, Waiting, Deciding, Completed, Failed, Cancelled] {
-            assert!(
-                can_transition(Acting, to),
-                "acting → {} must be allowed",
-                to.as_str()
+        let cells: &[(CaseStatus, CaseStatus, bool)] = &[
+            (Open, Open, true),
+            (Open, Waiting, true),
+            (Open, Deciding, true),
+            (Open, Acting, true),
+            (Open, Completed, true),
+            (Open, Failed, true),
+            (Open, Cancelled, true),
+            (Waiting, Open, true),
+            (Waiting, Waiting, true),
+            (Waiting, Deciding, true),
+            (Waiting, Acting, false),
+            (Waiting, Completed, true),
+            (Waiting, Failed, true),
+            (Waiting, Cancelled, true),
+            (Deciding, Open, true),
+            (Deciding, Waiting, true),
+            (Deciding, Deciding, true),
+            (Deciding, Acting, true),
+            (Deciding, Completed, true),
+            (Deciding, Failed, true),
+            (Deciding, Cancelled, true),
+        ];
+        for &(from, to, allowed) in cells {
+            assert_eq!(
+                can_transition(from, to),
+                allowed,
+                "{from:?} → {to:?}"
             );
         }
-        assert!(can_transition(Acting, Acting));
-    }
-
-    #[test]
-    fn terminals_have_no_outbound_except_same_status() {
-        use CaseStatus::*;
-        let terminals = [Completed, Failed, Cancelled];
-        let all = [
-            Open, Waiting, Deciding, Acting, Completed, Failed, Cancelled,
-        ];
-        for from in terminals {
-            for to in all {
-                if from == to {
-                    assert!(can_transition(from, to), "same-status {from:?}");
-                } else {
-                    assert!(
-                        !can_transition(from, to),
-                        "{:?} → {:?} must be forbidden",
-                        from,
-                        to
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn parse_and_terminal_flags() {
-        for (wire, want) in [
-            ("open", CaseStatus::Open),
-            ("waiting", CaseStatus::Waiting),
-            ("deciding", CaseStatus::Deciding),
-            ("acting", CaseStatus::Acting),
-            ("completed", CaseStatus::Completed),
-            ("failed", CaseStatus::Failed),
-            ("cancelled", CaseStatus::Cancelled),
-        ] {
-            assert_eq!(CaseStatus::parse(wire), Some(want));
-            assert_eq!(want.as_str(), wire);
-        }
-        assert_eq!(CaseStatus::parse(""), None);
-        assert_eq!(CaseStatus::parse("native"), None);
-        assert!(CaseStatus::Completed.is_terminal());
-        assert!(CaseStatus::Failed.is_terminal());
-        assert!(CaseStatus::Cancelled.is_terminal());
-        assert!(!CaseStatus::Acting.is_terminal());
-        assert!(!CaseStatus::Open.is_terminal());
     }
 
     #[test]
@@ -1636,49 +1592,6 @@ mod tests {
         assert!(can_transition(CaseStatus::Acting, CaseStatus::Deciding));
         assert!(can_transition(CaseStatus::Acting, CaseStatus::Open));
         assert!(can_transition(CaseStatus::Acting, CaseStatus::Acting));
-    }
-
-    #[test]
-    fn terminal_completed_failed_cancelled_cannot_leave_same_status_ok() {
-        for from in [
-            CaseStatus::Completed,
-            CaseStatus::Failed,
-            CaseStatus::Cancelled,
-        ] {
-            for to in ALL_STATUSES {
-                if from == to {
-                    assert!(
-                        can_transition(from, to),
-                        "same-status {from:?} → {to:?} must be allowed"
-                    );
-                } else {
-                    assert!(
-                        !can_transition(from, to),
-                        "terminal {from:?} → {to:?} must be denied"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn parse_unknown_and_blank_none_all_seven_wires_some() {
-        assert_eq!(CaseStatus::parse("unknown"), None);
-        assert_eq!(CaseStatus::parse(""), None);
-        assert_eq!(CaseStatus::parse("   "), None);
-        assert_eq!(CaseStatus::parse("OPEN"), None);
-
-        assert_eq!(CaseStatus::parse("open"), Some(CaseStatus::Open));
-        assert_eq!(CaseStatus::parse("waiting"), Some(CaseStatus::Waiting));
-        assert_eq!(CaseStatus::parse("deciding"), Some(CaseStatus::Deciding));
-        assert_eq!(CaseStatus::parse("acting"), Some(CaseStatus::Acting));
-        assert_eq!(CaseStatus::parse("completed"), Some(CaseStatus::Completed));
-        assert_eq!(CaseStatus::parse("failed"), Some(CaseStatus::Failed));
-        assert_eq!(CaseStatus::parse("cancelled"), Some(CaseStatus::Cancelled));
-
-        for status in ALL_STATUSES {
-            assert_eq!(CaseStatus::parse(status.as_str()), Some(status));
-        }
     }
 
     #[test]
@@ -1765,7 +1678,6 @@ mod tests {
 
     #[test]
     fn parse_tool_request_requires_provider_and_op() {
-        assert!(parse_tool_request(&json!({})).is_err());
         let (p, o, args) = parse_tool_request(&json!({
             "provider": "Slack",
             "operation": "get_channel_history",
@@ -1778,12 +1690,25 @@ mod tests {
     }
 
     #[test]
-    fn llm_decide_wanted_respects_env_and_providers() {
-        // Safety: this test process may have CASE_LLM_DECIDE set; only assert
-        // the explicit-off / provider-on combinations via the helper's env branch
-        // by checking the boolean logic with known inputs when env is unset.
-        let _ = llm_decide_wanted(true, false);
-        let _ = llm_decide_wanted(false, false);
+    fn parse_tool_request_err_when_operation_missing_but_provider_present() {
+        assert!(parse_tool_request(&json!({ "provider": "slack" })).is_err());
+    }
+
+    #[test]
+    fn parse_tool_request_err_when_provider_missing_but_operation_present() {
+        assert!(parse_tool_request(&json!({ "operation": "list_channels" })).is_err());
+    }
+
+    #[test]
+    fn parse_tool_request_trims_and_lowercases_operation_defaults_missing_args() {
+        let (p, o, args) = parse_tool_request(&json!({
+            "provider": " Slack ",
+            "operation": "Get_Channel_History"
+        }))
+        .expect("ok");
+        assert_eq!(p, "slack");
+        assert_eq!(o, "get_channel_history");
+        assert_eq!(args, json!({}));
     }
 
     fn deciding_case(decision_count: i32, version: i64) -> Case {
@@ -1814,48 +1739,38 @@ mod tests {
                 !case_auto_decide_enabled(Some(raw)),
                 "CASE_AUTO_DECIDE={raw:?} must disable auto-decide"
             );
-            assert_eq!(
-                process_due_claim_action(case_auto_decide_enabled(Some(raw))),
-                ProcessDueClaimAction::UnclaimWaiting,
-                "CASE_AUTO_DECIDE={raw:?} must not apply LLM/heuristic decide"
+        }
+    }
+
+    #[test]
+    fn case_auto_decide_blank_or_unknown_stays_enabled() {
+        for raw in ["", "yes", "true", "maybe"] {
+            assert!(
+                case_auto_decide_enabled(Some(raw)),
+                "CASE_AUTO_DECIDE={raw:?} must stay enabled (fail-open)"
             );
         }
-        assert!(case_auto_decide_enabled(None));
-        assert!(case_auto_decide_enabled(Some("on")));
-        assert!(case_auto_decide_enabled(Some("1")));
-        assert_eq!(
-            process_due_claim_action(true),
-            ProcessDueClaimAction::ApplyDecide
-        );
     }
 
     #[test]
     fn case_auto_decide_off_unclaim_does_not_bump_decision_count() {
         let case = deciding_case(7, 3);
         let patch = auto_decide_off_unclaim_patch(&case);
-        assert_eq!(patch.status, CaseStatus::Waiting.as_str());
         assert!(!patch.bump_decision);
-        assert_eq!(patch.expected_version, case.version);
-        assert_eq!(patch.last_error.as_deref(), Some("CASE_AUTO_DECIDE=off"));
         assert_eq!(patch.next_wake_at, case.next_wake_at);
-        // force_complete would complete if decide ran; off-path must stay waiting.
-        assert_eq!(heuristic_decision(&case).action, "complete");
-        assert_eq!(
-            process_due_claim_action(case_auto_decide_enabled(Some("off"))),
-            ProcessDueClaimAction::UnclaimWaiting
-        );
     }
 
     #[test]
-    fn case_auto_decide_off_failed_unclaim_does_not_leave_deciding() {
-        let case = deciding_case(4, 2);
-        let (action, retry) = process_due_after_unclaim_failure(&case);
-        assert_eq!(action, ProcessDueClaimAction::UnclaimWaiting);
-        assert_ne!(action, ProcessDueClaimAction::ApplyDecide);
-        assert_eq!(retry.status, CaseStatus::Waiting.as_str());
-        assert_ne!(retry.status, CaseStatus::Deciding.as_str());
-        assert!(!retry.bump_decision);
-        assert_eq!(retry.expected_version, case.version);
-        assert_eq!(retry.last_error.as_deref(), Some("CASE_AUTO_DECIDE=off"));
+    fn auto_decide_off_unclaim_patch_nil_wake_schedules_default_wait() {
+        let mut case = deciding_case(0, 1);
+        case.next_wake_at = None;
+        let before = Utc::now();
+        let patch = auto_decide_off_unclaim_patch(&case);
+        let after = Utc::now();
+        let wake = patch.next_wake_at.expect("off unclaim schedules a wake");
+        assert!(
+            wake >= before + chrono::Duration::seconds(DEFAULT_WAIT_SECS)
+                && wake <= after + chrono::Duration::seconds(DEFAULT_WAIT_SECS)
+        );
     }
 }

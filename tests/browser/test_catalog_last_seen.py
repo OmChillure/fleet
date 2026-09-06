@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: last seen relative (catalog:e2e-last-seen).
 
-Pending card: last seen never. After pair+heartbeat: just now / relative.
-Plane uses "this process" — not a last-seen heartbeat row.
+Pending list row: last seen never. After pair+heartbeat: just now / relative.
 """
 from __future__ import annotations
 
@@ -19,6 +18,7 @@ from runners_e2e_helpers import (  # noqa: E402
     create_host,
     goto_self_hosted,
     heartbeat,
+    list_hosts,
     pair_host,
     signup_login,
 )
@@ -68,21 +68,29 @@ def _require_playwright():
     return sync_playwright
 
 
-def _article_for_host(page, name: str):
-    """Wait for the named host card. Control plane is never a match."""
-    card = page.locator("article").filter(has_text=name)
-    card.first.wait_for(timeout=30_000)
-    for i in range(card.count()):
-        art = card.nth(i)
-        text = art.inner_text()
-        if "Control plane" in text:
-            continue
-        if name in text:
-            return art
-    raise AssertionError(
-        f"host card {name!r} missing (or only Control plane matched). "
-        f"body={page.inner_text('body')[:800]!r}"
+def _list_button_for_host(page, name: str):
+    """Wait for the named HostListRow button (list row, not detail article)."""
+    row = (
+        page.get_by_role("button")
+        .filter(has_text=name)
+        .filter(has_text=re.compile(r"last seen", re.I))
     )
+    try:
+        row.first.wait_for(timeout=30_000)
+    except Exception as e:
+        raise AssertionError(
+            f"host list button {name!r} missing. "
+            f"body={page.inner_text('body')[:800]!r}"
+        ) from e
+    return row.first
+
+
+def _listed_host(page, workspace_id: str, host_id: str) -> dict:
+    listed = list_hosts(page, workspace_id)
+    for host in listed.get("hosts") or []:
+        if host.get("id") == host_id:
+            return host
+    raise AssertionError(f"host {host_id} missing from list: {listed!r}"[:800])
 
 
 class CatalogLastSeenE2ETests(unittest.TestCase):
@@ -120,22 +128,26 @@ class CatalogLastSeenE2ETests(unittest.TestCase):
         name = f"seen-{uuid.uuid4().hex[:8]}"
         created = create_host(page, ws, name)
         token = created["pair_token"]
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
+
+        pending_api = _listed_host(page, ws, host_id)
+        self.assertIsNone(
+            pending_api.get("last_seen_at"),
+            f"create must leave last_seen_at null: {pending_api!r}"[:800],
+        )
 
         goto_self_hosted(page, workspace_url)
         page.get_by_role("button", name="Add worker").wait_for(timeout=45_000)
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
-        )
 
-        pending = _article_for_host(page, name)
+        pending = _list_button_for_host(page, name)
         pending.get_by_text("last seen never", exact=False).wait_for(timeout=15_000)
         pending_text = pending.inner_text()
-        self.assertNotIn("Control plane", pending_text)
         self.assertIn(
             "last seen never",
             pending_text.lower(),
-            "pending/unpaired card must show last seen never",
+            "pending/unpaired list row must show last seen never",
         )
 
         paired = pair_host(
@@ -150,26 +162,27 @@ class CatalogLastSeenE2ETests(unittest.TestCase):
             {"hostname": name, "platform": "linux-x86_64"},
         )
 
+        live_api = _listed_host(page, ws, host_id)
+        seen_at = live_api.get("last_seen_at")
+        self.assertTrue(
+            isinstance(seen_at, str) and seen_at.strip(),
+            f"pair+heartbeat must set last_seen_at: {live_api!r}"[:800],
+        )
+
         goto_self_hosted(page, workspace_url)
         page.get_by_text(name, exact=True).first.wait_for(timeout=30_000)
-        live = _article_for_host(page, name)
+        live = _list_button_for_host(page, name)
         live.get_by_text(re.compile(LIVE_SEEN, re.I)).wait_for(timeout=15_000)
         live_text = live.inner_text()
-        self.assertNotIn("Control plane", live_text)
         self.assertNotIn(
             "last seen never",
             live_text.lower(),
-            "paired+heartbeat card must leave never",
+            "paired+heartbeat list row must leave never",
         )
         self.assertRegex(
             live_text.lower(),
             LIVE_SEEN,
-            "live card must show just now or relative last seen after pair+heartbeat",
-        )
-
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
+            "live list row must show just now or relative last seen after pair+heartbeat",
         )
 
 

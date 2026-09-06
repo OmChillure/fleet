@@ -212,11 +212,8 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_custom_harness_and_provider() {
+    fn deserializes_provider_omitted_npm_and_defaults() {
         let j: Job = serde_json::from_value(serde_json::json!({
-            "harness": "custom",
-            "command": "my-agent",
-            "args": ["stdio"],
             "model": "acme/m1",
             "provider": {
                 "id": "acme",
@@ -225,13 +222,39 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(j.harness, "custom");
-        assert_eq!(j.command.as_deref(), Some("my-agent"));
-        assert_eq!(j.args, vec!["stdio"]);
+        assert_eq!(j.model.as_deref(), Some("acme/m1"));
         let p = j.provider.unwrap();
         assert_eq!(p.id, "acme");
         assert_eq!(p.npm, "@ai-sdk/openai-compatible");
-        assert!(p.models.contains_key("m1"));
+        assert_eq!(p.base_url.as_deref(), Some("https://api.acme/v1"));
+        assert_eq!(p.name, "Custom provider");
+        assert_eq!(p.api_key_env, "OPENCODE_API_KEY");
+        assert_eq!(p.models["m1"].name.as_deref(), Some("M1"));
+    }
+
+    #[test]
+    fn provider_missing_id_rejects_job_json() {
+        let err = serde_json::from_value::<Job>(serde_json::json!({
+            "provider": {
+                "base_url": "https://api.acme/v1",
+                "models": { "m1": { "name": "M1" } }
+            }
+        }));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn model_entry_flatten_extra_survives_deserialize() {
+        let j: Job = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "id": "acme",
+                "models": { "m1": { "name": "M1", "limit": 128 } }
+            }
+        }))
+        .unwrap();
+        let m = &j.provider.unwrap().models["m1"];
+        assert_eq!(m.name.as_deref(), Some("M1"));
+        assert_eq!(m.extra.get("limit"), Some(&serde_json::json!(128)));
     }
 
     #[test]
@@ -244,57 +267,139 @@ mod tests {
             finished_at: "t1".into(),
             elapsed_sec: 1.5,
             harness: Some("opencode".into()),
-            harness_command: Some(vec!["opencode".into(), "acp".into()]),
-            repo_url: Some("https://x".into()),
-            git_ref: Some("main".into()),
-            work_dir: Some("/workspace/repo".into()),
+            harness_command: None,
+            repo_url: None,
+            git_ref: None,
+            work_dir: None,
             analysis: Some("hello".into()),
             error: None,
-            acp: Some(serde_json::json!({"protocol":"acp"})),
+            acp: None,
             opencode: None,
             provider_probe: None,
             provision: None,
         };
         let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["job_id"], "j1");
+        assert_eq!(v["type"], "analyze_repo");
         assert_eq!(v["ok"], true);
         assert_eq!(v["analysis"], "hello");
         assert_eq!(v["harness"], "opencode");
-        assert!(v.get("error").is_none() || v["error"].is_null());
+        assert!(v.get("error").is_none());
+        assert!(v.get("opencode").is_none());
+    }
+
+    #[test]
+    fn result_failed_shape_has_ok_false_and_error() {
+        let r = JobResult {
+            job_id: "j1".into(),
+            r#type: "analyze_repo".into(),
+            ok: false,
+            started_at: "t0".into(),
+            finished_at: "t1".into(),
+            elapsed_sec: 1.5,
+            harness: None,
+            harness_command: None,
+            repo_url: None,
+            git_ref: None,
+            work_dir: None,
+            analysis: None,
+            error: Some("boom".into()),
+            acp: None,
+            opencode: None,
+            provider_probe: None,
+            provision: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "boom");
+        assert!(v.get("analysis").is_none());
+    }
+
+    #[test]
+    fn result_opencode_back_compat_alias_emitted_with_acp() {
+        let blob = serde_json::json!({"protocol": "acp"});
+        let r = JobResult {
+            job_id: "j1".into(),
+            r#type: "analyze_repo".into(),
+            ok: true,
+            started_at: "t0".into(),
+            finished_at: "t1".into(),
+            elapsed_sec: 1.5,
+            harness: Some("opencode".into()),
+            harness_command: None,
+            repo_url: None,
+            git_ref: None,
+            work_dir: None,
+            analysis: None,
+            error: None,
+            acp: Some(blob.clone()),
+            opencode: Some(blob.clone()),
+            provider_probe: None,
+            provision: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["acp"], blob);
+        assert_eq!(v["opencode"], blob);
+        assert_eq!(v.get("acp"), v.get("opencode"));
     }
 
     #[test]
     fn deserializes_project_setup() {
         let j: Job = serde_json::from_value(serde_json::json!({
-            "repo_url": "https://github.com/eugenepyvovarov/123-invoices.git",
             "project_setup": {
-                "strategy": "commands",
-                "workspace_image": "python:3.13-bookworm",
+                "strategy": "detect",
                 "commands": ["python -m pip install -r requirements.txt"],
                 "smoke_commands": ["python manage.py check"]
             }
         }))
         .unwrap();
         let ps = j.project_setup.unwrap();
-        assert_eq!(ps.strategy, "commands");
-        assert_eq!(ps.commands.len(), 1);
-        assert_eq!(ps.smoke_commands.len(), 1);
+        assert_eq!(ps.strategy, "detect");
+        assert_eq!(
+            ps.commands,
+            vec!["python -m pip install -r requirements.txt"]
+        );
+        assert_eq!(ps.smoke_commands, vec!["python manage.py check"]);
     }
 
     #[test]
-    fn deserializes_workspace_tools() {
+    fn project_setup_omitted_strategy_defaults_to_commands() {
         let j: Job = serde_json::from_value(serde_json::json!({
-            "repo_url": "https://example.com/r.git",
             "project_setup": {
-                "tools": {
-                    "django_check": {
-                        "argv": ["python", "manage.py", "check"],
-                        "description": "Django system check"
-                    }
-                }
+                "commands": ["pip install -r requirements.txt"]
             }
         }))
         .unwrap();
-        let t = j.project_setup.unwrap().tools;
-        assert_eq!(t["django_check"].argv, vec!["python", "manage.py", "check"]);
+        let ps = j.project_setup.unwrap();
+        assert_eq!(ps.strategy, "commands");
+        assert_eq!(ps.commands, vec!["pip install -r requirements.txt"]);
+    }
+
+    #[test]
+    fn project_setup_script_strategy_deserializes_from_job_json() {
+        let j: Job = serde_json::from_value(serde_json::json!({
+            "project_setup": {
+                "strategy": "script",
+                "script": "scripts/fleet-setup.sh"
+            }
+        }))
+        .unwrap();
+        let ps = j.project_setup.unwrap();
+        assert_eq!(ps.strategy, "script");
+        assert_eq!(ps.script.as_deref(), Some("scripts/fleet-setup.sh"));
+    }
+
+    #[test]
+    fn project_setup_env_and_timeout_sec_from_json() {
+        let j: Job = serde_json::from_value(serde_json::json!({
+            "project_setup": {
+                "env": {"PIP_DISABLE_PIP_VERSION_CHECK": "1"},
+                "timeout_sec": 180
+            }
+        }))
+        .unwrap();
+        let ps = j.project_setup.unwrap();
+        assert_eq!(ps.env.get("PIP_DISABLE_PIP_VERSION_CHECK").map(String::as_str), Some("1"));
+        assert_eq!(ps.timeout_sec, Some(180));
     }
 }

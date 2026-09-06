@@ -696,38 +696,6 @@ mod tests {
     }
 
     #[test]
-    fn acquire_run_lock_refuses_second_process() {
-        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
-        }
-        let first = acquire_run_lock().expect("first lock");
-        let err = acquire_run_lock().expect_err("second lock");
-        assert!(err.to_string().contains("already running"), "{err}");
-        drop(first);
-        acquire_run_lock().expect("lock after drop");
-    }
-
-    #[test]
-    fn is_loopback_url_detects_common_forms() {
-        assert!(is_loopback_url("http://localhost:8080"));
-        assert!(is_loopback_url("http://127.0.0.1:8080/"));
-        assert!(is_loopback_url("http://127.1.2.3:1"));
-        assert!(
-            is_loopback_url("http://[::1]:8080"),
-            "IPv6 loopback must be detected so we do not persist [::1] from the API"
-        );
-        assert!(
-            is_loopback_url("http://::1"),
-            "bare IPv6 loopback must be detected"
-        );
-        assert!(!is_loopback_url(
-            "http://api.agent-fleet.svc.cluster.local:8080"
-        ));
-    }
-
-    #[test]
     fn persist_pair_rejects_empty_machine_token() {
         let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();

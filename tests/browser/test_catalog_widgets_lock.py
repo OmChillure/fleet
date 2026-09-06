@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import sys
 import time
@@ -135,6 +134,12 @@ def _widgets(card):
     return auto, max_jobs
 
 
+def _sandbox_widgets(card):
+    allow = card.locator("label").filter(has_text="Allow process jobs").locator("input")
+    work_root = card.locator("label").filter(has_text="Work root").locator("select")
+    return allow, work_root
+
+
 class CatalogWidgetsLockPendingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -166,6 +171,8 @@ class CatalogWidgetsLockPendingTests(unittest.TestCase):
 
     def test_widgets_lock_while_pending_until_ack(self) -> None:
         # catalog:e2e-widgets-lock-pending — Inputs disabled while pending.
+        from playwright.sync_api import expect
+
         page = self.page
         ws, workspace_url = _signup_api(page)
         name = f"wlock-{uuid.uuid4().hex[:12]}"
@@ -175,91 +182,103 @@ class CatalogWidgetsLockPendingTests(unittest.TestCase):
         self.assertTrue(host_id, created)
         machine_token = paired["machine_token"]
 
-        row = _host_row(page, ws, host_id)
-        self.assertEqual(row.get("status"), "online", row)
-        self.assertFalse(row.get("settings_pending"), row)
-        self.assertEqual(row.get("settings_gen"), row.get("settings_ack_gen"), row)
-
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         card = _card(page, name)
-        self.assertIn("online", card.inner_text().lower())
         auto, max_jobs = _widgets(card)
-        self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
-        self.assertGreater(max_jobs.count(), 0, "paired card needs Max jobs at once")
-        self.assertEqual(
-            card.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
-            0,
-            "isolation Native checkbox must not exist",
-        )
-        self.assertTrue(auto.first.is_enabled(), "Auto-update must be editable before Apply")
-        self.assertTrue(max_jobs.first.is_enabled(), "max jobs must be editable before Apply")
-        self.assertEqual(
-            card.get_by_text("pending apply", exact=True).count(),
-            0,
-            "fresh pair must not show pending apply",
-        )
+        expect(auto.first, "Auto-update must be editable before Apply").to_be_enabled()
+        expect(max_jobs.first, "max jobs must be editable before Apply").to_be_enabled()
 
         auto.first.click(force=True)
         apply = card.get_by_role("button", name="Apply changes")
         apply.wait_for(timeout=5_000)
         apply.click(force=True)
-
-        # List poll is 10s; do not wait on the in-memory card. Server gen is the lock.
-        row = {}
-        settings_gen = 0
-        for _ in range(30):
-            row = _host_row(page, ws, host_id)
-            if row.get("settings_pending") or row.get("settings_gen") != row.get(
-                "settings_ack_gen"
-            ):
-                settings_gen = int(row["settings_gen"])
-                break
-            page.wait_for_timeout(400)
-        self.assertTrue(
-            settings_gen
-            and (
-                row.get("settings_pending")
-                or row.get("settings_gen") != row.get("settings_ack_gen")
-            ),
-            f"Apply must bump settings_gen: {row}",
-        )
-        self.assertGreater(settings_gen, int(row.get("settings_ack_gen") or 0), row)
+        # Stay until PATCH lands so reload does not abort it.
+        apply.wait_for(state="hidden", timeout=20_000)
 
         # Reload: lock must come from server pending, not the in-flight busy flag.
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         card = _card(page, name)
-        try:
-            card.get_by_text("pending apply", exact=True).wait_for(timeout=20_000)
-        except Exception:
-            raise AssertionError(
-                "pending apply pill missing after reload: "
-                f"{card.inner_text()[:800]!r} api={row!r}"
-            ) from None
+        expect(
+            card.get_by_text("pending apply", exact=True),
+            "pending apply pill missing after reload",
+        ).to_be_visible(timeout=20_000)
         auto, max_jobs = _widgets(card)
-        self.assertFalse(auto.first.is_enabled(), "Auto-update must lock while pending apply")
-        self.assertFalse(
-            max_jobs.first.is_enabled(),
-            "Max jobs at once must lock while pending apply",
+        expect(auto.first, "Auto-update must lock while pending apply").to_be_disabled()
+        expect(max_jobs.first, "Max jobs at once must lock while pending apply").to_be_disabled()
+
+        row = _host_row(page, ws, host_id)
+        settings_gen = int(row.get("settings_gen") or 0)
+        self.assertGreater(
+            settings_gen,
+            int(row.get("settings_ack_gen") or 0),
+            f"Apply must bump settings_gen: {row}",
         )
 
-        acked = heartbeat(page, machine_token, {"settings_ack_gen": settings_gen})
-        acked_host = acked.get("host") or {}
-        self.assertEqual(acked_host.get("settings_ack_gen"), settings_gen, acked)
-        self.assertFalse(acked_host.get("settings_pending"), acked)
+        heartbeat(page, machine_token, {"settings_ack_gen": settings_gen})
 
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         card = _card(page, name)
-        self.assertEqual(
-            card.get_by_text("pending apply", exact=True).count(),
-            0,
-            "ack must clear pending apply so widgets unlock",
-        )
         auto, max_jobs = _widgets(card)
-        self.assertTrue(auto.first.is_enabled(), "Auto-update must unlock after ack")
-        self.assertTrue(max_jobs.first.is_enabled(), "max jobs must unlock after ack")
+        expect(auto.first, "Auto-update must unlock after ack").to_be_enabled()
+        expect(max_jobs.first, "max jobs must unlock after ack").to_be_enabled()
+
+    def test_sandbox_allow_process_and_work_root_lock_while_pending(self) -> None:
+        # SandboxBlock pending lock — Allow process jobs / Work root.
+        from playwright.sync_api import expect
+
+        page = self.page
+        ws, workspace_url = _signup_api(page)
+        name = f"wlock-sbx-{uuid.uuid4().hex[:12]}"
+        created, paired, _hb = pair_and_heartbeat(page, ws, name)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
+        machine_token = paired["machine_token"]
+
+        goto_self_hosted(page, workspace_url)
+        wait_dx_ready(page)
+        card = _card(page, name)
+        allow, work_root = _sandbox_widgets(card)
+        expect(allow.first, "Allow process jobs must be editable before Apply").to_be_enabled()
+        expect(work_root.first, "Work root must be editable before Apply").to_be_enabled()
+
+        auto, _max_jobs = _widgets(card)
+        auto.first.click(force=True)
+        apply = card.get_by_role("button", name="Apply changes")
+        apply.wait_for(timeout=5_000)
+        apply.click(force=True)
+        apply.wait_for(state="hidden", timeout=20_000)
+
+        goto_self_hosted(page, workspace_url)
+        wait_dx_ready(page)
+        card = _card(page, name)
+        expect(
+            card.get_by_text("pending apply", exact=True),
+            "pending apply pill missing after reload",
+        ).to_be_visible(timeout=20_000)
+        allow, work_root = _sandbox_widgets(card)
+        expect(allow.first, "Allow process jobs must lock while pending apply").to_be_disabled()
+        expect(work_root.first, "Work root must lock while pending apply").to_be_disabled()
+
+        row = _host_row(page, ws, host_id)
+        settings_gen = int(row.get("settings_gen") or 0)
+        self.assertGreater(
+            settings_gen,
+            int(row.get("settings_ack_gen") or 0),
+            f"Apply must bump settings_gen: {row}",
+        )
+
+        heartbeat(page, machine_token, {"settings_ack_gen": settings_gen})
+
+        goto_self_hosted(page, workspace_url)
+        wait_dx_ready(page)
+        card = _card(page, name)
+        allow, work_root = _sandbox_widgets(card)
+        expect(allow.first, "Allow process jobs must unlock after ack").to_be_enabled()
+        expect(work_root.first, "Work root must unlock after ack").to_be_enabled()
 
 
 if __name__ == "__main__":

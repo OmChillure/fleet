@@ -11,7 +11,8 @@ pub(crate) async fn list_repos(http: &reqwest::Client, token: &str, args: &Value
         .and_then(|v| v.as_u64())
         .unwrap_or(20)
         .clamp(1, 50);
-    let url = format!("https://api.github.com/user/repos?per_page={per_page}&sort=updated");
+    let origin = github_api_origin();
+    let url = format!("{origin}/user/repos?per_page={per_page}&sort=updated");
     let (status, body) = github_get(http, token, &url).await;
     if !(200..300).contains(&status) {
         return upstream_err("list_repos", status, &body);
@@ -310,4 +311,231 @@ pub(crate) async fn list_commits(http: &reqwest::Client, token: &str, args: &Val
         json!({ "owner": owner, "repo": repo, "count": n, "items": items }),
         Some(status),
     )
+}
+
+#[cfg(test)]
+mod list_repos_tests {
+    use super::*;
+    use crate::proxy::dispatch;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    const LEAK: &str = "gho_LIST_REPOS_MUST_NOT_ECHO_c0ffee";
+
+    struct OriginGuard;
+    impl Drop for OriginGuard {
+        fn drop(&mut self) {
+            TEST_GITHUB_API_BASE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    struct GitHubListSink {
+        hits: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        origin: String,
+        last_request: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Drop for GitHubListSink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl GitHubListSink {
+        fn bind(status: u16, body: Value) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind github list_repos sink");
+            listener.set_nonblocking(true).expect("nonblocking sink");
+            let addr = listener.local_addr().expect("sink addr");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let last_request = Arc::new(Mutex::new(None));
+            let hits_t = hits.clone();
+            let stop_t = stop.clone();
+            let last_request_t = last_request.clone();
+            let payload = body.to_string();
+            thread::spawn(move || {
+                while !stop_t.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_t.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut buf = Vec::new();
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match stream.read(&mut tmp) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        buf.extend_from_slice(&tmp[..n]);
+                                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if let Some(line) = std::str::from_utf8(&buf)
+                                .ok()
+                                .and_then(|s| s.lines().next())
+                                .map(str::to_string)
+                            {
+                                *last_request_t.lock().expect("last_request") = Some(line);
+                            }
+                            let resp = format!(
+                                "HTTP/1.1 {status} ok\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                payload.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                hits,
+                stop,
+                origin: format!("http://{addr}"),
+                last_request,
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+
+        fn last_request(&self) -> Option<String> {
+            self.last_request.lock().expect("last_request").clone()
+        }
+    }
+
+    fn mapped_repo() -> Value {
+        json!({
+            "full_name": "acme/app",
+            "private": false,
+            "html_url": "https://github.com/acme/app",
+            "description": "demo",
+            "default_branch": "main",
+            "language": "Rust",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "access_token": LEAK,
+        })
+    }
+
+    async fn dispatch_list_repos(origin: &str, args: Value) -> ProxyResult {
+        let _guard = OriginGuard;
+        TEST_GITHUB_API_BASE.with(|c| *c.borrow_mut() = Some(origin.to_string()));
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http");
+        dispatch("github", &http, LEAK, "list_repos", &args, &json!({})).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_list_repos_maps_user_repos_json() {
+        let sink = GitHubListSink::bind(200, json!([mapped_repo()]));
+        let result = dispatch_list_repos(&sink.origin, json!({})).await;
+        assert!(result.ok, "list_repos 200 must be ok: {result:?}");
+        assert_eq!(result.provider, "github", "{result:?}");
+        assert_eq!(result.operation, "list_repos", "{result:?}");
+        assert_eq!(
+            result.data["count"],
+            json!(1),
+            "count must match items: {result:?}"
+        );
+        let item = &result.data["items"][0];
+        assert_eq!(
+            item["full_name"],
+            json!("acme/app"),
+            "must map full_name: {result:?}"
+        );
+        assert_eq!(item["private"], json!(false), "must map private: {result:?}");
+        assert_eq!(
+            item["html_url"],
+            json!("https://github.com/acme/app"),
+            "must map html_url: {result:?}"
+        );
+        assert_eq!(
+            item["description"],
+            json!("demo"),
+            "must map description: {result:?}"
+        );
+        assert_eq!(
+            item["default_branch"],
+            json!("main"),
+            "must map default_branch: {result:?}"
+        );
+        assert_eq!(
+            item["language"],
+            json!("Rust"),
+            "must map language: {result:?}"
+        );
+        assert_eq!(
+            item["updated_at"],
+            json!("2024-01-01T00:00:00Z"),
+            "must map updated_at: {result:?}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK) && !dump.to_ascii_lowercase().contains("bearer"),
+            "list_repos must not echo bearer/token: {dump}"
+        );
+        assert!(sink.hits() > 0, "list_repos must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_list_repos_upstream_401_is_token_expired() {
+        let sink = GitHubListSink::bind(
+            401,
+            json!({ "message": "Bad credentials", "access_token": LEAK }),
+        );
+        let result = dispatch_list_repos(&sink.origin, json!({})).await;
+        assert!(!result.ok, "401 must be ok:false: {result:?}");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("token_expired"),
+            "GitHub 401 must map to token_expired: {result:?}"
+        );
+        assert_eq!(
+            result.provider_status,
+            Some(401),
+            "provider_status must be 401: {result:?}"
+        );
+        assert_eq!(result.provider, "github", "{result:?}");
+        assert_eq!(result.operation, "list_repos", "{result:?}");
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK),
+            "token_expired must not echo token: {dump}"
+        );
+        assert!(sink.hits() > 0, "401 must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_list_repos_per_page_clamped_to_50() {
+        let sink = GitHubListSink::bind(200, json!([mapped_repo()]));
+        let result = dispatch_list_repos(&sink.origin, json!({ "per_page": 999 })).await;
+        assert!(result.ok, "clamped list_repos 200 must be ok: {result:?}");
+        let req = sink
+            .last_request()
+            .unwrap_or_else(|| panic!("GET line: {result:?}"));
+        assert!(
+            req.contains("/user/repos") && req.contains("per_page=50"),
+            "per_page=999 must clamp to 50: {req}"
+        );
+        assert!(
+            !req.contains("per_page=999"),
+            "unclamped per_page must not be sent: {req}"
+        );
+        assert!(sink.hits() > 0, "clamp test must hit the sink: {result:?}");
+    }
 }

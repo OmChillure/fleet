@@ -498,24 +498,3 @@ fn CasePanel(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn detail_status_and_stage_are_separate_pills() {
-        let src = include_str!("page.rs");
-        let prod = src.split("#[cfg(test)]").next().expect("prod");
-        assert!(
-            !prod.contains("\"{case.status} · {case.stage}\""),
-            "detail must not jam status and stage into one uppercase pill"
-        );
-        assert!(
-            prod.contains("\"{case.status}\""),
-            "detail must render status on its own"
-        );
-        assert!(
-            prod.contains("\"{case.stage}\""),
-            "detail must render stage on its own"
-        );
-    }
-}

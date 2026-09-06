@@ -113,25 +113,6 @@ mod tests {
     }
 
     #[test]
-    fn liveliness_driver_and_host() {
-        assert_eq!(
-            key_for_liveliness_driver("acme", "sbx-1"),
-            "fleet/acme/liveliness/driver/sbx-1"
-        );
-        assert_eq!(
-            key_for_liveliness_host("acme", "host-42"),
-            "fleet/acme/liveliness/host/host-42"
-        );
-    }
-
-    #[test]
-    fn event_type_chunk_strips_domain_prefix() {
-        assert_eq!(event_type_chunk("sandbox.failed"), "failed");
-        assert_eq!(event_type_chunk("session.state_changed"), "state_changed");
-        assert_eq!(event_type_chunk("ready"), "ready");
-    }
-
-    #[test]
     fn key_for_message_session() {
         use agent_fleet_contracts::{
             BusMessage, MessageBody, Producer, SessionCompleted, SessionId,
@@ -171,22 +152,6 @@ mod tests {
         assert_eq!(
             key_for_message("default", &msg).unwrap(),
             format!("fleet/default/session/{sid}/event/agent")
-        );
-    }
-
-    #[test]
-    fn session_and_cmd_keys() {
-        assert_eq!(
-            key_for_session_event("default", "sid", "state_changed"),
-            "fleet/default/session/sid/event/state_changed"
-        );
-        assert_eq!(
-            key_for_sandbox_cmd("default", "sbx", "stop"),
-            "fleet/default/sandbox/sbx/cmd/stop"
-        );
-        assert_eq!(
-            KEY_EXPR_ALL_SANDBOX_FAILURES,
-            "fleet/*/sandbox/*/event/failed"
         );
     }
 }

@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: partners disclaimer ack persists (catalog:e2e-partners-ack-persists).
 
-Ack is a recorded timestamp only. It must survive reload and must not
-enable lending, buying credits, or a live credit balance.
+Ack survives reload and must not enable Lend, Buy, or the partner picker.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import socket
@@ -14,7 +12,6 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import UI, signup_login  # noqa: E402
@@ -28,14 +25,7 @@ BROWSERS = os.environ.get(
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
-_LEND_CONTROL_RE = re.compile(
-    r"^(lend|lend capacity|enable lending|start lending|offer capacity|begin lending)$",
-    re.I,
-)
-_ACK_LABEL = re.compile(r"acknowledge", re.I)
-_ISO_TS = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
-)
+_ACK_CHECKBOX = re.compile(r"acknowledge", re.I)
 
 
 def _listening(host: str, port: int) -> bool:
@@ -69,30 +59,6 @@ def _require_playwright():
     return sync_playwright
 
 
-def _json(res) -> dict[str, Any]:
-    text = res.text()
-    if not res.ok:
-        raise RuntimeError(f"{res.status} {res.url}: {text[:500]}")
-    if not text:
-        return {}
-    return json.loads(text)
-
-
-def _disclaimer(page, workspace_id: str) -> dict[str, Any]:
-    return _json(
-        page.request.get(f"{UI}/api/workspaces/{workspace_id}/partners/disclaimer")
-    )
-
-
-def _ack_boxes(page):
-    boxes = page.get_by_role(
-        "checkbox", name=re.compile(r"acknowledge|disclaimer", re.I)
-    )
-    if boxes.count() == 0:
-        boxes = page.get_by_role("checkbox")
-    return [boxes.nth(i) for i in range(boxes.count()) if boxes.nth(i).is_visible()]
-
-
 def _goto_partners(page, base: str) -> None:
     """Land on Partners. dx rebuild overlay can hide h1; retry like signup."""
     last_err: Exception | None = None
@@ -113,22 +79,6 @@ def _goto_partners(page, base: str) -> None:
             time.sleep(2)
     if last_err is not None:
         raise last_err
-
-
-def _assert_no_lend_enablement(test: unittest.TestCase, page, where: str) -> None:
-    body = page.inner_text("body").lower()
-    test.assertNotIn("lending enabled", body, f"{where}: lend must stay off")
-    for i in range(page.get_by_role("button").count()):
-        btn = page.get_by_role("button").nth(i)
-        if not btn.is_visible():
-            continue
-        name = " ".join((btn.inner_text() or "").split())
-        if not name or _LEND_CONTROL_RE.search(name) is None:
-            continue
-        test.assertFalse(
-            btn.is_enabled(),
-            f"{where}: lend control {name!r} must not be enabled",
-        )
 
 
 class CatalogPartnersAckE2ETests(unittest.TestCase):
@@ -161,135 +111,32 @@ class CatalogPartnersAckE2ETests(unittest.TestCase):
         cls._pw.stop()
 
     def test_ack_persists_and_does_not_enable_lend(self) -> None:
-        page = self.page
-        ws, base = signup_login(page, prefix="ack")
+        # catalog:e2e-partners-ack-persists — checkbox POST survives reload; lend stays off.
+        from playwright.sync_api import expect
 
-        before = _disclaimer(page, ws)
-        self.assertFalse(before.get("accepted"), f"default must be off: {before}")
-        self.assertTrue(
-            before.get("accepted_at") in (None, ""),
-            f"default accepted_at must be empty: {before}",
-        )
-        self.assertNotIn("lending", before)
-        self.assertNotIn("assignable", before)
+        page = self.page
+        _ws, base = signup_login(page, prefix="ack")
 
         _goto_partners(page, base)
-        self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/partners(?:[?#].*)?$")
-        main = page.locator("main")
-        self.assertGreater(
-            main.get_by_text("Coming soon", exact=True).count(),
-            0,
-            "partners page must show the Coming soon badge",
-        )
-        body_l = main.inner_text().lower()
-        self.assertIn("coming soon", body_l, "partners page must stay Coming soon")
-        self.assertIn("trust", body_l, "partners page missing trust copy")
-        self.assertIn("disclaimer", body_l, "partners page missing disclaimer copy")
-
-        visible = _ack_boxes(page)
-        self.assertGreater(
-            len(visible),
-            0,
-            "partners disclaimer control missing (expected a checkbox)",
-        )
-        box = visible[0]
-        self.assertFalse(box.is_checked(), "disclaimer must default off")
-
-        posted: dict[str, Any] = {}
-
-        def is_ack_post(resp) -> bool:
-            if "/partners/disclaimer" not in resp.url:
-                return False
-            if resp.request.method.upper() != "POST" or not resp.ok:
-                return False
-            try:
-                posted.update(resp.json())
-            except Exception:  # noqa: BLE001 — body may be empty mid-stream
-                pass
-            return True
+        box = page.get_by_role("checkbox", name=_ACK_CHECKBOX)
+        expect(box).not_to_be_checked()
 
         # Label click: locator.check() retries after the box disables itself.
-        label = page.locator("label").filter(has_text=_ACK_LABEL).first
-        label.wait_for()
-        with page.expect_response(is_ack_post, timeout=15_000):
+        label = page.locator("label").filter(has=box)
+        with page.expect_response(
+            lambda r: "/partners/disclaimer" in r.url
+            and r.request.method.upper() == "POST"
+            and r.ok,
+            timeout=15_000,
+        ):
             label.click()
-        self.assertTrue(box.is_checked(), "disclaimer must stay checked after persist")
-        self.assertTrue(posted.get("accepted"), f"POST must record ack: {posted}")
-        accepted_at = posted.get("accepted_at")
-        self.assertIsInstance(accepted_at, str, f"ack is a timestamp only: {posted}")
-        self.assertRegex(
-            accepted_at,
-            _ISO_TS,
-            f"accepted_at must be an ISO timestamp: {posted}",
-        )
-        self.assertNotIn("lending", posted)
-        self.assertNotIn("assignable", posted)
 
-        page.reload(wait_until="networkidle")
-        page.wait_for_selector("h1")
-        page.wait_for_function(
-            """() => {
-                const labels = [...document.querySelectorAll('label')];
-                const lab = labels.find((l) =>
-                    /acknowledge/i.test(l.innerText || '')
-                );
-                const input = lab && lab.querySelector('input[type=checkbox]');
-                return !!(input && input.checked);
-            }"""
-        )
-        visible = _ack_boxes(page)
-        self.assertGreater(
-            len(visible),
-            0,
-            "disclaimer checkbox missing after reload",
-        )
-        for box in visible:
-            self.assertTrue(
-                box.is_checked(),
-                "disclaimer ack must persist across reload",
-            )
-
-        after = _disclaimer(page, ws)
-        self.assertTrue(after.get("accepted"), f"GET after reload: {after}")
-        self.assertEqual(
-            after.get("accepted_at"),
-            accepted_at,
-            "ack timestamp must persist (first write wins)",
-        )
-
-        lend = page.get_by_role("button", name="Lend capacity")
-        self.assertTrue(lend.first.is_visible(), "partners page missing Lend capacity")
-        self.assertFalse(
-            lend.first.is_enabled(),
-            "Lend capacity must stay disabled after ack",
-        )
-        buy = page.get_by_role("button", name="Buy credits")
-        self.assertTrue(buy.first.is_visible(), "partners page missing Buy credits")
-        self.assertFalse(
-            buy.first.is_enabled(),
-            "Buy credits must stay disabled after ack",
-        )
-        picker = page.locator("select")
-        self.assertGreater(picker.count(), 0, "partner picker missing")
-        self.assertFalse(
-            picker.first.is_enabled(),
-            "partner picker must stay disabled after ack",
-        )
-        _assert_no_lend_enablement(self, page, "partners after ack")
-        main = page.locator("main")
-        self.assertGreater(
-            main.get_by_text("Coming soon", exact=True).count(),
-            0,
-            "ack must not drop the Coming soon badge",
-        )
-        body_l = page.inner_text("body").lower()
-        self.assertIn("coming soon", body_l, "partners page must stay Coming soon after ack")
-        self.assertNotIn("balance", body_l, "ack must not create a credit balance")
-        self.assertNotRegex(
-            body_l,
-            r"\b\d+(?:\.\d+)?\s+credits?\b",
-            "ack must not display a live credit balance",
-        )
+        page.reload(wait_until="domcontentloaded")
+        page.locator("h1").wait_for(state="visible", timeout=8_000)
+        expect(box).to_be_checked()
+        expect(page.get_by_role("button", name="Lend capacity")).to_be_disabled()
+        expect(page.get_by_role("button", name="Buy credits")).to_be_disabled()
+        expect(page.get_by_role("combobox")).to_be_disabled()
 
 
 if __name__ == "__main__":

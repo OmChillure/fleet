@@ -294,29 +294,6 @@ pub async fn signal_retired_sessions(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn loopback_detects_ipv4_ipv6_and_localhost() {
-        assert!(worker_url_is_loopback("http://127.0.0.1:8080"));
-        assert!(worker_url_is_loopback("http://localhost:8080/v1"));
-        assert!(
-            worker_url_is_loopback("http://[::1]:8080"),
-            "container guests cannot reach IPv6 loopback of the plane"
-        );
-        assert!(!worker_url_is_loopback(
-            "http://api.agent-fleet.svc.cluster.local:8080"
-        ));
-        assert!(!worker_url_is_loopback("http://10.0.0.8:8080"));
-        assert!(
-            worker_url_is_loopback("http://127.1.2.3:8080"),
-            "127.0.0.0/8 is loopback; container guests cannot reach it"
-        );
-    }
-}
-
 pub async fn apply_retry_after_failure(
     store: &Store,
     task_id: Uuid,

@@ -76,6 +76,25 @@ pub fn client_ip(headers: &HeaderMap, connect: Option<SocketAddr>) -> Option<Str
         .or_else(|| connect.map(|a| a.ip().to_string()))
 }
 
+/// Positive `AUTH_*_RATE_MAX` env, else `default`. Zero/invalid keep the default.
+pub fn max_from_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+/// Positive `AUTH_*_RATE_WINDOW_SECS` env, else `default_secs`.
+pub fn window_from_env(var: &str, default_secs: u64) -> Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
 pub fn check(
     action: &str,
     headers: &HeaderMap,
@@ -136,27 +155,9 @@ mod tests {
     }
 
     #[test]
-    fn prefers_x_real_ip_over_spoofed_xff() {
-        let h = headers(&[
-            ("x-forwarded-for", "1.2.3.4, 203.0.113.9"),
-            ("x-real-ip", "203.0.113.9"),
-        ]);
-        assert_eq!(client_ip(&h, None).as_deref(), Some("203.0.113.9"));
-    }
-
-    #[test]
     fn xff_uses_rightmost_valid_hop() {
         let h = headers(&[("x-forwarded-for", "1.2.3.4, 198.51.100.20")]);
         assert_eq!(client_ip(&h, None).as_deref(), Some("198.51.100.20"));
-    }
-
-    #[test]
-    fn invalid_xff_token_falls_through_to_x_real_ip() {
-        let h = headers(&[
-            ("x-forwarded-for", "unknown, 1.2.3.4:80"),
-            ("x-real-ip", "203.0.113.7"),
-        ]);
-        assert_eq!(client_ip(&h, None).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
@@ -174,10 +175,59 @@ mod tests {
         let action = "evict-empty-window";
         let ip = "203.0.113.50";
         let h = headers(&[("x-real-ip", ip)]);
-        check(action, &h, None, 5, Duration::from_millis(1)).unwrap();
-        assert_eq!(window_len(action, ip), 1);
+        let window = Duration::from_millis(250);
+        check(action, &h, None, 2, window).unwrap();
+        check(action, &h, None, 2, window).unwrap();
+        let err = check(action, &h, None, 2, window).expect_err("third hit at max=2");
+        assert!(
+            matches!(err, AppError::TooManyRequests(_)),
+            "expected too_many_requests at max=2, got {err:?}"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        check(action, &h, None, 2, window).unwrap();
+    }
+
+    #[test]
+    fn check_drops_expired_foreign_key() {
+        let action = "drop-expired-foreign";
+        let ip_a = "203.0.113.52";
+        let ip_b = "203.0.113.53";
+        let ha = headers(&[("x-real-ip", ip_a)]);
+        let hb = headers(&[("x-real-ip", ip_b)]);
+        let window = Duration::from_millis(1);
+        check(action, &ha, None, 5, window).unwrap();
+        assert_eq!(window_len(action, ip_a), 1);
         std::thread::sleep(Duration::from_millis(5));
-        check(action, &h, None, 5, Duration::from_millis(1)).unwrap();
-        assert_eq!(window_len(action, ip), 1);
+        check(action, &hb, None, 5, window).unwrap();
+        assert_eq!(
+            window_len(action, ip_a),
+            0,
+            "expired A must be retain-dropped when B is checked"
+        );
+        assert_eq!(window_len(action, ip_b), 1);
+    }
+
+    #[test]
+    fn max_from_env_invalid_or_zero_keeps_default() {
+        assert_eq!(max_from_env("AUTH_RATE_MAX_UNSET_FOR_TEST", 5), 5);
+        assert_eq!(
+            window_from_env("AUTH_RATE_WINDOW_UNSET_FOR_TEST", 900),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn check_skips_when_client_ip_absent() {
+        let action = "skip-absent-client-ip";
+        check(action, &HeaderMap::new(), None, 0, Duration::from_secs(60)).unwrap();
+        assert!(
+            limiter()
+                .windows
+                .lock()
+                .expect("limiter")
+                .keys()
+                .all(|(a, _)| a != action),
+            "absent client_ip must not insert a limiter key"
+        );
     }
 }

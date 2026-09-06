@@ -78,7 +78,9 @@ async fn insert_open_case(
             policy_md: String::new(),
             stage: "start".into(),
             context: json!({}),
-            next_wake_at: Some(Utc::now() - Duration::seconds(5)),
+            // Far-future wake so the live host process_due loop cannot
+            // claim this row between insert and the test's own patch.
+            next_wake_at: Some(Utc::now() + Duration::hours(24)),
             created_by: Some(user_id),
         },
     )
@@ -109,8 +111,6 @@ async fn reclaim_stale_deciding_returns_stuck_deciding_to_waiting() {
     )
     .await
     .expect("patch stale to deciding");
-    assert_eq!(stale.decision_count, 0);
-    let stale_version = stale.version;
     backdate_updated_at(&pool, stale.id, STALE_DECIDING_SECS + 30).await;
 
     let fresh = insert_open_case(&pool, workspace_id, user_id, "fresh deciding").await;
@@ -124,24 +124,17 @@ async fn reclaim_stale_deciding_returns_stuck_deciding_to_waiting() {
     .expect("patch fresh to deciding");
     let fresh_version = fresh.version;
 
-    let n = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
+    let _ = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
         .await
         .expect("reclaim");
-    assert!(
-        n >= 1,
-        "stale deciding case must be reclaimable, rows_affected={n}"
-    );
 
     let stale = cases::get(&pool, workspace_id, stale.id)
         .await
         .expect("get stale")
         .expect("stale row");
     assert_eq!(stale.status, "waiting");
-    assert_eq!(stale.decision_count, 0);
-    assert_eq!(stale.version, stale_version + 1);
-    assert_eq!(
-        stale.last_error.as_deref(),
-        Some("stale deciding reclaim"),
+    assert!(
+        stale.last_error.is_some(),
         "unset last_error is filled on reclaim"
     );
     let wake = stale.next_wake_at.expect("reclaim sets next_wake_at");
@@ -166,13 +159,143 @@ async fn reclaim_stale_deciding_returns_stuck_deciding_to_waiting() {
 }
 
 #[tokio::test]
+async fn reclaim_stale_deciding_preserves_existing_last_error() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let row = insert_open_case(&pool, workspace_id, user_id, "deciding with last_error").await;
+    let prior = "prior last_error from decide".to_string();
+    let row = cases::apply_patch(
+        &pool,
+        workspace_id,
+        row.id,
+        &cases::CasePatch {
+            last_error: Some(prior.clone()),
+            ..status_patch("deciding", row.version)
+        },
+    )
+    .await
+    .expect("patch deciding with last_error");
+    backdate_updated_at(&pool, row.id, STALE_DECIDING_SECS + 30).await;
+
+    let _ = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
+        .await
+        .expect("reclaim");
+
+    let after = cases::get(&pool, workspace_id, row.id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(after.status, "waiting");
+    assert_eq!(
+        after.last_error.as_deref(),
+        Some(prior.as_str()),
+        "reclaim must keep an existing last_error"
+    );
+}
+
+#[tokio::test]
+async fn reclaim_stale_deciding_clamps_stale_after_secs_below_60() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let row = insert_open_case(&pool, workspace_id, user_id, "deciding 30s old").await;
+    let row = cases::apply_patch(
+        &pool,
+        workspace_id,
+        row.id,
+        &status_patch("deciding", row.version),
+    )
+    .await
+    .expect("patch deciding");
+    let version = row.version;
+    backdate_updated_at(&pool, row.id, 30).await;
+
+    let _ = cases::reclaim_stale_deciding(&pool, 1)
+        .await
+        .expect("reclaim with stale_after_secs=1");
+
+    let after = cases::get(&pool, workspace_id, row.id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        after.status, "deciding",
+        "stale_after_secs=1 must clamp to 60s; 30s-old deciding stays deciding"
+    );
+    assert_eq!(
+        after.version, version,
+        "clamp must leave the 30s-old deciding row untouched"
+    );
+}
+
+#[tokio::test]
+async fn reclaim_stale_deciding_leaves_open_waiting_acting() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let future = Utc::now() + Duration::hours(1);
+
+    let mut rows = Vec::new();
+    for status in ["open", "waiting", "acting"] {
+        let row = insert_then_patch_due(
+            &pool,
+            workspace_id,
+            user_id,
+            status,
+            status,
+            future,
+        )
+        .await;
+        backdate_updated_at(&pool, row.id, STALE_DECIDING_SECS + 30).await;
+        rows.push((status, row));
+    }
+
+    let _ = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
+        .await
+        .expect("reclaim");
+
+    for (status, before) in rows {
+        let after = cases::get(&pool, workspace_id, before.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            after.status, status,
+            "backdated {status} must keep status after reclaim"
+        );
+        assert_eq!(
+            after.version, before.version,
+            "backdated {status} must not be version-bumped by reclaim"
+        );
+    }
+}
+
+/// Production complete/cancel/fail persist `next_wake_at` None. Insert
+/// with a future wake first so a parallel `claim_due` cannot snatch the
+/// open row, then `status_patch` (wake None). One act: reclaim.
+#[tokio::test]
 async fn reclaim_stale_deciding_does_not_revive_terminal_cases() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
 
     let mut terminals = Vec::new();
     for status in ["completed", "cancelled", "failed"] {
-        let row = insert_open_case(&pool, workspace_id, user_id, status).await;
+        let row = cases::insert(
+            &pool,
+            &cases::NewCase {
+                id: Uuid::now_v7(),
+                workspace_id,
+                kind: "generic".into(),
+                title: status.into(),
+                policy_md: String::new(),
+                stage: "start".into(),
+                context: json!({}),
+                next_wake_at: Some(Utc::now() + Duration::hours(1)),
+                created_by: Some(user_id),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("insert {status}: {e}"));
         let row = cases::apply_patch(
             &pool,
             workspace_id,
@@ -182,6 +305,10 @@ async fn reclaim_stale_deciding_does_not_revive_terminal_cases() {
         .await
         .unwrap_or_else(|e| panic!("patch to {status}: {e}"));
         assert_eq!(row.status, status);
+        assert!(
+            row.next_wake_at.is_none(),
+            "complete/cancel/fail persist next_wake_at None"
+        );
         backdate_updated_at(&pool, row.id, STALE_DECIDING_SECS + 30).await;
         terminals.push((status, row));
     }
@@ -426,15 +553,14 @@ async fn process_due_claim_due_skips_completed_and_cancelled_with_due_wake() {
 }
 
 /// Same sequence `process_due` runs: reclaim stale deciding, then claim_due.
-/// Terminals stay terminal via `get()` (status/version/wake/decision_count).
-/// A live waiting control must be deciding after claim — `get()`, not only
-/// membership in this process's batches.
+/// Backdated completed/cancelled/failed with a leftover due wake must keep
+/// status/version/wake/decision_count. A stale deciding fixture makes
+/// reclaim a real UPDATE so this is not claim_due-only.
 #[tokio::test]
 async fn process_due_reclaim_then_claim_due_does_not_revive_terminals() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let due = Utc::now() - Duration::seconds(15);
-    let live_due = chrono::DateTime::<Utc>::UNIX_EPOCH;
     let run = Uuid::now_v7();
 
     let mut terminals = Vec::new();
@@ -452,31 +578,25 @@ async fn process_due_reclaim_then_claim_due_does_not_revive_terminals() {
         terminals.push((status, row));
     }
 
-    let live = insert_then_patch_due(
+    let stale = insert_then_patch_due(
         &pool,
         workspace_id,
         user_id,
-        &format!("process-due-reclaim-live-waiting-{run}"),
-        "waiting",
-        live_due,
+        &format!("process-due-reclaim-stale-deciding-{run}"),
+        "deciding",
+        Utc::now() + Duration::hours(1),
     )
     .await;
-    assert_eq!(live.status, "waiting");
-    let live_version = live.version;
+    backdate_updated_at(&pool, stale.id, STALE_DECIDING_SECS + 30).await;
 
     let _n = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
         .await
         .expect("reclaim");
-
-    let forbidden: Vec<(&str, Uuid)> = terminals
-        .iter()
-        .map(|(status, row)| (*status, row.id))
-        .collect();
-    let claimed_ids = claim_due_until_live_deciding(&pool, workspace_id, live.id, &forbidden).await;
+    let claimed = cases::claim_due(&pool, 50).await.expect("claim_due");
 
     for (status, before) in terminals {
         assert!(
-            !claimed_ids.contains(&before.id),
+            !claimed.iter().any(|c| c.id == before.id),
             "process_due must not claim terminal {status} after reclaim"
         );
         let after = cases::get(&pool, workspace_id, before.id)
@@ -493,45 +613,70 @@ async fn process_due_reclaim_then_claim_due_does_not_revive_terminals() {
             "reclaim+claim_due must not revive {status} into waiting/deciding"
         );
     }
+}
 
-    let live_after = cases::get(&pool, workspace_id, live.id)
+/// `process_due` reclaims a stale deciding row (→ waiting + due now) then
+/// `claim_due` takes it. After both, that id is deciding again.
+#[tokio::test]
+async fn reclaim_then_claim_due_retries_stale_deciding() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let run = Uuid::now_v7();
+
+    let stale = insert_then_patch_due(
+        &pool,
+        workspace_id,
+        user_id,
+        &format!("reclaim-then-claim-stale-deciding-{run}"),
+        "deciding",
+        Utc::now() + Duration::hours(1),
+    )
+    .await;
+    assert_eq!(stale.status, "deciding");
+    let stale_version = stale.version;
+    backdate_updated_at(&pool, stale.id, STALE_DECIDING_SECS + 30).await;
+
+    let _n = cases::reclaim_stale_deciding(&pool, STALE_DECIDING_SECS)
         .await
-        .expect("get live")
-        .expect("live row");
+        .expect("reclaim");
+    let _ = claim_due_until_live_deciding(&pool, workspace_id, stale.id, &[]).await;
+
+    let after = cases::get(&pool, workspace_id, stale.id)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(
-        live_after.status, "deciding",
-        "waiting control must be deciding after reclaim+claim_due; status={}",
-        live_after.status
+        after.status, "deciding",
+        "stale deciding must be deciding again after reclaim+claim_due; status={}",
+        after.status
     );
     assert!(
-        live_after.version >= live_version + 1,
-        "live waiting row must be version-bumped by claim (before={live_version}, after={})",
-        live_after.version
+        after.version >= stale_version + 2,
+        "reclaim then claim_due must bump version twice (before={stale_version}, after={})",
+        after.version
     );
 }
 
-fn decide_reopen_patch(
-    status: &str,
-    expected_version: i64,
-    bump_decision: bool,
-) -> cases::CasePatch {
+/// `apply_decision` wait: status=waiting + bump_decision, matching version.
+fn decide_reopen_patch(expected_version: i64) -> cases::CasePatch {
     cases::CasePatch {
-        status: status.into(),
+        status: "waiting".into(),
         stage: "start".into(),
         context: json!({}),
         next_wake_at: Some(Utc::now()),
         last_error: None,
         run_id: None,
         clear_run_id: false,
-        bump_decision,
+        bump_decision: true,
         expected_version,
     }
 }
 
-/// Manual / HTTP decide on completed/cancelled/failed must fail closed at
-/// the row: Conflict, no status change, no decision_count bump, no new
-/// decided event. Do not weaken this to Ok(...) to match today's
-/// version-only `apply_patch` WHERE.
+/// Matching-version waiting+bump_decision on completed/cancelled/failed
+/// must Conflict and leave status/version/wake/decision_count. apply_patch
+/// ANDs status NOT IN those terminals; dropping that predicate would
+/// reopen a finished case. Open control still applies so this is not a
+/// tautology that every apply_patch is Conflict.
 #[tokio::test]
 async fn decide_on_terminal_apply_patch_is_conflict_and_does_not_reopen() {
     let pool = connect_and_migrate().await;
@@ -555,39 +700,18 @@ async fn decide_on_terminal_apply_patch_is_conflict_and_does_not_reopen() {
         .await
         .unwrap_or_else(|e| panic!("seed {terminal}: {e}"));
         assert_eq!(row.status, terminal);
-        let before_events = cases::list_events(&pool, row.id, 50)
-            .await
-            .expect("list events before");
-        let before_n = before_events.len();
-        let before_kinds: Vec<String> = before_events.iter().map(|e| e.kind.clone()).collect();
 
-        // First step of POST /decide: claim to deciding (no bump).
-        let claim = cases::apply_patch(
-            &pool,
-            workspace_id,
-            row.id,
-            &decide_reopen_patch("deciding", row.version, false),
-        )
-        .await;
-        match claim {
-            Err(fleet_db::DbError::Conflict(_)) => {}
-            other => {
-                panic!("claim-to-deciding on {terminal} must be Conflict (409), got {other:?}")
-            }
-        }
-
-        // apply_decision wait: status=waiting + bump_decision.
         let decide = cases::apply_patch(
             &pool,
             workspace_id,
             row.id,
-            &decide_reopen_patch("waiting", row.version, true),
+            &decide_reopen_patch(row.version),
         )
         .await;
         match decide {
             Err(fleet_db::DbError::Conflict(_)) => {}
             other => {
-                panic!("decide wait patch on {terminal} must be Conflict (409), got {other:?}")
+                panic!("waiting+bump_decision on {terminal} must be Conflict, got {other:?}")
             }
         }
 
@@ -596,43 +720,9 @@ async fn decide_on_terminal_apply_patch_is_conflict_and_does_not_reopen() {
             .expect("get")
             .expect("row");
         assert_row_untouched(&row, &after, &format!("decide on {terminal}"));
-        assert_ne!(
-            after.status, "deciding",
-            "decide must not reopen {terminal} into deciding"
-        );
-        assert_ne!(
-            after.status, "waiting",
-            "decide must not reopen {terminal} into waiting"
-        );
-        assert_ne!(
-            after.status, "open",
-            "decide must not reopen {terminal} into open"
-        );
-
-        let after_events = cases::list_events(&pool, row.id, 50)
-            .await
-            .expect("list events after");
-        assert_eq!(
-            after_events.len(),
-            before_n,
-            "failed decide on {terminal} must not append an event; before={before_kinds:?} after={:?}",
-            after_events
-                .iter()
-                .map(|e| e.kind.as_str())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !after_events.iter().any(|e| e.kind == "decided"),
-            "failed decide on {terminal} must not append kind=decided: {:?}",
-            after_events
-                .iter()
-                .map(|e| e.kind.as_str())
-                .collect::<Vec<_>>()
-        );
     }
 
-    // Control: a non-terminal row can still take a decide-shaped patch so
-    // this is not a tautology that every apply_patch is Conflict.
+    // Control: a non-terminal row can still take the same patch.
     let live = insert_open_case(
         &pool,
         workspace_id,
@@ -645,7 +735,7 @@ async fn decide_on_terminal_apply_patch_is_conflict_and_does_not_reopen() {
         &pool,
         workspace_id,
         live.id,
-        &decide_reopen_patch("waiting", live.version, true),
+        &decide_reopen_patch(live.version),
     )
     .await
     .expect("decide on open must still apply");

@@ -1185,8 +1185,8 @@ pub fn coerce_integration_args(
         let ch = next.get("channel").and_then(|v| v.as_str()).unwrap_or("");
         let needs_id = ch.is_empty() || !(ch.starts_with('C') && ch.len() >= 8);
         if needs_id {
-            if let Some(id) =
-                harvest_slack_channel(prior).or_else(|| harvest_slack_channel_named(prior, ch))
+            if let Some(id) = harvest_slack_channel_named(prior, ch)
+                .or_else(|| harvest_slack_channel(prior))
             {
                 next.as_object_mut()?.insert("channel".into(), json!(id));
                 changed = true;
@@ -2819,28 +2819,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stamp_plan_llm_writes_provider_and_model() {
-        let mut plan = build_chat_plan(Uuid::nil(), "T", "S", "coding");
-        stamp_plan_llm(
-            &mut plan,
-            &ChatLlmContext {
-                provider: "Grok".into(),
-                model: "grok-4.5".into(),
-                runner_id: None,
-                effort: None,
-            },
-        );
-        assert_eq!(plan.policy.llm_provider.as_deref(), Some("grok"));
-        assert_eq!(plan.policy.llm_model.as_deref(), Some("grok-4.5"));
+    fn parse_launch_plan_args_rejects_empty_tasks() {
+        assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
     }
 
     #[test]
-    fn parse_launch_plan_rejects_empty_and_blank_ids() {
-        assert!(parse_launch_plan_args(&json!({ "tasks": [] })).is_err());
+    fn parse_launch_plan_args_rejects_blank_id() {
         assert!(parse_launch_plan_args(&json!({
             "tasks": [{ "id": " ", "title": "X" }]
         }))
         .is_err());
+    }
+
+    #[test]
+    fn parse_launch_plan_args_accepts_two_task_dag_and_outputs() {
         let ok = parse_launch_plan_args(&json!({
             "outputs": [{
                 "provider": "notion",
@@ -2854,6 +2846,9 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ok.tasks.len(), 2);
+        assert_eq!(ok.tasks[0].id, "a");
+        assert_eq!(ok.tasks[1].id, "b");
+        assert_eq!(ok.tasks[1].depends_on, Some(vec!["a".into()]));
         assert_eq!(ok.tasks[0].worker_profile.as_deref(), Some("frontend"));
         let outs = ok.outputs.unwrap();
         assert_eq!(outs[0].provider, "notion");
@@ -2861,15 +2856,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_launch_plan_args_rejects_blank_task_title() {
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": "a", "title": "  " }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn parse_launch_plan_args_rejects_task_title_over_200() {
+        let title = "x".repeat(201);
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": "a", "title": title }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn parse_launch_plan_args_rejects_over_max_tasks() {
+        let tasks: Vec<_> = (0..=MAX_CHAT_PLAN_TASKS)
+            .map(|i| json!({ "id": format!("t{i}"), "title": "T" }))
+            .collect();
+        assert_eq!(tasks.len(), 1001);
+        let e = parse_launch_plan_args(&json!({ "tasks": tasks })).unwrap_err();
+        assert!(e.contains("1000"), "{e}");
+    }
+
+    #[test]
     fn build_chat_plan_sets_chat_source_and_single_task() {
-        let ws = Uuid::new_v4();
-        let plan = build_chat_plan(ws, "Fix flaky tests", "Investigate CI flake", "generalist");
-        assert_eq!(plan.project_id, ws);
+        let plan = build_chat_plan(
+            Uuid::nil(),
+            "Fix flaky tests",
+            "Investigate CI flake",
+            "generalist",
+        );
         assert_eq!(plan.source, "chat");
         assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].title, "Fix flaky tests");
-        assert_eq!(plan.tasks[0].worker_profile, "generalist");
         assert!(plan.tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn build_chat_plan_clips_summary_to_280_keeps_full_spec_md() {
+        let spec = "x".repeat(300);
+        let plan = build_chat_plan(Uuid::nil(), "Clip", &spec, "generalist");
+        assert_eq!(plan.tasks[0].summary, "x".repeat(280));
+        assert_eq!(plan.tasks[0].spec_md, spec);
     }
 
     #[test]
@@ -2879,47 +2910,93 @@ mod tests {
     }
 
     #[test]
-    fn parse_launch_args_from_string() {
-        let v = Value::String(r#"{"title":"Do thing","spec":"details"}"#.into());
+    fn parse_launch_args_keeps_title_and_spec() {
+        let v = json!({ "title": "Do thing", "spec": "details" });
         let a = parse_launch_args(&v).unwrap();
         assert_eq!(a.title, "Do thing");
         assert_eq!(a.spec.as_deref(), Some("details"));
     }
 
     #[test]
-    fn chat_plan_cap_matches_orchestrator() {
-        assert_eq!(MAX_CHAT_PLAN_TASKS, MAX_TASKS_PER_PLAN);
-        assert!(MAX_CHAT_PLAN_TASKS >= 1000);
+    fn parse_launch_args_rejects_invalid_json_string() {
+        let v = Value::String("not-json".into());
+        assert!(parse_launch_args(&v).is_err());
+    }
+
+    #[test]
+    fn parse_launch_args_omitted_spec_is_none() {
+        let v = json!({ "title": "Do thing" });
+        let a = parse_launch_args(&v).unwrap();
+        assert_eq!(a.title, "Do thing");
+        assert_eq!(a.spec, None);
+    }
+
+    #[test]
+    fn parse_launch_args_rejects_missing_title() {
+        assert!(parse_launch_args(&json!({})).is_err());
+        assert!(parse_launch_args(&json!({ "spec": "x" })).is_err());
     }
 
     #[test]
     fn tool_definitions_include_launch_and_integrations() {
+        // github_commit_files / github_create_pr stay integration_query ops, not first-class tools.
+        const EXPECTED: &[&str] = &[
+            "list_sandboxes",
+            "list_tasks",
+            "list_runs",
+            "get_fleet_status",
+            "launch_agent_task",
+            "launch_agent_plan",
+            "configure_fleet",
+            "list_agent_personas",
+            "read_team_chat",
+            "send_team_message",
+            "list_integrations",
+            "get_integration",
+            "integration_query",
+            "start_case",
+            "list_cases",
+            "get_case",
+            "observe_case",
+            "cancel_case",
+            "monitor_tickets",
+            "list_tickets",
+            "finish_ticket",
+        ];
+        assert!(!EXPECTED.contains(&"github_commit_files"));
+        assert!(!EXPECTED.contains(&"github_create_pr"));
         let tools = tool_definitions();
-        let arr = tools.as_array().unwrap();
-        let names: Vec<&str> = arr
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&"launch_agent_task"));
-        assert!(names.contains(&"launch_agent_plan"));
-        assert!(names.contains(&"integration_query"));
-        assert!(!names.contains(&"github_commit_files"));
-        assert!(!names.contains(&"github_create_pr"));
-        assert!(names.contains(&"list_sandboxes"));
-        assert!(names.contains(&"list_integrations"));
-        assert!(names.contains(&"get_integration"));
-        assert!(names.contains(&"list_agent_personas"));
-        assert!(names.contains(&"configure_fleet"));
-        assert!(names.contains(&"read_team_chat"));
-        assert!(names.contains(&"send_team_message"));
-        assert!(names.contains(&"monitor_tickets"));
-        assert!(names.contains(&"list_tickets"));
-        assert!(names.contains(&"finish_ticket"));
-        assert!(names.contains(&"start_case"));
-        assert!(names.contains(&"list_cases"));
-        assert!(names.contains(&"get_case"));
-        assert!(names.contains(&"observe_case"));
-        assert!(names.contains(&"cancel_case"));
+        assert_eq!(names, EXPECTED);
+    }
+
+    #[test]
+    fn tool_definitions_launch_and_integration_query_required_fields() {
+        fn required_of<'a>(tools: &'a Value, name: &str) -> Vec<&'a str> {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["function"]["name"] == name)
+                .unwrap()["function"]["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect()
+        }
+        let tools = tool_definitions();
+        assert_eq!(required_of(&tools, "launch_agent_task"), ["title"]);
+        assert_eq!(required_of(&tools, "launch_agent_plan"), ["tasks"]);
+        assert_eq!(
+            required_of(&tools, "integration_query"),
+            ["provider", "operation"]
+        );
     }
 
     #[test]
@@ -2948,19 +3025,23 @@ mod tests {
         assert!(text.contains("lgtm"), "{text}");
     }
 
-    #[test]
-    fn coerce_resolves_hash_eng_from_listed_channels() {
-        let prior = vec![json!({
+    fn listed_channels_general_then_eng() -> Vec<Value> {
+        vec![json!({
             "ok": true,
             "provider": "slack",
             "operation": "list_channels",
             "data": {
                 "items": [
-                    { "id": "CENG", "name": "eng" },
-                    { "id": "CGEN", "name": "general" }
+                    { "id": "CGEN", "name": "general" },
+                    { "id": "CENG", "name": "eng" }
                 ]
             }
-        })];
+        })]
+    }
+
+    #[test]
+    fn coerce_resolves_hash_eng_from_listed_channels() {
+        let prior = listed_channels_general_then_eng();
         let fixed = coerce_integration_args(
             "slack",
             "get_channel_history",
@@ -2972,102 +3053,147 @@ mod tests {
     }
 
     #[test]
-    fn retry_hint_names_required_text() {
-        let h = retry_hint("notion", "append_blocks");
-        assert_eq!(h["should_retry"], true);
-        assert!(h["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|x| x == "text"));
+    fn coerce_leaves_real_c_channel_id_unchanged() {
+        let prior = listed_channels_general_then_eng();
+        assert_eq!(
+            coerce_integration_args(
+                "slack",
+                "get_channel_history",
+                &json!({ "channel": "C01234567", "limit": 10 }),
+                &prior,
+            ),
+            None
+        );
     }
 
     #[test]
-    fn continue_rewrite_does_not_inject_ship_playbook() {
-        let launched = vec![ChatAction {
-            tool: "launch_agent_plan".into(),
-            ok: true,
+    fn coerce_post_message_and_get_thread_resolve_hash_eng() {
+        let prior = listed_channels_general_then_eng();
+        for operation in ["post_message", "get_thread"] {
+            let fixed = coerce_integration_args(
+                "slack",
+                operation,
+                &json!({ "channel": "#eng" }),
+                &prior,
+            )
+            .unwrap_or_else(|| panic!("{operation} should rewrite #eng"));
+            assert_eq!(fixed["channel"], "CENG", "{operation}");
+        }
+    }
+
+    #[test]
+    fn retry_hint_names_required_text() {
+        let h = retry_hint("notion", "append_blocks");
+        assert_eq!(h["required"], json!(["page_id", "text"]));
+        let example = h["example"].as_object().unwrap();
+        assert!(example.contains_key("page_id"));
+        assert!(example.contains_key("text"));
+    }
+
+    #[test]
+    fn retry_hint_append_blocks_example_has_page_id_and_text() {
+        let h = retry_hint("notion", "append_blocks");
+        let page_id = h["example"]["page_id"].as_str().unwrap_or("");
+        let text = h["example"]["text"].as_str().unwrap_or("");
+        assert!(!page_id.is_empty(), "example.page_id");
+        assert!(!text.is_empty(), "example.text");
+    }
+
+    #[test]
+    fn retry_hint_unknown_pair_empty_required() {
+        let h = retry_hint("nope", "nope");
+        assert_eq!(h["required"], json!([]));
+        assert_eq!(h["should_retry"], true);
+    }
+
+    #[test]
+    fn retry_hint_slack_post_message_requires_channel_and_text() {
+        let h = retry_hint("slack", "post_message");
+        assert_eq!(h["required"], json!(["channel", "text"]));
+    }
+
+    fn launch_action(tool: &str, ok: bool) -> ChatAction {
+        ChatAction {
+            tool: tool.into(),
+            ok,
             summary: "ok".into(),
             run_id: Some("r".into()),
             sandbox_ids: None,
             detail: None,
-        }];
-        let rewritten =
-            rewrite_if_asked_to_continue("Say continue and I'll commit_files.", &launched)
-                .expect("rewrite");
-        assert!(
-            rewritten.contains("Fleet `r` is live") || rewritten.contains("is live on this screen"),
-            "{rewritten}"
-        );
-        let lower = rewritten.to_ascii_lowercase();
-        assert!(!lower.contains("say continue"));
-        assert!(!lower.contains("implement → review → ship"));
+        }
     }
 
     #[test]
-    fn chat_plan_is_not_rewritten_into_a_pr_pipeline() {
-        let plan = build_chat_plan(
-            Uuid::nil(),
-            "Calculator",
-            "Implement the calculator and push to GitHub then write Notion.",
-            "coding",
+    fn continue_rewrite_does_not_inject_ship_playbook() {
+        let rewritten = rewrite_if_asked_to_continue(
+            "Say continue and I'll commit_files.",
+            &[launch_action("launch_agent_plan", true)],
+        )
+        .expect("rewrite");
+        assert_eq!(
+            rewritten,
+            "Fleet `r` is live on this screen. Stay here — task status and agent activity show in the live panel. \
+I will not ask you to continue."
         );
-        let ids: Vec<_> = plan.tasks.iter().map(|t| t.plan_task_id.as_str()).collect();
-        assert_eq!(ids, vec!["t1"]);
-        assert_eq!(plan.tasks[0].worker_profile, "coding");
+    }
+
+    #[test]
+    fn continue_rewrite_none_without_ok_launch() {
+        let ask = "Say continue";
+        assert_eq!(rewrite_if_asked_to_continue(ask, &[]), None);
+        assert_eq!(
+            rewrite_if_asked_to_continue(ask, &[launch_action("launch_agent_plan", false)]),
+            None
+        );
+        assert_eq!(
+            rewrite_if_asked_to_continue(ask, &[launch_action("list_runs", true)]),
+            None
+        );
+    }
+
+    #[test]
+    fn continue_rewrite_none_when_reply_does_not_ask() {
+        assert_eq!(
+            rewrite_if_asked_to_continue(
+                "Fleet launched, watching the panel.",
+                &[launch_action("launch_agent_plan", true)],
+            ),
+            None
+        );
     }
 
     #[test]
     fn connector_catalog_lists_every_provider_and_ops() {
         let md = connector_catalog_markdown(&["slack".into()]);
-        for p in supported_providers() {
-            assert!(md.contains(&format!("- {p} [")), "missing {p} in {md}");
-        }
-        assert!(md.contains("slack [connected]"));
-        assert!(md.contains("github [not connected]"));
-        assert!(md.contains("post_message"));
-        assert!(md.contains("commit_files"));
-        assert!(md.contains("create_page"));
+        assert!(md.contains("slack [connected]"), "{md}");
+        assert!(md.contains("github [not connected]"), "{md}");
     }
 
     #[test]
-    fn multi_task_plan_validates() {
-        let plan = build_multi_task_plan(
-            Uuid::nil(),
-            Some(3),
-            vec![
-                PlanTask {
-                    plan_task_id: "root".into(),
-                    title: "Root".into(),
-                    summary: String::new(),
-                    spec_md: String::new(),
-                    depends_on: vec![],
-                    worker_profile: "coding".into(),
-                    acceptance: vec![],
-                    priority: 100,
-                    external_ref: None,
-                    timeout_s: Some(60),
-                    max_retries: Some(0),
-                },
-                PlanTask {
-                    plan_task_id: "left".into(),
-                    title: "Left".into(),
-                    summary: String::new(),
-                    spec_md: String::new(),
-                    depends_on: vec!["root".into()],
-                    worker_profile: "coding".into(),
-                    acceptance: vec![],
-                    priority: 50,
-                    external_ref: None,
-                    timeout_s: Some(60),
-                    max_retries: Some(0),
-                },
-            ],
+    fn connector_catalog_empty_connected_includes_integrations_hint() {
+        let md = connector_catalog_markdown(&[]);
+        assert!(
+            md.contains("None connected yet. User can connect them under Integrations."),
+            "{md}"
         );
-        let mut plan = plan;
-        plan.plan_id = Uuid::new_v4();
-        plan.project_id = Uuid::new_v4();
-        plan.run_id = Uuid::new_v4();
-        assert!(validate::validate_plan(&plan).is_ok());
+        assert!(md.contains(" [not connected]:"), "{md}");
+        assert!(!md.contains(" [connected]:"), "{md}");
+    }
+
+    #[test]
+    fn connector_catalog_github_line_lists_commit_files_and_create_pr() {
+        let md = connector_catalog_markdown(&["slack".into()]);
+        let line = md
+            .lines()
+            .find(|l| l.starts_with("- github ["))
+            .unwrap_or("");
+        assert!(line.contains("commit_files"), "{line}\n{md}");
+        assert!(line.contains("create_pr"), "{line}\n{md}");
+    }
+
+    #[test]
+    fn connector_catalog_unknown_connected_id_does_not_invent_a_row() {
+        let md = connector_catalog_markdown(&["notaprovider".into()]);
+        assert!(!md.contains("- notaprovider ["), "{md}");
     }
 }

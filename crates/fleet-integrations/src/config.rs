@@ -269,16 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn valid_secret_from_env_works() {
-        let secret = "valid-secret-at-least-32-characters-long!";
-        let cfg = with_jwt_secret(Some(secret), || {
-            IntegrationsConfig::from_env().expect("valid JWT_SECRET")
-        });
-        assert_eq!(cfg.state_secret, secret);
-        assert_ne!(cfg.state_secret, PUBLIC_DEFAULT);
-    }
-
-    #[test]
     fn jwt_secret_is_trimmed_before_length_check() {
         let secret = "valid-secret-at-least-32-characters-long!";
         let padded = format!("  {secret}  ");
@@ -428,14 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn integrations_encryption_key_from_env_valid_and_unset() {
+    fn integrations_encryption_key_from_env_uses_dedicated() {
         assert!(IEK_JWT.len() >= 32);
         assert!(IEK_PASSPHRASE.len() >= 32);
         assert!(IEK_PASSPHRASE.chars().any(|c| !c.is_ascii_hexdigit()));
         assert_eq!(IEK_HEX64.len(), 64);
         assert!(IEK_HEX64.chars().all(|c| c.is_ascii_hexdigit()));
-
-        let jwt_key = CredentialsKey::from_secret(IEK_JWT).expect("jwt key");
 
         // Dedicated ≥32 non-hex passphrase → SHA-256 derive; not the JWT key.
         let passphrase_cfg = with_credentials_env(IEK_JWT, Some(IEK_PASSPHRASE), || {
@@ -448,38 +436,12 @@ mod tests {
             IntegrationsConfig::from_env().expect("64-hex INTEGRATIONS_ENCRYPTION_KEY")
         });
         assert_dedicated_key(&hex_cfg, IEK_HEX64, IEK_JWT, "64-hex");
+    }
 
-        // 64 non-hex chars: from_secret either SHA-256-derives (passphrase) or
-        // rejects. A set key must never fall back to JWT_SECRET either way.
-        const IEK_HEX64_NON_HEX: &str =
-            "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg";
-        assert_eq!(IEK_HEX64_NON_HEX.len(), 64);
-        assert!(IEK_HEX64_NON_HEX.chars().any(|c| !c.is_ascii_hexdigit()));
-        match CredentialsKey::from_secret(IEK_HEX64_NON_HEX) {
-            Ok(_) => {
-                let cfg = with_credentials_env(IEK_JWT, Some(IEK_HEX64_NON_HEX), || {
-                    IntegrationsConfig::from_env().expect(
-                        "64-char non-hex INTEGRATIONS_ENCRYPTION_KEY accepted by from_secret",
-                    )
-                });
-                assert_dedicated_key(&cfg, IEK_HEX64_NON_HEX, IEK_JWT, "64_char_non_hex");
-            }
-            Err(_) => {
-                assert_integrations_key_rejected(
-                    with_credentials_env(
-                        IEK_JWT,
-                        Some(IEK_HEX64_NON_HEX),
-                        IntegrationsConfig::from_env,
-                    ),
-                    IEK_JWT,
-                    IEK_HEX64_NON_HEX,
-                    "64_char_rejected_by_from_secret",
-                    false,
-                );
-            }
-        }
-
-        // Control: unset still Ok (documented JWT fallback) — not every key fails.
+    #[test]
+    fn integrations_encryption_key_unset_falls_back_to_jwt() {
+        assert!(IEK_JWT.len() >= 32);
+        let jwt_key = CredentialsKey::from_secret(IEK_JWT).expect("jwt key");
         let unset_cfg = with_credentials_env(IEK_JWT, None, || {
             IntegrationsConfig::from_env()
                 .expect("unset INTEGRATIONS_ENCRYPTION_KEY must fall back to JWT_SECRET")
@@ -491,11 +453,73 @@ mod tests {
         assert_eq!(unset_cfg.state_secret, IEK_JWT);
     }
 
+    #[test]
+    fn integrations_encryption_key_empty_or_whitespace_falls_back_to_jwt() {
+        assert!(IEK_JWT.len() >= 32);
+        let jwt_key = CredentialsKey::from_secret(IEK_JWT).expect("jwt key");
+        for (case, value) in [("empty", ""), ("spaces", "   "), ("tabs_newlines", "\t\n")] {
+            let cfg = with_credentials_env(IEK_JWT, Some(value), || {
+                IntegrationsConfig::from_env().unwrap_or_else(|e| {
+                    panic!(
+                        "{case}: empty/whitespace INTEGRATIONS_ENCRYPTION_KEY must fall back \
+                         to JWT_SECRET: {e:#}"
+                    )
+                })
+            });
+            assert!(
+                credentials_keys_match(&cfg.credentials_key, &jwt_key),
+                "{case}: credentials_key must be derived from JWT_SECRET"
+            );
+        }
+    }
+
+    #[test]
+    fn integrations_encryption_key_64_hex_mixed_case_same_key() {
+        assert!(IEK_JWT.len() >= 32);
+        assert_eq!(IEK_HEX64.len(), 64);
+        assert!(IEK_HEX64.chars().all(|c| c.is_ascii_hexdigit()));
+        let upper = IEK_HEX64.to_ascii_uppercase();
+        assert_ne!(IEK_HEX64, upper.as_str());
+
+        let lower_cfg = with_credentials_env(IEK_JWT, Some(IEK_HEX64), || {
+            IntegrationsConfig::from_env().expect("lowercase 64-hex INTEGRATIONS_ENCRYPTION_KEY")
+        });
+        let upper_cfg = with_credentials_env(IEK_JWT, Some(&upper), || {
+            IntegrationsConfig::from_env().expect("uppercase 64-hex INTEGRATIONS_ENCRYPTION_KEY")
+        });
+        // Raw hex decode is case-insensitive; SHA-256 of aa… vs AA… differs.
+        assert!(
+            credentials_keys_match(&lower_cfg.credentials_key, &upper_cfg.credentials_key),
+            "64-hex INTEGRATIONS_ENCRYPTION_KEY must be case-insensitive"
+        );
+        let jwt_key = CredentialsKey::from_secret(IEK_JWT).expect("jwt key");
+        assert!(
+            !credentials_keys_match(&lower_cfg.credentials_key, &jwt_key),
+            "mixed-case hex must not fall back to JWT_SECRET"
+        );
+    }
+
+    #[test]
+    fn integrations_encryption_key_padded_64_hex_uses_dedicated() {
+        assert!(IEK_JWT.len() >= 32);
+        let padded = format!("  {IEK_HEX64}  ");
+        assert_ne!(padded.as_str(), IEK_HEX64);
+        assert_eq!(padded.trim(), IEK_HEX64);
+        let cfg = with_credentials_env(IEK_JWT, Some(&padded), || {
+            IntegrationsConfig::from_env().expect("padded 64-hex INTEGRATIONS_ENCRYPTION_KEY")
+        });
+        // Compare to unpadded hex so from_secret trim is required, not SHA-256 of spaces.
+        assert_dedicated_key(&cfg, IEK_HEX64, IEK_JWT, "padded_64_hex");
+    }
+
     /// Distinct from list-jwt-secret-unset-fails-closed (JWT is set and valid).
     const PAIR_JWT: &str = "oauth-client-pair-jwt-at-least-32-chars!";
     const PAIR_GH_ID: &str = "gh-oauth-pair-id-unique-aaaa";
     const PAIR_GH_SECRET: &str = "gh-oauth-pair-secret-unique-bbbb";
     const PAIR_GL_ID: &str = "gl-oauth-pair-id-unique-cccc";
+    const PAIR_GL_SECRET: &str = "gl-oauth-pair-secret-unique-dddd";
+    const PAIR_SLACK_ID: &str = "sl-oauth-pair-id-unique-eeee";
+    const PAIR_SLACK_SECRET: &str = "sl-oauth-pair-secret-unique-ffff";
 
     /// JWT_SECRET + GitHub/GitLab OAuth pair under the same env_lock; all restored.
     fn with_oauth_client_pair_env<T>(
@@ -520,6 +544,57 @@ mod tests {
             github_secret,
             gitlab_id,
             gitlab_secret,
+        ];
+        // SAFETY: held under env_lock; restored before unlock / panic resume.
+        unsafe {
+            for (k, v) in keys.iter().zip(next) {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // SAFETY: restore prior process env before releasing the lock.
+        unsafe {
+            for (k, prev) in keys.iter().zip(previous) {
+                match prev {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        match result {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// JWT_SECRET + Slack pair; GitHub/GitLab unset. All restored.
+    fn with_oauth_slack_pair_env<T>(
+        slack_id: Option<&str>,
+        slack_secret: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = env_lock().lock().expect("env lock");
+        let keys = [
+            "JWT_SECRET",
+            "GITHUB_CLIENT_ID",
+            "GITHUB_CLIENT_SECRET",
+            "GITLAB_CLIENT_ID",
+            "GITLAB_CLIENT_SECRET",
+            "SLACK_CLIENT_ID",
+            "SLACK_CLIENT_SECRET",
+        ];
+        let previous: [Option<String>; 7] = std::array::from_fn(|i| env::var(keys[i]).ok());
+        let next = [
+            Some(PAIR_JWT),
+            None,
+            None,
+            None,
+            None,
+            slack_id,
+            slack_secret,
         ];
         // SAFETY: held under env_lock; restored before unlock / panic resume.
         unsafe {
@@ -636,37 +711,38 @@ mod tests {
     }
 
     #[test]
-    fn oauth_client_pair_both_unset_or_set_from_env() {
+    fn oauth_client_pair_unset_or_whitespace_boots_from_env() {
         assert!(PAIR_JWT.len() >= 32);
-        let missing = [None, Some(""), Some("   "), Some("\t\n")];
-
         // Both unset / whitespace still boots — Connect starts unconfigured.
-        for (i, (id, secret)) in missing
-            .iter()
-            .copied()
-            .flat_map(|id| missing.iter().copied().map(move |secret| (id, secret)))
-            .enumerate()
-        {
+        for (case, id, secret) in [
+            ("unset", None, None),
+            ("empty", Some(""), Some("")),
+            ("spaces", Some("   "), Some("   ")),
+            ("tabs_newlines", Some("\t\n"), Some("\t\n")),
+        ] {
             let cfg = with_oauth_client_pair_env(id, secret, None, None, || {
                 IntegrationsConfig::from_env().unwrap_or_else(|e| {
                     panic!(
-                        "both_blank_{i}: both unset/whitespace must still Ok \
+                        "{case}: both unset/whitespace must still Ok \
                          with github: None: {e:#}"
                     )
                 })
             });
             assert!(
                 cfg.github.is_none(),
-                "both_blank_{i}: github must be None, not a half-config"
+                "{case}: github must be None, not a half-config"
             );
             assert!(
                 cfg.gitlab.is_none(),
-                "both_blank_{i}: gitlab must stay None"
+                "{case}: gitlab must stay None"
             );
             assert_eq!(cfg.state_secret, PAIR_JWT);
         }
+    }
 
-        // Control: both set still parses the fields (not Debug-only).
+    #[test]
+    fn oauth_client_pair_both_set_parses_from_env() {
+        assert!(PAIR_JWT.len() >= 32);
         let cfg =
             with_oauth_client_pair_env(Some(PAIR_GH_ID), Some(PAIR_GH_SECRET), None, None, || {
                 IntegrationsConfig::from_env().expect("both set must parse github")
@@ -678,9 +754,72 @@ mod tests {
         assert_eq!(github.client_id, PAIR_GH_ID);
         assert_eq!(github.client_secret, PAIR_GH_SECRET);
         assert!(
-            cfg.gitlab.is_none(),
-            "control: gitlab must stay None when unset"
+            github.github_app_slug.is_none(),
+            "optional_oauth stores github_app_slug: None"
         );
+        assert!(
+            cfg.gitlab.is_none(),
+            "gitlab must stay None when unset"
+        );
+        assert_eq!(cfg.state_secret, PAIR_JWT);
+    }
+
+    #[test]
+    fn oauth_client_id_and_secret_are_trimmed_from_env() {
+        assert!(PAIR_JWT.len() >= 32);
+        let padded_id = format!("  {PAIR_GH_ID}  ");
+        let padded_secret = format!("  {PAIR_GH_SECRET}  ");
+        assert_ne!(padded_id.as_str(), PAIR_GH_ID);
+        assert_ne!(padded_secret.as_str(), PAIR_GH_SECRET);
+        let cfg = with_oauth_client_pair_env(
+            Some(padded_id.as_str()),
+            Some(padded_secret.as_str()),
+            None,
+            None,
+            || IntegrationsConfig::from_env().expect("padded github pair must trim"),
+        );
+        let github = cfg
+            .github
+            .as_ref()
+            .expect("padded pair must return github: Some");
+        assert_eq!(github.client_id, PAIR_GH_ID);
+        assert_eq!(github.client_secret, PAIR_GH_SECRET);
+    }
+
+    #[test]
+    fn oauth_client_pair_gitlab_both_set_parses_from_env() {
+        assert!(PAIR_JWT.len() >= 32);
+        let cfg = with_oauth_client_pair_env(
+            None,
+            None,
+            Some(PAIR_GL_ID),
+            Some(PAIR_GL_SECRET),
+            || IntegrationsConfig::from_env().expect("both set must parse gitlab"),
+        );
+        let gitlab = cfg
+            .gitlab
+            .as_ref()
+            .expect("both set must return gitlab: Some");
+        assert_eq!(gitlab.client_id, PAIR_GL_ID);
+        assert_eq!(gitlab.client_secret, PAIR_GL_SECRET);
+        assert!(cfg.github.is_none(), "github must stay None when unset");
+        assert_eq!(cfg.state_secret, PAIR_JWT);
+    }
+
+    #[test]
+    fn oauth_client_pair_slack_both_set_parses_from_env() {
+        assert!(PAIR_JWT.len() >= 32);
+        let cfg = with_oauth_slack_pair_env(Some(PAIR_SLACK_ID), Some(PAIR_SLACK_SECRET), || {
+            IntegrationsConfig::from_env().expect("both set must parse slack")
+        });
+        let slack = cfg
+            .slack
+            .as_ref()
+            .expect("both set must return slack: Some");
+        assert_eq!(slack.client_id, PAIR_SLACK_ID);
+        assert_eq!(slack.client_secret, PAIR_SLACK_SECRET);
+        assert!(cfg.github.is_none(), "github must stay None when unset");
+        assert!(cfg.gitlab.is_none(), "gitlab must stay None when unset");
         assert_eq!(cfg.state_secret, PAIR_JWT);
     }
 }

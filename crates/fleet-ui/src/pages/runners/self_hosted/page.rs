@@ -95,7 +95,13 @@ pub fn SelfHosted(workspace_id: String) -> Element {
         creating.set(true);
         let ws = ws_create.clone();
         spawn(async move {
-            match create_host(&ws, &CreateHostBody::default()).await {
+            match create_host(
+                &ws,
+                &CreateHostBody {
+                    name: Some("worker".into()),
+                },
+            )
+            .await {
                 Ok(created) => {
                     let mut list = hosts();
                     if !list.iter().any(|h| h.id == created.host.id) {

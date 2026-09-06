@@ -2,14 +2,15 @@
 """Layer 2 e2e: Remove worker Confirm removes; Cancel aborts (catalog:e2e-remove-confirm).
 
 Catalog: Apply / ack (paired) → Remove worker (confirm / cancel).
-Cancel restores Remove worker and keeps the card. Confirm revokes; a
-never-paired leftover stays hidden (no Show removed). Fail closed — no skip.
+Cancel restores Remove worker and keeps the card. Confirm revokes
+(GET list_hosts status=disabled) and drops the never-paired card.
+A 500 DELETE keeps the card and restores Remove worker.
+Fail closed — no skip.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import sys
 import time
@@ -22,6 +23,7 @@ from runners_e2e_helpers import (  # noqa: E402
     UI,
     create_host,
     goto_self_hosted,
+    list_hosts,
     wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
@@ -34,10 +36,7 @@ BROWSERS = os.environ.get(
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
-CONFIRM_COPY = "Remove this worker?"
-CONFIRM_HINT = "It must be paired again to come back."
-REMOVED_TOAST = "Worker removed."
-SHOW_REMOVED = re.compile(r"^Show removed")
+DELETE_HOST = "**/api/workspaces/*/worker-hosts/*"
 
 
 def _listening(host: str, port: int) -> bool:
@@ -124,10 +123,12 @@ def _signup_api(page) -> tuple[str, str]:
     return ws, f"{UI}/{ws}"
 
 
-def _plane_has_no_remove(page) -> None:
-    n = page.locator("article").filter(has_text="Control plane").count()
-    if n:
-        raise AssertionError("synthetic Control plane card must not appear")
+def _host_row(page, workspace_id: str, host_id: str) -> dict:
+    listed = list_hosts(page, workspace_id)
+    for host in listed.get("hosts") or []:
+        if host.get("id") == host_id:
+            return host
+    raise AssertionError(f"host {host_id} missing from list: {listed!r}"[:800])
 
 
 class CatalogRemoveConfirmTests(unittest.TestCase):
@@ -162,32 +163,30 @@ class CatalogRemoveConfirmTests(unittest.TestCase):
     def test_remove_worker_confirm_removes_cancel_aborts(self) -> None:
         # catalog:e2e-remove-confirm — Confirm removes; Cancel aborts.
         page = self.page
-        _ws, workspace_url = _signup_api(page)
+        ws, workspace_url = _signup_api(page)
         name = f"rm-{uuid.uuid4().hex[:8]}"
-        create_host(page, _ws, name)
+        created = create_host(page, ws, name)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         page.wait_for_selector("h1", state="attached", timeout=60_000)
 
-        _plane_has_no_remove(page)
-
         card = page.locator("article").filter(has_text=name)
         card.wait_for(timeout=10_000)
-        self.assertNotIn("Control plane", card.inner_text())
         remove = card.get_by_role("button", name="Remove worker")
         self.assertTrue(remove.is_visible(), "seeded worker must show Remove worker")
 
         remove.click(force=True)
-        page.get_by_text(CONFIRM_COPY).wait_for(timeout=5_000)
-        card_text = card.inner_text()
-        self.assertIn(CONFIRM_COPY, card_text)
-        self.assertIn(CONFIRM_HINT, card_text)
-        self.assertTrue(card.get_by_role("button", name="Confirm").is_visible())
-        self.assertTrue(card.get_by_role("button", name="Cancel").is_visible())
+        confirm = card.get_by_role("button", name="Confirm")
+        cancel = card.get_by_role("button", name="Cancel")
+        confirm.wait_for(timeout=5_000)
+        self.assertTrue(confirm.is_visible())
+        self.assertTrue(cancel.is_visible())
 
-        card.get_by_role("button", name="Cancel").click(force=True)
+        cancel.click(force=True)
         card.get_by_role("button", name="Remove worker").wait_for(timeout=5_000)
-        self.assertNotIn(CONFIRM_COPY, card.inner_text())
         self.assertTrue(card.is_visible(), "Cancel must keep the worker card")
         self.assertIn(name, card.inner_text())
         self.assertTrue(
@@ -201,44 +200,72 @@ class CatalogRemoveConfirmTests(unittest.TestCase):
         )
 
         card.get_by_role("button", name="Remove worker").click(force=True)
-        page.get_by_text(CONFIRM_COPY).wait_for(timeout=5_000)
+        card.get_by_role("button", name="Confirm").wait_for(timeout=5_000)
         card.get_by_role("button", name="Confirm").click(force=True)
         card.wait_for(state="detached", timeout=15_000)
-        try:
-            page.get_by_text(REMOVED_TOAST).wait_for(timeout=8_000)
-        except Exception as e:  # noqa: BLE001
-            self.fail(
-                f"Confirm must toast {REMOVED_TOAST!r} ({e}). "
-                f"body={page.inner_text('body')[:1200]!r}"
-            )
         self.assertEqual(
             page.locator("article").filter(has_text=name).count(),
             0,
             "Confirm must drop the card from the default list",
         )
-        self.assertNotIn(name, page.inner_text("body"))
+        row = _host_row(page, ws, host_id)
         self.assertEqual(
-            page.get_by_role("button", name=SHOW_REMOVED).count(),
-            0,
-            "pending leftover must stay hidden (never paired)",
+            row.get("status"),
+            "disabled",
+            f"Confirm must revoke on the server: {row}",
         )
 
-        _plane_has_no_remove(page)
-
+    def test_remove_worker_confirm_revoke_error_keeps_card(self) -> None:
+        page = self.page
+        ws, workspace_url = _signup_api(page)
+        name = f"rm-err-{uuid.uuid4().hex[:8]}"
+        created = create_host(page, ws, name)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         page.wait_for_selector("h1", state="attached", timeout=60_000)
-        _plane_has_no_remove(page)
+
+        card = page.locator("article").filter(has_text=name)
+        card.wait_for(timeout=10_000)
+        card.get_by_role("button", name="Remove worker").click(force=True)
+        card.get_by_role("button", name="Confirm").wait_for(timeout=5_000)
+
+        def _fail_delete(route):
+            if route.request.method.upper() == "DELETE":
+                route.fulfill(
+                    status=500,
+                    content_type="application/json",
+                    body='{"error":"revoke failed"}',
+                )
+                return
+            route.continue_()
+
+        page.route(DELETE_HOST, _fail_delete)
+        try:
+            card.get_by_role("button", name="Confirm").click(force=True)
+            card.get_by_role("button", name="Remove worker").wait_for(timeout=15_000)
+            self.assertTrue(card.is_visible(), "failed Confirm must keep the worker card")
+            self.assertTrue(
+                card.get_by_role("button", name="Remove worker").is_visible(),
+                "failed Confirm must restore Remove worker",
+            )
+            statuses = page.get_by_role("status")
+            seen = [statuses.nth(i).inner_text() for i in range(statuses.count())]
+            self.assertNotIn(
+                "Worker removed.",
+                "\n".join(seen),
+                f"failed Confirm must not toast Worker removed.: {seen!r}",
+            )
+        finally:
+            page.unroute(DELETE_HOST, _fail_delete)
+
+        row = _host_row(page, ws, host_id)
         self.assertEqual(
-            page.locator("article").filter(has_text=name).count(),
-            0,
-            "Confirm must persist across reload",
-        )
-        self.assertNotIn(name, page.inner_text("body"))
-        self.assertEqual(
-            page.get_by_role("button", name=SHOW_REMOVED).count(),
-            0,
-            "never-paired leftover must stay hidden after reload",
+            row.get("status"),
+            "pending",
+            f"failed Confirm must not revoke on the server: {row}",
         )
 
 

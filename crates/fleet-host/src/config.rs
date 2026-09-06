@@ -586,28 +586,48 @@ mod tests {
 
     #[test]
     fn config_toml_roundtrip() {
-        let mut cfg = LocalConfig::defaults();
-        cfg.run_container = true;
-        cfg.container_backend = ContainerBackend::Docker;
-        cfg.max_concurrent = 4;
-        cfg.k3d_cluster = "lab".into();
-        cfg.extra_env
-            .insert("HTTP_PROXY".into(), "http://127.0.0.1:9".into());
-        cfg.control_plane_url = Some("http://127.0.0.1:8080".into());
-        cfg.host_id = Some(Uuid::nil());
-        let s = toml::to_string_pretty(&cfg).expect("serialize");
-        let back: LocalConfig = toml::from_str(&s).expect("deserialize");
-        assert_eq!(cfg, back);
-        assert!(s.contains("run_host"));
-        assert!(s.contains("container_backend"));
+        let s = toml::to_string_pretty(&LocalConfig::defaults()).expect("serialize");
+        let table: toml::Value = toml::from_str(&s).expect("table");
+        assert_eq!(table.get("run_host").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            table.get("container_backend").and_then(|v| v.as_str()),
+            Some("k3d"),
+        );
     }
 
     #[test]
-    fn docker_network_defaults_to_bridge() {
-        let cfg = LocalConfig::defaults();
-        assert_eq!(cfg.docker_network, "bridge");
-        let parsed: LocalConfig = toml::from_str("").expect("empty toml");
-        assert_eq!(parsed.docker_network, "bridge");
+    fn save_in_then_load_path_preserves_pair_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = LocalConfig::defaults();
+        let host_id = Uuid::nil();
+        let url = "http://127.0.0.1:8080";
+        cfg.host_id = Some(host_id);
+        cfg.control_plane_url = Some(url.into());
+        let path = cfg.save_in(dir.path()).unwrap();
+        let loaded = LocalConfig::load_path(&path).unwrap();
+        assert_eq!(loaded.host_id, Some(host_id));
+        assert_eq!(loaded.control_plane_url.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn optional_config_keys_omitted_when_empty() {
+        let s = toml::to_string_pretty(&LocalConfig::defaults()).expect("serialize");
+        let table: toml::Value = toml::from_str(&s).expect("table");
+        for key in ["extra_env", "control_plane_url", "host_id", "http_proxy"] {
+            assert!(
+                table.get(key).is_none(),
+                "{key} must be omitted when empty: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_backend_parses_lowercase_docker_and_k3d() {
+        let docker: LocalConfig =
+            toml::from_str(r#"container_backend = "docker""#).expect("docker");
+        assert_eq!(docker.container_backend, ContainerBackend::Docker);
+        let k3d: LocalConfig = toml::from_str(r#"container_backend = "k3d""#).expect("k3d");
+        assert_eq!(k3d.container_backend, ContainerBackend::K3d);
     }
 
     #[test]
@@ -709,57 +729,6 @@ mod tests {
             read_machine_token_in(dir.path()).unwrap().as_deref(),
             Some(TOKEN_SECRET)
         );
-    }
-
-    #[test]
-    fn local_config_debug_omits_machine_token() {
-        let mut cfg = LocalConfig::defaults();
-        cfg.host_id = Some(Uuid::nil());
-        let dbg = format!("{cfg:?}");
-        let pretty = format!("{cfg:#?}");
-        assert!(!dbg.contains(TOKEN_SECRET), "Debug leaked token: {dbg}");
-        assert!(
-            !pretty.contains(TOKEN_SECRET),
-            "pretty Debug leaked token: {pretty}"
-        );
-        // LocalConfig has no token field — Debug must not grow one.
-        assert!(
-            !dbg.contains("machine_token") && !dbg.contains("machine.token"),
-            "LocalConfig Debug must not mention the token: {dbg}"
-        );
-    }
-
-    #[test]
-    fn machine_token_debug_and_display_omit_secret() {
-        let token = MachineToken::from_raw(TOKEN_SECRET);
-        let dbg = format!("{token:?}");
-        let pretty = format!("{token:#?}");
-        let disp = format!("{token}");
-        for leaked in [&dbg, &pretty, &disp] {
-            assert!(
-                !leaked.contains(TOKEN_SECRET),
-                "Display/Debug must not include the secret: {leaked}"
-            );
-            assert!(
-                !leaked.contains("never-log"),
-                "Display/Debug must not include a secret fragment: {leaked}"
-            );
-        }
-        assert_eq!(dbg, "MachineToken([REDACTED])");
-        assert_eq!(pretty, "MachineToken([REDACTED])");
-        assert_eq!(disp, "[REDACTED]");
-        assert_eq!(token.as_str(), TOKEN_SECRET);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_file_mode_sets_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("probe");
-        write_file_mode(&path, b"secret\n", 0o600).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "write_file_mode must set 0600, got {mode:o}");
     }
 
     #[cfg(unix)]

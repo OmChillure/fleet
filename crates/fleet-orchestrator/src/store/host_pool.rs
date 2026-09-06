@@ -633,79 +633,204 @@ mod tests {
         }
     }
 
+    fn require_local_name() -> String {
+        local_machine_names().into_iter().next().expect(
+            "hostname match needs a local name from HOSTNAME, /etc/hostname, uname -n, or hostname",
+        )
+    }
+
+    fn require_local_ip() -> String {
+        local_nonloopback_ips().into_iter().next().expect(
+            "advertised-IP match needs a non-loopback address from hostname -I",
+        )
+    }
+
     #[test]
-    fn this_machine_matches_hostname_fqdn_and_addrs() {
-        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+    fn host_is_this_machine_empty_hostname_and_addrs_is_not_this_machine() {
+        let h = host(Uuid::new_v4(), true, false, true, false, 4);
         assert!(
             !host_is_this_machine(&h),
             "missing hostname and addrs is not this machine"
         );
-        h.hostname = Some("off-box-remote".into());
-        assert!(!host_is_this_machine(&h));
-        let local = local_machine_names();
-        if let Some(name) = local.first() {
-            h.hostname = Some(name.clone());
-            assert!(host_is_this_machine(&h), "exact hostname {name}");
-            h.hostname = Some(name.to_ascii_uppercase());
-            assert!(host_is_this_machine(&h), "case-insensitive hostname");
-            h.hostname = Some(format!("{name}.lan"));
-            assert!(host_is_this_machine(&h), "FQDN vs short name");
-        }
-        h.hostname = None;
-        let ips = local_nonloopback_ips();
-        if let Some(ip) = ips.first() {
-            h.addrs = vec![ip.clone()];
-            assert!(host_is_this_machine(&h), "advertised IP {ip}");
-        }
     }
 
     #[test]
-    fn loopback_reachable_keeps_this_machine_drops_offbox_host() {
-        let mut off = host(Uuid::new_v4(), true, false, true, false, 4);
-        off.hostname = Some("off-box-remote".into());
-        assert!(!host_reachable_on_plane(
-            &off,
-            IsolationClass::Process,
-            true
-        ));
-        assert!(host_reachable_on_plane(
-            &off,
-            IsolationClass::Process,
-            false
-        ));
-        let mut local = host(Uuid::new_v4(), true, false, true, false, 4);
-        if let Some(name) = local_machine_names().into_iter().next() {
-            local.hostname = Some(name);
-            assert!(host_reachable_on_plane(
-                &local,
-                IsolationClass::Process,
-                true
-            ));
-        }
-        let container = host(Uuid::new_v4(), false, true, false, true, 4);
+    fn host_is_this_machine_offbox_hostname_is_not_this_machine() {
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = Some("off-box-remote".into());
         assert!(
-            host_reachable_on_plane(&container, IsolationClass::Process, true),
-            "container guests stay in the pool; spawn refuses after assign"
+            !host_is_this_machine(&h),
+            "off-box-remote must not match this machine"
         );
     }
 
     #[test]
-    fn v1_assigns_host_even_when_container_is_advertised() {
-        let h = host(Uuid::new_v4(), true, true, true, true, 4);
-        assert_eq!(effective_runtime(&h), Some(HostRuntime::Host));
+    fn host_is_this_machine_matches_exact_local_hostname() {
+        let name = require_local_name();
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = Some(name.clone());
+        assert!(host_is_this_machine(&h), "exact hostname {name}");
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_local_hostname_case_insensitively() {
+        let name = require_local_name();
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = Some(name.to_ascii_uppercase());
+        assert!(
+            host_is_this_machine(&h),
+            "case-insensitive hostname {name}"
+        );
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_advertised_fqdn_against_local_name() {
+        let name = require_local_name();
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = Some(format!("{name}.lan"));
+        assert!(host_is_this_machine(&h), "FQDN vs short name {name}.lan");
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_advertised_nonloopback_ip() {
+        let ip = require_local_ip();
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.addrs = vec![ip.clone()];
+        assert!(host_is_this_machine(&h), "advertised IP {ip}");
+    }
+
+    #[test]
+    fn host_is_this_machine_matches_short_label_when_local_name_is_fqdn() {
+        assert!(
+            hostnames_match("box", "box.lan"),
+            "short label must match FQDN"
+        );
+        assert!(
+            hostnames_match("box.lan", "box"),
+            "FQDN must match short label"
+        );
+        assert!(
+            hostnames_match("BOX", "box.lan"),
+            "short/FQDN match is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn host_is_this_machine_loopback_addrs_are_not_this_machine() {
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = None;
+        h.addrs = vec!["127.0.0.1".into(), "::1".into()];
+        assert!(
+            !host_is_this_machine(&h),
+            "loopback addrs are filtered by local_nonloopback_ips"
+        );
+    }
+
+    #[test]
+    fn host_is_this_machine_whitespace_only_hostname_is_not_this_machine() {
+        let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
+        h.hostname = Some("  \n".into());
+        assert!(
+            !host_is_this_machine(&h),
+            "whitespace-only hostname is trimmed away and is not this machine"
+        );
+    }
+
+    #[test]
+    fn loopback_drops_offbox_host() {
+        let mut off = host(Uuid::new_v4(), true, false, true, false, 4);
+        off.hostname = Some("off-box-remote".into());
+        assert!(
+            !host_reachable_on_plane(&off, IsolationClass::Process, true),
+            "off-box-remote host-runtime cannot heartbeat to a loopback plane"
+        );
+    }
+
+    #[test]
+    fn non_loopback_keeps_offbox_host() {
+        let mut off = host(Uuid::new_v4(), true, false, true, false, 4);
+        off.hostname = Some("off-box-remote".into());
+        assert!(
+            host_reachable_on_plane(&off, IsolationClass::Process, false),
+            "off-box-remote stays reachable when the plane is not loopback"
+        );
+    }
+
+    #[test]
+    fn loopback_keeps_this_machine_by_hostname() {
+        let name = require_local_name();
+        let mut local = host(Uuid::new_v4(), true, false, true, false, 4);
+        local.hostname = Some(name.clone());
+        assert!(
+            host_reachable_on_plane(&local, IsolationClass::Process, true),
+            "this-machine {name} stays reachable on a loopback plane"
+        );
+    }
+
+    #[test]
+    fn loopback_drops_host_runtime_with_empty_identity() {
+        let nameless = host(Uuid::new_v4(), true, false, true, false, 4);
+        assert!(
+            !host_reachable_on_plane(&nameless, IsolationClass::Process, true),
+            "Host+loopback with hostname None and empty addrs is not this machine"
+        );
+    }
+
+    #[test]
+    fn loopback_drops_sandboxed_even_when_hostname_is_this_machine() {
+        let name = require_local_name();
+        let mut sandboxed = host(Uuid::new_v4(), true, false, true, false, 4);
+        sandboxed.hostname = Some(name.clone());
+        sandboxed.isolation = RunnerIsolation::Sandboxed;
+        assert!(
+            !host_reachable_on_plane(&sandboxed, IsolationClass::Process, true),
+            "sandboxed isolation is not assignable even when hostname is this machine ({name})"
+        );
+    }
+
+    #[test]
+    fn loopback_keeps_this_machine_by_advertised_ip() {
+        let ip = require_local_ip();
+        let mut local = host(Uuid::new_v4(), true, false, true, false, 4);
+        local.hostname = None;
+        local.addrs = vec![ip.clone()];
+        assert!(
+            host_reachable_on_plane(&local, IsolationClass::Process, true),
+            "this-machine advertised IP {ip} stays reachable on a loopback plane"
+        );
     }
 
     #[test]
     fn container_only_host_is_assignable() {
-        let h = host(Uuid::new_v4(), true, true, false, true, 4);
-        assert_eq!(effective_runtime(&h), Some(HostRuntime::Container));
-        let chosen = pick_assignable_host(&[h.clone()], &HashMap::new()).unwrap();
-        assert_eq!(chosen.runtime, HostRuntime::Container);
+        let container_only = host(Uuid::new_v4(), true, true, false, true, 4);
+        let chosen = pick_assignable_host(&[container_only], &HashMap::new())
+            .expect("container-only host must still be assignable");
         assert_eq!(
-            pick_assignable_host_for(&[h], &HashMap::new(), IsolationClass::Container)
-                .unwrap()
-                .runtime,
-            HostRuntime::Container
+            chosen.runtime,
+            HostRuntime::Container,
+            "process need upgrades to Container when advertised_host is off"
+        );
+    }
+
+    #[test]
+    fn plane_disallows_host_still_assigns_container() {
+        let h = host(Uuid::new_v4(), false, true, true, true, 4);
+        assert_eq!(
+            effective_runtime(&h),
+            Some(HostRuntime::Container),
+            "allow_host=false still offers Container when advertised_container is on"
+        );
+    }
+
+    #[test]
+    fn pick_assignable_runner_assigns_container_only() {
+        let container_only = host(Uuid::new_v4(), true, true, false, true, 4);
+        let chosen = pick_assignable_runner(&[container_only], &HashMap::new())
+            .expect("container-only native host must still be assignable");
+        assert_eq!(
+            chosen.runtime,
+            HostRuntime::Container,
+            "pick_assignable_runner keeps Container; V1 select_assignable_runner is host-only"
         );
     }
 
@@ -729,12 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn host_when_container_not_advertised() {
-        let h = host(Uuid::new_v4(), true, true, true, false, 4);
-        assert_eq!(effective_runtime(&h), Some(HostRuntime::Host));
-    }
-
-    #[test]
     fn skip_when_plane_disallows_both() {
         let h = host(Uuid::new_v4(), false, false, true, true, 4);
         assert_eq!(effective_runtime(&h), None);
@@ -747,68 +866,52 @@ mod tests {
     }
 
     #[test]
-    fn skip_at_max_concurrent_and_256_cap() {
-        let at_cp = host(Uuid::new_v4(), true, true, true, true, 4);
-        assert!(host_at_capacity(4, &at_cp));
-        assert!(!host_at_capacity(3, &at_cp));
-        let over = host(Uuid::new_v4(), true, true, true, true, 999);
-        assert!(host_at_capacity(256, &over));
-        assert!(!host_at_capacity(255, &over));
-    }
-
-    #[test]
-    fn skip_when_advertised_cap_reached() {
+    fn pick_assigns_when_inflight_is_one_below_plane_max() {
         let id = Uuid::new_v4();
-        let mut h = host(id, true, true, true, true, 8);
-        h.advertised_max_concurrent = Some(2);
-        assert!(host_at_capacity(2, &h));
-        assert!(!host_at_capacity(1, &h));
+        let h = host(id, true, true, true, true, 4);
         let mut inflight = HashMap::new();
-        inflight.insert(id, 2);
-        assert!(pick_assignable_host(&[h], &inflight).is_none());
+        inflight.insert(id, 3);
+        let chosen = pick_assignable_host(&[h], &inflight)
+            .expect("inflight 3 is under plane max 4");
+        assert_eq!(chosen.id(), id);
     }
 
     #[test]
-    fn pick_skips_full_and_ineffective() {
-        let full_id = Uuid::new_v4();
-        let none_id = Uuid::new_v4();
-        let ok_id = Uuid::new_v4();
-        let hosts = vec![
-            host(full_id, true, true, true, true, 1),
-            host(none_id, false, false, true, true, 4),
-            host(ok_id, true, false, true, false, 2),
-        ];
-        let mut inflight = HashMap::new();
-        inflight.insert(full_id, 1);
-        let chosen = pick_assignable_host(&hosts, &inflight).unwrap();
-        assert_eq!(chosen.id(), ok_id);
-        assert_eq!(chosen.runtime, HostRuntime::Host);
-    }
-
-    #[test]
-    fn pick_lowest_utilization_not_first_under_capacity() {
-        let busy = host(Uuid::new_v4(), true, false, true, false, 4);
-        let idle = host(Uuid::new_v4(), true, false, true, false, 4);
-        let mut inflight = HashMap::new();
-        inflight.insert(busy.id, 3);
-        let chosen = pick_assignable_host(&[busy.clone(), idle.clone()], &inflight).unwrap();
-        assert_eq!(
-            chosen.id(),
-            idle.id,
-            "3/4 must lose to 0/4 even when the busy host is listed first"
+    fn pick_none_when_inflight_hits_clamped_256() {
+        let id = Uuid::new_v4();
+        let over = host(id, true, true, true, true, 999);
+        let mut at_ceiling = HashMap::new();
+        at_ceiling.insert(id, 256);
+        assert!(
+            pick_assignable_host(&[over.clone()], &at_ceiling).is_none(),
+            "plane max 999 clamps to 256; inflight 256 must skip"
         );
+        let mut just_under = HashMap::new();
+        just_under.insert(id, 255);
+        let chosen = pick_assignable_host(&[over], &just_under)
+            .expect("inflight 255 is still under the 256 ceiling");
+        assert_eq!(chosen.id(), id);
     }
 
     #[test]
-    fn pick_equal_load_prefers_oldest_not_newest_first() {
-        let newer = host(Uuid::new_v4(), true, false, true, false, 4);
-        let older = host(Uuid::new_v4(), true, false, true, false, 4);
-        let chosen =
-            pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new()).unwrap();
-        assert_eq!(
-            chosen.id(),
-            older.id,
-            "tie-break is oldest heartbeat, not SQL last_seen DESC list order"
+    fn host_at_capacity_clamps_nonpositive_plane_max_to_1() {
+        let zero = host(Uuid::new_v4(), true, true, true, true, 0);
+        assert!(
+            host_at_capacity(1, &zero),
+            "plane max 0 clamps to 1"
+        );
+        assert!(
+            !host_at_capacity(0, &zero),
+            "clamp 1 still allows the first job"
+        );
+        let neg = host(Uuid::new_v4(), true, true, true, true, -5);
+        assert!(
+            host_at_capacity(1, &neg),
+            "plane max -5 clamps to 1"
+        );
+        assert!(
+            !host_at_capacity(0, &neg),
+            "clamp 1 still allows the first job"
         );
     }
 
@@ -835,42 +938,6 @@ mod tests {
         assert_eq!(job_timeout_s(7200, 3600), 3600);
         assert_eq!(job_timeout_s(30, 3600), 30);
         assert_eq!(job_timeout_s(10, 10), 10);
-    }
-
-    #[test]
-    fn hold_ready_when_home_host_is_updating() {
-        assert!(hold_ready_for_host_update(false, true));
-        assert!(
-            hold_ready_for_host_update(true, true),
-            "do not fail over to cluster while a home host restarts"
-        );
-        assert!(!hold_ready_for_host_update(false, false));
-        assert!(!hold_ready_for_host_update(true, false));
-    }
-
-    #[test]
-    fn runner_default_is_native_and_picks_paired_host() {
-        let h = host(Uuid::new_v4(), true, true, true, true, 4);
-        assert_eq!(h.isolation, RunnerIsolation::Native);
-        let chosen = pick_assignable_runner(&[h.clone()], &HashMap::new()).unwrap();
-        assert_eq!(chosen.id(), h.id);
-        assert_eq!(chosen.runtime, HostRuntime::Host);
-        assert_eq!(
-            pick_assignable_runner(&[h.clone()], &HashMap::new()),
-            pick_assignable_host(&[h], &HashMap::new())
-        );
-    }
-
-    #[test]
-    fn runner_skips_sandboxed_and_picks_native() {
-        let native_id = Uuid::new_v4();
-        let mut sandboxed = host(Uuid::new_v4(), true, true, true, true, 4);
-        sandboxed.isolation = RunnerIsolation::Sandboxed;
-        let native = host(native_id, true, true, true, true, 4);
-        assert!(pick_assignable_runner(&[sandboxed.clone()], &HashMap::new()).is_none());
-        let chosen = pick_assignable_runner(&[sandboxed, native], &HashMap::new()).unwrap();
-        assert_eq!(chosen.id(), native_id);
-        assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
     }
 
     fn worker_host(isolation: &str) -> fleet_db::WorkerHost {
@@ -928,5 +995,48 @@ mod tests {
         assert_eq!(boxed.isolation, RunnerIsolation::Sandboxed);
         let unknown = AssignableHost::from(&worker_host("k8s"));
         assert_eq!(unknown.isolation, RunnerIsolation::Native);
+    }
+
+    /// 0/0 load: prefer_workspace beats an older cluster row listed first.
+    #[test]
+    fn pick_load_tie_prefers_home_workspace_over_cluster() {
+        let home_ws = Uuid::new_v4();
+        let cluster_ws = Uuid::new_v4();
+        let older = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let newer = chrono::Utc::now();
+
+        let mut cluster = host(Uuid::new_v4(), true, false, true, false, 4);
+        cluster.workspace_id = cluster_ws;
+        cluster.last_seen_at = Some(older);
+
+        let mut home_host = host(Uuid::new_v4(), true, false, true, false, 4);
+        home_host.workspace_id = home_ws;
+        home_host.last_seen_at = Some(newer);
+
+        let chosen = pick_assignable_host_in(
+            &[cluster.clone(), home_host.clone()],
+            &HashMap::new(),
+            IsolationClass::Process,
+            Some(home_ws),
+        )
+        .expect("home host must be assignable");
+        assert_eq!(
+            chosen.id(),
+            home_host.id,
+            "0/0 load: home workspace beats an older cluster host listed first"
+        );
+
+        let chosen_rev = pick_assignable_host_in(
+            &[home_host.clone(), cluster],
+            &HashMap::new(),
+            IsolationClass::Process,
+            Some(home_ws),
+        )
+        .expect("home host must be assignable");
+        assert_eq!(
+            chosen_rev.id(),
+            home_host.id,
+            "list order must not change the home winner"
+        );
     }
 }

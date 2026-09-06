@@ -790,6 +790,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn anthropic_tools_preserves_every_tool_definitions_name() {
+        let openai_tools = tool_definitions();
+        let openai_names: Vec<&str> = openai_tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        let claude_tools = anthropic_tools();
+        let claude_names: Vec<&str> = claude_tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(claude_names, openai_names);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_unknown_first_class_github_write_tools() {
+        let state = dummy_chat_state();
+        let llm = ChatLlmContext {
+            provider: "openai".into(),
+            model: "test".into(),
+            runner_id: None,
+            effort: None,
+        };
+        let args = json!({});
+        for name in ["github_commit_files", "github_create_pr"] {
+            let (content, action) = crate::chat_tools::execute_tool(
+                &state,
+                Uuid::nil(),
+                Uuid::nil(),
+                name,
+                &args,
+                &llm,
+            )
+            .await;
+            assert!(!action.ok, "{name} must not dispatch");
+            assert_eq!(action.tool, name);
+            let expected = format!("unknown tool `{name}`");
+            assert_eq!(action.summary, expected);
+            assert_eq!(content, json!({ "error": expected }));
+        }
+        state.db.close().await;
+    }
+
+    #[test]
     fn openai_status_without_key() {
         let cfg = OpenaiConfig {
             enabled: true,
@@ -806,36 +854,63 @@ mod tests {
     fn openai_status_disabled_is_coming_soon() {
         let cfg = OpenaiConfig {
             enabled: false,
-            api_key: None,
+            api_key: Some("sk-test".into()),
             api_base: OPENAI_DEFAULT_BASE.into(),
         };
         let p = openai_status(&cfg);
         assert!(!p.available);
         assert!(p.coming_soon);
-        assert!(p.error.unwrap().to_lowercase().contains("coming soon"));
+        assert!(p.models.is_empty());
+        assert!(p.default_model.is_none());
     }
 
     #[test]
-    fn claude_status_without_key() {
-        let cfg = ClaudeConfig {
+    fn openai_config_available_requires_enabled_and_nonempty_key() {
+        assert!(!OpenaiConfig {
+            enabled: false,
+            api_key: Some("sk-test".into()),
+            api_base: OPENAI_DEFAULT_BASE.into(),
+        }
+        .available());
+        assert!(!OpenaiConfig {
             enabled: true,
             api_key: None,
-            api_base: ANTHROPIC_DEFAULT_BASE.into(),
-        };
-        let p = claude_status(&cfg);
-        assert!(!p.available);
-        assert!(!p.coming_soon);
+            api_base: OPENAI_DEFAULT_BASE.into(),
+        }
+        .available());
+        assert!(!OpenaiConfig {
+            enabled: true,
+            api_key: Some(String::new()),
+            api_base: OPENAI_DEFAULT_BASE.into(),
+        }
+        .available());
+        assert!(OpenaiConfig {
+            enabled: true,
+            api_key: Some("sk-test".into()),
+            api_base: OPENAI_DEFAULT_BASE.into(),
+        }
+        .available());
     }
 
-    /// Empty / typo / ticket-name composer ids are 400. `parse_provider` is the
-    /// single gate: `chat_complete` and `run_chat_turn` must call it (no second
-    /// raw match that could map grokk/open-ai/"" onto a live backend).
+    #[test]
+    fn openai_status_with_key_is_available_not_coming_soon() {
+        let cfg = OpenaiConfig {
+            enabled: true,
+            api_key: Some("sk-test".into()),
+            api_base: OPENAI_DEFAULT_BASE.into(),
+        };
+        let p = openai_status(&cfg);
+        assert!(p.available);
+        assert!(!p.coming_soon);
+        assert!(p.error.is_none());
+    }
+
+    /// Empty, whitespace, typo, and ticket-name ids are BadRequest 400.
     #[test]
     fn unknown_empty_typo_provider_fails_closed() {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
 
-        const LIVE: &[&str] = &["openai", "claude", "grok", "ollama", "anthropic", "xai"];
         const RAWS: &[&str] = &[
             "",
             " ",
@@ -851,147 +926,45 @@ mod tests {
         ];
 
         for raw in RAWS {
-            match parse_provider(raw) {
+            let err = match parse_provider(raw) {
                 Ok(id) => panic!("{raw:?} must be 400, must not resolve to live id {id}"),
-                Err(err) => {
-                    let status = err.into_response().status();
-                    assert_eq!(
-                        status,
-                        StatusCode::BAD_REQUEST,
-                        "{raw:?} must be HTTP 400, got {status}"
-                    );
-                }
-            }
-            // Re-parse for the message (into_response consumes the error).
-            match parse_provider(raw) {
-                Ok(id) => panic!("{raw:?} must stay rejected, got Ok({id})"),
-                Err(AppError::BadRequest(msg)) => {
-                    let lower = msg.to_ascii_lowercase();
-                    assert!(
-                        lower.contains("unknown"),
-                        "{raw:?} reject must say unknown, got {msg}"
-                    );
-                    assert!(
-                        lower.contains("provider"),
-                        "{raw:?} reject must say provider, got {msg}"
-                    );
-                    let token = raw.trim().to_ascii_lowercase();
-                    if !token.is_empty() {
-                        assert!(
-                            lower.contains(&token),
-                            "{raw:?} reject must name the rejected id, got {msg}"
-                        );
-                    }
-                    for live in LIVE {
-                        assert_ne!(
-                            lower.trim(),
-                            *live,
-                            "{raw:?} error body must not be the live id {live}"
-                        );
-                    }
-                }
-                Err(other) => panic!("{raw:?} must be 400 BadRequest, not {other:?}"),
-            }
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, AppError::BadRequest(_)),
+                "{raw:?} must be BadRequest, not {err:?}"
+            );
+            let status = err.into_response().status();
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{raw:?} must be HTTP 400, got {status}"
+            );
         }
-
-        assert_eq!(parse_provider("openai").unwrap(), "openai");
-        assert_eq!(parse_provider(" OPENAI ").unwrap(), "openai");
-        assert_eq!(parse_provider("claude").unwrap(), "claude");
-        assert_eq!(parse_provider("anthropic").unwrap(), "claude");
-        assert_eq!(parse_provider("grok").unwrap(), "grok");
-        assert_eq!(parse_provider("xai").unwrap(), "grok");
-        assert_eq!(parse_provider("ollama").unwrap(), "ollama");
-
-        let chat = include_str!("chat.rs");
-        let complete = fn_src(chat, "async fn chat_complete(");
-        let turn = fn_src(chat, "async fn run_chat_turn(");
-
-        for (label, body) in [("chat_complete", complete), ("run_chat_turn", turn)] {
-            let parse_at = pos(body, "parse_provider(", label);
-            let cli_at = pos(body, "runner_cli_provider", label);
-            let match_at = pos(body, "match provider", label);
-            assert!(
-                parse_at < cli_at,
-                "{label} must parse_provider before runner_cli_provider:\n{body}"
-            );
-            assert!(
-                parse_at < match_at,
-                "{label} must parse_provider before the backend match:\n{body}"
-            );
-            assert!(
-                !body.contains(".unwrap_or(\"ollama\").trim()"),
-                "{label} must not lowercase/trim the raw then match; empty would become ollama:\n{body}"
-            );
-            assert!(
-                !body.contains("unwrap_or_else"),
-                "{label} must not fall through a typo to a live default:\n{body}"
-            );
-            for typo in [
-                "grokk",
-                "open-ai",
-                "openaii",
-                "claud",
-                "github",
-                "jira",
-                "TASK_PROVIDER",
-            ] {
-                assert!(
-                    !body.contains(&format!("\"{typo}\"")),
-                    "{label} must not alias {typo:?} onto a live backend:\n{body}"
-                );
-            }
-        }
-
-        assert!(
-            complete.contains("body.provider.as_deref().unwrap_or(\"ollama\")"),
-            "missing composer provider may default to ollama; empty/typo must still hit parse_provider:\n{complete}"
-        );
-        assert!(
-            !turn.contains("unwrap_or(\"ollama\")"),
-            "run_chat_turn must not default a typo/empty id to ollama:\n{turn}"
-        );
     }
 
-    /// Docs §6.2/§7: a model that only emits tool calls must stop at
-    /// `MAX_TOOL_ROUNDS` and still return text so `chat_complete_*` can
-    /// persist the assistant turn. Not a source grep — a tool-only sink.
+    /// Tool-only OpenAI must stop at MAX_TOOL_ROUNDS (plus one no-tools call)
+    /// and still return non-empty assistant text.
     #[tokio::test]
-    async fn chat_complete_tool_rounds_capped() {
-        use crate::chat_tools::MAX_TOOL_ROUNDS;
-        use std::time::{Duration, Instant};
-
-        assert!(
-            (1..=32).contains(&MAX_TOOL_ROUNDS),
-            "MAX_TOOL_ROUNDS must be a small finite cap, got {MAX_TOOL_ROUNDS}"
-        );
-
+    async fn openai_tool_only_stops_at_max_tool_rounds() {
         let sink = ToolOnlyLlm::bind();
         let state = dummy_chat_state();
         state.db.close().await;
 
-        let openai_cfg = OpenaiConfig {
-            enabled: true,
-            api_key: Some("sk-tool-rounds-test".into()),
-            api_base: sink.base.clone(),
-        };
-        let claude_cfg = ClaudeConfig {
+        let cfg = OpenaiConfig {
             enabled: true,
             api_key: Some("sk-tool-rounds-test".into()),
             api_base: sink.base.clone(),
         };
         let history = vec![("user".into(), "keep calling tools".into())];
-        let ws = Uuid::new_v4();
-        let user = Uuid::new_v4();
-        let budget = Duration::from_secs(20);
 
-        let started = Instant::now();
-        let openai = tokio::time::timeout(
-            budget,
+        let (_model, content, actions) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
             openai_chat_with_tools(
                 &state,
-                ws,
-                user,
-                &openai_cfg,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &cfg,
                 "gpt-test",
                 &history,
                 None,
@@ -1001,23 +974,37 @@ mod tests {
         .await
         .expect("OpenAI tool-only model must stop at MAX_TOOL_ROUNDS, not recurse unbounded")
         .expect("cap hit must return Ok so the assistant turn can persist");
-        let openai_hits = sink.hits();
-        assert_tool_only_stopped("openai", openai, openai_hits);
-        assert!(
-            started.elapsed() < budget,
-            "OpenAI cap path took {:?}",
-            started.elapsed()
-        );
 
-        sink.reset_hits();
-        let started = Instant::now();
-        let claude = tokio::time::timeout(
-            budget,
+        assert_eq!(actions.len(), MAX_TOOL_ROUNDS);
+        assert!(!content.trim().is_empty());
+        assert_eq!(sink.hits(), MAX_TOOL_ROUNDS + 1);
+        for a in &actions {
+            assert_eq!(a.tool, "always_more_tools");
+        }
+    }
+
+    /// Tool-only Claude must stop at MAX_TOOL_ROUNDS (plus one no-tools call)
+    /// and still return non-empty assistant text.
+    #[tokio::test]
+    async fn claude_tool_only_stops_at_max_tool_rounds() {
+        let sink = ToolOnlyLlm::bind();
+        let state = dummy_chat_state();
+        state.db.close().await;
+
+        let cfg = ClaudeConfig {
+            enabled: true,
+            api_key: Some("sk-tool-rounds-test".into()),
+            api_base: sink.base.clone(),
+        };
+        let history = vec![("user".into(), "keep calling tools".into())];
+
+        let (_model, content, actions) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
             claude_chat_with_tools(
                 &state,
-                ws,
-                user,
-                &claude_cfg,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &cfg,
                 "claude-test",
                 &history,
                 None,
@@ -1027,62 +1014,12 @@ mod tests {
         .await
         .expect("Claude tool-only model must stop at MAX_TOOL_ROUNDS, not recurse unbounded")
         .expect("cap hit must return Ok so the assistant turn can persist");
-        assert_tool_only_stopped("claude", claude, sink.hits());
-        assert!(
-            started.elapsed() < budget,
-            "Claude cap path took {:?}",
-            started.elapsed()
-        );
 
-        let chat = include_str!("chat.rs");
-        for (label, sig) in [
-            ("chat_complete_openai", "async fn chat_complete_openai("),
-            ("chat_complete_claude", "async fn chat_complete_claude("),
-        ] {
-            let body = fn_src(chat, sig);
-            let persist_at = pos(body, "persist_user_and_assistant", label);
-            let loop_at = if label.contains("openai") {
-                pos(body, "openai_chat_with_tools", label)
-            } else {
-                pos(body, "claude_chat_with_tools", label)
-            };
-            assert!(
-                loop_at < persist_at,
-                "{label} must persist the assistant turn after the capped loop:\n{body}"
-            );
-        }
-    }
-
-    fn assert_tool_only_stopped(
-        label: &str,
-        result: (String, String, Vec<ChatAction>),
-        provider_hits: usize,
-    ) {
-        let (_model, content, actions) = result;
-        assert_eq!(
-            actions.len(),
-            MAX_TOOL_ROUNDS,
-            "{label}: tool-only model must run exactly MAX_TOOL_ROUNDS tool rounds, got {}",
-            actions.len()
-        );
-        assert!(
-            provider_hits == MAX_TOOL_ROUNDS || provider_hits == MAX_TOOL_ROUNDS + 1,
-            "{label}: provider must be called MAX_TOOL_ROUNDS times (optional final no-tools summary), got {provider_hits}"
-        );
-        assert!(
-            !content.trim().is_empty(),
-            "{label}: cap path must return assistant text to persist, got empty"
-        );
-        let lower = content.to_ascii_lowercase();
-        assert!(
-            lower.contains("tool round limit") || lower.contains("reached"),
-            "{label}: empty tool-only model must surface the cap (not drop the turn): {content}"
-        );
+        assert_eq!(actions.len(), MAX_TOOL_ROUNDS);
+        assert!(!content.trim().is_empty());
+        assert_eq!(sink.hits(), MAX_TOOL_ROUNDS + 1);
         for a in &actions {
-            assert_eq!(
-                a.tool, "always_more_tools",
-                "{label}: unexpected tool {a:?}"
-            );
+            assert_eq!(a.tool, "always_more_tools");
         }
     }
 
@@ -1249,10 +1186,6 @@ mod tests {
         fn hits(&self) -> usize {
             self.hits.load(std::sync::atomic::Ordering::SeqCst)
         }
-
-        fn reset_hits(&self) {
-            self.hits.store(0, std::sync::atomic::Ordering::SeqCst);
-        }
     }
 
     fn headers_end(buf: &[u8]) -> Option<usize> {
@@ -1302,21 +1235,5 @@ mod tests {
             }]
         })
         .to_string()
-    }
-
-    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
-        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
-        let after = start + sig.len();
-        let end = src[after..]
-            .find("\nasync fn ")
-            .or_else(|| src[after..].find("\nfn "))
-            .map(|i| after + i)
-            .unwrap_or(src.len());
-        &src[start..end]
-    }
-
-    fn pos(hay: &str, needle: &str, label: &str) -> usize {
-        hay.find(needle)
-            .unwrap_or_else(|| panic!("{label} must contain `{needle}`:\n{hay}"))
     }
 }

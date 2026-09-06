@@ -15,6 +15,17 @@ def _note_method(method: str | None) -> None:
         fh.write(method + "\n")
 
 
+def _dump_child_env() -> None:
+    path = os.environ.get("FLEET_ACP_ENV_DUMP")
+    if not path:
+        return
+    secret = os.environ.get("FLEET_HANDSHAKE_SECRET")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("has_handshake_secret=" + ("1" if secret else "0") + "\n")
+        if secret:
+            fh.write("handshake_secret=" + secret + "\n")
+
+
 def read_msg():
     line = sys.stdin.readline()
     if not line:
@@ -32,6 +43,7 @@ def write_msg(obj):
 
 
 def main() -> int:
+    _dump_child_env()
     while True:
         msg = read_msg()
         if msg is None:
@@ -121,6 +133,11 @@ def main() -> int:
                 }
             )
         elif method == "session/prompt":
+            mode = (os.environ.get("FLEET_ACP_PROMPT_MODE") or "").strip().lower()
+            if mode == "silent":
+                # Never answer; client rpc timeout arm must fire.
+                continue
+            stop_reason = "blocked" if mode == "blocked" else "end_turn"
             # Stream a couple of updates, then finish
             write_msg(
                 {
@@ -152,7 +169,7 @@ def main() -> int:
                 {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "result": {"stopReason": "end_turn"},
+                    "result": {"stopReason": stop_reason},
                 }
             )
         elif method == "session/cancel":

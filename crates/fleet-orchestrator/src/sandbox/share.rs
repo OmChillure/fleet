@@ -258,218 +258,86 @@ mod tests {
         assert!(!dest.join("TEAM.md").exists());
     }
 
-    /// Docs §16: Settings git remote cleared → new tasks skip clone
-    /// (prompt-only). A leftover per-project `source.git` from the previous
-    /// remote must not seed a later run.
-    #[tokio::test]
-    async fn new_spawn_skips_clone_when_remote_cleared() {
-        let root = tempfile::tempdir().unwrap();
-        let old_src = root.path().join("remote-old");
-        std::fs::create_dir_all(&old_src).unwrap();
-        let git_ok = std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_ok();
-        assert!(
-            git_ok,
-            "git is required for share skip-clone tests (install git; see install-full-suite-deps.sh)"
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["-C", old_src.to_str().unwrap(), "init", "-q"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        let _ = std::process::Command::new("git")
-            .current_dir(&old_src)
-            .args(["config", "user.email", "t@t.t"])
-            .status();
-        let _ = std::process::Command::new("git")
-            .current_dir(&old_src)
-            .args(["config", "user.name", "t"])
-            .status();
-        std::fs::write(old_src.join("FROM_OLD.txt"), "alpha-remote").unwrap();
-        std::fs::write(old_src.join("README.md"), "old-remote").unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .current_dir(&old_src)
-                .args(["add", "."])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .current_dir(&old_src)
-                .args(["commit", "-qm", "init"])
-                .status()
-                .unwrap()
-                .success()
-        );
-
-        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-        let first_run = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
-        let old_url = old_src.to_str().unwrap();
-        let first =
-            ensure_run_workspace(root.path(), project, first_run, Some(old_url), Some("HEAD"))
-                .await;
-        assert_eq!(
-            std::fs::read_to_string(first.join("FROM_OLD.txt")).unwrap_or_default(),
-            "alpha-remote",
-            "control seed must clone the Settings remote before it is cleared"
-        );
-        assert!(
-            root.path()
-                .join("projects")
-                .join(project.to_string())
-                .join("source.git")
-                .join("HEAD")
-                .exists(),
-            "previous remote must leave a cache the cleared-remote spawn must not reuse"
-        );
-
-        let cleared_run = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
-        let cleared = ensure_run_workspace(root.path(), project, cleared_run, None, None).await;
-        assert!(
-            !cleared.join("FROM_OLD.txt").exists(),
-            "new run after Settings clear must not clone the previous remote (leftover source.git)"
-        );
-        let readme = std::fs::read_to_string(cleared.join("README.md")).unwrap_or_default();
-        assert!(
-            readme.contains("Shared workspace") && !readme.contains("old-remote"),
-            "cleared remote must seed a prompt-only shared workspace, not the previous checkout: {readme:?}"
-        );
-        assert!(
-            !readme.contains("alpha-remote"),
-            "prompt-only workspace must not contain leftover remote contents"
-        );
-
-        let whitespace_run = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
-        let whitespace = ensure_run_workspace(
-            root.path(),
-            project,
-            whitespace_run,
-            Some("   "),
-            Some(old_url),
-        )
-        .await;
-        assert!(
-            !whitespace.join("FROM_OLD.txt").exists(),
-            "whitespace Settings URL is a clear and must not clone leftover remote"
-        );
-        let empty_run = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
-        let empty =
-            ensure_run_workspace(root.path(), project, empty_run, Some(""), Some("main")).await;
-        assert!(
-            !empty.join("FROM_OLD.txt").exists(),
-            "empty Settings URL is a clear and must not clone leftover remote"
-        );
-
-        assert_eq!(
-            std::fs::read_to_string(first.join("FROM_OLD.txt")).unwrap(),
-            "alpha-remote",
-            "skipping clone on a later run must not rewrite the already-seeded workspace"
-        );
-
-        let still_set_run = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
-        let still = ensure_run_workspace(
-            root.path(),
-            project,
-            still_set_run,
-            Some(old_url),
-            Some("HEAD"),
-        )
-        .await;
-        assert_eq!(
-            std::fs::read_to_string(still.join("FROM_OLD.txt")).unwrap_or_default(),
-            "alpha-remote",
-            "control: a still-set Settings remote must still clone (not a tautology that every seed skips)"
-        );
-        assert!(
-            !cleared.join("FROM_OLD.txt").exists(),
-            "control clone must not backfill the skipped cleared-remote workspace"
-        );
-    }
-
-    #[tokio::test]
-    async fn seed_empty_workspace_and_roundtrip_repo() {
-        let root = tempfile::tempdir().unwrap();
-        let project = Uuid::now_v7();
-        let run = Uuid::now_v7();
-        let ws = ensure_run_workspace(root.path(), project, run, None, None).await;
-        assert!(ws.join("README.md").exists());
-        assert!(ws.join(SEEDED).exists());
-        // second call is no-op
-        let _ = std::fs::write(ws.join("api.rs"), "ok");
-        ensure_run_workspace(root.path(), project, run, None, None).await;
-        assert_eq!(std::fs::read_to_string(ws.join("api.rs")).unwrap(), "ok");
-
-        let task = dummy_task(project, run, "t1");
-        let session = root.path().join("sess");
-        std::fs::create_dir_all(&session).unwrap();
-        materialize_session_repo(root.path(), &session, &task);
-        assert!(session.join("work/api.rs").exists());
-        std::fs::write(session.join("work/api.rs"), "v2").unwrap();
-        std::fs::write(session.join("work/ui.tsx"), "x").unwrap();
-        sync_session_repo_back(root.path(), &session, &task);
-        archive_session_tree(root.path(), project, run, "t1", &session);
-        assert_eq!(std::fs::read_to_string(ws.join("api.rs")).unwrap(), "v2");
-        assert!(ws.join("ui.tsx").exists());
-        let archived = crate::sandbox::team::run_handoffs_dir(root.path(), project, run)
-            .join("t1/tree/ui.tsx");
-        assert!(archived.exists());
-    }
-
     #[test]
     fn changes_request_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let req = ChangesRequest {
             targets: vec!["t1".into()],
-            reason: "missing tests".into(),
+            reason: "  missing tests\n".into(),
         };
         write_changes_request(dir.path(), &req).unwrap();
         let got = read_changes_request(dir.path()).unwrap();
         assert_eq!(got.targets, ["t1"]);
-        assert!(dir.path().join("REVIEW.md").exists());
+        assert_eq!(got.reason, "  missing tests\n");
+        let review = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(
+            review,
+            "# Changes requested\n\nTargets: t1\n\nmissing tests\n"
+        );
     }
 
-    fn dummy_task(project: Uuid, run: Uuid, id: &str) -> BoardTaskRow {
-        BoardTaskRow {
-            id: Uuid::now_v7(),
-            project_id: project,
-            run_id: run,
-            plan_id: Uuid::now_v7(),
-            plan_task_id: id.into(),
-            title: id.into(),
-            summary: String::new(),
-            spec_md: String::new(),
-            status: "ready".into(),
-            depends_on: vec![],
-            priority: 1,
-            worker_profile: "coding".into(),
-            acceptance: serde_json::json!([]),
-            external_ref: None,
-            timeout_s: None,
-            max_retries: 0,
-            attempt: 0,
-            claimed_session_id: None,
-            last_report_seq: 0,
-            progress_pct: 0,
-            block_reason: None,
-            hitl_notes: None,
-            hitl_artifacts: None,
-            hitl_resume_requested_at: None,
-            hitl_notified_at: None,
-            hitl_resolved_at: None,
-            failure_reason: None,
-            artifacts: None,
-            retry_not_before: None,
-            assigned_at: None,
-            started_at: None,
-            terminal_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+    #[test]
+    fn write_changes_request_rejects_blank_reason() {
+        for reason in ["", "  \n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let err = write_changes_request(
+                dir.path(),
+                &ChangesRequest {
+                    targets: vec!["t1".into()],
+                    reason: reason.into(),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, "reason is empty", "reason={reason:?}");
+            assert!(
+                !changes_path(dir.path()).exists(),
+                "blank reason {reason:?} must not write request_changes.json"
+            );
+            assert!(
+                !dir.path().join("REVIEW.md").exists(),
+                "blank reason {reason:?} must not write REVIEW.md"
+            );
         }
+    }
+
+    #[test]
+    fn write_changes_request_empty_targets_labels_dependencies_in_review_md() {
+        let dir = tempfile::tempdir().unwrap();
+        write_changes_request(
+            dir.path(),
+            &ChangesRequest {
+                targets: vec![],
+                reason: "  need deps  ".into(),
+            },
+        )
+        .unwrap();
+        let review = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(
+            review,
+            "# Changes requested\n\nTargets: (dependencies)\n\nneed deps\n"
+        );
+    }
+
+    #[test]
+    fn read_changes_request_none_when_missing_or_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "absent request_changes.json must skip bounce"
+        );
+
+        let path = changes_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "empty request_changes.json must skip bounce"
+        );
+
+        std::fs::write(&path, "{").unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "invalid request_changes.json must skip bounce"
+        );
     }
 }

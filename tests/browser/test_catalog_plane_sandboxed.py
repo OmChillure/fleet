@@ -19,10 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
     API,
     UI,
-    assert_hosts_have_no_plane,
     assert_no_control_plane_card,
     goto_self_hosted,
-    list_hosts,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -137,22 +135,15 @@ class CatalogPlaneSandboxedToggleTests(unittest.TestCase):
         cls._browser.close()
         cls._pw.stop()
 
-    def test_toggle_sandboxed_on_the_plane_card(self) -> None:
+    def test_empty_self_hosted_shows_no_workers_and_no_plane_card(self) -> None:
         # catalog:e2e-plane-runtime — API is not a runner; empty list + empty state.
         page = self.page
-        _ws, workspace_url = _signup_api(page)
+        _, workspace_url = _signup_api(page)
 
         goto_self_hosted(page, workspace_url)
         assert_no_control_plane_card(page)
-        body = page.inner_text("body")
-        self.assertIn("No workers yet", body)
-        self.assertIn("The API is not a runner", body)
-        listed = list_hosts(page, _ws)
-        assert_hosts_have_no_plane(listed)
-        own = listed.get("hosts") or []
-        if not own:
-            self.assertIn("No workers yet", body)
-            self.assertIn("The API is not a runner", body)
+        page.get_by_text("No workers yet", exact=True).wait_for(state="visible")
+        page.get_by_text("The API is not a runner").wait_for(state="visible")
 
 
 if __name__ == "__main__":

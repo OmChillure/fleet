@@ -6,6 +6,7 @@ Catalog: List, identity, status → Rename (click name, Enter / Escape).
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import unittest
@@ -16,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
     create_host,
     goto_self_hosted,
+    list_hosts,
     signup_login,
-    wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -62,6 +63,31 @@ def _require_playwright():
     return sync_playwright
 
 
+def _list_row(page, name: str):
+    """HostListRow button (list row, not the detail title=Rename control)."""
+    return (
+        page.get_by_role("button")
+        .filter(has_text=name)
+        .filter(has_text=re.compile(r"last seen", re.I))
+    )
+
+
+def _listed_host(page, workspace_id: str, host_id: str) -> dict:
+    listed = list_hosts(page, workspace_id)
+    for host in listed.get("hosts") or []:
+        if str(host.get("id")) == str(host_id):
+            return host
+    raise AssertionError(f"host {host_id} missing from list: {listed!r}"[:800])
+
+
+def _is_host_patch(req, host_id: str) -> bool:
+    return (
+        req.method == "PATCH"
+        and "/worker-hosts/" in req.url
+        and str(host_id) in req.url
+    )
+
+
 class CatalogRenameTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -92,100 +118,164 @@ class CatalogRenameTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_rename_card_enter_saves_escape_cancels(self) -> None:
+        from playwright.sync_api import expect
+
         page = self.page
         ws, workspace_url = signup_login(page, prefix="rename")
         seed = f"rename-seed-{uuid.uuid4().hex[:8]}"
         created = create_host(page, ws, seed)
-        host_id = str(created.get("host", created).get("id") or created.get("id") or "")
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
         goto_self_hosted(page, workspace_url)
-        wait_dx_ready(page)
 
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
-        )
-
-        card = page.locator("article").filter(has_text=seed)
-        card.wait_for(timeout=10_000)
-        rename_btn = card.get_by_title("Rename")
-        self.assertTrue(rename_btn.is_visible(), "seeded worker name is the Rename button")
-        self.assertEqual(rename_btn.inner_text().strip(), seed)
-        rename_btn.click()
-
-        # Name text lives on the button; after click it is an input value, so
-        # do not keep filtering the card with has_text=seed (or the other
-        # card inputs: Auto-update checkbox, Max jobs).
-        inp = page.locator("article").filter(has_text="pending").locator("input[autofocus]")
-        if inp.count() == 0:
-            inp = page.locator("input[autofocus]")
-        inp.wait_for(timeout=5_000)
-        inp.click()
+        row = _list_row(page, seed)
+        expect(row).to_be_visible()
+        row.click()
+        rename = page.get_by_title("Rename")
+        expect(rename).to_have_text(seed)
+        rename.click()
+        # Rename editor has no accessible name; autofocus is the public marker.
+        inp = page.locator("input[autofocus]")
+        expect(inp).to_be_visible()
         saved = f"rename-saved-{uuid.uuid4().hex[:8]}"
-        inp.fill("")
-        inp.press_sequentially(saved, delay=20)
-        self.assertEqual(inp.input_value().strip(), saved)
-        patch_url = "/worker-hosts"
-        if host_id:
-            patch_url = f"/worker-hosts/{host_id}"
+        inp.fill(saved)
         try:
             with page.expect_response(
-                lambda r: patch_url in r.url
-                and r.request.method == "PATCH"
-                and r.ok,
+                lambda r: _is_host_patch(r.request, host_id) and r.ok,
                 timeout=15_000,
             ) as pending:
                 inp.press("Enter")
             pending.value
         except Exception as e:  # noqa: BLE001 — include page dump
-            body = page.inner_text("body")
             self.fail(
                 f"Enter did not PATCH name={saved!r} ({e}). "
-                f"url={page.url} body={body[:1500]!r}"
+                f"url={page.url} body={page.inner_text('body')[:1500]!r}"
             )
-
-        try:
-            page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
-        except Exception as e:  # noqa: BLE001
-            body = page.inner_text("body")
-            self.fail(
-                f"saved name not on Rename button after PATCH ({e}). "
-                f"url={page.url} body={body[:1500]!r}"
-            )
-        goto_self_hosted(page, workspace_url)
-        wait_dx_ready(page)
-        page.locator("article").first.wait_for(timeout=15_000)
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
-        body = page.inner_text("body")
-        self.assertIn(saved, body)
-        self.assertNotIn(seed, body)
-
-        page.get_by_title("Rename").filter(has_text=saved).click()
-        inp = page.locator("input[autofocus]")
-        inp.wait_for(timeout=5_000)
-        inp.click()
-        cancelled = f"rename-esc-{uuid.uuid4().hex[:8]}"
-        inp.fill("")
-        inp.press_sequentially(cancelled, delay=20)
-        inp.press("Escape")
-
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=5_000)
-        self.assertNotIn(
-            cancelled,
-            page.inner_text("body"),
-            "Escape must restore the previous name and exit the input",
-        )
-
-        goto_self_hosted(page, workspace_url)
-        wait_dx_ready(page)
-        page.locator("article").first.wait_for(timeout=15_000)
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
-        body = page.inner_text("body")
-        self.assertIn(saved, body)
-        self.assertNotIn(cancelled, body)
+        expect(page.get_by_title("Rename")).to_have_text(saved)
+        listed = _listed_host(page, ws, host_id)
         self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
+            listed.get("name"),
+            saved,
+            f"Enter must persist name via list_hosts: {listed!r}"[:800],
         )
+
+        page.get_by_title("Rename").click()
+        inp = page.locator("input[autofocus]")
+        expect(inp).to_be_visible()
+        cancelled = f"rename-esc-{uuid.uuid4().hex[:8]}"
+        inp.fill(cancelled)
+        patches: list[str] = []
+
+        def _on_req(req) -> None:
+            if _is_host_patch(req, host_id):
+                patches.append(req.url)
+
+        page.on("request", _on_req)
+        try:
+            inp.press("Escape")
+            expect(page.get_by_title("Rename")).to_have_text(saved)
+        finally:
+            page.remove_listener("request", _on_req)
+        self.assertEqual(patches, [], f"Escape must not PATCH: {patches!r}")
+        listed = _listed_host(page, ws, host_id)
+        self.assertEqual(
+            listed.get("name"),
+            saved,
+            f"Escape must leave the saved name: {listed!r}"[:800],
+        )
+
+    def test_rename_enter_empty_or_unchanged_closes_without_patch(self) -> None:
+        from playwright.sync_api import expect
+
+        page = self.page
+        ws, workspace_url = signup_login(page, prefix="rename-empty")
+        seed = f"rename-empty-{uuid.uuid4().hex[:8]}"
+        created = create_host(page, ws, seed)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
+        goto_self_hosted(page, workspace_url)
+
+        row = _list_row(page, seed)
+        expect(row).to_be_visible()
+        row.click()
+        rename = page.get_by_title("Rename")
+        expect(rename).to_have_text(seed)
+        rename.click()
+        inp = page.locator("input[autofocus]")
+        expect(inp).to_be_visible()
+        patches: list[str] = []
+
+        def _on_req(req) -> None:
+            if _is_host_patch(req, host_id):
+                patches.append(req.url)
+
+        page.on("request", _on_req)
+        try:
+            inp.fill("")
+            inp.press("Enter")
+            expect(page.get_by_title("Rename")).to_have_text(seed)
+
+            page.get_by_title("Rename").click()
+            inp = page.locator("input[autofocus]")
+            expect(inp).to_be_visible()
+            expect(inp).to_have_value(seed)
+            inp.press("Enter")
+            expect(page.get_by_title("Rename")).to_have_text(seed)
+        finally:
+            page.remove_listener("request", _on_req)
+        self.assertEqual(
+            patches,
+            [],
+            f"empty/unchanged Enter must not PATCH: {patches!r}",
+        )
+        listed = _listed_host(page, ws, host_id)
+        self.assertEqual(listed.get("name"), seed, listed)
+
+    def test_rename_patch_error_toasts_and_keeps_old_name(self) -> None:
+        from playwright.sync_api import expect
+
+        page = self.page
+        ws, workspace_url = signup_login(page, prefix="rename-err")
+        seed = f"rename-err-{uuid.uuid4().hex[:8]}"
+        created = create_host(page, ws, seed)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
+        goto_self_hosted(page, workspace_url)
+
+        row = _list_row(page, seed)
+        expect(row).to_be_visible()
+        row.click()
+        rename = page.get_by_title("Rename")
+        expect(rename).to_have_text(seed)
+        rename.click()
+        inp = page.locator("input[autofocus]")
+        expect(inp).to_be_visible()
+        inp.fill(f"rename-fail-{uuid.uuid4().hex[:8]}")
+
+        def _fail_patch(route) -> None:
+            if route.request.method.upper() == "PATCH":
+                route.fulfill(
+                    status=500,
+                    content_type="application/json",
+                    body='{"error":"rename failed"}',
+                )
+                return
+            route.continue_()
+
+        page.route("**/api/workspaces/*/worker-hosts/*", _fail_patch)
+        try:
+            inp.press("Enter")
+            expect(
+                page.get_by_role("status").filter(has_text="rename failed")
+            ).to_be_visible()
+            expect(page.get_by_title("Rename")).to_have_text(seed)
+        finally:
+            page.unroute("**/api/workspaces/*/worker-hosts/*", _fail_patch)
+        listed = _listed_host(page, ws, host_id)
+        self.assertEqual(listed.get("name"), seed, listed)
 
 
 if __name__ == "__main__":

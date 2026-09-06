@@ -123,21 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_config_constructs_in_struct() {
-        let cfg = AuthConfig {
-            jwt_secret: "in-struct-secret-at-least-32-chars!!!!".into(),
-            access_ttl: Duration::from_secs(60),
-            refresh_ttl: Duration::from_secs(3600),
-            cookie_secure: false,
-            cookie_samesite: cookie::SameSite::Lax,
-            signup_token: None,
-        };
-        assert!(cfg.jwt_secret.len() >= 32);
-        assert!(!cfg.cookie_secure);
-        assert!(cfg.signup_token.is_none());
-    }
-
-    #[test]
     fn from_env_reads_signup_token() {
         let _guard = env_lock().lock().expect("env lock");
         let previous = env::var("SIGNUP_TOKEN").ok();

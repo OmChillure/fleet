@@ -14,9 +14,10 @@ use crate::components::toast::show_toast;
 use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
 use dioxus::prelude::*;
 use fleet_runners_view::{
-    ChatProviderCandidate, ChatProviderPick, agent_status_phrase, catalog_provider_display_name,
-    claude_cli_model_aliases, claude_effort_values, display_name, find_model_detail,
-    format_chat_elapsed, is_removed, pick_chat_provider_and_model, pick_effort_value,
+    ChatProviderCandidate, ChatProviderChoice, ChatProviderPick, agent_status_phrase,
+    catalog_provider_display_name, claude_cli_model_aliases, claude_effort_values, display_name,
+    find_model_detail, format_chat_elapsed, is_removed, ollama_empty_model_send_reason,
+    pick_chat_provider_and_model, pick_effort_value, resolve_provider_pick_after_change,
     should_apply_chat_defaults,
 };
 use gloo_timers::future::TimeoutFuture;
@@ -406,8 +407,8 @@ fn send_on_existing_session(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() && provider == "ollama" {
-        show_toast().error("Select a model first (`ollama pull …` on the runner).");
+    if let Some(reason) = ollama_empty_model_send_reason(&provider, &model) {
+        show_toast().error(reason);
         return;
     }
     write_stored_runner(&workspace_id, &runner_id);
@@ -571,8 +572,8 @@ fn send_message(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() && provider == "ollama" {
-        show_toast().error("Select a model first (`ollama pull …` on the runner).");
+    if let Some(reason) = ollama_empty_model_send_reason(&provider, &model) {
+        show_toast().error(reason);
         return;
     }
 
@@ -1209,6 +1210,14 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                         let ws = workspace_id.clone();
                                         move |e| {
                                             let id = e.value();
+                                            let choices: Vec<ChatProviderChoice> = providers
+                                                .iter()
+                                                .map(|p| ChatProviderChoice {
+                                                    id: p.id.clone(),
+                                                    available: p.available,
+                                                    coming_soon: p.coming_soon,
+                                                })
+                                                .collect();
                                             if let Some(p) =
                                                 providers.iter().find(|p| p.id == id && p.coming_soon)
                                             {
@@ -1216,14 +1225,22 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                     "{} is coming soon",
                                                     p.name
                                                 ));
-                                                if let Some(live) = providers
-                                                    .iter()
-                                                    .find(|x| x.available && !x.coming_soon)
+                                                if let Some(live_id) =
+                                                    resolve_provider_pick_after_change(&choices, &id)
                                                 {
-                                                    selected_provider.set(live.id.clone());
-                                                    let model = pick_default_model(live);
-                                                    selected_model.set(model.clone());
-                                                    write_stored_composer(&ws, &live.id, &model);
+                                                    if let Some(live) = providers
+                                                        .iter()
+                                                        .find(|x| x.id == live_id)
+                                                    {
+                                                        selected_provider.set(live.id.clone());
+                                                        let model = pick_default_model(live);
+                                                        selected_model.set(model.clone());
+                                                        write_stored_composer(
+                                                            &ws,
+                                                            &live.id,
+                                                            &model,
+                                                        );
+                                                    }
                                                 }
                                                 return;
                                             }
@@ -2047,5 +2064,18 @@ fn ChatBubbleIcon() -> Element {
             stroke_linejoin: "round",
             path { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" }
         }
+    }
+}
+
+#[cfg(test)]
+mod later_copy_tests {
+    use super::*;
+
+    #[test]
+    fn later_copy_overlay_skips_server_live_status() {
+        assert!(!looks_like_later_copy(
+            "Fleet `r` is live on this screen. Stay here — task status and agent activity show in the live panel. \
+I will not ask you to continue."
+        ));
     }
 }

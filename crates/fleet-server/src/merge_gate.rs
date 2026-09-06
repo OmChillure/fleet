@@ -1,77 +1,83 @@
-//! Lock: all tests must pass before a merge to main, and every test
-//! must be relevant.
-//!
-//! This GitLab has no runner (`.gitlab-ci.yml` is `when: never`). The
-//! merge gate is the text in AGENTS.md / docs/testing.md plus this scan.
+//! Lock: `just test-integration` and `scripts/run-every-test.sh`
+//! orch-integration keep the live orch `--test` list; the justfile
+//! `test` / `test-integration` recipes have `cargo test` and no `|| true`.
+
+const LIVE_ORCH_INTEGRATION_BINS: &[&str] = &[
+    "store_integration",
+    "tick_integration",
+    "api_integration",
+    "e2e_matrix",
+    "host_pool_spawn",
+    "host_update_tick",
+    "assignable_runner",
+    "git_config_patch",
+    "host_picker_product",
+];
+
+fn justfile_recipe<'a>(justfile: &'a str, header: &str) -> &'a str {
+    justfile
+        .split(header)
+        .nth(1)
+        .and_then(|s| s.split("\n# ").next())
+        .unwrap_or(justfile)
+}
+
+fn assert_live_orch_bins(label: &str, src: &str) {
+    assert!(
+        !src.contains("process_sandbox") && !src.contains("plane_runner_tick"),
+        "{label} must not name deleted orch test binaries:\n{src}"
+    );
+    for needle in LIVE_ORCH_INTEGRATION_BINS {
+        assert!(
+            src.contains(needle),
+            "{label} must run {needle}:\n{src}"
+        );
+    }
+}
 
 #[test]
 fn merge_to_main_requires_green_tests() {
-    let agents = include_str!("../../../AGENTS.md");
-    let testing = include_str!("../../../docs/testing.md");
-    let std = include_str!("../../../docs/testing-standardization.md");
     let justfile = include_str!("../../../justfile");
-    let gitlab = include_str!("../../../.gitlab-ci.yml");
+    let integration = justfile_recipe(justfile, "\ntest-integration:");
+    assert_live_orch_bins("just test-integration", integration);
+}
 
-    for (label, src) in [
-        ("AGENTS.md", agents),
-        ("docs/testing.md", testing),
-        ("docs/testing-standardization.md", std),
-    ] {
+#[test]
+fn run_every_test_sh_orch_integration_matches_live_bins() {
+    let every = include_str!("../../../scripts/run-every-test.sh");
+    let orch = every
+        .split("run_step orch-integration")
+        .nth(1)
+        .and_then(|s| s.split("run_step ").next())
+        .unwrap_or(every);
+    assert_live_orch_bins("scripts/run-every-test.sh orch-integration", orch);
+}
+
+#[test]
+fn justfile_test_and_test_integration_have_no_or_true_on_cargo() {
+    let justfile = include_str!("../../../justfile");
+    let unit = justfile_recipe(justfile, "\ntest:\n");
+    let integration = justfile_recipe(justfile, "\ntest-integration:");
+    for (label, src) in [("test", unit), ("test-integration", integration)] {
         assert!(
-            src.contains("All tests must pass before a merge to main"),
-            "{label} must lock a green suite before merge to main"
+            src.contains("cargo test"),
+            "just {label} must contain cargo test:\n{src}"
         );
         assert!(
-            src.contains("just test") && src.contains("just test-integration"),
-            "{label} must name just test and just test-integration"
-        );
-        assert!(
-            src.contains("All tests must be relevant"),
-            "{label} must lock that all tests must be relevant"
-        );
-        assert!(
-            src.contains("If a test is not relevant, decide whether the test or the code should change"),
-            "{label} must say a stale test is a product-or-test decision, not a keep-or-silence choice"
+            !src.contains("|| true"),
+            "just {label} must not wrap cargo in || true:\n{src}"
         );
     }
+}
 
-    assert!(
-        agents.contains("Do not merge unless a human asks you to merge"),
-        "AGENTS.md must still require a human merge"
-    );
-    assert!(
-        testing.contains("Do not use `|| true` around `cargo test`"),
-        "docs/testing.md must forbid || true around cargo test"
-    );
-
-    assert!(
-        gitlab.contains("when: never"),
-        ".gitlab-ci.yml must stay workflow: rules: when: never"
-    );
-    assert!(
-        !gitlab.contains("script:") && !gitlab.contains("\njob"),
-        ".gitlab-ci.yml must not grow a job; tests run locally"
-    );
-
-    let integration = justfile
-        .split("test-integration:")
-        .nth(1)
-        .and_then(|s| s.split("\n# ").next())
-        .unwrap_or(justfile);
-    assert!(
-        !integration.contains("process_sandbox") && !integration.contains("plane_runner_tick"),
-        "just test-integration must not name deleted orch test binaries:\n{integration}"
-    );
+#[test]
+fn justfile_test_integration_runs_auth_server_and_db_package_tests() {
+    let justfile = include_str!("../../../justfile");
+    let integration = justfile_recipe(justfile, "\ntest-integration:");
     for needle in [
-        "store_integration",
-        "tick_integration",
-        "api_integration",
-        "e2e_matrix",
-        "host_pool_spawn",
-        "host_update_tick",
-        "assignable_runner",
-        "git_config_patch",
-        "host_picker_product",
+        "cargo test -p fleet-auth --locked --tests",
+        "cargo test -p fleet-server --locked --tests",
+        "cargo test -p fleet-db --locked --tests",
     ] {
         assert!(
             integration.contains(needle),

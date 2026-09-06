@@ -137,6 +137,8 @@ mod tests {
     /// Isolate JWT / cookie / encryption so this lock is DATABASE_URL only
     /// (list-jwt-secret-unset-fails-closed owns JWT; do not set AuthMode::None).
     const JWT: &str = "list-database-url-empty-fails-boot-jwt-secret-32+";
+    const NOCONNECT_URL: &str =
+        "postgres://list-database-url-empty-fails-boot:noconnect@127.0.0.1:1/fleet_from_env_lock";
 
     fn from_env_for_database_url(database_url: Option<&str>) -> anyhow::Result<ServerConfig> {
         with_env(
@@ -201,20 +203,69 @@ mod tests {
         }
     }
 
-    /// Explicit URL still parses bind + CORS + auth. No live Postgres connect.
+    /// Fixed noconnect dummy URL is copied onto ServerConfig. No live Postgres connect.
     #[test]
     fn database_url_explicit_still_parses_bind_cors_auth() {
-        let process_url = env::var("DATABASE_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        let url = process_url.unwrap_or_else(|| {
-            "postgres://list-database-url-empty-fails-boot:noconnect@127.0.0.1:1/fleet_from_env_lock"
-                .into()
-        });
+        let cfg = from_env_for_database_url(Some(NOCONNECT_URL))
+            .expect("explicit DATABASE_URL must parse (no live connect)");
+        assert_eq!(cfg.database_url, NOCONNECT_URL);
+    }
 
+    #[test]
+    fn from_env_localhost_host_fails() {
         with_env(
             &[
-                ("DATABASE_URL", Some(url.as_str())),
+                ("DATABASE_URL", Some(NOCONNECT_URL)),
+                ("JWT_SECRET", Some(JWT)),
+                ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                ("COOKIE_SAMESITE", Some("Lax")),
+                ("COOKIE_SECURE", Some("false")),
+                ("HOST", Some("localhost")),
+                ("PORT", Some("8080")),
+                ("AUTH_HOST", None),
+                ("AUTH_PORT", None),
+                ("SANDBOX_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env()
+                    .expect_err("HOST=localhost is not a SocketAddr host");
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.contains("invalid HOST/PORT"),
+                    "error must mention invalid HOST/PORT, got {msg}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_auth_host_port_fallback() {
+        with_env(
+            &[
+                ("DATABASE_URL", Some(NOCONNECT_URL)),
+                ("JWT_SECRET", Some(JWT)),
+                ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                ("COOKIE_SAMESITE", Some("Lax")),
+                ("COOKIE_SECURE", Some("false")),
+                ("HOST", None),
+                ("PORT", None),
+                ("AUTH_HOST", Some("127.0.0.1")),
+                ("AUTH_PORT", Some("19090")),
+                ("SANDBOX_BACKEND", None),
+            ],
+            || {
+                let cfg = ServerConfig::from_env()
+                    .expect("AUTH_HOST/AUTH_PORT must bind when HOST/PORT unset");
+                assert_eq!(cfg.bind, "127.0.0.1:19090".parse().expect("fallback bind"));
+            },
+        );
+    }
+
+    #[test]
+    fn from_env_cors_origins_default_and_trimmed_list() {
+        with_env(
+            &[
+                ("DATABASE_URL", Some(NOCONNECT_URL)),
                 ("JWT_SECRET", Some(JWT)),
                 ("INTEGRATIONS_ENCRYPTION_KEY", None),
                 ("COOKIE_SAMESITE", Some("Lax")),
@@ -223,43 +274,101 @@ mod tests {
                 ("PORT", Some("18080")),
                 ("AUTH_HOST", None),
                 ("AUTH_PORT", None),
-                ("CORS_ORIGINS", Some("http://cors.example.test:3030")),
+                ("CORS_ORIGINS", None),
                 ("SANDBOX_BACKEND", None),
             ],
             || {
-                let cfg = ServerConfig::from_env()
-                    .expect("explicit DATABASE_URL must parse (no live connect)");
-                assert_eq!(cfg.database_url, url);
-                assert!(!cfg.database_url.trim().is_empty());
-                assert_eq!(cfg.bind, "127.0.0.1:18080".parse().expect("control bind"));
-                assert_eq!(cfg.cors_origins, vec!["http://cors.example.test:3030"]);
-                assert_eq!(cfg.auth.jwt_secret, JWT);
-                assert!(cfg.auth.jwt_secret.len() >= 32);
+                let cfg = ServerConfig::from_env().expect("unset CORS_ORIGINS must parse");
+                assert_eq!(
+                    cfg.cors_origins,
+                    vec!["http://localhost:3030", "http://127.0.0.1:3030"]
+                );
+            },
+        );
+        with_env(
+            &[
+                ("DATABASE_URL", Some(NOCONNECT_URL)),
+                ("JWT_SECRET", Some(JWT)),
+                ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                ("COOKIE_SAMESITE", Some("Lax")),
+                ("COOKIE_SECURE", Some("false")),
+                ("HOST", Some("127.0.0.1")),
+                ("PORT", Some("18080")),
+                ("AUTH_HOST", None),
+                ("AUTH_PORT", None),
+                ("CORS_ORIGINS", Some(" a.test , , b.test ")),
+                ("SANDBOX_BACKEND", None),
+            ],
+            || {
+                let cfg = ServerConfig::from_env().expect("trimmed CORS_ORIGINS must parse");
+                assert_eq!(cfg.cors_origins, vec!["a.test", "b.test"]);
             },
         );
     }
 
     #[test]
-    fn unset_worker_dist_dir_parses_as_none() {
-        assert_eq!(worker_dist_dir_from_raw(None), None);
-    }
-
-    #[test]
     fn empty_or_whitespace_worker_dist_dir_parses_as_none() {
-        assert_eq!(worker_dist_dir_from_raw(Some("")), None);
-        assert_eq!(worker_dist_dir_from_raw(Some("   ")), None);
-        assert_eq!(worker_dist_dir_from_raw(Some("\t\n")), None);
+        for (case, value) in [("empty", ""), ("spaces", "   "), ("tabs_newlines", "\t\n")] {
+            with_env(
+                &[
+                    ("DATABASE_URL", Some(NOCONNECT_URL)),
+                    ("JWT_SECRET", Some(JWT)),
+                    ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                    ("COOKIE_SAMESITE", Some("Lax")),
+                    ("COOKIE_SECURE", Some("false")),
+                    ("HOST", Some("127.0.0.1")),
+                    ("PORT", Some("18081")),
+                    ("AUTH_HOST", None),
+                    ("AUTH_PORT", None),
+                    ("SANDBOX_BACKEND", None),
+                    ("FLEET_WORKER_DIST_DIR", Some(value)),
+                ],
+                || {
+                    let cfg = ServerConfig::from_env().unwrap_or_else(|err| {
+                        panic!(
+                            "{case}: empty/whitespace FLEET_WORKER_DIST_DIR must Ok, got {err:#}"
+                        )
+                    });
+                    assert_eq!(
+                        cfg.worker_dist_dir, None,
+                        "{case}: empty/whitespace FLEET_WORKER_DIST_DIR must be None, not Some empty/CWD"
+                    );
+                },
+            );
+        }
     }
 
     #[test]
     fn set_worker_dist_dir_parses_trimmed_path() {
-        assert_eq!(
-            worker_dist_dir_from_raw(Some("/opt/fleet/dist")),
-            Some(PathBuf::from("/opt/fleet/dist"))
-        );
-        assert_eq!(
-            worker_dist_dir_from_raw(Some("  /opt/fleet/dist  ")),
-            Some(PathBuf::from("/opt/fleet/dist"))
-        );
+        for (case, value) in [
+            ("set", "/opt/fleet/dist"),
+            ("padded", "  /opt/fleet/dist  "),
+        ] {
+            with_env(
+                &[
+                    ("DATABASE_URL", Some(NOCONNECT_URL)),
+                    ("JWT_SECRET", Some(JWT)),
+                    ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                    ("COOKIE_SAMESITE", Some("Lax")),
+                    ("COOKIE_SECURE", Some("false")),
+                    ("HOST", Some("127.0.0.1")),
+                    ("PORT", Some("18081")),
+                    ("AUTH_HOST", None),
+                    ("AUTH_PORT", None),
+                    ("SANDBOX_BACKEND", None),
+                    ("FLEET_WORKER_DIST_DIR", Some(value)),
+                ],
+                || {
+                    let cfg = ServerConfig::from_env().unwrap_or_else(|err| {
+                        panic!("{case}: set FLEET_WORKER_DIST_DIR must Ok, got {err:#}")
+                    });
+                    assert_eq!(
+                        cfg.worker_dist_dir,
+                        Some(PathBuf::from("/opt/fleet/dist")),
+                        "{case}: set FLEET_WORKER_DIST_DIR must be Some(\"/opt/fleet/dist\") after trim"
+                    );
+                },
+            );
+        }
     }
 }

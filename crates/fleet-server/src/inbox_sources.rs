@@ -394,7 +394,107 @@ mod tests {
     }
 
     #[test]
-    fn merge_legacy_fields_into_filters() {
+    fn merge_legacy_github_repos_land_in_filters() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            Some(&["acme/api".into()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            github_repos(&merged),
+            vec!["acme/api"],
+            "github_repos must land as filters.github.repos"
+        );
+    }
+
+    #[test]
+    fn merge_legacy_jira_jql_lands_in_filters() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            Some("project = ENG"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            jira_jql(&merged).as_deref(),
+            Some("project = ENG"),
+            "jira_jql must land as filters.jira.jql"
+        );
+    }
+
+    #[test]
+    fn merge_legacy_slack_channels_land_in_filters() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            None,
+            Some(&["#eng".into()]),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            slack_channels(&merged),
+            vec!["#eng"],
+            "slack_channels must land as filters.slack.channels"
+        );
+    }
+
+    #[test]
+    fn merge_legacy_gitlab_projects_land_in_filters() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&["acme/app".into()]),
+            None,
+            None,
+        );
+        assert_eq!(
+            gitlab_projects(&merged),
+            vec!["acme/app"],
+            "gitlab_projects must land as filters.gitlab.projects"
+        );
+    }
+
+    #[test]
+    fn merge_legacy_linear_teams_land_in_filters() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&["ENG".into()]),
+            None,
+        );
+        assert_eq!(
+            linear_teams(&merged),
+            vec!["ENG"],
+            "linear_teams must land as filters.linear.teams"
+        );
+    }
+
+    #[test]
+    fn merge_omitted_notion_stays_empty() {
         let merged = merge_filters(
             &json!({}),
             None,
@@ -406,49 +506,225 @@ mod tests {
             Some(&["ENG".into()]),
             None,
         );
-        assert_eq!(merged["gitlab"]["projects"][0], "acme/app");
-        assert_eq!(merged["linear"]["teams"][0], "ENG");
-        assert!(item_matches_filters(&merged, "github", "acme/api#9"));
-        assert!(!item_matches_filters(&merged, "github", "other/repo#1"));
-        assert!(item_matches_filters(&merged, "linear", "ENG-12"));
-        assert!(!item_matches_filters(&merged, "linear", "OPS-1"));
         assert!(
-            !item_matches_filters(&merged, "linear", "ENGINEERING-1"),
-            "linear team ENG must not match ENGINEERING-1"
+            notion_databases(&merged).is_empty(),
+            "omitted notion_databases must stay empty when other legacy fields land"
+        );
+    }
+
+    #[test]
+    fn github_repo_allowlist_is_exact() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            Some(&["acme/api".into()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            item_matches_filters(&merged, "github", "acme/api#9"),
+            "acme/api#9 must match repo allowlist acme/api"
+        );
+        assert!(
+            !item_matches_filters(&merged, "github", "other/repo#1"),
+            "other/repo must not match acme/api"
         );
         assert!(
             !item_matches_filters(&merged, "github", "acme/api-extra#1"),
             "repo allowlist must be exact, not a prefix of owner/name"
         );
-        assert_eq!(merged["github"]["repos"][0], "acme/api");
-        assert_eq!(merged["jira"]["jql"], "project = ENG");
-        assert_eq!(slack_channels(&merged), vec!["#eng"]);
-        assert!(notion_databases(&merged).is_empty());
+    }
+
+    #[test]
+    fn linear_team_eng_does_not_match_engineering() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&["ENG".into()]),
+            None,
+        );
+        assert!(
+            item_matches_filters(&merged, "linear", "ENG-12"),
+            "ENG-12 must match team ENG"
+        );
+        assert!(
+            !item_matches_filters(&merged, "linear", "OPS-1"),
+            "OPS-1 must not match team ENG"
+        );
+        assert!(
+            !item_matches_filters(&merged, "linear", "ENGINEERING-1"),
+            "linear team ENG must not match ENGINEERING-1"
+        );
+    }
+
+    #[test]
+    fn merge_filters_legacy_fields_win_over_existing_and_incoming() {
+        let merged = merge_filters(
+            &json!({ "github": { "repos": ["old/repo"] } }),
+            Some(&json!({ "github": { "repos": ["old/repo"] } })),
+            Some(&["acme/api".into()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            github_repos(&merged),
+            vec!["acme/api"],
+            "legacy github_repos must overwrite existing and incoming filters.github.repos"
+        );
+    }
+
+    #[test]
+    fn merge_filters_empty_jira_jql_removes_jira() {
+        let merged = merge_filters(
+            &json!({ "jira": { "jql": "project=ENG" } }),
+            None,
+            None,
+            Some(""),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            merged.get("jira").is_none(),
+            "empty jira_jql must remove the jira key"
+        );
+    }
+
+    #[test]
+    fn merge_filters_github_repos_require_owner_slash_name() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            Some(&["acme".into(), "acme/api".into()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            github_repos(&merged),
+            vec!["acme/api"],
+            "github_repos without owner/name slash must be dropped"
+        );
+    }
+
+    #[test]
+    fn follow_connected_webhook_accepts_unlisted_inbox_provider() {
+        assert!(
+            webhook_provider_allowed(true, &["slack".into()], "github"),
+            "follow_connected must ingest github even when the pin list is slack-only"
+        );
+    }
+
+    #[test]
+    fn pinned_webhook_empty_allowlist_rejects_inbox_provider() {
+        assert!(
+            !webhook_provider_allowed(false, &[], "jira"),
+            "empty pin without follow_connected must reject jira"
+        );
+    }
+
+    #[test]
+    fn pinned_webhook_accepts_listed_inbox_provider() {
+        assert!(
+            webhook_provider_allowed(false, &["slack".into(), "linear".into()], "slack"),
+            "pinned slack+linear must ingest slack"
+        );
     }
 
     #[test]
     fn pinned_webhook_rejects_other_providers() {
-        assert!(webhook_provider_allowed(true, &["slack".into()], "github"));
-        assert!(!webhook_provider_allowed(false, &[], "jira"));
-        assert!(webhook_provider_allowed(
-            false,
-            &["slack".into(), "linear".into()],
-            "slack"
-        ));
-        assert!(!webhook_provider_allowed(
-            false,
-            &["slack".into()],
-            "github"
-        ));
-        assert!(!webhook_provider_allowed(true, &[], "figma"));
+        assert!(
+            !webhook_provider_allowed(false, &["slack".into()], "github"),
+            "pinned slack must not ingest github"
+        );
+    }
+
+    #[test]
+    fn webhook_follow_connected_rejects_unknown_provider() {
+        assert!(
+            !webhook_provider_allowed(true, &[], "figma"),
+            "follow_connected must still reject non-inbox figma"
+        );
+    }
+
+    #[test]
+    fn webhook_allowlist_match_is_trimmed_and_case_insensitive() {
+        assert!(
+            webhook_provider_allowed(false, &[" Slack ".into()], "SLACK"),
+            "pinned allowlist must match after trim and ascii lowercase on both sides"
+        );
+    }
+
+    #[test]
+    fn webhook_rejects_non_inbox_even_when_listed() {
+        assert!(
+            !webhook_provider_allowed(false, &["figma".into(), "slack".into()], "figma"),
+            "is_inbox_provider must reject figma even when the pin list includes it"
+        );
     }
 
     #[test]
     fn trello_board_allowlist_is_exact() {
         let filters = json!({ "trello": { "boards": ["abc"] } });
-        assert!(listed_hit(&trello_boards(&filters), "abc"));
-        assert!(listed_hit(&trello_boards(&filters), "ABC"));
-        assert!(!listed_hit(&trello_boards(&filters), "other"));
-        assert!(listed_hit(&[], "anything"));
+        let allow = trello_boards(&filters);
+        assert!(
+            listed_hit(&allow, "ABC"),
+            "board allowlist abc must match ABC"
+        );
+        assert!(
+            !listed_hit(&allow, "abcd"),
+            "board allowlist abc must not prefix-match abcd"
+        );
+        assert!(
+            !listed_hit(&allow, "abc-extra"),
+            "board allowlist abc must not prefix-match abc-extra"
+        );
+    }
+
+    #[test]
+    fn item_matches_filters_trello_ignores_board_allowlist() {
+        let filters = json!({ "trello": { "boards": ["abc"] } });
+        assert!(
+            item_matches_filters(&filters, "trello", "any-card-id"),
+            "trello webhook keys are card ids; board allowlist must not filter them"
+        );
+    }
+
+    #[test]
+    fn merge_filters_legacy_trello_boards_overwrites() {
+        let merged = merge_filters(
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&["board-1".into()]),
+        );
+        assert_eq!(
+            trello_boards(&merged).first().map(String::as_str),
+            Some("board-1"),
+            "legacy trello_boards must land as filters.trello.boards[0]"
+        );
     }
 }

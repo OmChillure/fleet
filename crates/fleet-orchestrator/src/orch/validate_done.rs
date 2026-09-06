@@ -223,15 +223,12 @@ fn resolve_work_path(work_dir: &Path, rel: &str) -> Option<std::path::PathBuf> {
     if rel.split(['/', '\\']).any(|p| p == "..") {
         return None;
     }
-    let candidates = [
-        work_dir.join(rel),
-        work_dir.join("work").join(rel),
-        work_dir.join("work"),
-    ];
+    // `work` itself is the session work directory, not a fallback for other paths.
+    if rel == "work" && work_dir.join("work").is_dir() {
+        return Some(work_dir.join("work"));
+    }
+    let candidates = [work_dir.join(rel), work_dir.join("work").join(rel)];
     for p in candidates {
-        if rel == "work" && work_dir.join("work").is_dir() {
-            return Some(work_dir.join("work"));
-        }
         if p.exists() {
             return Some(p);
         }
@@ -286,13 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn stub_always_passes() {
-        let dir = tempdir().unwrap();
-        let c = validate_task_done(&task(json!([])), dir.path(), "stub");
-        assert!(c.ok, "{c:?}");
-    }
-
-    #[test]
     fn k8s_and_remote_still_require_proof_of_work() {
         // Product gate: a task is not done_success until the workspace proves it.
         // HTTP ok / CR phase alone is not proof. Missing result.md must fail
@@ -340,7 +330,58 @@ mod tests {
 
     #[test]
     fn exists_rejects_parent_escape() {
-        assert!(resolve_work_path(std::path::Path::new("/tmp"), "../etc/passwd").is_none());
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        let t = task(json!(["exists:../etc/passwd"]));
+        let c = validate_task_done(&t, dir.path(), "local");
+        assert!(
+            !c.ok,
+            "exists:../etc/passwd must not treat a parent path as session proof: {c:?}"
+        );
+        assert!(
+            c.reasons.iter().any(|r| r.contains("../etc/passwd")),
+            "fail reason must name the escaped rel: {c:?}"
+        );
+    }
+
+    #[test]
+    fn contains_parent_escape_does_not_read_host_file() {
+        let parent = tempdir().unwrap();
+        let work_dir = parent.path().join("session");
+        std::fs::create_dir_all(work_dir.join("work")).unwrap();
+        std::fs::write(work_dir.join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(parent.path().join("etc")).unwrap();
+        std::fs::write(parent.path().join("etc").join("passwd"), "root:x:0:0\n").unwrap();
+        let t = task(json!(["contains:../etc/passwd:root"]));
+        let c = validate_task_done(&t, &work_dir, "local");
+        assert!(
+            !c.ok,
+            "contains:../etc/passwd:root must not treat a host file as session proof: {c:?}"
+        );
+        assert!(
+            c.reasons.iter().any(|r| r.contains("../etc/passwd")),
+            "fail reason must name the escaped rel: {c:?}"
+        );
+    }
+
+    #[test]
+    fn exists_backslash_or_nested_parent_segment_fails() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        for rel in [r"..\etc\passwd", "foo/../../etc/passwd"] {
+            let t = task(json!([format!("exists:{rel}")]));
+            let c = validate_task_done(&t, dir.path(), "local");
+            assert!(
+                !c.ok,
+                "exists:{rel} must not treat a parent segment as session proof: {c:?}"
+            );
+            assert!(
+                c.reasons.iter().any(|r| r.contains(rel)),
+                "fail reason must name the escaped rel {rel}: {c:?}"
+            );
+        }
     }
 
     #[test]
@@ -362,30 +403,143 @@ mod tests {
         std::fs::write(dir.path().join("work").join("hello.txt"), "nope\n").unwrap();
         let t = task(json!(["contains:hello.txt:hello"]));
         let c = validate_task_done(&t, dir.path(), "docker");
-        assert!(!c.ok);
+        assert!(!c.ok, "{c:?}");
+        assert!(
+            c.reasons
+                .iter()
+                .any(|r| r.contains("hello.txt") && r.contains("hello")),
+            "needle-miss must name the path and needle: {c:?}"
+        );
     }
 
     #[test]
-    fn ship_id_does_not_require_a_github_url() {
+    fn contains_missing_path_fails() {
         let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("result.md"),
-            "Posted the summary to Slack and stopped.\n",
-        )
-        .unwrap();
-        let mut t = task(json!([]));
-        t.plan_task_id = "ship".into();
-        t.worker_profile = "generalist".into();
-        let c = validate_task_done(&t, dir.path(), "process");
-        assert!(c.ok, "{c:?}");
+        std::fs::write(dir.path().join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        let t = task(json!(["contains:hello.txt:hello"]));
+        let c = validate_task_done(&t, dir.path(), "docker");
+        assert!(!c.ok, "{c:?}");
+        assert!(
+            c.reasons.iter().any(|r| r.contains("does not exist")),
+            "missing contains: path must say does not exist: {c:?}"
+        );
+    }
+
+    #[test]
+    fn contains_empty_needle_is_noop() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        std::fs::write(dir.path().join("work").join("hello.txt"), "nope\n").unwrap();
+        for line in ["contains:hello.txt:", "contains:hello.txt:   "] {
+            let t = task(json!([line]));
+            let c = validate_task_done(&t, dir.path(), "docker");
+            assert!(c.ok, "empty needle {line} is a no-op: {c:?}");
+        }
+    }
+
+    #[test]
+    fn contains_needle_is_case_sensitive() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("result.md"), "Completed the marker file.\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        std::fs::write(dir.path().join("work").join("hello.txt"), "Hello").unwrap();
+        let t = task(json!(["contains:hello.txt:hello"]));
+        let c = validate_task_done(&t, dir.path(), "docker");
+        assert!(!c.ok, "{c:?}");
+        assert!(
+            c.reasons.iter().any(|r| r.contains("does not contain")),
+            "case-sensitive needle miss must say does not contain: {c:?}"
+        );
     }
 
     #[test]
     fn generalist_default_acceptance_is_result_only() {
-        let acc = default_acceptance("generalist");
-        assert_eq!(acc, vec!["result.md exists and is non-empty"]);
-        let coding = default_acceptance("coding");
-        assert!(coding.iter().any(|l| l.contains("exists:work")));
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Completed the marker file.\n",
+        )
+        .unwrap();
+        let mut t = task(json!([]));
+        t.worker_profile = "generalist".into();
+        let c = validate_task_done(&t, dir.path(), "process");
+        assert!(
+            c.ok,
+            "generalist + long result.md must pass without work/: {c:?}"
+        );
+    }
+
+    #[test]
+    fn coding_empty_acceptance_fails_without_work_dir() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Completed the marker file.\n",
+        )
+        .unwrap();
+        let c = validate_task_done(&task(json!([])), dir.path(), "process");
+        assert!(
+            !c.ok,
+            "coding + long result.md without work/ must fail: {c:?}"
+        );
+        assert!(
+            c.reasons.iter().any(|r| r.contains("work")),
+            "fail reason must mention work: {c:?}"
+        );
+    }
+
+    #[test]
+    fn review_or_testing_empty_acceptance_requires_pass_or_fail() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Reviewed the change set thoroughly.\n",
+        )
+        .unwrap();
+        for profile in ["reviewer", "testing"] {
+            let mut t = task(json!([]));
+            t.worker_profile = profile.into();
+            let c = validate_task_done(&t, dir.path(), "process");
+            assert!(!c.ok, "{profile} without pass/fail must fail: {c:?}");
+            assert!(
+                c.reasons.iter().any(|r| r.contains("must say pass or fail")),
+                "{profile} fail reason must require pass or fail: {c:?}"
+            );
+        }
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Reviewed the change set thoroughly. PASS\n",
+        )
+        .unwrap();
+        for profile in ["reviewer", "testing"] {
+            let mut t = task(json!([]));
+            t.worker_profile = profile.into();
+            let c = validate_task_done(&t, dir.path(), "process");
+            assert!(c.ok, "{profile} + PASS must pass: {c:?}");
+        }
+    }
+
+    #[test]
+    fn implement_alias_uses_coding_exists_work() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("result.md"),
+            "Completed the marker file.\n",
+        )
+        .unwrap();
+        let mut t = task(json!([]));
+        t.worker_profile = "implementer".into();
+        let c = validate_task_done(&t, dir.path(), "process");
+        assert!(
+            !c.ok,
+            "implementer + long result.md without work/ must fail: {c:?}"
+        );
+        assert!(
+            c.reasons.iter().any(|r| r.contains("work")),
+            "fail reason must mention work: {c:?}"
+        );
     }
 
     #[test]

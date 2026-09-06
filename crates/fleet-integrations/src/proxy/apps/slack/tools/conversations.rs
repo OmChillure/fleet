@@ -19,8 +19,9 @@ pub(crate) async fn list_channels(
         .get("types")
         .and_then(|v| v.as_str())
         .unwrap_or("public_channel,private_channel");
+    let origin = slack_api_origin();
     let url = format!(
-        "https://slack.com/api/conversations.list?limit={limit}&types={types}&exclude_archived=true"
+        "{origin}/conversations.list?limit={limit}&types={types}&exclude_archived=true"
     );
     let (status, body) = slack_get(http, token, &url).await;
     if let Err(e) = slack_ok(status, &body, "list_channels") {
@@ -62,7 +63,8 @@ pub(crate) async fn list_users(http: &reqwest::Client, token: &str, args: &Value
         .and_then(|v| v.as_u64())
         .unwrap_or(50)
         .clamp(1, 200);
-    let url = format!("https://slack.com/api/users.list?limit={limit}");
+    let origin = slack_api_origin();
+    let url = format!("{origin}/users.list?limit={limit}");
     let (status, body) = slack_get(http, token, &url).await;
     if let Err(e) = slack_ok(status, &body, "list_users") {
         return e;
@@ -355,21 +357,286 @@ async fn resolve_channel_id(
 mod tests {
     use super::*;
 
-    #[test]
-    fn matches_hash_eng_name() {
-        let items = vec![
+    fn listed_channels() -> Vec<Value> {
+        vec![
             json!({"id": "C111", "name": "general"}),
             json!({"id": "CENG", "name": "eng"}),
-        ];
+        ]
+    }
+
+    #[test]
+    fn matches_hash_eng_name() {
+        let items = listed_channels();
         assert_eq!(
             match_listed_channel(&items, "#eng").as_deref(),
             Some("CENG")
         );
+    }
+
+    #[test]
+    fn match_listed_channel_bare_eng_name() {
+        let items = listed_channels();
         assert_eq!(match_listed_channel(&items, "eng").as_deref(), Some("CENG"));
+    }
+
+    #[test]
+    fn match_listed_channel_listed_id() {
+        let items = listed_channels();
         assert_eq!(
             match_listed_channel(&items, "C111").as_deref(),
             Some("C111")
         );
+    }
+
+    #[test]
+    fn match_listed_channel_unknown_name_is_none() {
+        let items = listed_channels();
         assert!(match_listed_channel(&items, "missing").is_none());
+    }
+
+    #[test]
+    fn match_listed_channel_name_is_case_insensitive() {
+        let items = listed_channels();
+        assert_eq!(
+            match_listed_channel(&items, "#Eng").as_deref(),
+            Some("CENG")
+        );
+        assert_eq!(match_listed_channel(&items, "ENG").as_deref(), Some("CENG"));
+    }
+
+    #[test]
+    fn match_listed_channel_trims_and_rejects_hash_only() {
+        let items = listed_channels();
+        assert_eq!(
+            match_listed_channel(&items, " #eng ").as_deref(),
+            Some("CENG")
+        );
+        assert!(match_listed_channel(&items, "#").is_none());
+        assert!(match_listed_channel(&items, "").is_none());
+        assert!(match_listed_channel(&items, "   ").is_none());
+    }
+
+    #[test]
+    fn looks_like_slack_channel_id_c_prefix_len_ge_8() {
+        assert!(looks_like_slack_channel_id("C01234567"));
+        assert!(!looks_like_slack_channel_id("C111"));
+        assert!(!looks_like_slack_channel_id("#C01234567"));
+        assert!(!looks_like_slack_channel_id("c01234567"));
+    }
+}
+
+#[cfg(test)]
+mod list_ops_sink_tests {
+    use super::*;
+    use crate::proxy::dispatch;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    struct OriginGuard;
+    impl Drop for OriginGuard {
+        fn drop(&mut self) {
+            TEST_SLACK_API_BASE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    struct SlackSink {
+        hits: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        origin: String,
+    }
+
+    impl Drop for SlackSink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl SlackSink {
+        fn bind(body: Value) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind slack sink");
+            listener.set_nonblocking(true).expect("nonblocking sink");
+            let addr = listener.local_addr().expect("sink addr");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let hits_t = hits.clone();
+            let stop_t = stop.clone();
+            let payload = body.to_string();
+            thread::spawn(move || {
+                while !stop_t.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_t.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut buf = Vec::new();
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match stream.read(&mut tmp) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        buf.extend_from_slice(&tmp[..n]);
+                                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let resp = format!(
+                                "HTTP/1.1 200 ok\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                payload.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                hits,
+                stop,
+                origin: format!("http://{addr}"),
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn dispatch_slack(origin: &str, token: &str, operation: &str) -> ProxyResult {
+        let _guard = OriginGuard;
+        TEST_SLACK_API_BASE.with(|c| *c.borrow_mut() = Some(origin.to_string()));
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http");
+        dispatch("slack", &http, token, operation, &json!({}), &json!({})).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slack_list_channels_local_sink_maps_id_name_and_count() {
+        const LEAK: &str = "xoxb-LIST-CHANNELS-MUST-NOT-ECHO-c0ffee";
+        let sink = SlackSink::bind(json!({
+            "ok": true,
+            "access_token": LEAK,
+            "channels": [{
+                "id": "C0ENGTEST",
+                "name": "eng",
+                "is_private": false,
+                "topic": { "value": "engineering" }
+            }]
+        }));
+        let result = dispatch_slack(&sink.origin, LEAK, "list_channels").await;
+        assert!(result.ok, "conversations.list 200 must be ok: {result:?}");
+        assert_eq!(
+            result.data["count"],
+            json!(1),
+            "count must match items: {result:?}"
+        );
+        assert_eq!(
+            result.data["items"][0]["id"],
+            json!("C0ENGTEST"),
+            "must map channels[].id: {result:?}"
+        );
+        assert_eq!(
+            result.data["items"][0]["name"],
+            json!("eng"),
+            "must map channels[].name: {result:?}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK) && !dump.to_ascii_lowercase().contains("bearer"),
+            "list_channels must not echo bearer/token: {dump}"
+        );
+        assert!(
+            sink.hits() > 0,
+            "list_channels must hit the sink: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slack_list_users_local_sink_drops_deleted_and_bots() {
+        const LEAK: &str = "xoxb-LIST-USERS-MUST-NOT-ECHO-0b0d";
+        let sink = SlackSink::bind(json!({
+            "ok": true,
+            "access_token": LEAK,
+            "members": [
+                {
+                    "id": "U0DELETED",
+                    "name": "gone",
+                    "deleted": true,
+                    "is_bot": false,
+                    "real_name": "Gone"
+                },
+                {
+                    "id": "U0BOTUSER",
+                    "name": "hubot",
+                    "deleted": false,
+                    "is_bot": true,
+                    "real_name": "Hubot"
+                },
+                {
+                    "id": "U0HUMAN01",
+                    "name": "ada",
+                    "deleted": false,
+                    "is_bot": false,
+                    "real_name": "Ada"
+                }
+            ]
+        }));
+        let result = dispatch_slack(&sink.origin, LEAK, "list_users").await;
+        assert!(result.ok, "users.list 200 must be ok: {result:?}");
+        let items = result.data["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("items: {result:?}"));
+        assert_eq!(
+            result.data["count"],
+            json!(1),
+            "only the human remains: {result:?}"
+        );
+        assert_eq!(items.len(), 1, "deleted+bot must be dropped: {result:?}");
+        assert_eq!(items[0]["id"], json!("U0HUMAN01"), "{result:?}");
+        assert_eq!(items[0]["name"], json!("ada"), "{result:?}");
+        assert!(
+            items.iter().all(|u| {
+                u["id"].as_str() != Some("U0DELETED") && u["id"].as_str() != Some("U0BOTUSER")
+            }),
+            "must drop deleted and bots: {result:?}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(!dump.contains(LEAK), "list_users must not echo token: {dump}");
+        assert!(sink.hits() > 0, "list_users must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slack_invalid_auth_is_token_expired() {
+        const LEAK: &str = "xoxb-INVALID-AUTH-MUST-NOT-ECHO-dead";
+        let sink = SlackSink::bind(json!({
+            "ok": false,
+            "error": "invalid_auth",
+            "access_token": LEAK
+        }));
+        let result = dispatch_slack(&sink.origin, LEAK, "list_channels").await;
+        assert!(!result.ok, "invalid_auth must be ok:false: {result:?}");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("token_expired"),
+            "Slack invalid_auth must map to token_expired: {result:?}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK),
+            "token_expired must not echo token: {dump}"
+        );
+        assert!(sink.hits() > 0, "invalid_auth must hit the sink: {result:?}");
     }
 }

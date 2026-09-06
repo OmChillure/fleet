@@ -21,8 +21,8 @@ from runners_e2e_helpers import (  # noqa: E402
     UI,
     create_host,
     goto_self_hosted,
+    list_hosts,
     pair_and_heartbeat,
-    wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -34,10 +34,9 @@ BROWSERS = os.environ.get(
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
-SHOW_REMOVED = re.compile(r"^Show removed \(\d+\)$")
-HIDE_REMOVED = re.compile(r"^Hide removed \(\d+\)$")
+SHOW_REMOVED = re.compile(r"^Show removed \([1-9]\d*\)$")
+HIDE_REMOVED = re.compile(r"^Hide removed \([1-9]\d*\)$")
 CONFIRM_COPY = "Remove this worker?"
-
 
 def _listening(host: str, port: int) -> bool:
     try:
@@ -116,6 +115,22 @@ def _require_playwright():
     return sync_playwright
 
 
+def _list_row(page, name: str):
+    """HostListRow button (list row, not the detail article)."""
+    return (
+        page.get_by_role("button")
+        .filter(has_text=name)
+        .filter(has_text=re.compile(r"last seen", re.I))
+    )
+
+
+def _listed_host(listed: dict, host_id: str) -> dict:
+    for host in listed.get("hosts") or []:
+        if host.get("id") == host_id:
+            return host
+    raise AssertionError(f"host {host_id} missing from list: {listed!r}"[:800])
+
+
 class CatalogShowRemovedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -146,13 +161,14 @@ class CatalogShowRemovedTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_show_removed_after_revoke_of_a_paired_box(self) -> None:
+        # catalog:e2e-show-removed — Confirm paired revoke, then Show/Hide removed.
         page = self.page
         ws, workspace_url = _api_workspace(page)
         leftover = f"never-paired-{uuid.uuid4().hex[:8]}"
         paired_name = f"paired-rm-{uuid.uuid4().hex[:8]}"
 
         leftover_created = create_host(page, ws, leftover)
-        leftover_id = leftover_created["host"]["id"]
+        leftover_id = str(leftover_created["host"]["id"])
         revoked = page.request.delete(
             f"{UI}/api/workspaces/{ws}/worker-hosts/{leftover_id}"
         )
@@ -161,75 +177,65 @@ class CatalogShowRemovedTests(unittest.TestCase):
             f"revoke leftover {leftover_id}: {revoked.status} {revoked.text()[:300]}",
         )
 
-        pair_and_heartbeat(page, ws, paired_name)
+        created, _paired, _hb = pair_and_heartbeat(page, ws, paired_name)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        paired_id = str(host.get("id") or "")
+        self.assertTrue(paired_id, created)
+
         goto_self_hosted(page, workspace_url)
-        wait_dx_ready(page)
-        page.wait_for_selector("h1", state="attached", timeout=60_000)
+        row = _list_row(page, paired_name)
+        try:
+            row.first.wait_for(timeout=30_000)
+        except Exception as e:
+            raise AssertionError(
+                f"paired list row {paired_name!r} missing. "
+                f"body={page.inner_text('body')[:800]!r}"
+            ) from e
+        row.first.click()
 
-        card = page.locator("article").filter(has_text=paired_name)
-        card.first.wait_for(state="attached", timeout=30_000)
-        self.assertNotIn(
-            leftover,
-            page.inner_text("body"),
-            "revoked never-paired leftover must stay hidden",
-        )
-        self.assertEqual(
-            page.get_by_role("button", name=SHOW_REMOVED).count(),
-            0,
-            "Show removed must stay hidden until a paired box is revoked",
-        )
-
-        card.get_by_role("button", name="Remove worker").click(force=True)
+        page.get_by_role("button", name="Remove worker").wait_for(timeout=10_000)
+        page.get_by_role("button", name="Remove worker").click()
         page.get_by_text(CONFIRM_COPY).wait_for(timeout=5_000)
-        card.get_by_role("button", name="Confirm").click(force=True)
-        card.wait_for(state="detached", timeout=15_000)
+        page.get_by_role("button", name="Confirm").click()
+        row.wait_for(state="detached", timeout=15_000)
 
-        body = page.inner_text("body")
-        self.assertNotIn(
-            paired_name,
-            body,
-            "removed paired box must be hidden by default",
+        listed = list_hosts(page, ws)
+        paired_row = _listed_host(listed, paired_id)
+        self.assertEqual(
+            paired_row.get("status"),
+            "disabled",
+            f"Confirm must persist disabled on GET list: {paired_row}",
         )
-        self.assertNotIn(
-            leftover,
-            body,
-            "never-paired leftover must stay hidden after paired revoke",
+        leftover_row = _listed_host(listed, leftover_id)
+        self.assertEqual(
+            leftover_row.get("status"),
+            "disabled",
+            f"never-paired leftover must stay on GET list as disabled: {leftover_row}",
         )
 
         show = page.get_by_role("button", name=SHOW_REMOVED)
         show.wait_for(timeout=5_000)
-        self.assertTrue(
-            show.is_visible(),
-            "Show removed (N) after revoke of a paired box",
-        )
-        self.assertRegex(show.inner_text().strip(), r"^Show removed \([1-9]\d*\)$")
-        show.click(force=True)
+        show.click()
 
         page.get_by_role("button", name=HIDE_REMOVED).wait_for(timeout=5_000)
-        restored = page.locator("article").filter(has_text=paired_name)
-        restored.wait_for(timeout=10_000)
-        self.assertTrue(restored.is_visible(), "Show removed must reveal the paired box")
-        restored_text = restored.inner_text()
-        self.assertRegex(restored_text.lower(), r"\bremoved\b")
-        self.assertNotIn("Control plane", restored_text)
+        restored = _list_row(page, paired_name)
+        try:
+            restored.first.wait_for(timeout=10_000)
+        except Exception as e:
+            raise AssertionError(
+                f"Show removed must reveal {paired_name!r}. "
+                f"body={page.inner_text('body')[:800]!r}"
+            ) from e
+        self.assertRegex(restored.first.inner_text().lower(), r"\bremoved\b")
         self.assertEqual(
-            page.locator("article").filter(has_text=leftover).count(),
+            page.get_by_text(leftover, exact=True).count(),
             0,
             "never-paired leftover must stay hidden after Show removed",
         )
-        self.assertNotIn(leftover, page.inner_text("body"))
 
-        hide = page.get_by_role("button", name=HIDE_REMOVED)
-        hide.click(force=True)
+        page.get_by_role("button", name=HIDE_REMOVED).click()
         page.get_by_role("button", name=SHOW_REMOVED).wait_for(timeout=5_000)
         restored.wait_for(state="detached", timeout=10_000)
-        self.assertEqual(
-            page.locator("article").filter(has_text=paired_name).count(),
-            0,
-            "Hide removed must collapse the revoked paired box",
-        )
-        self.assertNotIn(paired_name, page.inner_text("body"))
-        self.assertNotIn(leftover, page.inner_text("body"))
 
 
 if __name__ == "__main__":

@@ -234,21 +234,27 @@ mod tests {
     }
 
     #[test]
-    fn workspace_json_roundtrip() {
+    fn missing_workspace_json_is_none() {
         let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("workspace.json"),
-            r#"{"repo":{"url":"https://example.com/r.git","ref":"dev","auth_via":"proxy"}}"#,
-        )
-        .unwrap();
-        let spec = load_workspace_json(dir.path()).unwrap();
-        assert_eq!(spec.url, "https://example.com/r.git");
-        assert_eq!(spec.git_ref, "dev");
+        unsafe { std::env::remove_var("FLEET_REPO_URL") };
+        assert!(RepoToClone::from_env_and_files(dir.path()).is_none());
     }
 
     #[test]
-    fn missing_workspace_json_is_none() {
+    fn workspace_json_invalid_json_is_none() {
         let dir = tempdir().unwrap();
-        assert!(load_workspace_json(dir.path()).is_none());
+        std::fs::write(dir.path().join("workspace.json"), "not-json").unwrap();
+        unsafe { std::env::remove_var("FLEET_REPO_URL") };
+        assert!(RepoToClone::from_env_and_files(dir.path()).is_none());
+    }
+
+    #[test]
+    fn workspace_json_missing_repo_or_url_key_is_none() {
+        let dir = tempdir().unwrap();
+        unsafe { std::env::remove_var("FLEET_REPO_URL") };
+        std::fs::write(dir.path().join("workspace.json"), "{}").unwrap();
+        assert!(RepoToClone::from_env_and_files(dir.path()).is_none());
+        std::fs::write(dir.path().join("workspace.json"), r#"{"repo":{}}"#).unwrap();
+        assert!(RepoToClone::from_env_and_files(dir.path()).is_none());
     }
 }

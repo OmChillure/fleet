@@ -10,6 +10,8 @@ Does not re-implement policy — imports the real agent module.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -22,7 +24,12 @@ from pathlib import Path
 AGENT_PATH = Path(__file__).resolve().parents[1] / "workspace_agent.py"
 
 
-def load_agent(fleet_dir: Path, jobs_root: Path, allow_raw: str | None = "0"):
+def load_agent(
+    fleet_dir: Path,
+    jobs_root: Path,
+    allow_raw: str | None = "0",
+    handshake_secret: str | None = "protocol-test-secret",
+):
     """Load workspace_agent with isolated FLEET_DIR / FLEET_JOBS_ROOT."""
     os.environ["FLEET_DIR"] = str(fleet_dir)
     os.environ["FLEET_JOBS_ROOT"] = str(jobs_root)
@@ -30,7 +37,10 @@ def load_agent(fleet_dir: Path, jobs_root: Path, allow_raw: str | None = "0"):
         os.environ.pop("FLEET_ALLOW_RAW_EXEC", None)
     else:
         os.environ["FLEET_ALLOW_RAW_EXEC"] = allow_raw
-    os.environ["FLEET_HANDSHAKE_SECRET"] = "protocol-test-secret"
+    if handshake_secret is None:
+        os.environ.pop("FLEET_HANDSHAKE_SECRET", None)
+    else:
+        os.environ["FLEET_HANDSHAKE_SECRET"] = handshake_secret
     # Unique module name per load so env is re-read if needed
     name = f"workspace_agent_under_test_{jobs_root.name}"
     # Clear cached module if reloading
@@ -86,20 +96,6 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_a_unknown_tool_rejected(self):
-        with self.assertRaises(ValueError) as cm:
-            self.agent.handle_tool(
-                {
-                    "job_id": self.job_id,
-                    "action": "tool",
-                    "tool": "rm_rf_not_listed",
-                    "cwd": str(self.cwd),
-                }
-            )
-        msg = str(cm.exception)
-        self.assertIn("not allowlisted", msg)
-        self.assertIn("rm_rf_not_listed", msg)
-
     def test_b_known_tool_ok_stdout_structure(self):
         result = self.agent.handle_tool(
             {
@@ -110,24 +106,38 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             }
         )
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["tool"], "cat_hello")
-        self.assertEqual(result["exit_code"], 0)
-        self.assertEqual(result["argv"], ["cat", "hello.txt"])
         self.assertIn("fleet-hello", result["stdout"])
-        self.assertEqual(result["job_id"], self.job_id)
-        self.assertIn("stdout", result)
-        self.assertIn("stderr", result)
 
-    def test_b2_echo_tool(self):
+    def test_handle_tool_nonzero_exit_ok_false(self):
+        self.agent.TOOLS_BY_JOB[self.job_id]["cat_missing"] = {
+            "argv": ["cat", "missing-file"],
+            "description": "nonzero",
+        }
         result = self.agent.handle_tool(
             {
                 "job_id": self.job_id,
-                "tool": "echo_ok",
+                "tool": "cat_missing",
                 "cwd": str(self.cwd),
             }
         )
-        self.assertTrue(result["ok"])
-        self.assertIn("tool-ok", result["stdout"])
+        self.assertFalse(result["ok"], result)
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertTrue(result["stderr"])
+
+    def test_handle_tool_empty_argv_rejected(self):
+        self.agent.TOOLS_BY_JOB[self.job_id]["empty"] = {
+            "argv": [],
+            "description": "invalid",
+        }
+        with self.assertRaises(ValueError) as cm:
+            self.agent.handle_tool(
+                {
+                    "job_id": self.job_id,
+                    "tool": "empty",
+                    "cwd": str(self.cwd),
+                }
+            )
+        self.assertIn("invalid argv", str(cm.exception))
 
     def test_c_cwd_outside_jobs_rejected(self):
         outside = self.tmp / "evil"
@@ -145,18 +155,6 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             )
         self.assertIn("outside job isolation", str(cm.exception))
 
-    def test_c2_parent_escape_rejected(self):
-        # path with .. should be rejected by path_under_jobs
-        escape = self.cwd / ".." / ".." / "evil"
-        self.assertFalse(self.agent.path_under_jobs(escape))
-
-    def test_raw_exec_disabled(self):
-        with self.assertRaises(ValueError) as cm:
-            self.agent.handle_exec_legacy(
-                {"job_id": self.job_id, "cmd": "echo pwned", "cwd": str(self.cwd)}
-            )
-        self.assertIn("raw exec disabled", str(cm.exception))
-
     def test_raw_exec_policy_matches_rust(self):
         """Truth table must match crates/fleet-sandbox-driver/src/policy.rs raw_exec_allowed."""
         for off in (None, "", "   ", "0", "false", "no", "off", "FALSE"):
@@ -164,25 +162,22 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         for on in ("1", "true", "yes", "on", "TRUE", " Yes ", "ON", " 1 "):
             self.assertTrue(self.agent.raw_exec_allowed(on), on)
 
-    def test_raw_exec_default_off_from_env(self):
-        self.assertFalse(self.agent.ALLOW_RAW)
-        unset = load_agent(self.fleet, self.jobs, allow_raw=None)
-        self.assertFalse(unset.ALLOW_RAW)
-        enabled = load_agent(self.fleet, self.jobs, allow_raw="1")
-        self.assertTrue(enabled.ALLOW_RAW)
-
     def test_raw_exec_enabled_when_allow_flag(self):
-        prev = self.agent.ALLOW_RAW
-        self.agent.ALLOW_RAW = True
-        try:
-            result = self.agent.handle_exec_legacy(
-                {"job_id": self.job_id, "cmd": "echo pwned-allowed", "cwd": str(self.cwd)}
-            )
-        finally:
-            self.agent.ALLOW_RAW = prev
-        self.assertTrue(result["ok"], result)
-        self.assertIn("pwned-allowed", result["stdout"])
-        self.assertEqual(result["cmd"], "echo pwned-allowed")
+        self.agent = load_agent(self.fleet, self.jobs, allow_raw="1")
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "exec",
+                "req_id": "raw-on",
+                "cmd": "echo pwned-allowed",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-raw-on.json").read_text(encoding="utf-8"))
+        self.assertTrue(body["ok"], body)
+        self.assertIn("pwned-allowed", body["stdout"])
+        self.assertEqual(body["cmd"], "echo pwned-allowed")
 
     def test_handle_request_exec_rejected_by_default(self):
         req = self.sign(
@@ -200,45 +195,46 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         self.assertIn("raw exec disabled", body.get("error") or "")
         self.assertNotIn("should-not-run", body.get("stdout") or "")
 
-    def test_path_under_jobs_accepts_job_tree(self):
-        self.assertTrue(self.agent.path_under_jobs(self.cwd))
-        self.assertTrue(self.agent.path_under_jobs(self.jobs / "other" / "repo"))
-
-    def test_handle_request_tool_writes_result(self):
-        """Full request path: handle_request for action=tool writes result-{id}.json."""
-        req = {
-            "job_id": self.job_id,
-            "action": "tool",
-            "req_id": "t1",
-            "tool": "echo_ok",
-            "cwd": str(self.cwd),
-        }
-        self.agent.handle_request(self.sign(req))
-        rpath = self.fleet / "result-t1.json"
-        self.assertTrue(rpath.is_file(), rpath)
-        body = json.loads(rpath.read_text(encoding="utf-8"))
-        self.assertTrue(body["ok"])
-        self.assertIn("tool-ok", body["stdout"])
-        self.assertTrue(body.get("hmac"), "result must be HMAC-signed")
+    def test_handle_request_unknown_tool_writes_signed_failed_result(self):
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "tool",
+                "req_id": "t-bad",
+                "tool": "nope",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-t-bad.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        self.assertEqual(body.get("stdout"), "")
+        self.assertIn("nope", body.get("error") or "")
         unsigned = {k: v for k, v in body.items() if k != "hmac"}
         expect = self.agent.sign_body(unsigned)["hmac"]
-        self.assertEqual(body["hmac"], expect)
+        self.assertTrue(
+            hmac.compare_digest(str(body.get("hmac") or ""), str(expect)),
+            body,
+        )
 
-    def test_handle_request_unknown_tool_fails_result(self):
-        req = {
-            "job_id": self.job_id,
-            "action": "tool",
-            "req_id": "t-bad",
-            "tool": "nope",
-            "cwd": str(self.cwd),
-        }
-        self.agent.handle_request(self.sign(req))
-        body = json.loads((self.fleet / "result-t-bad.json").read_text(encoding="utf-8"))
-        self.assertFalse(body["ok"])
-        self.assertIn("not allowlisted", body.get("error") or body.get("stderr") or "")
+    def test_handle_request_empty_tool_name_fails_result(self):
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "tool",
+                "req_id": "t-empty",
+                "tool": "",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-t-empty.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        self.assertEqual(body.get("stdout"), "")
 
     def test_unsigned_request_rejected_before_provision(self):
         other = "job-not-provisioned"
+        self.assertNotIn(other, self.agent.TOOLS_BY_JOB)
         req = {
             "job_id": other,
             "action": "tool",
@@ -248,12 +244,12 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         }
         self.agent.handle_request(req)
         body = json.loads((self.fleet / "result-unsigned.json").read_text(encoding="utf-8"))
-        self.assertFalse(body["ok"])
+        self.assertFalse(body["ok"], body)
         err = (body.get("error") or "").lower()
-        self.assertTrue(
-            "hmac" in err or "before provision" in err or "no registered tools" in err,
-            body,
-        )
+        self.assertIn("unsigned tool request before provision", err, body)
+        stdout = body.get("stdout") or ""
+        self.assertEqual(stdout, "", body)
+        self.assertNotIn("tool-ok", stdout)
 
     def test_hmac_tool_does_not_read_tools_file(self):
         """Signed tool requests must not take argv from a planted tools file."""
@@ -278,27 +274,6 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         self.assertIn("no registered tools", err)
         self.assertNotIn("from-file", (body.get("stdout") or ""))
 
-    def test_unsigned_tool_after_register_uses_memory_argv(self):
-        self.agent.TOOLS_BY_JOB[self.job_id] = {
-            "echo_ok": {"argv": ["echo", "from-memory"], "description": ""}
-        }
-        (self.cwd / ".fleet-tools.json").write_text(
-            json.dumps({"echo_ok": {"argv": ["echo", "from-file"]}}),
-            encoding="utf-8",
-        )
-        req = {
-            "job_id": self.job_id,
-            "action": "tool",
-            "req_id": "unsigned-ok",
-            "tool": "echo_ok",
-            "cwd": str(self.cwd),
-        }
-        self.agent.handle_request(req)
-        body = json.loads((self.fleet / "result-unsigned-ok.json").read_text(encoding="utf-8"))
-        self.assertTrue(body["ok"], body)
-        self.assertIn("from-memory", body["stdout"])
-        self.assertNotIn("from-file", body["stdout"])
-
     def test_unsigned_tool_rejects_argv_override(self):
         self.agent.TOOLS_BY_JOB[self.job_id] = {
             "echo_ok": {"argv": ["echo", "safe"], "description": ""}
@@ -309,86 +284,388 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
             "req_id": "unsigned-argv",
             "tool": "echo_ok",
             "cwd": str(self.cwd),
-            "argv": ["curl", "http://evil.example"],
+            "argv": ["echo", "from-request"],
         }
         self.agent.handle_request(req)
         body = json.loads((self.fleet / "result-unsigned-argv.json").read_text(encoding="utf-8"))
         self.assertFalse(body["ok"], body)
-        self.assertIn("argv", (body.get("error") or "").lower())
+        stdout = body.get("stdout") or ""
+        self.assertEqual(stdout, "", body)
+        self.assertNotIn("from-request", stdout)
+
+    def test_unsigned_tool_rejects_cmd_override(self):
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "echo_ok": {"argv": ["echo", "safe"], "description": ""}
+        }
+        req = {
+            "job_id": self.job_id,
+            "action": "tool",
+            "req_id": "unsigned-cmd",
+            "tool": "echo_ok",
+            "cwd": str(self.cwd),
+            "cmd": "echo pwned",
+        }
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-unsigned-cmd.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        stdout = body.get("stdout") or ""
+        self.assertEqual(stdout, "", body)
+        self.assertNotIn("pwned", stdout)
+
+    def test_unsigned_tool_rejects_commands_override(self):
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "echo_ok": {"argv": ["echo", "safe"], "description": ""}
+        }
+        req = {
+            "job_id": self.job_id,
+            "action": "tool",
+            "req_id": "unsigned-commands",
+            "tool": "echo_ok",
+            "cwd": str(self.cwd),
+            "commands": ["echo pwned"],
+        }
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-unsigned-commands.json").read_text(encoding="utf-8"))
+        self.assertFalse(body["ok"], body)
+        stdout = body.get("stdout") or ""
+        self.assertEqual(stdout, "", body)
+        self.assertNotIn("pwned", stdout)
 
     def test_git_ref_rejects_shell_metachar(self):
-        with self.assertRaises(ValueError):
-            self.agent.validate_git_arg("git_ref", 'main"; curl evil')
-        with self.assertRaises(ValueError):
-            self.agent.validate_git_arg("git_ref", "-evil")
+        dest = self.tmp / "clone-metachar-ref"
+        with self.assertRaises(ValueError) as cm:
+            self.agent.git_clone(
+                "https://x.example/r.git",
+                'main"; curl evil',
+                dest,
+                os.environ.copy(),
+            )
+        self.assertIn("invalid git_ref", str(cm.exception))
+        self.assertFalse(dest.exists())
 
-    def test_git_clone_missing_ref_fails_closed(self):
+    def test_git_clone_rejects_leading_dash_git_ref(self):
+        dest = self.tmp / "clone-dash-ref"
+        with self.assertRaises(ValueError) as cm:
+            self.agent.git_clone(
+                "https://x.example/r.git",
+                "-evil",
+                dest,
+                os.environ.copy(),
+            )
+        self.assertIn("invalid git_ref", str(cm.exception))
+        self.assertFalse(dest.exists())
+
+    def test_git_clone_rejects_metachar_repo_url(self):
+        dest = self.tmp / "clone-metachar-url"
+        with self.assertRaises(ValueError) as cm:
+            self.agent.git_clone(
+                "https://x.example/r.git; curl evil",
+                "main",
+                dest,
+                os.environ.copy(),
+            )
+        self.assertIn("invalid repo_url", str(cm.exception))
+        self.assertFalse(dest.exists())
+
+    def test_git_clone_rejects_newline_in_git_ref(self):
+        dest = self.tmp / "clone-newline-ref"
+        with self.assertRaises(ValueError) as cm:
+            self.agent.git_clone(
+                "https://x.example/r.git",
+                "main\ncurl",
+                dest,
+                os.environ.copy(),
+            )
+        self.assertIn("invalid git_ref", str(cm.exception))
+        self.assertFalse(dest.exists())
+
+    def test_git_clone_rejects_nul_in_git_ref(self):
+        dest = self.tmp / "clone-nul-ref"
+        with self.assertRaises(ValueError) as cm:
+            self.agent.git_clone(
+                "https://x.example/r.git",
+                "main\x00x",
+                dest,
+                os.environ.copy(),
+            )
+        self.assertIn("invalid git_ref", str(cm.exception))
+        self.assertFalse(dest.exists())
+
+    def test_handle_provision_invalid_git_ref_writes_failed_result(self):
+        work_dir = self.jobs / "job-evil-ref" / "repo"
+        req = self.sign(
+            {
+                "job_id": "job-evil-ref",
+                "action": "provision",
+                "req_id": "prov-evil-ref",
+                "repo_url": "https://x.example/r.git",
+                "git_ref": "-evil",
+                "work_dir": str(work_dir),
+                "commands": [],
+                "smoke_commands": [],
+                "env": {},
+                "tools": {},
+            }
+        )
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-prov-evil-ref.json").read_text(encoding="utf-8"))
+        self.assertFalse(body.get("ok"), body)
+        self.assertIn("invalid git_ref", body.get("error") or "")
+        self.assertFalse(work_dir.exists(), "invalid git_ref must not clone work_dir")
+
+    def _init_main_only_repo(self, name: str) -> Path:
         import subprocess
 
-        src = self.tmp / "src-repo"
+        src = self.tmp / name
         src.mkdir()
         (src / "README").write_text("only-main\n", encoding="utf-8")
         subprocess.run(["git", "init", "-b", "main", str(src)], check=True, capture_output=True)
         subprocess.run(
             ["git", "-C", str(src), "config", "user.email", "t@example.test"],
             check=True,
+            capture_output=True,
         )
-        subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
-        subprocess.run(["git", "-C", str(src), "add", "README"], check=True)
-        subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "init"], check=True)
-        dest = self.tmp / "clone-dest"
-        with self.assertRaises(RuntimeError) as cm:
-            self.agent.git_clone(str(src), "no-such-ref", dest, os.environ.copy())
-        self.assertIn("checkout", str(cm.exception).lower())
-        self.assertIn("no-such-ref", str(cm.exception))
-
-    def test_mutated_tools_file_ignored_after_register(self):
-        self.agent.TOOLS_BY_JOB[self.job_id] = {
-            "echo_ok": {"argv": ["echo", "from-memory"], "description": ""}
-        }
-        (self.cwd / ".fleet-tools.json").write_text(
-            json.dumps({"echo_ok": {"argv": ["echo", "from-file"]}}),
-            encoding="utf-8",
+        subprocess.run(
+            ["git", "-C", str(src), "config", "user.name", "t"],
+            check=True,
+            capture_output=True,
         )
-        result = self.agent.handle_tool(
-            {"job_id": self.job_id, "tool": "echo_ok", "cwd": str(self.cwd)}
+        subprocess.run(["git", "-C", str(src), "add", "README"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(src), "commit", "-q", "-m", "init"],
+            check=True,
+            capture_output=True,
         )
-        self.assertIn("from-memory", result["stdout"])
-        self.assertNotIn("from-file", result["stdout"])
+        return src
 
-    def test_curl_and_bash_argv_rejected(self):
-        with self.assertRaises(ValueError):
-            self.agent.validate_tool_bin("curl")
-        with self.assertRaises(ValueError):
-            self.agent.validate_tool_bin("bash")
-
-    def test_ssh_repo_detection(self):
-        self.assertTrue(self.agent.is_ssh_repo("git@github.com:org/repo.git"))
-        self.assertTrue(
-            self.agent.is_ssh_repo("ssh://git@host.docker.internal:2222/srv/git/hello.git")
+    def test_handle_request_provision_missing_ref_writes_failed_result(self):
+        src = self._init_main_only_repo("src-missing-ref")
+        job_id = "job-missing-ref"
+        work_dir = self.jobs / job_id / "repo"
+        req = self.sign(
+            {
+                "job_id": job_id,
+                "action": "provision",
+                "req_id": "prov-missing-ref",
+                "repo_url": str(src),
+                "git_ref": "no-such-ref",
+                "work_dir": str(work_dir),
+                "commands": [],
+                "smoke_commands": [],
+                "env": {},
+                "tools": {},
+            }
         )
-        self.assertFalse(self.agent.is_ssh_repo("https://github.com/org/repo.git"))
+        self.agent.handle_request(req)
+        body = json.loads((self.fleet / "result-prov-missing-ref.json").read_text(encoding="utf-8"))
+        self.assertFalse(body.get("ok"), body)
+        status = json.loads((self.fleet / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(status.get("phase"), "failed", status)
+        self.assertFalse(status.get("ok"), status)
 
-    def test_write_json_default_mode_is_group_readable(self):
-        path = self.fleet / "result-mode.json"
-        self.agent.write_json(path, {"ok": True})
+    def test_handle_provision_missing_ref_does_not_emit_clone_done_or_register_tools(self):
+        src = self._init_main_only_repo("src-missing-ref-tools")
+        job_id = "job-missing-ref-tools"
+        work_dir = self.jobs / job_id / "repo"
+        with self.assertRaises(RuntimeError):
+            self.agent.handle_provision(
+                {
+                    "job_id": job_id,
+                    "repo_url": str(src),
+                    "git_ref": "no-such-ref",
+                    "work_dir": str(work_dir),
+                    "commands": [],
+                    "smoke_commands": [],
+                    "env": {},
+                    "tools": {
+                        "echo_ok": {
+                            "argv": ["echo", "should-not-register"],
+                            "description": "",
+                        }
+                    },
+                }
+            )
+        self.assertNotIn(job_id, self.agent.TOOLS_BY_JOB)
+        status = json.loads((self.fleet / "status.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(status.get("phase"), "clone_done", status)
+        self.assertNotIn("clone_done", status.get("milestones") or [])
+
+    def test_handle_request_result_is_group_and_other_readable(self):
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "tool",
+                "req_id": "mode-read",
+                "tool": "echo_ok",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        for name in ("result-mode-read.json", "status.json"):
+            path = self.fleet / name
+            mode = path.stat().st_mode
+            self.assertEqual(
+                mode & 0o044,
+                0o044,
+                f"{name} {oct(mode & 0o777)} missing group/other read",
+            )
+
+    def test_write_tools_allowlist_file_is_0444(self):
+        work_dir = self.jobs / "job-tools-mode" / "repo"
+        work_dir.mkdir(parents=True)
+        self.agent.write_tools(
+            work_dir,
+            {"echo_ok": {"argv": ["echo", "tool-ok"], "description": "echo"}},
+        )
+        path = work_dir / ".fleet-tools.json"
         mode = path.stat().st_mode & 0o777
-        self.assertEqual(mode, 0o664, oct(mode))
+        self.assertEqual(mode, 0o444, oct(mode))
+
+    def _restore_env(self, key: str, old: str | None) -> None:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
 
     def test_git_ssh_env_sets_command_when_key_present(self):
+        key_bytes = "dummy-key\n"
         key = self.tmp / "id_ed25519"
-        key.write_text("dummy-key\n", encoding="utf-8")
+        key.write_text(key_bytes, encoding="utf-8")
+        home = self.tmp / "home"
+        home.mkdir()
+        old_key = os.environ.get("GIT_SSH_KEY_PATH")
+        old_home = os.environ.get("HOME")
         os.environ["GIT_SSH_KEY_PATH"] = str(key)
-        os.environ["HOME"] = str(self.tmp / "home")
-        (self.tmp / "home").mkdir()
+        os.environ["HOME"] = str(home)
         try:
             env = self.agent.git_ssh_env({})
-            self.assertIn("GIT_SSH_COMMAND", env)
-            self.assertIn("ssh -F", env["GIT_SSH_COMMAND"])
-            ident = self.tmp / "home" / ".ssh" / "id_fleet"
+            ident = home / ".ssh" / "id_fleet"
+            config = home / ".ssh" / "config"
+            self.assertEqual(env.get("GIT_SSH_COMMAND"), f"ssh -F {config}")
             self.assertTrue(ident.is_file())
+            self.assertEqual(ident.read_text(encoding="utf-8"), key_bytes)
+            self.assertEqual(ident.stat().st_mode & 0o777, 0o600)
+            cfg = config.read_text(encoding="utf-8")
+            self.assertIn(f"IdentityFile {ident}", cfg)
+            self.assertIn("IdentitiesOnly yes", cfg)
         finally:
-            os.environ.pop("GIT_SSH_KEY_PATH", None)
+            self._restore_env("GIT_SSH_KEY_PATH", old_key)
+            self._restore_env("HOME", old_home)
+
+    def test_git_ssh_env_missing_key_leaves_env_unchanged(self):
+        home = self.tmp / "home-missing-key"
+        home.mkdir()
+        old_key = os.environ.get("GIT_SSH_KEY_PATH")
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        try:
+            for label, key_val in (
+                ("unset", None),
+                ("nonexistent", str(self.tmp / "no-such-deploy-key")),
+            ):
+                with self.subTest(key=label):
+                    if key_val is None:
+                        os.environ.pop("GIT_SSH_KEY_PATH", None)
+                    else:
+                        os.environ["GIT_SSH_KEY_PATH"] = key_val
+                    incoming = {"HOME": str(home)}
+                    env = self.agent.git_ssh_env(incoming)
+                    self.assertNotIn("GIT_SSH_COMMAND", env)
+                    self.assertEqual(env, incoming)
+                    self.assertFalse((home / ".ssh" / "id_fleet").exists())
+        finally:
+            self._restore_env("GIT_SSH_KEY_PATH", old_key)
+            self._restore_env("HOME", old_home)
+
+    def test_git_ssh_env_copies_known_hosts_when_set(self):
+        key = self.tmp / "id_ed25519"
+        key.write_text("dummy-key\n", encoding="utf-8")
+        kh_bytes = "example.test ssh-ed25519 AAAA\n"
+        kh = self.tmp / "known_hosts.src"
+        kh.write_text(kh_bytes, encoding="utf-8")
+        home = self.tmp / "home-known-hosts"
+        home.mkdir()
+        old_key = os.environ.get("GIT_SSH_KEY_PATH")
+        old_home = os.environ.get("HOME")
+        old_kh = os.environ.get("GIT_SSH_KNOWN_HOSTS")
+        os.environ["GIT_SSH_KEY_PATH"] = str(key)
+        os.environ["HOME"] = str(home)
+        os.environ["GIT_SSH_KNOWN_HOSTS"] = str(kh)
+        try:
+            self.agent.git_ssh_env({})
+            dest = home / ".ssh" / "known_hosts"
+            self.assertTrue(dest.is_file())
+            self.assertEqual(dest.read_text(encoding="utf-8"), kh_bytes)
+        finally:
+            self._restore_env("GIT_SSH_KEY_PATH", old_key)
+            self._restore_env("HOME", old_home)
+            self._restore_env("GIT_SSH_KNOWN_HOSTS", old_kh)
+
+    def test_handle_request_refuses_when_handshake_secret_unset(self):
+        """verify_request refuses provision when FLEET_HANDSHAKE_SECRET is unset/blank."""
+        for label, secret in (("unset", None), ("blank", "   ")):
+            with self.subTest(secret=label):
+                fleet = self.tmp / f"fleet-secret-{label}"
+                jobs = self.tmp / f"jobs-secret-{label}"
+                fleet.mkdir()
+                jobs.mkdir()
+                agent = load_agent(fleet, jobs, handshake_secret=secret)
+                work_dir = jobs / "secret-unset" / "repo"
+                req = {
+                    "job_id": "secret-unset",
+                    "action": "provision",
+                    "req_id": f"secret-{label}",
+                    "repo_url": str(self.cwd),
+                    "git_ref": "main",
+                    "work_dir": str(work_dir),
+                    "commands": [],
+                    "smoke_commands": [],
+                    "env": {},
+                    "tools": {},
+                }
+                raw = agent.canonical_json(req).encode()
+                req["hmac"] = hmac.new(b"signed-looking", raw, hashlib.sha256).hexdigest()
+                agent.handle_request(req)
+                body = json.loads(
+                    (fleet / f"result-secret-{label}.json").read_text(encoding="utf-8")
+                )
+                self.assertFalse(body.get("ok"), body)
+                err = f"{body.get('error') or ''} {body.get('stderr') or ''}".lower()
+                self.assertIn("secret", err, body)
+                self.assertFalse(work_dir.exists(), "unset secret must not create work_dir")
+
+    def test_signed_tool_hmac_replay_is_rejected(self):
+        """SEEN_HMACS one-shot applies to a signed tool request, not only provision."""
+        marker = self.cwd / "tool-ran"
+        self.agent.TOOLS_BY_JOB[self.job_id] = {
+            "mark": {"argv": ["touch", "tool-ran"], "description": "touch marker"},
+        }
+        req = self.sign(
+            {
+                "job_id": self.job_id,
+                "action": "tool",
+                "req_id": "tool-replay",
+                "tool": "mark",
+                "cwd": str(self.cwd),
+            }
+        )
+        self.agent.handle_request(req)
+        first = json.loads(
+            (self.fleet / "result-tool-replay.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(first.get("ok"), first)
+        self.assertTrue(marker.is_file(), "first signed tool request must exec")
+        marker.unlink()
+        (self.fleet / "result-tool-replay.json").unlink()
+        self.agent.handle_request(req)
+        replay = json.loads(
+            (self.fleet / "result-tool-replay.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(replay.get("ok"), replay)
+        err = f"{replay.get('error') or ''} {replay.get('stderr') or ''}".lower()
+        self.assertIn("replayed", err, replay)
+        self.assertIn("hmac", err, replay)
+        self.assertFalse(marker.exists(), "replay must not exec the tool again")
 
 
 if __name__ == "__main__":

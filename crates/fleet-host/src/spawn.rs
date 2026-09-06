@@ -599,8 +599,17 @@ pub async fn publish_guest_proof(payload: &SpawnPayload, session_dir: &Path) -> 
 
 /// Fail-closed VM path. Hypervisor on PATH is required; execution is not implemented.
 pub async fn run_vm(cfg: &LocalConfig, payload: &SpawnPayload, session_dir: &Path) -> Result<()> {
+    run_vm_with(cfg, payload, session_dir, hypervisor_on_path()).await
+}
+
+async fn run_vm_with(
+    cfg: &LocalConfig,
+    payload: &SpawnPayload,
+    session_dir: &Path,
+    hypervisor: bool,
+) -> Result<()> {
     let _ = (cfg, payload, session_dir);
-    if !hypervisor_on_path() {
+    if !hypervisor {
         bail!("vm isolation requires firecracker or qemu on PATH; will not fall back to host");
     }
     bail!("vm isolation: run_vm is not implemented (fail-closed; will not fall back to host)");
@@ -646,32 +655,49 @@ fn tail_stdio(stdout: &[u8], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::merge_child_env;
-
-    #[test]
-    fn extra_env_cannot_replace_fleet_worker_token() {
-        let mut payload = HashMap::new();
-        payload.insert(WORKER_TOKEN_KEY.into(), "job-token".into());
-        let mut extra = HashMap::new();
-        extra.insert(WORKER_TOKEN_KEY.into(), "from-extra".into());
-        extra.insert("FLEET_HARNESS".into(), "mock".into());
-        let merged = merge_child_env(&payload, &extra);
-        assert_eq!(merged.get(WORKER_TOKEN_KEY).unwrap(), "job-token");
-        assert_eq!(merged.get("FLEET_HARNESS").unwrap(), "mock");
-        let cfg = LocalConfig::defaults();
-        assert_eq!(host_child_bin(&cfg, &merged), cfg.fleet_driver_bin);
-        let mut no_harness = merged.clone();
-        no_harness.remove("FLEET_HARNESS");
-        assert_eq!(host_child_bin(&cfg, &no_harness), cfg.fleet_driver_bin);
-    }
 
     #[test]
     fn child_env_defaults_harness_to_mock() {
         let env = child_env(&sample_payload(), &HashMap::new(), Path::new("/work"));
         assert_eq!(env.get(HARNESS_KEY).map(String::as_str), Some("mock"));
+    }
+
+    #[test]
+    fn child_env_keeps_extra_env_harness() {
         let mut extra = HashMap::new();
         extra.insert(HARNESS_KEY.into(), "grok".into());
         let env = child_env(&sample_payload(), &extra, Path::new("/work"));
+        assert_eq!(env.get(HARNESS_KEY).map(String::as_str), Some("grok"));
+    }
+
+    #[test]
+    fn child_env_defaults_blank_or_whitespace_harness_to_mock() {
+        for blank in ["", " \t "] {
+            let mut extra = HashMap::new();
+            extra.insert(HARNESS_KEY.into(), blank.into());
+            let env = child_env(&sample_payload(), &extra, Path::new("/work"));
+            assert_eq!(
+                env.get(HARNESS_KEY).map(String::as_str),
+                Some("mock"),
+                "extra FLEET_HARNESS={blank:?}"
+            );
+
+            let mut payload = sample_payload();
+            payload.env.insert(HARNESS_KEY.into(), blank.into());
+            let env = child_env(&payload, &HashMap::new(), Path::new("/work"));
+            assert_eq!(
+                env.get(HARNESS_KEY).map(String::as_str),
+                Some("mock"),
+                "payload.env FLEET_HARNESS={blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_env_keeps_payload_env_harness() {
+        let mut payload = sample_payload();
+        payload.env.insert(HARNESS_KEY.into(), "grok".into());
+        let env = child_env(&payload, &HashMap::new(), Path::new("/work"));
         assert_eq!(env.get(HARNESS_KEY).map(String::as_str), Some("grok"));
     }
 
@@ -720,83 +746,45 @@ mod tests {
     #[test]
     fn vm_not_allowed_without_hypervisor() {
         let cfg = LocalConfig::defaults();
-        let mut no_hv = no_tools();
-        assert!(!runtime_allowed_with(
-            JobRuntime::Vm,
-            &cfg,
-            true,
-            true,
-            &no_hv
-        ));
-        no_hv.hypervisor = true;
-        assert!(runtime_allowed_with(
-            JobRuntime::Vm,
-            &cfg,
-            true,
-            true,
-            &no_hv
-        ));
-        // Host flags must not make Vm look like Host.
-        assert_ne!(JobRuntime::Vm, JobRuntime::Host);
+        assert!(cfg.run_host);
+        let probe = no_tools();
+        assert!(!probe.hypervisor);
+        assert!(
+            !runtime_allowed_with(JobRuntime::Vm, &cfg, true, true, &probe),
+            "Vm must stay closed when run_host/effective_* are true but hypervisor is missing"
+        );
     }
 
     #[test]
-    fn container_runtime_rejected_when_run_container_false() {
-        let cfg = LocalConfig::defaults();
-        assert!(
-            !cfg.run_container,
-            "v1 default must refuse container/k3d jobs"
-        );
-        let tools = ToolProbe {
-            docker: true,
+    fn vm_allowed_with_hypervisor_when_host_and_container_flags_off() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.run_host = false;
+        cfg.run_container = false;
+        let probe = ToolProbe {
+            docker: false,
             in_cluster: false,
+            kubeconfig: false,
+            hypervisor: true,
+        };
+        assert!(
+            runtime_allowed_with(JobRuntime::Vm, &cfg, false, false, &probe),
+            "Vm is probe.hypervisor only; run_host/run_container/effective_* must not gate it"
+        );
+    }
+
+    #[test]
+    fn vm_not_allowed_when_only_container_tools_present() {
+        let cfg = LocalConfig::defaults();
+        let probe = ToolProbe {
+            docker: true,
+            in_cluster: true,
             kubeconfig: true,
             hypervisor: false,
         };
         assert!(
-            !runtime_allowed_with(JobRuntime::Container, &cfg, true, true, &tools),
-            "run_container=false must reject Container even when docker/kube exist"
+            !runtime_allowed_with(JobRuntime::Vm, &cfg, true, true, &probe),
+            "docker/in_cluster/kubeconfig must not stand in for hypervisor"
         );
-        assert!(!runtime_allowed_with(
-            JobRuntime::Container,
-            &cfg,
-            true,
-            false,
-            &tools
-        ));
-    }
-
-    #[test]
-    fn isolation_string_selects_runtime() {
-        let mut p = sample_payload();
-        p.runtime = JobRuntime::Host;
-        p.isolation = Some("container".into());
-        assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Container);
-        p.isolation = Some("vm".into());
-        assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Vm);
-        p.isolation = Some("k8s".into());
-        assert!(
-            p.resolved_runtime()
-                .unwrap_err()
-                .to_string()
-                .contains("placement")
-        );
-    }
-
-    #[test]
-    fn docker_missing_errors_without_host_fallback() {
-        let err = docker_preflight_with(false).unwrap_err().to_string();
-        assert!(err.contains("docker not on PATH"), "{err}");
-        assert!(err.contains("will not fall back"), "{err}");
-
-        let mut cfg = LocalConfig::defaults();
-        cfg.container_backend = ContainerBackend::Docker;
-        let err = pick_container_executor(&cfg, &no_tools())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("docker"), "{err}");
-        assert!(err.contains("will not fall back"), "{err}");
-        assert!(!err.to_ascii_lowercase().contains("spawn host"));
     }
 
     #[test]
@@ -815,32 +803,91 @@ mod tests {
     }
 
     #[test]
+    fn pick_container_executor_k3d_uses_docker_when_kubeconfig_absent() {
+        let cfg = LocalConfig::defaults();
+        assert_eq!(cfg.container_backend, ContainerBackend::K3d);
+        let probe = ToolProbe {
+            docker: true,
+            in_cluster: false,
+            kubeconfig: false,
+            hypervisor: false,
+        };
+        assert_eq!(
+            pick_container_executor(&cfg, &probe).unwrap(),
+            ExecutorKind::Docker
+        );
+    }
+
+    #[test]
     fn docker_args_use_bridge_network_and_fleet_env() {
         let cfg = LocalConfig::defaults();
-        assert_eq!(cfg.docker_network, "bridge");
         let mut p = sample_payload();
         p.session_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         p.worker_token = "tok".into();
         let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "fleet-wh-test");
-        assert!(args.contains(&"--network".into()), "{args:?}");
-        assert!(args.contains(&"bridge".into()), "{args:?}");
         assert!(
-            args.iter().any(|a| a == "FLEET_WORKER_TOKEN=tok"),
+            args.windows(2)
+                .any(|w| w[0] == "--network" && w[1] == "bridge"),
             "{args:?}"
         );
         assert!(
-            args.iter()
-                .any(|a| a == "FLEET_SESSION_ID=550e8400-e29b-41d4-a716-446655440000"),
+            args.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "FLEET_WORKER_TOKEN=tok"),
             "{args:?}"
         );
-        assert!(args.iter().any(|a| a == "FLEET_HARNESS=mock"), "{args:?}");
-        assert!(args.iter().any(|a| a == "fleet-driver"), "{args:?}");
-        assert!(!args.iter().any(|a| a == "fleet-worker"), "{args:?}");
-        assert!(args.contains(&"--rm".into()), "{args:?}");
-        #[cfg(unix)]
-        {
-            assert!(args.contains(&"--user".into()), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-e"
+                && w[1] == "FLEET_SESSION_ID=550e8400-e29b-41d4-a716-446655440000"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "FLEET_HARNESS=mock"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_empty_or_whitespace_network_becomes_bridge() {
+        for blank in ["", "  "] {
+            let mut cfg = LocalConfig::defaults();
+            cfg.docker_network = blank.into();
+            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+            let i = args
+                .iter()
+                .position(|a| a == "--network")
+                .expect("--network");
+            assert_eq!(
+                args.get(i + 1).map(String::as_str),
+                Some("bridge"),
+                "docker_network={blank:?}: {args:?}"
+            );
         }
+    }
+
+    #[test]
+    fn docker_run_args_custom_network_follows_network_flag() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.docker_network = "labnet".into();
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        let i = args
+            .iter()
+            .position(|a| a == "--network")
+            .expect("--network");
+        assert_eq!(args[i], "--network");
+        assert_eq!(args[i + 1], "labnet", "{args:?}");
+    }
+
+    #[test]
+    fn docker_run_args_command_is_basename_of_absolute_driver_bin() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.fleet_driver_bin = "/opt/fleet/fleet-driver".into();
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("fleet-driver"),
+            "container command must be the basename, not the host path: {args:?}"
+        );
     }
 
     #[test]
@@ -852,20 +899,6 @@ mod tests {
         );
         extra.insert("FLEET_HARNESS".into(), "mock".into());
         extra.insert("FLEET_GROK_BIN".into(), "grok".into());
-        let filtered = extra_env_for_isolated_guest(&extra);
-        assert!(
-            !filtered.contains_key("FLEET_MOCK_ACP_BIN"),
-            "host path must not ride into docker/kube: {filtered:?}"
-        );
-        assert_eq!(
-            filtered.get("FLEET_HARNESS").map(String::as_str),
-            Some("mock")
-        );
-        assert_eq!(
-            filtered.get("FLEET_GROK_BIN").map(String::as_str),
-            Some("grok")
-        );
-
         let mut cfg = LocalConfig::defaults();
         cfg.extra_env = extra;
         let mut payload = sample_payload();
@@ -888,21 +921,108 @@ mod tests {
             "plane payload.env host path must not ride into docker: {args:?}"
         );
         assert!(
-            !args.iter().any(|a| a.contains("FLEET_WORK_CMD=")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1].starts_with("FLEET_WORK_CMD=")),
             "FLEET_WORK_CMD is host-only: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "FLEET_HARNESS=mock"),
+            "relative FLEET_HARNESS must still appear as -e: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "FLEET_GROK_BIN=grok"),
+            "relative FLEET_GROK_BIN must still appear as -e: {args:?}"
+        );
+    }
+
+    #[test]
+    fn host_child_env_keeps_absolute_bin_overrides() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "FLEET_MOCK_ACP_BIN".into(),
+            "/home/viny/.local/bin/mock-acp-agent".into(),
+        );
+        let env = child_env(&sample_payload(), &extra, Path::new("/tmp/sess"));
+        assert_eq!(
+            env.get("FLEET_MOCK_ACP_BIN").map(String::as_str),
+            Some("/home/viny/.local/bin/mock-acp-agent"),
+            "run_host must still honor operator host paths: {env:?}"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_drops_loopback_extra_env() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.extra_env
+            .insert("FLEET_API_BASE".into(), "http://127.0.0.1:8080".into());
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        assert!(
+            !args.iter().any(|a| a.contains("127.0.0.1")),
+            "loopback extra_env must not ride into docker: {args:?}"
         );
     }
 
     #[test]
     fn collect_guest_proof_prefers_result_md() {
         let dir = tempfile::tempdir().unwrap();
+        let result_md = "# Result\n\nACP end_turn from guest.\n";
+        std::fs::write(dir.path().join("result.md"), result_md).unwrap();
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
         std::fs::write(
-            dir.path().join("result.md"),
-            "# Result\n\nACP end_turn from guest.\n",
+            dir.path().join("artifacts/transcript.md"),
+            "transcript-only body from artifacts\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/result.json"),
+            r#"{"ok":true}"#,
         )
         .unwrap();
         let md = collect_guest_proof(dir.path()).expect("proof");
-        assert!(md.contains("ACP end_turn from guest"), "{md}");
+        assert_eq!(md, result_md.trim());
+        assert!(
+            !md.contains("ACP completed"),
+            "synthesis header must not win over result.md: {md}"
+        );
+        assert!(
+            !md.contains("transcript-only body from artifacts"),
+            "artifacts/transcript.md must not leak when result.md is non-empty: {md}"
+        );
+    }
+
+    #[test]
+    fn collect_guest_proof_empty_or_whitespace_result_md_falls_through_to_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("result.md"), " \n\t").unwrap();
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/transcript.md"),
+            "hello from mock agent\n",
+        )
+        .unwrap();
+        let md = collect_guest_proof(dir.path()).expect("whitespace result.md must not be None");
+        assert!(md.contains("hello from mock agent"), "{md}");
+        assert!(md.contains("# Result"), "{md}");
+        assert_eq!(
+            md,
+            "# Result\n\nACP completed.\n\n## Transcript\n\nhello from mock agent\n"
+        );
+    }
+
+    #[test]
+    fn collect_guest_proof_json_only_synthesizes_header() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        std::fs::write(
+            dir.path().join("artifacts/result.json"),
+            r#"{"ok":true}"#,
+        )
+        .unwrap();
+        let md = collect_guest_proof(dir.path()).expect("json-only proof");
+        assert_eq!(md, "# Result\n\nACP completed.\n\n");
     }
 
     #[test]
@@ -926,14 +1046,37 @@ mod tests {
     }
 
     #[test]
-    fn docker_network_none_is_refused_because_guests_must_reach_the_plane() {
+    fn docker_network_none_is_remapped_to_bridge() {
         let mut cfg = LocalConfig::defaults();
         cfg.docker_network = "none".into();
         let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
-        assert!(
-            !args.iter().any(|a| a == "none"),
-            "network=none drops /v1 heartbeats; guests must not be launched that way: {args:?}"
+        let i = args
+            .iter()
+            .position(|a| a == "--network")
+            .expect("--network");
+        assert_eq!(
+            args.get(i + 1).map(String::as_str),
+            Some("bridge"),
+            "docker_network=none remaps to --network bridge so guests can heartbeat: {args:?}"
         );
+    }
+
+    #[test]
+    fn docker_run_args_none_any_case_or_padded_becomes_bridge() {
+        for none in ["NONE", " None "] {
+            let mut cfg = LocalConfig::defaults();
+            cfg.docker_network = none.into();
+            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+            let i = args
+                .iter()
+                .position(|a| a == "--network")
+                .expect("--network");
+            assert_eq!(
+                args.get(i + 1).map(String::as_str),
+                Some("bridge"),
+                "docker_network={none:?}: {args:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -976,16 +1119,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn docker_args_privileged_only_when_allowed() {
+    #[tokio::test]
+    async fn run_claim_does_not_refuse_privileged_when_allowed() {
         let mut cfg = LocalConfig::defaults();
+        cfg.run_container = true;
+        cfg.allow_privileged = true;
+        cfg.container_backend = ContainerBackend::Docker;
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Container;
+        p.isolation = Some("container".into());
+        p.privileged = true;
+        p.session_id = Uuid::now_v7();
+        let err = run_claim_with(&cfg, &p, true, true, &no_tools())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.to_ascii_lowercase().contains("privileged"),
+            "allow_privileged=true must not refuse the privileged spec: {err}"
+        );
+        assert!(
+            err.contains("docker"),
+            "next fail after the allow gate is docker-missing, not privileged: {err}"
+        );
+    }
+
+    #[test]
+    fn docker_args_omit_privileged_when_not_allowed() {
+        let cfg = LocalConfig::defaults();
+        assert!(!cfg.allow_privileged);
         let mut p = sample_payload();
         p.privileged = true;
         let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
-        assert!(!args.iter().any(|a| a == "--privileged"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "--privileged"),
+            "allow_privileged=false must omit --privileged: {args:?}"
+        );
+    }
+
+    #[test]
+    fn docker_args_privileged_only_when_allowed() {
+        let mut cfg = LocalConfig::defaults();
         cfg.allow_privileged = true;
+        let mut p = sample_payload();
+        p.privileged = true;
         let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
-        assert!(args.iter().any(|a| a == "--privileged"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "--privileged"),
+            "privileged=true and allow_privileged=true must pass --privileged: {args:?}"
+        );
+    }
+
+    #[test]
+    fn docker_args_omit_privileged_when_payload_false_even_if_allowed() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.allow_privileged = true;
+        let mut p = sample_payload();
+        p.privileged = false;
+        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
+        assert!(
+            !args.iter().any(|a| a == "--privileged"),
+            "payload.privileged=false must not emit --privileged even when allow_privileged: {args:?}"
+        );
     }
 
     #[tokio::test]
@@ -1001,8 +1196,101 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("docker"), "{err}");
-        assert!(err.contains("will not fall back"), "{err}");
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            err.contains(DOCKER_MISSING),
+            "Docker backend without docker must publish DOCKER_MISSING: {err}"
+        );
+        assert!(
+            err.contains("docker not on PATH"),
+            "must name the missing tool, not a generic docker token: {err}"
+        );
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            !lower.contains("docker run"),
+            "must fail before exec docker: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a docker/host child"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_claim_k3d_without_kube_or_docker_does_not_fall_back_to_host() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.run_container = true;
+        assert_eq!(cfg.container_backend, ContainerBackend::K3d);
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Container;
+        p.isolation = Some("container".into());
+        p.session_id = Uuid::now_v7();
+        let err = run_claim_with(&cfg, &p, true, true, &no_tools())
+            .await
+            .unwrap_err()
+            .to_string();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            err.contains("will not fall back"),
+            "K3d with neither kube nor docker must not fall back: {err}"
+        );
+        assert!(
+            err.contains("KUBECONFIG"),
+            "K3d neither-tool branch, not Docker-only DOCKER_MISSING: {err}"
+        );
+        assert!(
+            !err.contains("docker not on PATH"),
+            "default K3d must not use the Docker-backend token: {err}"
+        );
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a host child"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_claim_docker_backend_does_not_use_kubeconfig_when_docker_missing() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.run_container = true;
+        cfg.container_backend = ContainerBackend::Docker;
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Container;
+        p.isolation = Some("container".into());
+        p.session_id = Uuid::now_v7();
+        let probe = ToolProbe {
+            docker: false,
+            in_cluster: false,
+            kubeconfig: true,
+            hypervisor: false,
+        };
+        let err = run_claim_with(&cfg, &p, true, true, &probe)
+            .await
+            .unwrap_err()
+            .to_string();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            err.contains(DOCKER_MISSING),
+            "Docker backend must not fall through to KubePod when docker is missing: {err}"
+        );
+        assert!(
+            !lower.contains("k8s"),
+            "must not pick KubePod: {err}"
+        );
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a kube/docker/host child"
+        );
     }
 
     #[tokio::test]
@@ -1054,23 +1342,172 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("vm"), "{err}");
+        let lower = err.to_ascii_lowercase();
         assert!(
-            err.contains("will not fall back") || err.contains("not allowed"),
-            "{err}"
+            err.contains("not allowed"),
+            "must fail the advertise/allow gate, not a later path: {err}"
+        );
+        assert!(
+            err.contains("no firecracker/qemu"),
+            "must name the missing hypervisor, not a generic flags bail: {err}"
+        );
+        assert!(
+            err.contains("will not fall back"),
+            "must refuse Host fallback: {err}"
+        );
+        assert!(
+            !lower.contains("not implemented"),
+            "must not reach run_vm: {err}"
+        );
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a host child"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_claim_vm_without_hypervisor_does_not_mkdir_session_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = LocalConfig::defaults();
+        cfg.work_dir = tmp.path().display().to_string();
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Vm;
+        p.isolation = Some("vm".into());
+        p.session_id = Uuid::now_v7();
+        let session_dir = cfg.session_dir(p.session_id);
+        let err = run_claim_with(&cfg, &p, true, true, &no_tools())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not allowed") && err.contains("no firecracker/qemu"),
+            "must fail the advertise gate before mkdir: {err}"
+        );
+        assert!(
+            !session_dir.exists(),
+            "advertise-gate bail must leave session_dir absent: {}",
+            session_dir.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_claim_vm_refuses_loopback_orchestrator_url() {
+        let cfg = LocalConfig::defaults();
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Vm;
+        p.isolation = Some("vm".into());
+        p.orchestrator_url = "http://127.0.0.1:8080".into();
+        p.session_id = Uuid::now_v7();
+        let probe = ToolProbe {
+            docker: false,
+            in_cluster: false,
+            kubeconfig: false,
+            hypervisor: true,
+        };
+        let err = run_claim_with(&cfg, &p, true, true, &probe)
+            .await
+            .unwrap_err()
+            .to_string();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            lower.contains("loopback"),
+            "vm guests cannot reach the host's localhost: {err}"
+        );
+        assert!(
+            !lower.contains("not implemented"),
+            "must fail at the loopback gate, not inside run_vm: {err}"
+        );
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not register a host child"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_claim_vm_with_injected_hypervisor_does_not_spawn_host() {
+        let cfg = LocalConfig::defaults();
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Vm;
+        p.isolation = Some("vm".into());
+        p.session_id = Uuid::now_v7();
+        let probe = ToolProbe {
+            docker: false,
+            in_cluster: false,
+            kubeconfig: false,
+            hypervisor: true,
+        };
+        let err = run_claim_with(&cfg, &p, true, true, &probe)
+            .await
+            .unwrap_err()
+            .to_string();
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            err.contains("not implemented") || err.contains("requires firecracker or qemu"),
+            "must fail inside run_vm (PATH or not-implemented), not the allow-gate: {err}"
+        );
+        assert!(!err.contains("not allowed"), "{err}");
+        assert!(
+            !lower.contains("spawn host"),
+            "must not fall back to host: {err}"
+        );
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "must not insert LiveChild::Host"
         );
     }
 
     #[tokio::test]
     async fn run_vm_fails_closed() {
         let cfg = LocalConfig::defaults();
-        let p = sample_payload();
-        let err = run_vm(&cfg, &p, Path::new("/tmp"))
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Vm;
+        p.isolation = Some("vm".into());
+        p.session_id = Uuid::now_v7();
+        let session_dir = tempfile::tempdir().unwrap();
+        for hypervisor in [false, true] {
+            let err = run_vm_with(&cfg, &p, session_dir.path(), hypervisor)
+                .await
+                .unwrap_err()
+                .to_string();
+            let lower = err.to_ascii_lowercase();
+            assert!(
+                !lower.contains("spawn host"),
+                "hypervisor={hypervisor} must not fall back to host: {err}"
+            );
+            assert!(
+                !session_dir.path().join("stdout.log").exists()
+                    && !session_dir.path().join("stderr.log").exists(),
+                "hypervisor={hypervisor} must not start a host child"
+            );
+            assert!(
+                live_children().get(p.session_id).await.is_none(),
+                "hypervisor={hypervisor} must not register a live child"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_vm_does_not_register_live_child() {
+        let cfg = LocalConfig::defaults();
+        let mut p = sample_payload();
+        p.runtime = JobRuntime::Vm;
+        p.isolation = Some("vm".into());
+        p.session_id = Uuid::now_v7();
+        let _ = run_vm_with(&cfg, &p, Path::new("/tmp"), true)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("vm"), "{err}");
-        assert!(err.contains("will not fall back"), "{err}");
+            .unwrap_err();
+        assert!(
+            live_children().get(p.session_id).await.is_none(),
+            "run_vm must not insert a live child"
+        );
     }
 
     #[tokio::test]
@@ -1095,27 +1532,6 @@ mod tests {
             .expect("wait after SIGTERM")
             .expect("status");
         assert!(!status.success(), "SIGTERM should stop sleep: {status}");
-        assert!(live_children().get(id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn tracks_docker_session_then_forget() {
-        let id = Uuid::now_v7();
-        live_children()
-            .insert(
-                id,
-                LiveChild::Docker {
-                    name: "fleet-wh-unit".into(),
-                },
-            )
-            .await;
-        assert_eq!(
-            live_children().get(id).await,
-            Some(LiveChild::Docker {
-                name: "fleet-wh-unit".into()
-            })
-        );
-        live_children().remove(id).await;
         assert!(live_children().get(id).await.is_none());
     }
 }

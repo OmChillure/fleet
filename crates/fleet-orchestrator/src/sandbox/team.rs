@@ -370,9 +370,8 @@ pub async fn sync_team_boards(data_dir: &Path, project_id: uuid::Uuid, snap: &Bo
 mod tests {
     use super::*;
 
-    #[test]
-    fn team_md_marks_you_and_lists_others() {
-        let members = vec![
+    fn three_member_board() -> Vec<TeamMember> {
+        vec![
             TeamMember {
                 plan_task_id: "t1".into(),
                 title: "API".into(),
@@ -397,119 +396,107 @@ mod tests {
                 depends_on: vec!["t1".into(), "t2".into()],
                 result_excerpt: None,
             },
-        ];
-        let md = render_team_md("t2", &members);
-        assert!(md.contains("← you"));
-        assert!(md.contains("Settings UI"));
-        assert!(md.contains("Added PATCH /settings"));
-        assert!(md.contains("reviewer"));
-        assert!(md.contains("Do **only your** task"));
-        assert!(md.contains("Talk to live teammates"));
-        assert!(md.contains("work/"));
-        assert!(md.contains("request_changes"));
-        assert!(md.contains("You wait on / use output from: `t1`"));
+        ]
     }
 
     #[test]
-    fn excerpt_truncates_long_handoffs() {
-        let long = "x".repeat(EXCERPT_CHARS + 50);
-        let out = excerpt_text(&long);
-        assert!(out.contains("truncated"));
-        assert!(out.chars().count() < long.chars().count());
-        assert_eq!(excerpt_text("  short  "), "short");
+    fn team_md_marks_you_and_lists_others() {
+        let members = three_member_board();
+        let md = render_team_md("t2", &members);
+        assert!(
+            md.contains("| `t2` | `frontend` | Settings UI | in progress ← you |"),
+            "you-row must pin t2 frontend Settings UI in progress: {md}"
+        );
+        assert!(
+            md.contains("| `t3` | `reviewer` | Review | queued |"),
+            "teammate table must list t3 reviewer: {md}"
+        );
+        assert!(
+            md.contains("You wait on / use output from: `t1`"),
+            "t2 depends-on must emit wait-on t1: {md}"
+        );
+        assert!(
+            md.contains("### `t1` — API\n\nAdded PATCH /settings"),
+            "finished teammate t1 excerpt must appear under its heading: {md}"
+        );
     }
 
-    #[tokio::test]
-    async fn archive_and_copy_dep_handoffs() {
-        let root = tempfile::tempdir().unwrap();
-        let project = uuid::Uuid::now_v7();
-        let run = uuid::Uuid::now_v7();
-        let session = root.path().join("session");
-        std::fs::create_dir_all(&session).unwrap();
-        tokio::fs::write(session.join("result.md"), "implemented API\n")
-            .await
-            .unwrap();
-
-        archive_session_result(root.path(), project, run, "t1", &session).await;
-        let durable = run_handoffs_dir(root.path(), project, run).join("t1.md");
-        assert_eq!(
-            tokio::fs::read_to_string(&durable).await.unwrap().trim(),
-            "implemented API"
+    #[test]
+    fn team_md_unknown_you_falls_back_without_you_mark() {
+        let members = three_member_board();
+        let md = render_team_md("t99", &members);
+        assert!(
+            md.contains("You are task `t99`."),
+            "unknown you must use fallback header: {md}"
         );
+        assert!(
+            !md.contains("← you"),
+            "unknown you must not mark any table row: {md}"
+        );
+    }
 
-        let dest = root.path().join("next");
-        let you = TeamMember {
-            plan_task_id: "t2".into(),
-            title: "UI".into(),
+    #[test]
+    fn team_md_omits_your_own_excerpt_from_handoffs() {
+        let members = three_member_board();
+        let md = render_team_md("t1", &members);
+        assert!(
+            !md.contains("## Handoffs from finished teammates"),
+            "own excerpt must not open the handoffs section: {md}"
+        );
+        assert!(
+            !md.contains("### `t1`"),
+            "own excerpt must not appear under a t1 heading: {md}"
+        );
+    }
+
+    #[test]
+    fn team_md_table_one_line_escapes_pipe_newline_and_caps_80() {
+        let title = format!("A|B\n{}", "x".repeat(90));
+        let members = vec![TeamMember {
+            plan_task_id: "t1".into(),
+            title,
             worker_profile: "frontend".into(),
-            status: "ready".into(),
-            depends_on: vec!["t1".into()],
+            status: "in_progress".into(),
+            depends_on: vec![],
             result_excerpt: None,
-        };
-        let task = BoardTaskRow {
+        }];
+        let md = render_team_md("t1", &members);
+        let doing = format!("A/B {}", "x".repeat(76));
+        assert_eq!(
+            doing.chars().count(),
+            80,
+            "expected doing cell is 80 chars after |→/ take-80 newline→space"
+        );
+        assert!(
+            md.contains(&format!(
+                "| `t1` | `frontend` | {doing} | in progress ← you |"
+            )),
+            "table doing cell must slash-pipe, flatten newline, cap 80: {md}"
+        );
+    }
+
+    fn board_task(
+        project: uuid::Uuid,
+        run: uuid::Uuid,
+        plan_task_id: &str,
+        title: &str,
+        status: &str,
+        worker_profile: &str,
+    ) -> BoardTaskRow {
+        let now = chrono::Utc::now();
+        BoardTaskRow {
             id: uuid::Uuid::now_v7(),
             project_id: project,
             run_id: run,
             plan_id: uuid::Uuid::now_v7(),
-            plan_task_id: "t2".into(),
-            title: "UI".into(),
+            plan_task_id: plan_task_id.into(),
+            title: title.into(),
             summary: String::new(),
             spec_md: String::new(),
-            status: "ready".into(),
+            status: status.into(),
             depends_on: vec![],
             priority: 1,
-            worker_profile: "frontend".into(),
-            acceptance: serde_json::json!([]),
-            external_ref: None,
-            timeout_s: None,
-            max_retries: 0,
-            attempt: 0,
-            claimed_session_id: None,
-            last_report_seq: 0,
-            progress_pct: 0,
-            block_reason: None,
-            hitl_notes: None,
-            hitl_artifacts: None,
-            hitl_resume_requested_at: None,
-            hitl_notified_at: None,
-            hitl_resolved_at: None,
-            failure_reason: None,
-            artifacts: None,
-            retry_not_before: None,
-            assigned_at: None,
-            started_at: None,
-            terminal_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        copy_dep_handoffs(&dest, &you, root.path(), &task).await;
-        let copied = dest.join("handoff/t1.md");
-        assert_eq!(
-            tokio::fs::read_to_string(copied).await.unwrap().trim(),
-            "implemented API"
-        );
-    }
-
-    #[tokio::test]
-    async fn prepare_workspace_writes_team_md() {
-        let root = tempfile::tempdir().unwrap();
-        let project = uuid::Uuid::now_v7();
-        let run = uuid::Uuid::now_v7();
-        let task_id = uuid::Uuid::now_v7();
-        let now = chrono::Utc::now();
-        let task = BoardTaskRow {
-            id: task_id,
-            project_id: project,
-            run_id: run,
-            plan_id: uuid::Uuid::now_v7(),
-            plan_task_id: "t1".into(),
-            title: "API".into(),
-            summary: String::new(),
-            spec_md: String::new(),
-            status: "ready".into(),
-            depends_on: vec![],
-            priority: 10,
-            worker_profile: "coding".into(),
+            worker_profile: worker_profile.into(),
             acceptance: serde_json::json!([]),
             external_ref: None,
             timeout_s: None,
@@ -532,7 +519,359 @@ mod tests {
             terminal_at: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    fn write_durable_handoff(
+        data_dir: &std::path::Path,
+        project: uuid::Uuid,
+        run: uuid::Uuid,
+        plan_task_id: &str,
+        body: &str,
+    ) {
+        let dir = run_handoffs_dir(data_dir, project, run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{plan_task_id}.md")), body).unwrap();
+    }
+
+    fn snapshot_member<'a>(members: &'a [TeamMember], plan_task_id: &str) -> &'a TeamMember {
+        members
+            .iter()
+            .find(|m| m.plan_task_id == plan_task_id)
+            .unwrap_or_else(|| panic!("missing member {plan_task_id}"))
+    }
+
+    #[test]
+    fn excerpt_truncates_long_handoffs() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let prefix = "H".repeat(4000);
+        let tail = "T".repeat(50);
+        let long = format!("{prefix}{tail}");
+        write_durable_handoff(root.path(), project, run, "t1", &long);
+        write_durable_handoff(root.path(), project, run, "t3", "implemented API");
+        let t1 = board_task(project, run, "t1", "API", "done_success", "coding");
+        let t2 = board_task(project, run, "t2", "UI", "in_progress", "frontend");
+        let t3 = board_task(project, run, "t3", "Docs", "done_success", "coding");
+        let snap = BoardSnapshot {
+            tasks: vec![t1, t2, t3],
+            sessions: vec![],
         };
+        let members = members_from_snapshot(&snap, run, root.path());
+        let expected = format!("{prefix}\n…(truncated)");
+        assert_eq!(
+            snapshot_member(&members, "t1").result_excerpt.as_deref(),
+            Some(expected.as_str()),
+            "done_success durable must keep the first 4000 chars and append the marker"
+        );
+        assert_eq!(
+            snapshot_member(&members, "t3").result_excerpt.as_deref(),
+            Some("implemented API"),
+            "short durable must stay verbatim"
+        );
+        let md = render_team_md("t2", &members);
+        assert!(
+            md.contains(&format!("### `t1` — API\n\n{expected}")),
+            "TEAM.md must dump the capped t1 prefix+marker: {md}"
+        );
+        assert!(
+            !md.contains(&tail),
+            "TEAM.md must not include the dropped tail: {md}"
+        );
+        assert!(
+            md.contains("### `t3` — Docs\n\nimplemented API"),
+            "TEAM.md must dump the short t3 excerpt verbatim: {md}"
+        );
+    }
+
+    #[test]
+    fn members_from_snapshot_trims_short_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        write_durable_handoff(root.path(), project, run, "t1", "  short  \n");
+        let t1 = board_task(project, run, "t1", "API", "done_success", "coding");
+        let snap = BoardSnapshot {
+            tasks: vec![t1],
+            sessions: vec![],
+        };
+        let members = members_from_snapshot(&snap, run, root.path());
+        assert_eq!(
+            snapshot_member(&members, "t1").result_excerpt.as_deref(),
+            Some("short"),
+            "short padded durable must trim and stay verbatim"
+        );
+    }
+
+    #[test]
+    fn members_from_snapshot_falls_back_to_latest_session_result_when_durable_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let t1 = board_task(project, run, "t1", "API", "done_success", "coding");
+        write_durable_handoff(root.path(), project, run, "t1", "  \n");
+        let now = chrono::Utc::now();
+        let older = crate::store::WorkerSessionRow {
+            id: uuid::Uuid::now_v7(),
+            project_id: project,
+            run_id: run,
+            board_task_id: t1.id,
+            attempt: 1,
+            status: "exited".into(),
+            runtime_backend: "process".into(),
+            runtime_handle: None,
+            worker_token_hash: String::new(),
+            worker_profile: "coding".into(),
+            last_heartbeat_at: None,
+            progress_pct: 0,
+            exit_reason: None,
+            kill_grace_deadline: None,
+            work_dir: None,
+            started_at: None,
+            exited_at: None,
+            created_at: now - chrono::Duration::seconds(60),
+        };
+        let newer = crate::store::WorkerSessionRow {
+            id: uuid::Uuid::now_v7(),
+            project_id: project,
+            run_id: run,
+            board_task_id: t1.id,
+            attempt: 2,
+            status: "exited".into(),
+            runtime_backend: "process".into(),
+            runtime_handle: None,
+            worker_token_hash: String::new(),
+            worker_profile: "coding".into(),
+            last_heartbeat_at: None,
+            progress_pct: 0,
+            exit_reason: None,
+            kill_grace_deadline: None,
+            work_dir: None,
+            started_at: None,
+            exited_at: None,
+            created_at: now,
+        };
+        let old_prefix = "OLD".to_string() + &"o".repeat(3997);
+        let new_prefix = "NEW".to_string() + &"n".repeat(3997);
+        let old_body = format!("{}{}", old_prefix, "O".repeat(50));
+        let new_body = format!("{}{}", new_prefix, "N".repeat(50));
+        for (session_id, body) in [(older.id, old_body.as_str()), (newer.id, new_body.as_str())] {
+            let dir = session_dir(root.path(), project, session_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("result.md"), body).unwrap();
+        }
+        let snap = BoardSnapshot {
+            tasks: vec![t1],
+            sessions: vec![older, newer],
+        };
+        let members = members_from_snapshot(&snap, run, root.path());
+        let expected = format!("{new_prefix}\n…(truncated)");
+        assert_eq!(
+            snapshot_member(&members, "t1").result_excerpt.as_deref(),
+            Some(expected.as_str()),
+            "whitespace-only durable must fall back to the newest session prefix"
+        );
+    }
+
+    #[test]
+    fn members_from_snapshot_omits_excerpt_unless_done_success() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let huge = format!("{}{}", "H".repeat(4000), "T".repeat(50));
+        write_durable_handoff(root.path(), project, run, "t1", &huge);
+        write_durable_handoff(root.path(), project, run, "t2", &huge);
+        let t1 = board_task(project, run, "t1", "API", "in_progress", "coding");
+        let t2 = board_task(project, run, "t2", "UI", "done_failed", "frontend");
+        let t3 = board_task(project, run, "t3", "Review", "ready", "reviewer");
+        let snap = BoardSnapshot {
+            tasks: vec![t1, t2, t3],
+            sessions: vec![],
+        };
+        let members = members_from_snapshot(&snap, run, root.path());
+        assert_eq!(
+            snapshot_member(&members, "t1").result_excerpt,
+            None,
+            "in_progress must not excerpt a huge durable handoff"
+        );
+        assert_eq!(
+            snapshot_member(&members, "t2").result_excerpt,
+            None,
+            "done_failed must not excerpt a huge durable handoff"
+        );
+        let md = render_team_md("t3", &members);
+        assert!(
+            !md.contains("## Handoffs from finished teammates"),
+            "non-success teammates must not open the Handoffs section: {md}"
+        );
+        assert!(
+            !md.contains(&huge[..32]),
+            "TEAM.md must not dump a non-success handoff body: {md}"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_dep_handoffs_keeps_full_body_when_team_excerpt_is_capped() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let prefix = "H".repeat(4000);
+        let tail = "T".repeat(50);
+        let long = format!("{prefix}{tail}");
+        write_durable_handoff(root.path(), project, run, "t1", &long);
+        let t1 = board_task(project, run, "t1", "API", "done_success", "coding");
+        let mut t2 = board_task(project, run, "t2", "UI", "ready", "frontend");
+        t2.depends_on = vec![t1.id];
+        let snap = BoardSnapshot {
+            tasks: vec![t1, t2.clone()],
+            sessions: vec![],
+        };
+        let members = members_from_snapshot(&snap, run, root.path());
+        let expected = format!("{prefix}\n…(truncated)");
+        assert_eq!(
+            snapshot_member(&members, "t1").result_excerpt.as_deref(),
+            Some(expected.as_str()),
+            "TEAM excerpt must be the capped prefix, not the full durable file"
+        );
+        let you = snapshot_member(&members, "t2");
+        assert_eq!(
+            you.depends_on,
+            vec!["t1".to_string()],
+            "t2 must depend on t1 so copy_dep_handoffs plants handoff/t1.md"
+        );
+        let dest = root.path().join("next");
+        copy_dep_handoffs(&dest, you, root.path(), &t2).await;
+        assert_eq!(
+            tokio::fs::read_to_string(dest.join("handoff/t1.md"))
+                .await
+                .unwrap(),
+            long,
+            "work_dir/handoff/t1.md must keep the full durable body"
+        );
+    }
+
+    fn ready_member(plan_task_id: &str, depends_on: &[&str]) -> TeamMember {
+        TeamMember {
+            plan_task_id: plan_task_id.into(),
+            title: "UI".into(),
+            worker_profile: "frontend".into(),
+            status: "ready".into(),
+            depends_on: depends_on.iter().map(|s| (*s).to_string()).collect(),
+            result_excerpt: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_and_copy_dep_handoffs() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let session = root.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        tokio::fs::write(session.join("result.md"), "implemented API\n")
+            .await
+            .unwrap();
+
+        archive_session_result(root.path(), project, run, "t1", &session).await;
+        let durable = run_handoffs_dir(root.path(), project, run).join("t1.md");
+        assert_eq!(
+            tokio::fs::read_to_string(&durable).await.unwrap(),
+            "implemented API\n",
+            "non-empty session result.md must land at runs/.../handoffs/t1.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_session_result_skips_missing_or_blank_result_md() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let missing = root.path().join("missing");
+        std::fs::create_dir_all(&missing).unwrap();
+        archive_session_result(root.path(), project, run, "t1", &missing).await;
+
+        let blank = root.path().join("blank");
+        std::fs::create_dir_all(&blank).unwrap();
+        tokio::fs::write(blank.join("result.md"), "  \n")
+            .await
+            .unwrap();
+        archive_session_result(root.path(), project, run, "t2", &blank).await;
+
+        let durable = run_handoffs_dir(root.path(), project, run);
+        assert!(
+            !durable.join("t1.md").exists(),
+            "missing result.md must not write durable t1.md"
+        );
+        assert!(
+            !durable.join("t2.md").exists(),
+            "whitespace-only result.md must not write durable t2.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_dep_handoffs_copies_only_listed_deps() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        write_durable_handoff(root.path(), project, run, "t1", "from t1\n");
+        write_durable_handoff(root.path(), project, run, "t2", "from t2\n");
+        let task = board_task(project, run, "t3", "UI", "ready", "frontend");
+
+        let dest = root.path().join("next");
+        copy_dep_handoffs(&dest, &ready_member("t3", &["t1"]), root.path(), &task).await;
+        assert_eq!(
+            tokio::fs::read_to_string(dest.join("handoff/t1.md"))
+                .await
+                .unwrap(),
+            "from t1\n",
+            "you.depends_on=[t1] must copy durable t1.md into work_dir/handoff/"
+        );
+        assert!(
+            !dest.join("handoff/t2.md").exists(),
+            "unlisted durable t2.md must not be copied"
+        );
+
+        let empty = root.path().join("empty");
+        copy_dep_handoffs(&empty, &ready_member("t3", &[]), root.path(), &task).await;
+        assert!(
+            !empty.join("handoff").exists(),
+            "empty you.depends_on must not create work_dir/handoff/"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_handoff_survives_session_wipe() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let session = root.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        tokio::fs::write(session.join("result.md"), "implemented API\n")
+            .await
+            .unwrap();
+
+        archive_session_result(root.path(), project, run, "t1", &session).await;
+        tokio::fs::remove_dir_all(&session).await.unwrap();
+
+        let dest = root.path().join("next");
+        let task = board_task(project, run, "t2", "UI", "ready", "frontend");
+        copy_dep_handoffs(&dest, &ready_member("t2", &["t1"]), root.path(), &task).await;
+        assert_eq!(
+            tokio::fs::read_to_string(dest.join("handoff/t1.md"))
+                .await
+                .unwrap(),
+            "implemented API\n",
+            "copy_dep_handoffs must still plant dest/handoff/t1.md after session wipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_writes_team_md() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let task = board_task(project, run, "t1", "API", "ready", "coding");
         let snap = BoardSnapshot {
             tasks: vec![task.clone()],
             sessions: vec![],
@@ -543,11 +882,89 @@ mod tests {
         let md = tokio::fs::read_to_string(work.join("TEAM.md"))
             .await
             .unwrap();
-        assert!(md.contains("`t1`"));
-        assert!(md.contains("API"));
+        assert!(
+            md.contains("You are **`t1`**"),
+            "spawn TEAM.md must pin you-header for t1: {md}"
+        );
         let talk = crate::sandbox::team_chat::load_team_talk(&work).expect("talk file");
-        assert_eq!(talk.me, "t1");
-        assert_eq!(talk.run_id, run);
-        assert!(work.join("TEAM_CHAT.md").exists());
+        assert_eq!(talk.me, "t1", "spawn .team.json me must be plan_task_id t1");
+        assert_eq!(
+            talk.run_id, run,
+            "spawn .team.json run_id must match the board task"
+        );
+        let chat = tokio::fs::read_to_string(work.join("TEAM_CHAT.md"))
+            .await
+            .unwrap();
+        assert!(
+            chat.contains("_No messages yet._"),
+            "empty spawn TEAM_CHAT.md must plant the empty-header: {chat}"
+        );
+    }
+
+    #[test]
+    fn members_from_snapshot_maps_uuid_depends_on_to_plan_task_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let t1 = board_task(project, run, "t1", "API", "ready", "coding");
+        let mut t2 = board_task(project, run, "t2", "UI", "ready", "frontend");
+        t2.depends_on = vec![t1.id];
+        let snap = BoardSnapshot {
+            tasks: vec![t1, t2],
+            sessions: vec![],
+        };
+        let members = members_from_snapshot(&snap, run, root.path());
+        assert_eq!(
+            snapshot_member(&members, "t2").depends_on,
+            vec!["t1".to_string()],
+            "t2.depends_on must map t1.id to plan id t1, not the UUID"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_fallback_you_when_task_absent_from_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run = uuid::Uuid::now_v7();
+        let task = board_task(project, run, "t1", "API", "ready", "coding");
+        let snap = BoardSnapshot {
+            tasks: vec![],
+            sessions: vec![],
+        };
+        let work = root.path().join("work");
+        tokio::fs::create_dir_all(&work).await.unwrap();
+        prepare_agent_workspace(root.path(), &work, &task, &snap).await;
+        let md = tokio::fs::read_to_string(work.join("TEAM.md"))
+            .await
+            .unwrap();
+        assert!(
+            md.contains("You are task `t1`."),
+            "absent-from-snap must emit fallback you-header: {md}"
+        );
+        let talk = crate::sandbox::team_chat::load_team_talk(&work).expect("talk file");
+        assert_eq!(talk.me, "t1", "fallback spawn still plants talk.me=t1");
+    }
+
+    #[test]
+    fn members_from_snapshot_filters_tasks_to_this_run_id() {
+        let root = tempfile::tempdir().unwrap();
+        let project = uuid::Uuid::now_v7();
+        let run_a = uuid::Uuid::now_v7();
+        let run_b = uuid::Uuid::now_v7();
+        let t1 = board_task(project, run_a, "t1", "API", "ready", "coding");
+        let tx = board_task(project, run_b, "tX", "Other", "ready", "coding");
+        let snap = BoardSnapshot {
+            tasks: vec![t1, tx],
+            sessions: vec![],
+        };
+        let members = members_from_snapshot(&snap, run_a, root.path());
+        assert_eq!(
+            members
+                .iter()
+                .map(|m| m.plan_task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t1"],
+            "members must keep only run A's t1, not run B's tX"
+        );
     }
 }

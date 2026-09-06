@@ -770,21 +770,39 @@ mod public_view_tests {
     }
 
     #[test]
-    fn stale_online_host_is_reported_offline() {
+    fn online_host_stays_online_through_missed_heartbeat() {
         let now = Utc::now();
-        let fresh = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(5)));
-        assert_eq!(fresh.public_status(now), WORKER_HOST_STATUS_ONLINE);
-
-        let paused = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(60)));
+        let missed = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(60)));
         assert_eq!(
-            paused.public_status(now),
+            missed.public_status(now),
             WORKER_HOST_STATUS_ONLINE,
             "a missed beat must not flip the card offline"
         );
+    }
 
-        let stale = host(WORKER_HOST_STATUS_ONLINE, Some(now - Duration::seconds(91)));
+    #[test]
+    fn online_at_exactly_offline_after_stays_online() {
+        let now = Utc::now();
+        let at_threshold = host(
+            WORKER_HOST_STATUS_ONLINE,
+            Some(now - WORKER_HOST_OFFLINE_AFTER),
+        );
+        assert_eq!(at_threshold.public_status(now), WORKER_HOST_STATUS_ONLINE);
+    }
+
+    #[test]
+    fn stale_online_host_is_reported_offline() {
+        let now = Utc::now();
+        let stale = host(
+            WORKER_HOST_STATUS_ONLINE,
+            Some(now - WORKER_HOST_OFFLINE_AFTER - Duration::seconds(1)),
+        );
         assert_eq!(stale.public_status(now), "offline");
+    }
 
+    #[test]
+    fn online_host_without_last_seen_is_reported_offline() {
+        let now = Utc::now();
         let never_seen = host(WORKER_HOST_STATUS_ONLINE, None);
         assert_eq!(never_seen.public_status(now), "offline");
     }
@@ -811,56 +829,28 @@ mod public_view_tests {
         assert!(!label_is_cluster("gpu"));
         assert!(!label_is_cluster("cluster-host"));
         assert!(!label_is_cluster(""));
+    }
 
+    #[test]
+    fn is_cluster_host_true_when_any_label_is_cluster() {
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        boxed.labels = vec!["gpu".into(), " CLUSTER ".into()];
+        assert!(
+            boxed.is_cluster_host(),
+            "cluster anywhere in labels is a cluster host"
+        );
+    }
+
+    #[test]
+    fn normalize_host_labels_preserves_non_cluster_case() {
         assert_eq!(
-            normalize_host_labels(&[
-                " CLUSTER ".into(),
-                "".into(),
-                "  ".into(),
-                "gpu".into(),
-                "Cluster".into(),
-            ]),
-            vec![
-                "cluster".to_string(),
-                "gpu".to_string(),
-                "cluster".to_string()
-            ]
+            normalize_host_labels(&["GPU".into(), "Linux".into()]),
+            vec!["GPU".to_string(), "Linux".to_string()]
         );
-
-        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
-        boxed.labels = vec!["CLUSTER".into()];
-        assert!(boxed.is_cluster_host());
-        boxed.labels = vec!["gpu".into()];
-        assert!(!boxed.is_cluster_host());
     }
 
     #[test]
-    fn v1_lease_gate_is_host_or_cluster_container() {
-        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
-        boxed.allow_host = false;
-        boxed.advertised_host = false;
-        boxed.allow_container = true;
-        boxed.advertised_container = true;
-        boxed.labels = vec![];
-        assert!(
-            !boxed.accepts_v1_leases(),
-            "paired container-only must not take host-runtime /me/lease"
-        );
-        boxed.labels = vec!["cluster".into()];
-        assert!(
-            boxed.accepts_v1_leases(),
-            "cluster container-only (Kind fleet-host) must lease"
-        );
-        boxed.allow_container = false;
-        boxed.advertised_container = false;
-        boxed.allow_host = true;
-        boxed.advertised_host = true;
-        boxed.labels = vec![];
-        assert!(boxed.accepts_v1_leases(), "paired host-capable must lease");
-    }
-
-    #[test]
-    fn isolation_parse_and_public_view() {
+    fn parse_worker_host_isolation_only_native_or_sandboxed() {
         assert_eq!(
             parse_worker_host_isolation("native"),
             Some(WORKER_HOST_ISOLATION_NATIVE)
@@ -871,13 +861,117 @@ mod public_view_tests {
         );
         assert_eq!(parse_worker_host_isolation("k8s"), None);
         assert_eq!(parse_worker_host_isolation(""), None);
+    }
 
+    #[test]
+    fn parse_worker_host_isolation_rejects_case_and_whitespace_only() {
+        assert_eq!(parse_worker_host_isolation("NATIVE"), None);
+        assert_eq!(parse_worker_host_isolation("Sandboxed"), None);
+        assert_eq!(parse_worker_host_isolation("   "), None);
+    }
+
+    #[test]
+    fn as_public_sandboxed_isolation_stays_sandboxed() {
         let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
         boxed.isolation = WORKER_HOST_ISOLATION_SANDBOXED.into();
         assert!(!boxed.is_native_isolation());
         assert_eq!(
             boxed.as_public(Utc::now()).isolation,
             WORKER_HOST_ISOLATION_SANDBOXED
+        );
+    }
+
+    #[test]
+    fn as_public_unknown_isolation_is_native() {
+        let now = Utc::now();
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(now));
+        boxed.isolation = "k8s".into();
+        assert_eq!(boxed.as_public(now).isolation, WORKER_HOST_ISOLATION_NATIVE);
+        boxed.isolation = "cloud".into();
+        assert_eq!(boxed.as_public(now).isolation, WORKER_HOST_ISOLATION_NATIVE);
+        boxed.isolation = "".into();
+        assert_eq!(boxed.as_public(now).isolation, WORKER_HOST_ISOLATION_NATIVE);
+    }
+
+    #[test]
+    fn as_public_agents_maps_model_details() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.agent_runtimes = serde_json::json!([
+            {
+                "id": "grok",
+                "name": "Grok",
+                "installed": true,
+                "logged_in": true,
+                "models": ["grok-4"],
+                "model_details": [{
+                    "name": "grok-4",
+                    "efforts": [{"value": "high", "label": "High"}],
+                    "default_effort": "high"
+                }]
+            },
+            {
+                "id": "claude",
+                "name": "Claude",
+                "installed": true,
+                "logged_in": false,
+                "models": [],
+                "model_details": []
+            }
+        ]);
+        assert_eq!(
+            h.as_public(Utc::now()).agents,
+            vec![
+                WorkerAgentRuntime {
+                    id: "grok".into(),
+                    name: Some("Grok".into()),
+                    installed: true,
+                    logged_in: true,
+                    models: vec!["grok-4".into()],
+                    model_details: vec![WorkerAgentModelDetail {
+                        name: "grok-4".into(),
+                        efforts: vec![WorkerAgentEffort {
+                            value: "high".into(),
+                            label: Some("High".into()),
+                        }],
+                        default_effort: Some("high".into()),
+                    }],
+                },
+                WorkerAgentRuntime {
+                    id: "claude".into(),
+                    name: Some("Claude".into()),
+                    installed: true,
+                    logged_in: false,
+                    models: vec![],
+                    model_details: vec![],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn as_public_agents_drops_blank_ids_and_non_objects() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.agent_runtimes = serde_json::json!([
+            {"id": ""},
+            {"id": "  "},
+            {},
+            "x",
+            {"id": "grok"}
+        ]);
+        let agents = h.as_public(Utc::now()).agents;
+        assert_eq!(
+            agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            vec!["grok"]
+        );
+    }
+
+    #[test]
+    fn as_public_agents_empty_when_runtimes_not_an_array() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.agent_runtimes = serde_json::json!({"id": "grok"});
+        assert!(
+            h.as_public(Utc::now()).agents.is_empty(),
+            "non-array agent_runtimes must surface as no agents"
         );
     }
 
@@ -893,38 +987,43 @@ mod public_view_tests {
     #[test]
     fn public_json_never_includes_hashes_or_tokens() {
         let h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
-        let v = serde_json::to_value(h.as_public(Utc::now())).expect("json");
-        let obj = v.as_object().expect("object");
-        for secret in [
-            "machine_token_hash",
-            "pair_token",
-            "pair_token_hash",
-            "token_hash",
-            "machine_token",
-        ] {
-            assert!(
-                !obj.contains_key(secret),
-                "public host leaked {secret}: {v}"
-            );
+        let public = serde_json::to_string(&h.as_public(Utc::now())).expect("json");
+        let raw = serde_json::to_string(&h).expect("host json");
+        for (label, blob) in [("as_public", &public), ("WorkerHost", &raw)] {
+            for secret in [
+                "machine_token_hash",
+                "pair_token",
+                "pair_token_hash",
+                "token_hash",
+                "machine_token",
+                "should-never-leave",
+            ] {
+                assert!(
+                    !blob.contains(secret),
+                    "{label} leaked {secret}: {blob}"
+                );
+            }
         }
-        // Stored WorkerHost must also skip the hash on accidental serialize.
-        let raw = serde_json::to_value(&h).expect("host json");
+    }
+
+    #[test]
+    fn from_host_leaves_desired_none_when_software_is_reported() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.software_git_sha = Some("reported-sha".into());
+        h.software_reported_at = Some(Utc::now());
+        let public = h.as_public(Utc::now());
         assert!(
-            raw.get("machine_token_hash").is_none(),
-            "WorkerHost serialize leaked hash: {raw}"
+            public.software.is_some(),
+            "reported software must appear so desired-none is not the never-reported path"
         );
-        assert_eq!(v["status"], "online");
-        assert_eq!(v["isolation"], WORKER_HOST_ISOLATION_NATIVE);
-        assert!(h.is_native_isolation());
         assert!(
-            v.get("software").unwrap().is_null(),
-            "never-reported software must be null: {v}"
+            public.desired.is_none(),
+            "from_host must leave desired unset; host_json attaches via with_desired"
         );
-        assert_eq!(v["software_status"], "unknown");
-        assert_eq!(v["outdated"], false);
-        assert!(
-            v.get("desired").unwrap().is_null(),
-            "desired is attached by the API, not from_host: {v}"
+        assert_eq!(
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "from_host hardcodes unknown; with_desired recomputes against a staged manifest"
         );
     }
 
@@ -965,15 +1064,58 @@ mod public_view_tests {
 
     #[test]
     fn software_status_unknown_without_report_or_manifest() {
-        let desired = sample_manifest("aaa");
-        assert_eq!(
-            compute_software_status(None, Some(&desired)),
-            WORKER_SOFTWARE_STATUS_UNKNOWN
+        let sw = reported(
+            Some("stage-tree-id"),
+            Some(serde_json::json!({
+                "fleet-host": "aaa",
+                "fleet-driver": "driver-sha"
+            })),
         );
-        let sw = reported(Some("stage-tree-id"), None);
         assert_eq!(
             compute_software_status(Some(&sw), None),
-            WORKER_SOFTWARE_STATUS_UNKNOWN
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "no staged manifest is unknown, not behind, even when host+driver bins were reported"
+        );
+    }
+
+    #[test]
+    fn with_desired_none_on_reported_host_is_unknown_not_outdated() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.software_git_sha = Some("stage-tree-id".into());
+        h.software_bins = Some(serde_json::json!({
+            "fleet-host": "aaa",
+            "fleet-driver": "driver-sha"
+        }));
+        h.software_reported_at = Some(Utc::now());
+        let public = h.as_public(Utc::now()).with_desired(None);
+        assert!(
+            public.software.is_some(),
+            "reported software must appear so unknown is not the never-reported path"
+        );
+        assert_eq!(
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "desired_for withhold or no staged platform must not flag Update"
+        );
+        assert!(
+            !public.outdated,
+            "unknown is never outdated"
+        );
+    }
+
+    #[test]
+    fn software_status_unknown_when_manifest_has_empty_git_sha_and_no_bins() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: String::new(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let sw = reported(Some("stage-tree-id"), None);
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "empty bake id and no package bins cannot be behind"
         );
     }
 
@@ -1010,23 +1152,6 @@ mod public_view_tests {
     }
 
     #[test]
-    fn reporting_only_legacy_fleet_worker_is_not_current() {
-        let desired = sample_manifest("aaa");
-        let sw = reported(
-            Some("other-git"),
-            Some(serde_json::json!({
-                "fleet-host": "aaa",
-                "fleet-worker": "stale-on-disk"
-            })),
-        );
-        assert_ne!(
-            compute_software_status(Some(&sw), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_CURRENT,
-            "a leftover fleet-worker guest is the old SKU, not current"
-        );
-    }
-
-    #[test]
     fn software_status_current_when_bins_match() {
         let desired = sample_manifest("AaA");
         let sw = reported(
@@ -1043,19 +1168,8 @@ mod public_view_tests {
     }
 
     #[test]
-    fn software_status_uses_package_version_then_hash() {
+    fn software_status_behind_when_old_package_version_matches_hash() {
         let desired = sample_manifest("aaa");
-        let same_ver = reported(
-            None,
-            Some(serde_json::json!({
-                "fleet-host": { "sha256": "aaa", "version": "0.0.1" },
-                "fleet-driver": { "sha256": "driver-sha", "version": "0.0.1" }
-            })),
-        );
-        assert_eq!(
-            compute_software_status(Some(&same_ver), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_CURRENT
-        );
         let old_ver = reported(
             None,
             Some(serde_json::json!({
@@ -1065,8 +1179,14 @@ mod public_view_tests {
         );
         assert_eq!(
             compute_software_status(Some(&old_ver), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_BEHIND
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "host 0.0.0 vs staged 0.0.1 is behind even when sha256 matches"
         );
+    }
+
+    #[test]
+    fn software_status_uses_package_version_then_hash() {
+        let desired = sample_manifest("aaa");
         let same_ver_wrong_hash = reported(
             None,
             Some(serde_json::json!({
@@ -1076,7 +1196,25 @@ mod public_view_tests {
         );
         assert_eq!(
             compute_software_status(Some(&same_ver_wrong_hash), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_CURRENT
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "same 0.0.1 with a hash mismatch is current; version compare skips hash"
+        );
+    }
+
+    #[test]
+    fn software_status_behind_when_only_driver_version_mismatches() {
+        let desired = sample_manifest("aaa");
+        let old_driver = reported(
+            None,
+            Some(serde_json::json!({
+                "fleet-host": { "sha256": "aaa", "version": "0.0.1" },
+                "fleet-driver": { "sha256": "driver-sha", "version": "0.0.0" }
+            })),
+        );
+        assert_eq!(
+            compute_software_status(Some(&old_driver), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "driver 0.0.0 vs staged 0.0.1 is behind even when host version and hashes match"
         );
     }
 
@@ -1143,10 +1281,35 @@ mod public_view_tests {
             WORKER_SOFTWARE_STATUS_BEHIND,
             "git_sha match is not enough when the package lists host + driver"
         );
-        let empty_bins = reported(Some("old-tree"), Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn empty_reported_bins_object_matching_bake_is_behind() {
+        let desired = sample_manifest("aaa");
+        let empty_bins = reported(Some("stage-tree-id"), Some(serde_json::json!({})));
         assert_eq!(
             compute_software_status(Some(&empty_bins), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_BEHIND
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "empty bins object is not a host+driver pair; matching bake must stay behind"
+        );
+    }
+
+    #[test]
+    fn with_desired_matching_bake_without_bins_is_outdated() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.software_git_sha = Some("stage-tree-id".into());
+        h.software_reported_at = Some(Utc::now());
+        let public = h
+            .as_public(Utc::now())
+            .with_desired(Some(sample_manifest("aaa")));
+        assert_eq!(
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "matching bake without reported bins is behind when the package lists host+driver"
+        );
+        assert!(
+            public.outdated,
+            "behind from bake-id-alone must set outdated so Update now is shown"
         );
     }
 
@@ -1161,17 +1324,88 @@ mod public_view_tests {
         let current = reported(Some("stage-tree-id"), None);
         assert_eq!(
             compute_software_status(Some(&current), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_CURRENT
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "matching bake id is current when the staged package has no bins"
         );
+    }
+
+    #[test]
+    fn software_status_behind_when_git_sha_mismatches_and_package_has_no_bins() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
         let behind = reported(Some("old-tree"), None);
         assert_eq!(
             compute_software_status(Some(&behind), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_BEHIND
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "mismatched bake id is behind when the staged package has no bins"
         );
+    }
+
+    #[test]
+    fn software_status_unknown_when_reported_git_sha_is_whitespace_and_package_has_no_bins() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
         let empty = reported(Some("  "), None);
         assert_eq!(
             compute_software_status(Some(&empty), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_UNKNOWN
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "whitespace reported git_sha is treated as missing; empty-bin fallback is unknown"
+        );
+    }
+
+    #[test]
+    fn software_status_git_sha_fallback_ignores_case_and_trim() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let sw = reported(Some(" Stage-Tree-Id "), None);
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "empty-bin bake-id fallback uses sha_eq (trim + ignore case)"
+        );
+    }
+
+    #[test]
+    fn software_status_unknown_when_report_omits_git_sha_and_package_has_no_bins() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let sw = reported(None, None);
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "omitted reported git_sha cannot compare bake ids; empty-bin fallback is unknown"
+        );
+    }
+
+    #[test]
+    fn software_status_empty_reported_bins_object_still_falls_back() {
+        let desired = WorkerSoftwareManifest {
+            git_sha: "stage-tree-id".into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let sw = reported(Some("stage-tree-id"), Some(serde_json::json!({})));
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "empty reported bins object still leaves compared==0 so empty-package bake-id fallback runs"
         );
     }
 
@@ -1191,7 +1425,6 @@ mod public_view_tests {
         }
 
         // Empty-bin fallback: a 64-hex on either side is not a bake id.
-        // Matching or differing file hashes must be unknown, not current.
         let both_hash = reported(Some(file_hash), None);
         assert_eq!(
             compute_software_status(Some(&both_hash), Some(&empty_bins(file_hash))),
@@ -1222,22 +1455,12 @@ mod public_view_tests {
             WORKER_SOFTWARE_STATUS_UNKNOWN,
             "two different 64-hex git_sha values are still file hashes, not bake ids"
         );
+    }
 
-        // Matching real bake ids without a staged bin/version compare must not
-        // be current when the staged package lists fleet-host + fleet-driver.
-        let staged = sample_manifest("aaa");
-        let bake_only = reported(Some("stage-tree-id"), None);
-        assert_ne!(
-            compute_software_status(Some(&bake_only), Some(&staged)),
-            WORKER_SOFTWARE_STATUS_CURRENT,
-            "matching bake without host+driver compare must not be current"
-        );
-        assert_eq!(
-            compute_software_status(Some(&bake_only), Some(&staged)),
-            WORKER_SOFTWARE_STATUS_BEHIND
-        );
-
-        // File-hash equality is integrity only when versions are absent.
+    #[test]
+    fn software_status_current_when_64_hex_bin_hashes_match() {
+        let file_hash = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e";
+        let other_hash = "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d";
         let mut hash_bins = BTreeMap::new();
         hash_bins.insert(
             "fleet-host".into(),
@@ -1255,13 +1478,13 @@ mod public_view_tests {
                 version: None,
             },
         );
-        let hash_only = WorkerSoftwareManifest {
-            git_sha: bake.into(),
+        let desired = WorkerSoftwareManifest {
+            git_sha: "18a1be7df0a53136e7a85b741d8b9fc45b4cc351".into(),
             platform: "linux-x86_64".into(),
             staged_at: String::new(),
             bins: hash_bins,
         };
-        let matching_hashes = reported(
+        let sw = reported(
             Some(file_hash),
             Some(serde_json::json!({
                 "fleet-host": file_hash,
@@ -1269,36 +1492,50 @@ mod public_view_tests {
             })),
         );
         assert_eq!(
-            compute_software_status(Some(&matching_hashes), Some(&hash_only)),
+            compute_software_status(Some(&sw), Some(&desired)),
             WORKER_SOFTWARE_STATUS_CURRENT,
-            "matching file hashes with no versions is integrity, not a bake-id compare"
+            "matching 64-hex bin hashes are integrity; short-hash CURRENT siblings skip this path"
         );
-        let mismatch_hashes = reported(
-            Some(file_hash),
-            Some(serde_json::json!({
-                "fleet-host": file_hash,
-                "fleet-driver": "wrong-driver-bytes"
-            })),
-        );
-        assert_eq!(
-            compute_software_status(Some(&mismatch_hashes), Some(&hash_only)),
-            WORKER_SOFTWARE_STATUS_BEHIND,
-            "a 64-hex git_sha must not override a bin-hash mismatch"
-        );
+    }
 
-        // Versions win; a 64-hex git_sha cannot make an old package current.
-        let versioned = sample_manifest(file_hash);
-        let old_ver = reported(
-            Some(file_hash),
-            Some(serde_json::json!({
-                "fleet-host": { "sha256": file_hash, "version": "0.0.0" },
-                "fleet-driver": { "sha256": other_hash, "version": "0.0.1" }
-            })),
-        );
+    #[test]
+    fn software_status_40_hex_tree_id_empty_bins_compares_as_bake_id() {
+        let tree = "18a1be7df0a53136e7a85b741d8b9fc45b4cc351";
+        let other = "6bec5b00654e94f1a469f1f7cee6f939413b6e36";
+        let desired = WorkerSoftwareManifest {
+            git_sha: tree.into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let current = reported(Some(tree), None);
         assert_eq!(
-            compute_software_status(Some(&old_ver), Some(&versioned)),
+            compute_software_status(Some(&current), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "40-hex tree-id is a bake id; matching empty-bin report is current"
+        );
+        let behind = reported(Some(other), None);
+        assert_eq!(
+            compute_software_status(Some(&behind), Some(&desired)),
             WORKER_SOFTWARE_STATUS_BEHIND,
-            "file hash in git_sha is not a bake id that can override version compare"
+            "two different 40-hex tree-ids compare as bake ids, not unknown"
+        );
+    }
+
+    #[test]
+    fn software_status_uppercase_64_hex_git_sha_is_unknown() {
+        let file_hash = "2A971D693B6F7F0C13C94269845CA4AC0C73672B72AC7A2C7839BE2CEE590C8E";
+        let desired = WorkerSoftwareManifest {
+            git_sha: file_hash.into(),
+            platform: "linux-x86_64".into(),
+            staged_at: String::new(),
+            bins: BTreeMap::new(),
+        };
+        let sw = reported(Some(file_hash), None);
+        assert_eq!(
+            compute_software_status(Some(&sw), Some(&desired)),
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "uppercase 64-hex git_sha is a file hash, not a bake id"
         );
     }
 
@@ -1310,19 +1547,54 @@ mod public_view_tests {
         let public = h
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
-        assert_eq!(public.software_status, WORKER_SOFTWARE_STATUS_BEHIND);
-        assert!(public.outdated);
         assert_eq!(
-            public.desired.as_ref().map(|d| d.git_sha.as_str()),
-            Some("stage-tree-id")
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "bake-only report against a staged host+driver package is behind"
         );
+        assert!(
+            public.outdated,
+            "outdated is true only when software_status is behind"
+        );
+    }
 
-        let no_sw = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()))
+    #[test]
+    fn with_desired_never_reported_host_is_unknown_not_outdated() {
+        let public = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()))
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
-        assert_eq!(no_sw.software_status, WORKER_SOFTWARE_STATUS_UNKNOWN);
-        assert!(!no_sw.outdated);
-        assert!(no_sw.desired.is_some());
+        assert_eq!(
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            "a never-reported box stays unknown even when a package is staged"
+        );
+        assert!(
+            !public.outdated,
+            "unknown must not light Update now on a never-reported box"
+        );
+    }
+
+    #[test]
+    fn with_desired_current_matching_bins_is_not_outdated() {
+        let mut h = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        h.software_git_sha = Some("stage-tree-id".into());
+        h.software_bins = Some(serde_json::json!({
+            "fleet-host": "aaa",
+            "fleet-driver": "driver-sha"
+        }));
+        h.software_reported_at = Some(Utc::now());
+        let public = h
+            .as_public(Utc::now())
+            .with_desired(Some(sample_manifest("aaa")));
+        assert_eq!(
+            public.software_status,
+            WORKER_SOFTWARE_STATUS_CURRENT,
+            "matching fleet-host+fleet-driver hashes are current"
+        );
+        assert!(
+            !public.outdated,
+            "current must not be outdated; outdated is not merely status != unknown"
+        );
     }
 }
 

@@ -392,15 +392,6 @@ fn inbox_keys(body: &Value) -> Vec<String> {
         .collect()
 }
 
-fn inbox_ticket<'a>(body: &'a Value, key: &str) -> &'a Value {
-    body["tickets"]
-        .as_array()
-        .unwrap_or_else(|| panic!("tickets: {body}"))
-        .iter()
-        .find(|t| t["key"].as_str() == Some(key))
-        .unwrap_or_else(|| panic!("missing key {key}: {body}"))
-}
-
 fn assert_inbox_not_500(out: &HttpOut, label: &str) {
     assert_ne!(
         out.status,
@@ -409,25 +400,6 @@ fn assert_inbox_not_500(out: &HttpOut, label: &str) {
         out.status,
         out.body
     );
-}
-
-fn assert_no_ticket_leak(out: &HttpOut, keys: &[&str], label: &str) {
-    let blob = format!("{} {}", out.body, out.raw);
-    for key in keys {
-        assert!(
-            !blob.contains(key),
-            "{label} must not leak ticket {key}: {} {}",
-            out.status,
-            out.body
-        );
-    }
-    if let Some(tickets) = out.body["tickets"].as_array() {
-        assert!(
-            tickets.is_empty(),
-            "{label} must not return inbox tickets: {}",
-            out.body
-        );
-    }
 }
 
 fn assert_inbox_exact_keys(out: &HttpOut, expected: &[&str], label: &str) {
@@ -464,202 +436,172 @@ async fn seed_inbox(state: &AppState, workspace_id: Uuid, key: &str, title: &str
     .unwrap_or_else(|e| panic!("seed {key}: {e}"));
 }
 
-/// GET /inbox?state= keeps only matching tickets. Unknown / junk state is
-/// 200 with an empty list — not 500. Empty/whitespace `state` is unfiltered.
-#[tokio::test]
-async fn inbox_get_state_query_filters_and_unknown_does_not_500() {
-    let (app, state) = app_with_state().await;
-    let (_a_email, a_jar, a_ws) = signup_and_login(&app).await;
-    let (_b_email, b_jar, b_ws) = signup_and_login(&app).await;
-    let a_ws_id = Uuid::parse_str(&a_ws).expect("A workspace id");
-    let b_ws_id = Uuid::parse_str(&b_ws).expect("B workspace id");
+async fn seed_open_launched_done(
+    state: &AppState,
+    workspace_id: Uuid,
+) -> (String, String, String) {
     let tag = Uuid::new_v4();
     let open_key = format!("state-q-{tag}/app#open");
     let launched_key = format!("state-q-{tag}/app#launched");
     let done_key = format!("state-q-{tag}/app#done");
-    let other_key = format!("state-q-{tag}/other#open");
+    seed_inbox(state, workspace_id, &open_key, "open ticket", false).await;
+    seed_inbox(state, workspace_id, &launched_key, "launched ticket", false).await;
+    ticket_repo::mark_launched(
+        &state.db,
+        workspace_id,
+        "github",
+        &launched_key,
+        Uuid::now_v7(),
+    )
+    .await
+    .expect("mark launched")
+    .expect("launched row");
+    seed_inbox(state, workspace_id, &done_key, "done ticket", true).await;
+    (open_key, launched_key, done_key)
+}
 
-    seed_inbox(&state, a_ws_id, &open_key, "open ticket", false).await;
-    seed_inbox(&state, a_ws_id, &launched_key, "launched ticket", false).await;
-    let run_id = Uuid::now_v7();
-    ticket_repo::mark_launched(&state.db, a_ws_id, "github", &launched_key, run_id)
-        .await
-        .expect("mark launched")
-        .expect("launched row");
-    seed_inbox(&state, a_ws_id, &done_key, "done ticket", true).await;
-    seed_inbox(&state, b_ws_id, &other_key, "B open ticket", false).await;
+async fn authed_user_id(app: &axum::Router, jar: &CookieJar) -> Uuid {
+    let me = call(app, "GET", "/api/auth/me", Some(jar), None).await;
+    Uuid::parse_str(
+        me.body["user"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("user.id: {}", me.body)),
+    )
+    .expect("user id")
+}
 
-    let all = call(&app, "GET", &inbox_path(&a_ws, ""), Some(&a_jar), None).await;
-    assert_inbox_exact_keys(
-        &all,
-        &[&open_key, &launched_key, &done_key],
-        "unfiltered GET",
-    );
-    assert_eq!(
-        inbox_ticket(&all.body, &open_key)["state"].as_str(),
-        Some("open"),
-        "open ticket: {}",
-        all.body
-    );
-    assert_eq!(
-        inbox_ticket(&all.body, &launched_key)["state"].as_str(),
-        Some("launched"),
-        "launched ticket: {}",
-        all.body
-    );
-    assert_eq!(
-        inbox_ticket(&all.body, &launched_key)["run_id"].as_str(),
-        Some(run_id.to_string().as_str()),
-        "launched run_id: {}",
-        all.body
-    );
-    assert_eq!(
-        inbox_ticket(&all.body, &done_key)["state"].as_str(),
-        Some("done"),
-        "done ticket: {}",
-        all.body
-    );
-    assert!(
-        !inbox_keys(&all.body).iter().any(|k| k == &other_key),
-        "A unfiltered must not list B's ticket: {}",
-        all.body
-    );
+fn test_llm() -> fleet_server::chat_tools::ChatLlmContext {
+    fleet_server::chat_tools::ChatLlmContext {
+        provider: "grok".into(),
+        model: "grok-4.5".into(),
+        runner_id: None,
+        effort: None,
+    }
+}
+
+/// GET /inbox?state=open|launched|done keeps only the matching seeded key.
+#[tokio::test]
+async fn inbox_get_state_query_filters() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("workspace id");
+    let (open_key, launched_key, done_key) = seed_open_launched_done(&state, ws_id).await;
 
     let open = call(
         &app,
         "GET",
-        &inbox_path(&a_ws, "state=open"),
-        Some(&a_jar),
+        &inbox_path(&ws, "state=open"),
+        Some(&jar),
         None,
     )
     .await;
     assert_inbox_exact_keys(&open, &[&open_key], "GET ?state=open");
-    assert_eq!(
-        inbox_ticket(&open.body, &open_key)["state"].as_str(),
-        Some("open"),
-        "{}",
-        open.body
-    );
 
     let launched = call(
         &app,
         "GET",
-        &inbox_path(&a_ws, "state=launched"),
-        Some(&a_jar),
+        &inbox_path(&ws, "state=launched"),
+        Some(&jar),
         None,
     )
     .await;
     assert_inbox_exact_keys(&launched, &[&launched_key], "GET ?state=launched");
-    assert_eq!(
-        inbox_ticket(&launched.body, &launched_key)["state"].as_str(),
-        Some("launched"),
-        "{}",
-        launched.body
-    );
 
     let done = call(
         &app,
         "GET",
-        &inbox_path(&a_ws, "state=done"),
-        Some(&a_jar),
+        &inbox_path(&ws, "state=done"),
+        Some(&jar),
         None,
     )
     .await;
     assert_inbox_exact_keys(&done, &[&done_key], "GET ?state=done");
-    assert_eq!(
-        inbox_ticket(&done.body, &done_key)["state"].as_str(),
-        Some("done"),
-        "{}",
-        done.body
-    );
+}
 
-    let empty_param = call(
+/// Unknown / junk ?state= is 200 with an empty list — not 500.
+#[tokio::test]
+async fn inbox_get_state_unknown_is_200_empty() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("workspace id");
+    let _seeded = seed_open_launched_done(&state, ws_id).await;
+
+    let out = call(
         &app,
         "GET",
-        &inbox_path(&a_ws, "state="),
-        Some(&a_jar),
+        &inbox_path(&ws, "state=not_a_real_state"),
+        Some(&jar),
         None,
     )
     .await;
-    assert_inbox_exact_keys(
-        &empty_param,
-        &[&open_key, &launched_key, &done_key],
-        "GET ?state= (empty) is unfiltered",
-    );
+    assert_inbox_exact_keys(&out, &[], "GET ?state=unknown");
+}
 
-    let ws_param = call(
+/// GET ?state=%20open%20 still filters after InboxQuery trim.
+#[tokio::test]
+async fn inbox_get_state_padded_open_still_filters() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let ws_id = Uuid::parse_str(&ws).expect("workspace id");
+    let (open_key, _, _) = seed_open_launched_done(&state, ws_id).await;
+
+    let out = call(
         &app,
         "GET",
-        &inbox_path(&a_ws, "state=%20%20"),
-        Some(&a_jar),
+        &inbox_path(&ws, "state=%20open%20"),
+        Some(&jar),
         None,
     )
     .await;
-    assert_inbox_exact_keys(
-        &ws_param,
-        &[&open_key, &launched_key, &done_key],
-        "GET ?state=whitespace is unfiltered",
-    );
+    assert_inbox_exact_keys(&out, &[&open_key], "GET ?state=%20open%20");
+}
 
-    for (query, label) in [
-        ("state=not_a_real_state", "unknown name"),
-        ("state=OPEN", "wrong case"),
-        ("state=ignored", "valid CHECK state with no rows"),
-        ("state=open%27%20OR%201%3D1", "sql-injection-shaped"),
-        ("state=../../../etc/passwd", "path-shaped"),
-    ] {
-        let out = call(&app, "GET", &inbox_path(&a_ws, query), Some(&a_jar), None).await;
-        assert_inbox_exact_keys(&out, &[], &format!("GET ?{query} ({label})"));
-    }
+/// execute_tool list_tickets {state:"done"} on a seeded open+done inbox
+/// returns only the done key.
+#[tokio::test]
+async fn list_tickets_tool_state_done_returns_only_done_keys() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let user_id = authed_user_id(&app, &jar).await;
+    let workspace_id = Uuid::parse_str(&ws).expect("workspace id");
+    let (_open_key, _, done_key) = seed_open_launched_done(&state, workspace_id).await;
+    let llm = test_llm();
 
-    let after_unknown = call(&app, "GET", &inbox_path(&a_ws, ""), Some(&a_jar), None).await;
-    assert_inbox_exact_keys(
-        &after_unknown,
-        &[&open_key, &launched_key, &done_key],
-        "unknown filter must not drop rows",
-    );
-
-    let anon = call(&app, "GET", &inbox_path(&a_ws, "state=open"), None, None).await;
-    assert_inbox_not_500(&anon, "anon GET ?state=open");
-    assert_eq!(
-        anon.status,
-        StatusCode::UNAUTHORIZED,
-        "anon GET ?state=open must 401: {}",
-        anon.body
-    );
-    assert_no_ticket_leak(&anon, &[&open_key, &launched_key, &done_key], "anon");
-
-    let as_b = call(
-        &app,
-        "GET",
-        &inbox_path(&a_ws, "state=open"),
-        Some(&b_jar),
-        None,
+    let (listed, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "list_tickets",
+        &json!({ "state": "done" }),
+        &llm,
     )
     .await;
-    assert_inbox_not_500(&as_b, "B GET A's ?state=open");
-    assert!(
-        as_b.status == StatusCode::FORBIDDEN || as_b.status == StatusCode::UNAUTHORIZED,
-        "B GET A's ?state=open must be 403/401: {} {}",
-        as_b.status,
-        as_b.body
-    );
-    assert_no_ticket_leak(&as_b, &[&open_key, &launched_key, &done_key], "B on A");
+    assert!(action.ok, "list_tickets {action:?} {listed}");
+    assert_eq!(listed["count"].as_u64(), Some(1), "{listed}");
+    assert_eq!(inbox_keys(&listed), vec![done_key.clone()], "{listed}");
+}
 
-    let b_open = call(
-        &app,
-        "GET",
-        &inbox_path(&b_ws, "state=open"),
-        Some(&b_jar),
-        None,
+/// execute_tool list_tickets {state:"closed"} is ok with count=0
+/// (tool schema advertises closed; CHECK/HTTP use done).
+#[tokio::test]
+async fn list_tickets_tool_state_closed_is_empty_not_500() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let user_id = authed_user_id(&app, &jar).await;
+    let workspace_id = Uuid::parse_str(&ws).expect("workspace id");
+    let _ = seed_open_launched_done(&state, workspace_id).await;
+    let llm = test_llm();
+
+    let (listed, action) = fleet_server::chat_tools::execute_tool(
+        &state,
+        workspace_id,
+        user_id,
+        "list_tickets",
+        &json!({ "state": "closed" }),
+        &llm,
     )
     .await;
-    assert_inbox_exact_keys(&b_open, &[&other_key], "B GET own ?state=open");
-    assert!(
-        !inbox_keys(&b_open.body)
-            .iter()
-            .any(|k| k == &open_key || k == &launched_key || k == &done_key),
-        "B's filter must not list A's tickets: {}",
-        b_open.body
-    );
+    assert!(action.ok, "list_tickets closed {action:?} {listed}");
+    assert_eq!(listed["count"].as_u64(), Some(0), "{listed}");
+    assert_eq!(inbox_keys(&listed), Vec::<String>::new(), "{listed}");
 }

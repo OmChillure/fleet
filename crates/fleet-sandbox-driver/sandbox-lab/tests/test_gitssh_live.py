@@ -6,6 +6,7 @@ import importlib.util
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ LAB = Path(__file__).resolve().parents[1]
 REPO = LAB.parents[2]
 AGENT = LAB / "workspace" / "workspace_agent.py"
 KEY = REPO / ".tmp" / "ssh" / "id_ed25519"
+HELLO = "ssh://git@127.0.0.1:2222/srv/git/hello.git"
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -24,6 +26,29 @@ def _port_open(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _load_agent():
+    spec = importlib.util.spec_from_file_location("wa_gitssh", AGENT)
+    wa = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(wa)
+    return wa
+
+
+def _restore_env(key: str, old: str | None) -> None:
+    if old is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = old
+
+
+def _clone_env(home: Path) -> dict[str, str]:
+    """HOME for git_ssh_env only — do not mutate process HOME (kind kubeconfig)."""
+    home.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    return env
 
 
 class GitSshLiveTests(unittest.TestCase):
@@ -47,32 +72,38 @@ class GitSshLiveTests(unittest.TestCase):
         raise unittest.SkipTest("git-ssh :2222 not listening")
 
     def test_workspace_agent_clones_local_gitssh(self):
-        spec = importlib.util.spec_from_file_location("wa_gitssh", AGENT)
-        wa = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(wa)
+        wa = _load_agent()
         tmp = Path(tempfile.mkdtemp(prefix="fleet-gitssh-test-"))
-        old_home = os.environ.get("HOME")
-        os.environ["GIT_SSH_KEY_PATH"] = str(KEY)
-        os.environ["HOME"] = str(tmp / "home")
-        (tmp / "home").mkdir()
         dest = tmp / "jobs" / "j1" / "repo"
+        old_key = os.environ.get("GIT_SSH_KEY_PATH")
+        os.environ["GIT_SSH_KEY_PATH"] = str(KEY)
         try:
-            wa.git_clone(
-                "ssh://git@127.0.0.1:2222/srv/git/hello.git",
-                "main",
-                dest,
-                os.environ.copy(),
-            )
+            wa.git_clone(HELLO, "main", dest, _clone_env(tmp / "home"))
             readme = (dest / "README").read_text(encoding="utf-8")
             self.assertIn("hello-from-local-git-ssh", readme)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-            os.environ.pop("GIT_SSH_KEY_PATH", None)
-            if old_home is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = old_home
+            _restore_env("GIT_SSH_KEY_PATH", old_key)
+
+    def test_workspace_agent_ssh_clone_rejects_wrong_key(self):
+        # Unauthorized key must fail even if SSH_AUTH_SOCK holds the dummy.
+        wa = _load_agent()
+        tmp = Path(tempfile.mkdtemp(prefix="fleet-gitssh-wrong-"))
+        dest = tmp / "jobs" / "j1" / "repo"
+        bad_key = tmp / "id_ed25519"
+        old_key = os.environ.get("GIT_SSH_KEY_PATH")
+        try:
+            subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-f", str(bad_key), "-N", "", "-q"],
+                check=True,
+                capture_output=True,
+            )
+            os.environ["GIT_SSH_KEY_PATH"] = str(bad_key)
+            with self.assertRaises(RuntimeError):
+                wa.git_clone(HELLO, "main", dest, _clone_env(tmp / "home"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            _restore_env("GIT_SSH_KEY_PATH", old_key)
 
 
 if __name__ == "__main__":
