@@ -56,12 +56,23 @@ impl ServerConfig {
             .parse()
             .with_context(|| format!("invalid HOST/PORT: {host}:{port}"))?;
 
-        let cors_origins = env::var("CORS_ORIGINS")
-            .unwrap_or_else(|_| "http://localhost:3030,http://127.0.0.1:3030".into())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let cors_origins = match env::var("CORS_ORIGINS") {
+            Ok(s) if !s.trim().is_empty() => s
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => {
+                let ui = env::var("FLEET_UI_PORT")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u16>().ok())
+                    .unwrap_or(3030);
+                vec![
+                    format!("http://localhost:{ui}"),
+                    format!("http://127.0.0.1:{ui}"),
+                ]
+            }
+        };
 
         let auth = AuthConfig::from_env()?;
         let integrations = IntegrationsConfig::from_env()?;
@@ -235,6 +246,52 @@ mod tests {
                 assert_eq!(cfg.cors_origins, vec!["http://cors.example.test:3030"]);
                 assert_eq!(cfg.auth.jwt_secret, JWT);
                 assert!(cfg.auth.jwt_secret.len() >= 32);
+            },
+        );
+    }
+
+    #[test]
+    fn unset_cors_follows_ui_port() {
+        let process_url = env::var("DATABASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let url = process_url.unwrap_or_else(|| {
+            "postgres://list-database-url-empty-fails-boot:noconnect@127.0.0.1:1/fleet_from_env_lock"
+                .into()
+        });
+        with_env(
+            &[
+                ("DATABASE_URL", Some(url.as_str())),
+                ("JWT_SECRET", Some(JWT)),
+                ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                ("COOKIE_SAMESITE", Some("Lax")),
+                ("COOKIE_SECURE", Some("false")),
+                ("HOST", Some("127.0.0.1")),
+                ("PORT", Some("18280")),
+                ("FLEET_UI_PORT", Some("13230")),
+                ("AUTH_HOST", None),
+                ("AUTH_PORT", None),
+                ("CORS_ORIGINS", None),
+                ("API_PUBLIC_BASE", None),
+                ("UI_PUBLIC_BASE", None),
+            ],
+            || {
+                let cfg = ServerConfig::from_env().expect("from_env");
+                assert_eq!(
+                    cfg.cors_origins,
+                    vec![
+                        "http://localhost:13230".to_string(),
+                        "http://127.0.0.1:13230".to_string(),
+                    ]
+                );
+                assert_eq!(
+                    cfg.integrations.api_public_base,
+                    "http://localhost:18280"
+                );
+                assert_eq!(
+                    cfg.integrations.ui_public_base,
+                    "http://localhost:13230"
+                );
             },
         );
     }

@@ -275,28 +275,74 @@ fn sha_matches_plane(got: Option<&str>, plane: Option<&str>) -> bool {
 }
 
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+    local_machine_names()
+        .into_iter()
+        .next()
         .unwrap_or_default()
 }
 
-fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
-    if !local.is_empty()
-        && host
-            .hostname
-            .as_deref()
-            .is_some_and(|h| h.eq_ignore_ascii_case(local))
-    {
+/// HOSTNAME, `/etc/hostname`, `uname -n`, `hostname` — same needles the
+/// tick picker uses so a FQDN vs short name still lists this box.
+fn local_machine_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let s = raw.trim();
+        if s.is_empty() {
+            return;
+        }
+        if !out.iter().any(|n| n.eq_ignore_ascii_case(s)) {
+            out.push(s.to_string());
+        }
+    };
+    if let Ok(s) = std::env::var("HOSTNAME") {
+        push(&mut out, &s);
+    }
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        push(&mut out, &s);
+    }
+    if let Ok(outp) = std::process::Command::new("uname").arg("-n").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    if let Ok(outp) = std::process::Command::new("hostname").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    out
+}
+
+fn hostnames_match(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
         return true;
     }
+    let al = a.split('.').next().unwrap_or(a);
+    let bl = b.split('.').next().unwrap_or(b);
+    !al.is_empty() && al.eq_ignore_ascii_case(bl)
+}
+
+fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
+    let mut names = local_machine_names();
+    if !local.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(local)) {
+        names.push(local.to_string());
+    }
+    if let Some(hn) = host
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if names.iter().any(|n| hostnames_match(hn, n)) {
+            return true;
+        }
+    }
+    host_advertises_local_ip(host)
+}
+
+/// Unscoped list/assign/lease: advertised LAN IP ∩ this plane.
+/// Hostname alone is impersonable.
+fn host_advertises_local_ip(host: &WorkerHost) -> bool {
     let mut advertised = host
         .hardware
         .as_ref()
@@ -326,12 +372,35 @@ fn origin_is_loopback(headers: &HeaderMap) -> bool {
         let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
             continue;
         };
-        let v = raw.to_ascii_lowercase();
-        if v.contains("localhost") || v.contains("127.0.0.1") || v.contains("[::1]") {
+        if host_is_loopback_origin(raw) {
             return true;
         }
     }
     false
+}
+
+/// Host of Origin/Referer only — not a substring in the query or a
+/// `localhost.evil` label.
+fn host_is_loopback_origin(raw: &str) -> bool {
+    let rest = raw
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(raw);
+    let hostport = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.starts_with("127.")
 }
 
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
@@ -356,8 +425,8 @@ fn host_json_for_viewer(
     public.is_this_machine = plane_box && viewer_loopback;
     if let Some(rt) = public.runtime_reported.as_ref() {
         let clean = sanitize_runtime_object(rt);
-        public.runtime_reported = Some(clean)
-            .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+        public.runtime_reported =
+            Some(clean).filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
     }
     public
 }
@@ -741,12 +810,13 @@ async fn http_create(
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
+    // Name is optional. Empty pending rows take the device hostname on pair.
     let name = body
         .name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::bad_request("name is required"))?;
+        .unwrap_or("");
     if name.len() > 255 {
         return Err(AppError::bad_request("name is too long"));
     }
@@ -780,10 +850,17 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let viewer_loopback = origin_is_loopback(&headers);
-    let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    // Paired rows in this workspace only. Do not merge other workspaces' cluster hosts.
+    // Home-workspace rows plus this-machine boxes (the CP laptop). Cluster
+    // hosts from other workspaces stay off this list; they remain assignable.
+    let names = local_machine_names();
+    let rows = host_repo::list_visible_for_workspace(&state.db, workspace_id, &names).await?;
     let hosts: Vec<_> = rows
         .iter()
+        .filter(|h| {
+            h.workspace_id == workspace_id
+                || h.is_cluster_host()
+                || host_advertises_local_ip(h)
+        })
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
@@ -817,6 +894,7 @@ pub(crate) async fn load_visible_host(
     }
     match host_repo::get(&state.db, host_id).await? {
         Some(host) if host.is_cluster_host() => Ok(host),
+        Some(host) if host_advertises_local_ip(&host) => Ok(host),
         // Do not name the other workspace — that is a tenant leak.
         Some(_) | None => Err(AppError::not_found("worker host not found")),
     }
@@ -1173,8 +1251,8 @@ async fn http_heartbeat(
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt))
-            .await;
+        let _ =
+            host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt)).await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1205,7 +1283,8 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     // Lease poll is the reclaim path. A sweeper-only helper would never run
     // in this process; expired rows must return to ready before this claim.
     let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
-    let claim = if host.is_cluster_host() {
+    let claim = if host.is_cluster_host() || host_advertises_local_ip(&host) {
+        // Cluster and the CP laptop take jobs from any workspace.
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
     } else {
@@ -1342,6 +1421,17 @@ mod plane_bake_tests {
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn origin_host_not_substring() {
+        assert!(super::host_is_loopback_origin("http://localhost:3030"));
+        assert!(super::host_is_loopback_origin("http://127.0.0.1:3030"));
+        assert!(super::host_is_loopback_origin("http://[::1]:3030"));
+        assert!(!super::host_is_loopback_origin("http://localhost.evil.example.test"));
+        assert!(!super::host_is_loopback_origin(
+            "http://192.168.1.50:3030/?next=http://localhost:3030"
+        ));
+    }
 
     #[test]
     fn matching_sha_is_plane_bake() {
@@ -1495,6 +1585,22 @@ mod plane_bake_tests {
         assert!(
             should_withhold_desired(&host, &staged, "viny-5700g"),
             "a host already on this process bake must not get an older staged tarball"
+        );
+    }
+
+    #[test]
+    fn this_machine_matches_fqdn_vs_short_hostname() {
+        // Do not use this box's real hostname — local_machine_names()
+        // would make the negative case true.
+        let host = plane_host("unique-box-xyz.lan", None);
+        assert!(super::host_is_this_machine(&host, "unique-box-xyz"));
+        assert!(super::host_is_this_machine(&host, "UNIQUE-BOX-XYZ"));
+        let short = plane_host("unique-box-xyz", None);
+        assert!(super::host_is_this_machine(&short, "unique-box-xyz.lan"));
+        assert!(!super::host_is_this_machine(&short, "other-box"));
+        assert!(
+            !super::host_advertises_local_ip(&short),
+            "hostname-only must not unscoped-share"
         );
     }
 }

@@ -9,6 +9,20 @@ use anyhow::bail;
 
 use crate::crypto::CredentialsKey;
 
+fn env_port(keys: &[&str], default: u16) -> u16 {
+    keys.iter()
+        .find_map(|k| env::var(k).ok().and_then(|s| s.trim().parse().ok()))
+        .unwrap_or(default)
+}
+
+fn env_url_or_localhost(key: &str, port: u16) -> String {
+    env::var(key)
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("http://localhost:{port}"))
+}
+
 /// One OAuth application's client credentials.
 #[derive(Clone, Debug)]
 pub struct OAuthClientConfig {
@@ -48,14 +62,15 @@ pub struct IntegrationsConfig {
 
 impl IntegrationsConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let api_public_base = env::var("API_PUBLIC_BASE")
-            .unwrap_or_else(|_| "http://localhost:8080".into())
-            .trim_end_matches('/')
-            .to_string();
-        let ui_public_base = env::var("UI_PUBLIC_BASE")
-            .unwrap_or_else(|_| "http://localhost:3030".into())
-            .trim_end_matches('/')
-            .to_string();
+        // Unset public bases follow listen ports so OAuth is not pinned to a dead :8080.
+        let api_public_base = env_url_or_localhost(
+            "API_PUBLIC_BASE",
+            env_port(&["PORT", "FLEET_API_PORT", "AUTH_PORT"], 8080),
+        );
+        let ui_public_base = env_url_or_localhost(
+            "UI_PUBLIC_BASE",
+            env_port(&["FLEET_UI_PORT"], 3030),
+        );
 
         let state_secret = match env::var("JWT_SECRET") {
             Ok(s) => {
@@ -276,6 +291,42 @@ mod tests {
         });
         assert_eq!(cfg.state_secret, secret);
         assert_ne!(cfg.state_secret, PUBLIC_DEFAULT);
+    }
+
+    #[test]
+    fn unset_public_bases_follow_listen_ports() {
+        let _guard = env_lock().lock().expect("env lock");
+        let keys = [
+            "API_PUBLIC_BASE",
+            "UI_PUBLIC_BASE",
+            "PORT",
+            "FLEET_API_PORT",
+            "AUTH_PORT",
+            "FLEET_UI_PORT",
+            "JWT_SECRET",
+        ];
+        let prev: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, env::var(k).ok())).collect();
+        unsafe {
+            for k in keys {
+                env::remove_var(k);
+            }
+            env::set_var("PORT", "18280");
+            env::set_var("FLEET_UI_PORT", "13230");
+            env::set_var("JWT_SECRET", "valid-secret-at-least-32-characters-long!");
+        }
+        let cfg = IntegrationsConfig::from_env();
+        unsafe {
+            for (k, v) in prev {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        let cfg = cfg.expect("from_env");
+        assert_eq!(cfg.api_public_base, "http://localhost:18280");
+        assert_eq!(cfg.ui_public_base, "http://localhost:13230");
     }
 
     #[test]

@@ -419,6 +419,29 @@ mod tests {
         let archived = crate::sandbox::team::run_handoffs_dir(root.path(), project, run)
             .join("t1/tree/ui.tsx");
         assert!(archived.exists());
+
+        let next = root.path().join("sess-t2");
+        std::fs::create_dir_all(&next).unwrap();
+        hydrate_session_files(
+            root.path(),
+            &next,
+            &dummy_task(project, run, "t2"),
+            &crate::store::BoardSnapshot {
+                tasks: vec![],
+                sessions: vec![],
+            },
+            &["t1".into()],
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(next.join("handoff/t1/ui.tsx")).unwrap_or_default(),
+            "x",
+            "next specialist must see archived work/ from the previous guest"
+        );
+        assert_eq!(
+            std::fs::read_to_string(next.join("work/ui.tsx")).unwrap_or_default(),
+            "x"
+        );
     }
 
     #[test]

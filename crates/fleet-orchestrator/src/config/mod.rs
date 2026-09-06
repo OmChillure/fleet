@@ -174,10 +174,17 @@ impl Config {
 
 /// URL workers use to reach the control plane (`FLEET_ORCHESTRATOR_URL`).
 ///
-/// Prefers `ORCHESTRATOR_PUBLIC_URL` or `API_PUBLIC_BASE`. Wildcard binds
-/// (`0.0.0.0`, `[::]`) are rewritten to loopback so spawned processes can connect.
+/// Prefers `ORCHESTRATOR_PUBLIC_URL`, then `WORKER_PUBLIC_BASE` (pair /
+/// install), then `API_PUBLIC_BASE` (OAuth). Unset public bases follow
+/// listen ports so OAuth localhost is not pinned to a dead :8080.
+/// Wildcard binds (`0.0.0.0`, `[::]`) become loopback so in-process
+/// children can connect.
 pub fn public_orchestrator_url(http_addr: &str) -> String {
-    for key in ["ORCHESTRATOR_PUBLIC_URL", "API_PUBLIC_BASE"] {
+    for key in [
+        "ORCHESTRATOR_PUBLIC_URL",
+        "WORKER_PUBLIC_BASE",
+        "API_PUBLIC_BASE",
+    ] {
         if let Ok(v) = env::var(key) {
             let v = v.trim().trim_end_matches('/');
             if !v.is_empty() {
@@ -263,6 +270,7 @@ mod tests {
             "MAX_AGENTS",
             "LOCK_WAIT_TIMEOUT_S",
             "API_PUBLIC_BASE",
+            "WORKER_PUBLIC_BASE",
             "ORCHESTRATOR_PUBLIC_URL",
         ] {
             unsafe { env::remove_var(k) };
@@ -332,6 +340,7 @@ mod tests {
     fn public_url_rewrites_wildcard_and_prefers_env() {
         let _g = ENV_LOCK.lock().unwrap();
         unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+        unsafe { env::remove_var("WORKER_PUBLIC_BASE") };
         unsafe { env::remove_var("API_PUBLIC_BASE") };
         assert_eq!(public_orchestrator_url(":8080"), "http://127.0.0.1:8080");
         assert_eq!(
@@ -354,6 +363,27 @@ mod tests {
             "http://orch.internal:8081"
         );
         unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+    }
+
+    #[test]
+    fn public_url_prefers_worker_base_over_oauth_api_base() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080") };
+        unsafe { env::set_var("WORKER_PUBLIC_BASE", "http://192.168.1.1:18280") };
+        assert_eq!(
+            public_orchestrator_url("0.0.0.0:18280"),
+            "http://192.168.1.1:18280",
+            "spawn/heartbeat must use the pair URL, not OAuth localhost:8080"
+        );
+        unsafe { env::set_var("ORCHESTRATOR_PUBLIC_URL", "http://orch.internal:9") };
+        assert_eq!(
+            public_orchestrator_url("0.0.0.0:18280"),
+            "http://orch.internal:9"
+        );
+        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+        unsafe { env::remove_var("WORKER_PUBLIC_BASE") };
+        unsafe { env::remove_var("API_PUBLIC_BASE") };
     }
 
     #[test]

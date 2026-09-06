@@ -1233,7 +1233,9 @@ async fn cluster_host_completes_claim_in_other_workspace() {
     )
     .await
     .expect("claim");
-    let lease = call_bearer(
+    // Shared live API may enqueue another spawn for this cluster host
+    // between drain and lease. Complete those and keep leasing until ours.
+    let mut lease = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/me/lease",
@@ -1241,6 +1243,29 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         Some(json!({})),
     )
     .await;
+    for _ in 0..16 {
+        assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+        let got = lease.body["claim"]["id"].as_str();
+        if got == Some(claim_id.to_string().as_str()) {
+            break;
+        }
+        if let (Some(id), Some(token)) = (
+            got.and_then(|s| Uuid::parse_str(s).ok()),
+            lease.body["claim"]["lease_token"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok()),
+        ) {
+            let _ = fleet_db::repos::work_claims::complete(&state.db, id, token).await;
+        }
+        lease = call_bearer(
+            &app,
+            "POST",
+            "/api/worker-hosts/me/lease",
+            &machine,
+            Some(json!({})),
+        )
+        .await;
+    }
     assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
     assert_eq!(
         lease.body["claim"]["id"].as_str(),

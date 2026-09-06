@@ -81,6 +81,8 @@ pub async fn apply_inbox(
                                         session_id = %session.id,
                                         "failed to materialize guest proof onto plane work dir"
                                     );
+                                } else {
+                                    persist_guest_workspace(data_dir, &task, &work);
                                 }
                                 let check = super::validate_done::validate_task_done(
                                     &task,
@@ -183,7 +185,18 @@ pub async fn apply_inbox(
                                         .join("sessions")
                                         .join(session.id.to_string())
                                 });
-                            let _ = materialize_guest_proof(&work, &r.payload);
+                            if materialize_guest_proof(&work, &r.payload).is_ok() {
+                                if let Some(task) = store
+                                    .load_board_snapshot(project_id)
+                                    .await?
+                                    .tasks
+                                    .iter()
+                                    .find(|t| t.id == r.board_task_id)
+                                    .cloned()
+                                {
+                                    persist_guest_workspace(data_dir, &task, &work);
+                                }
+                            }
                         }
                     }
                     "failed" => {
@@ -258,6 +271,23 @@ pub async fn apply_inbox(
         applied,
         reviews_bounced,
     })
+}
+
+/// Copy guest `work/` into the run workspace and handoff tree so the next
+/// specialist's hydrate/pack sees it.
+fn persist_guest_workspace(
+    data_dir: &Path,
+    task: &crate::store::BoardTaskRow,
+    work: &Path,
+) {
+    crate::sandbox::share::sync_session_repo_back(data_dir, work, task);
+    crate::sandbox::share::archive_session_tree(
+        data_dir,
+        task.project_id,
+        task.run_id,
+        &task.plan_task_id,
+        work,
+    );
 }
 
 /// Write `result.md` / `work/` from a guest status payload onto the plane

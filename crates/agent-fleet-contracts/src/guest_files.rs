@@ -40,23 +40,28 @@ if [ -z "$base" ] || [ -z "$token" ] || [ -z "$project" ] || [ -z "$session" ]; 
 fi
 base="${base%/}"
 url="$base/v1/projects/$project/workers/$session/io"
+json_str() {
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()), end="")'
+}
 op="${1:-}"
 shift || true
 case "$op" in
   integration)
     provider="${1:-}"; operation="${2:-}"; args="${3:-{}}"
-    body=$(printf '{"op":"integration","provider":"%s","operation":"%s","args":%s}' "$provider" "$operation" "$args")
+    body=$(printf '{"op":"integration","provider":%s,"operation":%s,"args":%s}' \
+      "$(json_str "$provider")" "$(json_str "$operation")" "$args")
     ;;
   chat-post)
     to="${1:-*}"; body_text="${2:-}"
-    body=$(printf '{"op":"team_chat_post","to":"%s","kind":"say","body":"%s"}' "$to" "$body_text")
+    body=$(printf '{"op":"team_chat_post","to":%s,"kind":"say","body":%s}' \
+      "$(json_str "$to")" "$(json_str "$body_text")")
     ;;
   chat-list)
     body='{"op":"team_chat_list","all":true}'
     ;;
   request-changes)
     reason="${1:-}"
-    body=$(printf '{"op":"request_changes","reason":"%s"}' "$reason")
+    body=$(printf '{"op":"request_changes","reason":%s}' "$(json_str "$reason")")
     ;;
   *)
     echo "usage: fleet-tool integration PROVIDER OPERATION [ARGS_JSON]" >&2
@@ -128,7 +133,13 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>, total: &mut
             continue;
         };
         if path.is_dir() {
-            if rel == "handoff" || rel == "work" || rel == ".fleet" || rel.starts_with("work/") {
+            if rel == "handoff"
+                || rel.starts_with("handoff/")
+                || rel == "work"
+                || rel.starts_with("work/")
+                || rel == ".fleet"
+                || rel.starts_with(".fleet/")
+            {
                 walk(root, &path, out, total);
             }
             continue;
@@ -224,10 +235,13 @@ mod tests {
         fs::create_dir_all(dir.join("work")).unwrap();
         fs::write(dir.join("TEAM.md"), "you are t1\n").unwrap();
         fs::write(dir.join("work/app.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(dir.join("handoff/t1")).unwrap();
+        fs::write(dir.join("handoff/t1/app.rs"), "fn prior() {}\n").unwrap();
         fs::write(dir.join("secret.bin"), [0u8, 1, 2]).unwrap();
         let files = collect_guest_files(&dir);
         assert!(files.get("TEAM.md").unwrap().contains("t1"));
         assert_eq!(files.get("work/app.rs").unwrap(), "fn main() {}\n");
+        assert_eq!(files.get("handoff/t1/app.rs").unwrap(), "fn prior() {}\n");
         assert!(!files.contains_key("secret.bin"));
 
         let dest = dir.join("out");
@@ -236,6 +250,61 @@ mod tests {
             fs::read_to_string(dest.join("work/app.rs")).unwrap(),
             "fn main() {}\n"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fleet_tool_chat_post_escapes_quotes() {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-tool-json-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fleet-tool.sh");
+        fs::write(&script, FLEET_TOOL_SH).unwrap();
+        let stub = dir.join("curl");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-d\" ]; then printf '%s' \"$2\" > \"${FLEET_TOOL_BODY}\"; exit 0; fi\n  shift\ndone\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&script, &stub] {
+                let mut perms = fs::metadata(p).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(p, perms).unwrap();
+            }
+        }
+        let body_path = dir.join("body.json");
+        let status = std::process::Command::new("sh")
+            .arg(&script)
+            .args(["chat-post", "t1", r#"say "hello""#])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("FLEET_ORCHESTRATOR_URL", "http://127.0.0.1:1")
+            .env("FLEET_WORKER_TOKEN", "tok")
+            .env("FLEET_PROJECT_ID", "p")
+            .env("FLEET_SESSION_ID", "s")
+            .env("FLEET_TOOL_BODY", &body_path)
+            .status()
+            .expect("run fleet-tool");
+        assert!(status.success(), "fleet-tool exit {status}");
+        let raw = fs::read_to_string(&body_path).expect("curl -d body");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect(&raw);
+        assert_eq!(v["op"], "team_chat_post");
+        assert_eq!(v["body"], r#"say "hello""#);
         let _ = fs::remove_dir_all(&dir);
     }
 }

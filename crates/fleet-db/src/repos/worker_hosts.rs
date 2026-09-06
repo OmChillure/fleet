@@ -1069,6 +1069,138 @@ pub async fn list_assignable(
         .collect())
 }
 
+/// Same taking-jobs filters as [`list_assignable`], any workspace, matching
+/// plane hostnames (this-machine). The CP laptop is shared with every
+/// workspace on this plane without a `cluster` label.
+pub async fn list_assignable_by_hostnames(
+    pool: &PgPool,
+    stale_after: Duration,
+    hostnames: &[String],
+) -> DbResult<Vec<WorkerHost>> {
+    let names = normalize_hostname_needles(hostnames);
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cutoff = Utc::now() - stale_after;
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE hostname IS NOT NULL
+          AND (
+            lower(trim(hostname)) = ANY($2)
+            OR lower(split_part(trim(hostname), '.', 1)) = ANY($2)
+          )
+          AND enabled
+          AND NOT paused
+          AND NOT drain
+          AND (allow_host OR allow_container)
+          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+          AND status = '{WORKER_HOST_STATUS_ONLINE}'
+          AND machine_token_hash IS NOT NULL
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at >= $1
+        ORDER BY last_seen_at DESC, id ASC
+        "#
+    );
+    let hosts = sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(cutoff)
+        .bind(&names)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)?;
+    Ok(hosts
+        .into_iter()
+        .filter(|h| !holding_new_jobs(h) && !at_job_cap(h))
+        .collect())
+}
+
+/// Home-workspace rows plus this-machine boxes that are taking jobs.
+/// Hostname-only extra would list every leftover test row that reused
+/// this laptop's name.
+pub async fn list_visible_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    this_hostnames: &[String],
+) -> DbResult<Vec<WorkerHost>> {
+    let mut rows = list_for_workspace(pool, workspace_id).await?;
+    let extra = list_assignable_by_hostnames(
+        pool,
+        WORKER_HOST_OFFLINE_AFTER,
+        this_hostnames,
+    )
+    .await?;
+    for h in extra {
+        if !rows.iter().any(|x| x.id == h.id) {
+            rows.push(h);
+        }
+    }
+    Ok(rows)
+}
+
+pub async fn list_by_hostnames(
+    pool: &PgPool,
+    hostnames: &[String],
+) -> DbResult<Vec<WorkerHost>> {
+    let names = normalize_hostname_needles(hostnames);
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE hostname IS NOT NULL
+          AND (
+            lower(trim(hostname)) = ANY($1)
+            OR lower(split_part(trim(hostname), '.', 1)) = ANY($1)
+          )
+        ORDER BY created_at ASC, id ASC
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(&names)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Tick set: home workspace, `cluster`, or this-machine hostnames.
+pub async fn list_assignable_with_extra_hostnames(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    stale_after: Duration,
+    extra_hostnames: &[String],
+) -> DbResult<Vec<WorkerHost>> {
+    let mut hosts = list_assignable(pool, workspace_id, stale_after).await?;
+    let extra = list_assignable_by_hostnames(pool, stale_after, extra_hostnames).await?;
+    for h in extra {
+        if !hosts.iter().any(|x| x.id == h.id) {
+            hosts.push(h);
+        }
+    }
+    Ok(hosts)
+}
+
+fn normalize_hostname_needles(hostnames: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in hostnames {
+        let t = raw.trim().to_ascii_lowercase();
+        if t.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|n| n == &t) {
+            out.push(t.clone());
+        }
+        if let Some(short) = t.split('.').next() {
+            if !short.is_empty() && !out.iter().any(|n| n == short) {
+                out.push(short.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Plane ∩ advertised, each clamped to 1–256. Missing advertised uses the plane cap.
 pub fn effective_max_concurrent(host: &WorkerHost) -> i32 {
     let cp = host.max_concurrent.clamp(1, 256);

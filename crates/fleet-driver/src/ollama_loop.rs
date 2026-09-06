@@ -66,23 +66,31 @@ pub async fn run_ollama_on(
         .build()?;
     let deadline = tokio::time::Instant::now() + job_timeout;
     let mut last = String::new();
+    let mut use_tools = true;
     for _ in 1..=MAX_ROUNDS {
         if tokio::time::Instant::now() >= deadline {
             break;
         }
+        let mut payload = json!({
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+        });
+        if use_tools {
+            payload["tools"] = tools_schema();
+        }
         let res = http
             .post(format!("{base}/v1/chat/completions"))
-            .json(&json!({
-                "model": model,
-                "messages": messages,
-                "tools": tools_schema(),
-                "temperature": 0.2,
-            }))
+            .json(&payload)
             .send()
             .await?;
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         if !status.is_success() {
+            if use_tools && model_rejects_tools(&body) {
+                use_tools = false;
+                continue;
+            }
             return Err(anyhow!("ollama {status}: {}", body.chars().take(400).collect::<String>()));
         }
         let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
@@ -129,6 +137,11 @@ pub async fn run_ollama_on(
     } else {
         last.chars().take(400).collect()
     })
+}
+
+fn model_rejects_tools(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("does not support tools") || lower.contains("does not support function")
 }
 
 fn tools_schema() -> Value {
@@ -221,6 +234,14 @@ fn resolve(root: &Path, rel: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_rejects_tools_detects_ollama_400() {
+        assert!(model_rejects_tools(
+            r#"{"error":{"message":"registry.ollama.ai/library/gemma3:270m does not support tools"}}"#
+        ));
+        assert!(!model_rejects_tools(r#"{"error":{"message":"model not found"}}"#));
+    }
 
     #[test]
     fn resolve_stays_under_root() {

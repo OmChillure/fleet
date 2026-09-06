@@ -548,12 +548,29 @@ pub fn software_title(host: &HostPublic) -> String {
     }
 }
 
+/// Trim a rename. Empty or whitespace-only is rejected by PATCH (`name is required`).
+pub fn trimmed_host_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 pub fn display_name(host: &HostPublic) -> String {
     let n = host.name.trim();
-    let base = if n.is_empty() {
-        "Unnamed worker".to_string()
-    } else {
+    let host_n = host
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let base = if !n.is_empty() {
         n.to_string()
+    } else if let Some(h) = host_n {
+        h.to_string()
+    } else {
+        "Unnamed worker".to_string()
     };
     let mut tags: Vec<&str> = Vec::new();
     if host.is_control_plane_box {
@@ -1926,13 +1943,27 @@ mod tests {
     }
 
     #[test]
+    fn trimmed_host_name_rejects_blank() {
+        assert_eq!(trimmed_host_name(""), None);
+        assert_eq!(trimmed_host_name("   "), None);
+        assert_eq!(trimmed_host_name("\t\n"), None);
+        assert_eq!(
+            trimmed_host_name("  studio-laptop  ").as_deref(),
+            Some("studio-laptop")
+        );
+    }
+
+    #[test]
     fn display_name_falls_back_when_blank() {
         let mut host = sample_host();
         assert_eq!(display_name(&host), "box");
         host.name = "  ".into();
+        host.hostname = None;
         assert_eq!(display_name(&host), "Unnamed worker");
         host.name = String::new();
         assert_eq!(display_name(&host), "Unnamed worker");
+        host.hostname = Some("studio-laptop".into());
+        assert_eq!(display_name(&host), "studio-laptop");
     }
 
     #[test]

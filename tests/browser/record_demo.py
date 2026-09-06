@@ -1160,7 +1160,7 @@ class Demo:
         if hold.count() and hold.first.is_visible():
             hold.first.click()
             pause(p, 400)
-            apply = p.get_by_role("button", name="Apply changes")
+            apply = p.get_by_role("button", name="Apply", exact=True)
             if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                 with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                     apply.first.click()
@@ -1170,7 +1170,7 @@ class Demo:
             if resume.count():
                 resume.first.click()
                 pause(p, 400)
-                apply = p.get_by_role("button", name="Apply changes")
+                apply = p.get_by_role("button", name="Apply", exact=True)
                 if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                     with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                         apply.first.click()

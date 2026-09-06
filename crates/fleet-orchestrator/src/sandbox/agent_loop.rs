@@ -1448,6 +1448,7 @@ async fn append_capped(path: &Path, chunk: &[u8], cap: usize) {
     {
         Ok(mut f) => {
             let _ = f.write_all(chunk).await;
+            let _ = f.flush().await;
         }
         Err(_) => {
             let _ = tokio::fs::write(path, chunk).await;

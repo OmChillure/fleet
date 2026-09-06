@@ -804,6 +804,52 @@ pub fn require_taking_runner(llm: &ChatLlmContext) -> AppResult<()> {
     Ok(())
 }
 
+/// Runner CLI chat has no plane tools. Detect when the user asked to start
+/// a fleet agent so `POST /chat` can call `launch_agent_task` after the
+/// box replies. "Say only: pong" (integrations H3) must stay false.
+pub fn wants_fleet_launch(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    if t.contains("launch_agent_task") || t.contains("launch_agent_plan") {
+        return true;
+    }
+    if launch_is_negated(&t) {
+        return false;
+    }
+    let launchy = t.contains("launch")
+        || t.contains("spin up")
+        || t.contains("spawn")
+        || t.contains("start an")
+        || t.contains("start a ")
+        || t.contains("create an");
+    let target = t.contains("agent")
+        || t.contains("fleet")
+        || t.contains("sandbox")
+        || t.contains("worker");
+    launchy && target
+}
+
+fn launch_is_negated(t: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "don't launch",
+        "dont launch",
+        "do not launch",
+        "don't spawn",
+        "dont spawn",
+        "do not spawn",
+        "don't start",
+        "do not start",
+        "never launch",
+        "never spawn",
+        "without launching",
+        "without spawn",
+        "don't spin up",
+        "do not spin up",
+        "don't create an agent",
+        "do not create an agent",
+    ];
+    MARKERS.iter().any(|m| t.contains(m))
+}
+
 /// Reject a tool `workspace_id` that is not this chat's workspace.
 pub fn require_session_workspace(session: Uuid, arguments: &Value) -> AppResult<()> {
     let Some(raw) = arguments.get("workspace_id") else {
@@ -2882,6 +2928,23 @@ mod tests {
         assert_eq!(plan.policy.llm_provider.as_deref(), Some("ollama"));
         assert_eq!(plan.policy.llm_model.as_deref(), Some("tiny"));
         assert_eq!(plan.policy.preferred_host_id, Some(runner));
+    }
+
+    #[test]
+    fn wants_fleet_launch_detects_agent_request_not_pong() {
+        assert!(wants_fleet_launch(
+            "Launch one agent to write a one-line hello in work/hello.txt and finish. Use launch_agent_task."
+        ));
+        assert!(wants_fleet_launch("please launch_agent_plan for this"));
+        assert!(wants_fleet_launch("spin up an agent to fix the tests"));
+        assert!(wants_fleet_launch("start a worker on the paired runner"));
+        assert!(!wants_fleet_launch("Say only: pong"));
+        assert!(!wants_fleet_launch("pong"));
+        assert!(!wants_fleet_launch("what is an agent?"));
+        assert!(!wants_fleet_launch("launch the website tomorrow"));
+        assert!(!wants_fleet_launch("don't launch an agent"));
+        assert!(!wants_fleet_launch("do not spawn a worker"));
+        assert!(!wants_fleet_launch("never launch a fleet run"));
     }
 
     #[test]

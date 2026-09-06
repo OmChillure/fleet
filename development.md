@@ -141,19 +141,18 @@ DATABASE_URL=postgres://fleet:fleet@127.0.0.1:5433/fleet?sslmode=disable
 JWT_SECRET=dev-change-me-to-a-long-random-secret-at-least-32-chars
 HOST=127.0.0.1
 PORT=8080
-CORS_ORIGINS=http://localhost:3030,http://127.0.0.1:3030
 COOKIE_SECURE=false
-API_PUBLIC_BASE=http://localhost:8080
-UI_PUBLIC_BASE=http://localhost:3030
 DATA_DIR=./data
 ```
+
+Listen ports are declared once (`PORT`, optional `FLEET_UI_PORT`). Local API / UI / CORS / worker URLs are derived. Set a public host only when it is not this machine.
 
 | Variable | Notes |
 |----------|--------|
 | `DATABASE_URL` | Host → port **5433**; inside Compose network → `postgres:5432` |
-| `CORS_ORIGINS` | Needed if the browser calls the API origin directly |
-| `API_PUBLIC_BASE` | OAuth callbacks, absolute API links |
-| `UI_PUBLIC_BASE` | OAuth return / UI links |
+| `PORT` | API listen port. OAuth `API_PUBLIC_BASE` defaults to `http://localhost:$PORT`. |
+| `FLEET_UI_PORT` | UI listen port (default 3030). `UI_PUBLIC_BASE` and `CORS_ORIGINS` follow it. |
+| `WORKER_PUBLIC_BASE` | Pair + guest heartbeat. Unset = this machine's LAN IP + `PORT`. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
 
 The API does not run jobs. Pair a `fleet-host`.

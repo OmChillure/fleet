@@ -151,7 +151,11 @@ def list_hosts(page, workspace_id: str) -> dict[str, Any]:
 
 
 def wait_dx_ready(page, timeout_ms: int = 20_000) -> None:
-    """Wait out dx compile splash / rebuild banner that covers the app."""
+    """Wait out a real dx compile splash.
+
+    A leftover "Your app is being rebuilt" toast can sit on a live WASM
+    app. If Self-hosted chrome is already attached, do not block.
+    """
     splash = page.get_by_text(
         re.compile(
             r"We're building your app now|Your app is being rebuilt|One sec!",
@@ -161,12 +165,23 @@ def wait_dx_ready(page, timeout_ms: int = 20_000) -> None:
     deadline = time.time() + (timeout_ms / 1000)
     while time.time() < deadline:
         try:
+            chrome = page.get_by_role("button", name="Add worker").count() > 0
+        except Exception:
+            chrome = False
+        if chrome:
+            return
+        try:
             busy = splash.count() > 0 and splash.first.is_visible()
         except Exception:
             busy = False
         if not busy:
             return
         page.wait_for_timeout(500)
+
+
+def click_add_worker(page) -> None:
+    """Click Add worker. Name is optional; pair fills the device hostname."""
+    page.get_by_role("button", name="Add worker").click()
 
 
 def goto_self_hosted(page, workspace_url: str) -> None:
@@ -185,6 +200,17 @@ def goto_self_hosted(page, workspace_url: str) -> None:
         try:
             page.wait_for_selector("h1", state="attached", timeout=20_000)
             page.get_by_role("button", name="Add worker").wait_for(timeout=10_000)
+            # First list fetch shows Loading…; extras (this-machine) appear after.
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                try:
+                    if page.get_by_text("Loading…").count() == 0:
+                        break
+                    if not page.get_by_text("Loading…").first.is_visible():
+                        break
+                except Exception:
+                    break
+                page.wait_for_timeout(200)
             return
         except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
             last_err = e
@@ -193,9 +219,43 @@ def goto_self_hosted(page, workspace_url: str) -> None:
         raise last_err
 
 
+def host_list_row(page, needle: str):
+    """Catalog list rows are buttons; the side panel is the article."""
+    return page.get_by_role("button").filter(has_text=needle)
+
+
+def open_host_panel(page, needle: str, timeout_ms: int = 15_000):
+    """Open HostDetailPanel (article). List rows do not include
+    ``Waiting to pair`` — that sentence is detail-only."""
+    wait_dx_ready(page)
+    art = page.locator("article").filter(has_text=needle)
+    try:
+        if art.count() > 0 and art.first.is_visible():
+            return art
+    except Exception:
+        pass
+    row = host_list_row(page, needle)
+    if row.count() == 0 and needle == "Waiting to pair":
+        row = host_list_row(page, "Unnamed worker")
+        if row.count() == 0:
+            row = host_list_row(page, "pending")
+    row.first.wait_for(state="attached", timeout=timeout_ms)
+    row.first.click()
+    art = page.locator("article").filter(has_text=needle)
+    if art.count() == 0:
+        art = page.locator("article")
+    art.first.wait_for(timeout=timeout_ms)
+    return art
+
+
 def assert_no_control_plane_card(page) -> None:
-    """The API process is not a runner and must not render a host card."""
-    n = page.locator("article").filter(has_text="Control plane").count()
+    """The API process is not a runner.
+
+    A paired laptop titled ``name (control plane · this machine)`` is a
+    real host card, not the removed synthetic plane row.
+    """
+    exact = re.compile(r"^Control plane\s*$")
+    n = page.locator("article").filter(has_text=exact).count()
     if n:
         raise AssertionError(
             f"synthetic Control plane card must not appear ({n}). "

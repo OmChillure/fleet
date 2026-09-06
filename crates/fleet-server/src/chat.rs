@@ -30,8 +30,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    system_prompt_with_tools, tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    execute_tool, execute_tool_with_retry, rewrite_if_asked_to_continue,
+    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, wants_fleet_launch,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -309,6 +310,60 @@ fn title_from_user_text(text: &str) -> String {
         return t;
     }
     format!("{}…", chars.into_iter().take(69).collect::<String>())
+}
+
+/// Runner CLI has no plane tools. After the box replies, start a fleet
+/// agent here when the user asked to launch.
+async fn maybe_launch_after_runner(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    last_user: &str,
+    provider: &str,
+    model: &str,
+    runner_id: Uuid,
+    mut content: String,
+) -> (String, Vec<ChatAction>) {
+    if !wants_fleet_launch(last_user) {
+        return (content, vec![]);
+    }
+    let mut title = title_from_user_text(last_user);
+    if title == "New chat" {
+        title = "Chat launch".into();
+    }
+    let llm = ChatLlmContext {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        runner_id: Some(runner_id),
+        effort: None,
+    };
+    let args = json!({
+        "title": title,
+        "spec": last_user,
+    });
+    let (_, action) = execute_tool(
+        state,
+        workspace_id,
+        user_id,
+        "launch_agent_task",
+        &args,
+        &llm,
+    )
+    .await;
+    if let Some(rewritten) = rewrite_if_asked_to_continue(&content, std::slice::from_ref(&action))
+    {
+        content = rewritten;
+    }
+    if action.ok {
+        if let Some(run_id) = action.run_id.as_deref() {
+            if !content.contains(run_id) {
+                content = format!("{content}\n\nFleet `{run_id}` is live on this screen.");
+            }
+        }
+    } else if !action.summary.is_empty() {
+        content = format!("{content}\n\nCould not launch: {}", action.summary);
+    }
+    (content, vec![action])
 }
 
 // ── conversation CRUD ───────────────────────────────────────────────────────
@@ -1389,6 +1444,17 @@ async fn chat_complete(
             None,
         )
         .await?;
+        let (content, actions) = maybe_launch_after_runner(
+            &state,
+            workspace_id,
+            user.id,
+            &last_user,
+            &provider,
+            &used_model,
+            runner_id,
+            content,
+        )
+        .await;
         persist_user_and_assistant(
             &state,
             conversation_id,
@@ -1396,7 +1462,7 @@ async fn chat_complete(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(Json(ChatResponse {
@@ -1406,7 +1472,7 @@ async fn chat_complete(
             },
             model: used_model,
             provider,
-            actions: vec![],
+            actions,
             conversation_id,
         }));
     }
@@ -1684,6 +1750,17 @@ async fn run_chat_turn(
             progress.as_ref(),
         )
         .await?;
+        let (content, actions) = maybe_launch_after_runner(
+            state,
+            workspace_id,
+            user_id,
+            last_user,
+            &provider,
+            &used_model,
+            runner_id,
+            content,
+        )
+        .await;
         persist_user_and_assistant(
             state,
             conversation_id,
@@ -1691,7 +1768,7 @@ async fn run_chat_turn(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(ChatProgress::Done {
@@ -1699,7 +1776,7 @@ async fn run_chat_turn(
             model: used_model,
             provider,
             conversation_id,
-            actions: vec![],
+            actions,
         });
     }
 

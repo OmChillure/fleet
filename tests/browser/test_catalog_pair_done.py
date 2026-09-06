@@ -19,8 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
     UI,
+    click_add_worker,
     goto_self_hosted,
     list_hosts,
+    open_host_panel,
     wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
@@ -173,7 +175,7 @@ class CatalogPairDoneTests(unittest.TestCase):
         ws, workspace_url = _signup_api(page)
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
-        page.get_by_text("Control plane", exact=True).first.wait_for(
+        page.get_by_role("button", name="Add worker").wait_for(
             state="attached", timeout=90_000
         )
         before_ids = _host_ids(page, ws)
@@ -195,7 +197,7 @@ class CatalogPairDoneTests(unittest.TestCase):
                 try:
                     last_body = page.inner_text("body")
                     if add.count() and add.first.is_visible():
-                        add.first.click(force=True)
+                        click_add_worker(page)
                         page.get_by_role("heading", name="Pair this worker").wait_for(
                             timeout=20_000
                         )
@@ -239,8 +241,7 @@ class CatalogPairDoneTests(unittest.TestCase):
                 "Done must close the pair panel",
             )
 
-            card = page.locator("article").filter(has_text="Waiting to pair")
-            card.first.wait_for(timeout=10_000)
+            card = open_host_panel(page, "Waiting to pair", timeout_ms=10_000)
             text = card.first.inner_text()
             self.assertIn("pending", text.lower())
             self.assertIn("Waiting to pair", text)
@@ -253,7 +254,7 @@ class CatalogPairDoneTests(unittest.TestCase):
             page.reload(wait_until="domcontentloaded")
             wait_dx_ready(page)
             page.wait_for_selector("h1", state="attached", timeout=60_000)
-            page.get_by_text("Control plane", exact=True).first.wait_for(
+            page.get_by_role("button", name="Add worker").wait_for(
                 state="attached", timeout=90_000
             )
             self.assertEqual(
@@ -262,8 +263,7 @@ class CatalogPairDoneTests(unittest.TestCase):
                 "reload must not reopen the pair panel",
             )
             self.assertNotIn(token, page.inner_text("body"))
-            reloaded = page.locator("article").filter(has_text="Waiting to pair")
-            reloaded.first.wait_for(timeout=10_000)
+            reloaded = open_host_panel(page, "Waiting to pair", timeout_ms=10_000)
             reload_text = reloaded.first.inner_text()
             self.assertIn("pending", reload_text.lower())
             self.assertIn("Waiting to pair", reload_text)

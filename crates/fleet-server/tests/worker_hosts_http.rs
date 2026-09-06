@@ -7,17 +7,17 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode, header};
-use fleet_auth::{ACCESS_COOKIE, AuthConfig, REFRESH_COOKIE};
-use fleet_db::{PoolConfig, connect_and_migrate_with};
+use axum::http::{header, HeaderMap, Request, StatusCode};
+use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
+use fleet_db::{connect_and_migrate_with, PoolConfig};
 use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
 };
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1316,8 +1316,9 @@ async fn this_machine_origin_is_true_only_for_real_loopback() {
         let hosts = list_hosts(&list, origin);
         assert_list_includes_pending(hosts, &hid, &pending_name, origin);
         // A pending unpaired host has no hostname. Loopback Origin must not
-        // invent a synthetic plane card and tag that instead.
-        assert_no_host_is_this_machine(&list, hosts, origin);
+        // invent a synthetic plane card and tag that instead. A live
+        // this-machine extra may still be tagged.
+        assert_pending_is_not_this_machine(hosts, &hid, origin);
     }
 
     for origin in ["http://192.168.1.50:3030", "http://10.0.0.8:3030"] {
@@ -1419,6 +1420,17 @@ fn assert_list_omits_pair_and_machine_tokens(out: &HttpOut, pair_token: &str, wh
     );
 }
 
+fn assert_pending_is_not_this_machine(hosts: &[Value], hid: &str, what: &str) {
+    let pending = hosts
+        .iter()
+        .find(|h| h["id"].as_str() == Some(hid))
+        .unwrap_or_else(|| panic!("{what}: pending {hid} missing: {hosts:?}"));
+    assert!(
+        !host_flag_true(pending, "is_this_machine"),
+        "{what} must not tag unpaired pending {hid} as this machine: {pending}"
+    );
+}
+
 fn assert_no_host_is_this_machine(out: &HttpOut, hosts: &[Value], what: &str) {
     for host in hosts {
         assert!(
@@ -1440,13 +1452,13 @@ fn assert_no_host_is_this_machine(out: &HttpOut, hosts: &[Value], what: &str) {
     );
 }
 
-/// catalog:list-host-create-name-empty-400 — POST empty / whitespace /
-/// omitted name is 400 and inserts no pending row. A 10k name must not
-/// persist (400, or 200 with GET name.len()<=255). Member and other-ws
-/// stay 403. Control unique 1–80 still 200 with flp_. Distinct from
-/// list-rename-host-patch (PATCH only).
+/// catalog:list-host-create-name-optional — POST empty / whitespace /
+/// omitted name is 200 pending; pair stamps the device hostname. A 10k
+/// name must not persist (400, or 200 with GET name.len()<=255). Member
+/// and other-ws stay 403. Control unique 1–80 still 200 with flp_.
+/// Distinct from list-rename-host-patch (PATCH only).
 #[tokio::test]
-async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
+async fn host_create_name_optional_pair_uses_hostname() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let uri = hosts_path(&ws);
@@ -1458,105 +1470,89 @@ async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
         "pre-call GET /worker-hosts: {}",
         snapshot.body
     );
-    let snap_hosts = snapshot.body["hosts"].as_array().expect("hosts array");
-    let snap_count = snap_hosts.len();
-    let snap_ids: Vec<String> = snap_hosts
-        .iter()
-        .filter_map(|h| h["id"].as_str().map(str::to_string))
-        .collect();
-    let snap_pending: Vec<String> = snap_hosts
-        .iter()
-        .filter(|h| h["status"] == "pending")
-        .filter_map(|h| h["id"].as_str().map(str::to_string))
-        .collect();
 
+    let mut unnamed_token = None;
+    let mut unnamed_id = None;
     for (label, body) in [
         ("empty", json!({ "name": "" })),
         ("whitespace", json!({ "name": "   " })),
         ("omitted", json!({})),
     ] {
         let out = call(&app, "POST", &uri, Some(&jar), Some(body)).await;
-        assert_ne!(
-            out.status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "POST {label} name must not 500: {}",
-            out.body
-        );
-        assert_ne!(
+        assert_eq!(
             out.status,
             StatusCode::OK,
-            "POST {label} name must not 200 with host.name \"\": {}",
+            "POST {label} name must create a pending host: {}",
             out.body
         );
-        assert_ne!(
-            out.status,
-            StatusCode::CREATED,
-            "POST {label} name must not 201 with host.name \"\": {}",
-            out.body
-        );
-        assert_eq!(
-            out.status,
-            StatusCode::BAD_REQUEST,
-            "POST {label} name must be 400: {}",
-            out.body
-        );
+        let created_name = out.body["host"]["name"].as_str().unwrap_or("?");
         assert!(
-            out.body.get("pair_token").is_none()
-                || out.body["pair_token"].is_null()
-                || out.body["pair_token"].as_str().is_none_or(str::is_empty),
-            "rejected {label} create must not include pair_token: {}",
+            created_name.trim().is_empty(),
+            "POST {label} pending name must be blank until pair: {}",
             out.body
         );
-        assert!(
-            out.body.get("machine_token").is_none()
-                || out.body["machine_token"].is_null()
-                || out.body["machine_token"].as_str().is_none_or(str::is_empty),
-            "rejected {label} create must not include machine_token: {}",
+        assert_eq!(
+            out.body["host"]["status"], "pending",
+            "POST {label} must be pending: {}",
             out.body
         );
-        assert!(
-            !out.raw.contains("flp_") && !out.raw.contains("flm_"),
-            "rejected {label} create must not leak a pair/machine token: {}",
-            out.raw
-        );
-
-        let after = call(&app, "GET", &uri, Some(&jar), None).await;
-        assert_eq!(
-            after.status,
-            StatusCode::OK,
-            "GET after {label} reject: {}",
-            after.body
-        );
-        let hosts = after.body["hosts"].as_array().expect("hosts array");
-        let ids: Vec<String> = hosts
-            .iter()
-            .filter_map(|h| h["id"].as_str().map(str::to_string))
-            .collect();
-        let pending: Vec<String> = hosts
-            .iter()
-            .filter(|h| h["status"] == "pending")
-            .filter_map(|h| h["id"].as_str().map(str::to_string))
-            .collect();
-        assert_eq!(
-            hosts.len(),
-            snap_count,
-            "POST {label} name must not add a GET /worker-hosts row: {}",
-            after.body
-        );
-        assert_eq!(
-            ids, snap_ids,
-            "POST {label} name must not introduce a new host id: {ids:?} vs {snap_ids:?}"
-        );
-        assert_eq!(
-            pending, snap_pending,
-            "POST {label} name must not include a new pending row: {pending:?}"
-        );
-        assert!(
-            hosts.iter().all(|h| h["name"].as_str() != Some("")),
-            "GET after {label} reject must not list a host named \"\": {}",
-            after.body
+        let token = out.body["pair_token"]
+            .as_str()
+            .expect("pair_token")
+            .to_string();
+        assert!(token.starts_with("flp_"), "pair_token prefix: {token}");
+        unnamed_token = Some(token);
+        unnamed_id = Some(
+            out.body["host"]["id"]
+                .as_str()
+                .expect("host.id")
+                .to_string(),
         );
     }
+
+    let hostname = format!("box-{}", Uuid::new_v4());
+    let pair = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": unnamed_token.expect("token"),
+            "hostname": hostname,
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert_eq!(pair.status, StatusCode::OK, "pair unnamed: {}", pair.body);
+    let hid = unnamed_id.expect("id");
+    let got = call(&app, "GET", &format!("{uri}/{hid}"), Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "GET after pair: {}", got.body);
+    assert_eq!(
+        got.body["name"].as_str(),
+        Some(hostname.as_str()),
+        "pair must stamp the device hostname as the name: {}",
+        got.body
+    );
+    assert_eq!(
+        got.body["hostname"].as_str(),
+        Some(hostname.as_str()),
+        "pair hostname: {}",
+        got.body
+    );
+
+    let after_optional = call(&app, "GET", &uri, Some(&jar), None).await;
+    assert_eq!(
+        after_optional.status,
+        StatusCode::OK,
+        "GET after optional-name creates: {}",
+        after_optional.body
+    );
+    let snap_count = after_optional.body["hosts"]
+        .as_array()
+        .expect("hosts")
+        .len();
 
     let huge = "x".repeat(10_000);
     let huge_out = call(
@@ -15182,8 +15178,8 @@ struct LocalModelTagsNoOutbound {
 
 impl LocalModelTagsNoOutbound {
     fn arm() -> Self {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+        use std::sync::Arc;
 
         let before_1234 = tcp_rows_to_remote_port(1234);
         let before_443 = tcp_rows_to_remote_port(443);

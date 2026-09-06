@@ -80,7 +80,7 @@ pub fn resolve(
                 "text".into(),
                 "--permission-mode".into(),
                 if auto_approve {
-                    "dontAsk".into()
+                    "bypassPermissions".into()
                 } else {
                     "acceptEdits".into()
                 },
@@ -231,7 +231,11 @@ mod tests {
         assert_eq!(h.command, "claude");
         assert!(h.args.contains(&"-p".into()));
         assert!(!h.args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(h.args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"));
+        assert!(!h.args.iter().any(|a| a == "dontAsk"));
         assert!(h.args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        let ask = resolve("claude", None, None, false, None, None, None).unwrap();
+        assert!(ask.args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits"));
     }
 
     #[test]

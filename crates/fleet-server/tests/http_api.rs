@@ -2229,7 +2229,9 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         hosts.body
     );
     assert!(
-        host_list.is_empty(),
+        host_list
+            .iter()
+            .all(|h| h["workspace_id"].as_str() != Some(ws.as_str())),
         "ack must not create worker_hosts for this workspace: {}",
         hosts.body
     );

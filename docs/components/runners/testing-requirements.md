@@ -79,7 +79,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Add worker creates a pending host + one-time pair token | HTTP create; token hashed; plaintext once | Click Add worker; panel shows token once; gone after Done + reload | Pair from a guest using that token |
+| Add worker creates a pending host + one-time pair token | HTTP create; token hashed; plaintext once | Click Add worker (name optional); panel shows token once; gone after Done + reload | Pair from a guest using that token |
 | Unix install command (Linux, macOS, FreeBSD) | Script contract; `FLEET_PAIR_TOKEN` present | Command in the panel contains token + `install-worker.sh` | Guest runs the command; bins install; daemon starts |
 | Windows PowerShell install | Same for `.ps1`; ARM64 vs x64 from the machine | Command in the panel contains token + `install-worker.ps1` | Windows x64 and ARM64 guests |
 | Copy (Unix, Windows, token) | Clipboard helper | Copy buttons work (incl. HTTP LAN fallback) | n/a (browser) |

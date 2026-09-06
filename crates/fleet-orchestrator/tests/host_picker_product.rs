@@ -385,24 +385,6 @@ async fn tick_must_not_assign_offbox_host_when_plane_url_is_loopback() {
             "off-box fixture must not match this machine"
         );
 
-        let assignable = worker_hosts::list_assignable(
-            store.pool(),
-            project.id,
-            fleet_db::WORKER_HOST_OFFLINE_AFTER,
-        )
-        .await
-        .expect("list_assignable");
-        let foreign_local: Vec<_> = assignable
-            .iter()
-            .filter(|h| h.id != off)
-            .filter(|h| host_is_this_machine(&AssignableHost::from(*h)))
-            .collect();
-        if !foreign_local.is_empty() {
-            // Shared live cluster host is this-machine. Ticking would enqueue
-            // onto that box. Mixed-pool test covers the pick; do not tick.
-            continue;
-        }
-
         store
             .insert_accepted_plan(project.id, one_task_plan(project.id))
             .await
@@ -412,22 +394,13 @@ async fn tick_must_not_assign_offbox_host_when_plane_url_is_loopback() {
             .tick_project(project.id)
             .await
             .unwrap();
-        let claims = spawn_claim_count(&store, project.id).await;
         let off_claims = spawn_claim_count_for_host(&store, project.id, off).await;
         assert_eq!(
             off_claims, 0,
             "must not enqueue onto off-box {off} while plane URL {url} is loopback: {r:?}"
         );
-        assert_eq!(
-            r.spawned, 0,
-            "must not assign off-box host {off} while plane URL {url} is loopback: {r:?}"
-        );
-        assert_eq!(
-            claims, 0,
-            "must not enqueue a spawn claim an off-box host cannot heartbeat \
-             ({url}): spawned={:?} claims={claims}",
-            r.spawned
-        );
+        // A this-machine extra (the live CP laptop) may still take the claim.
+        // That box can heartbeat to loopback. The off-box fixture cannot.
     }
 }
 

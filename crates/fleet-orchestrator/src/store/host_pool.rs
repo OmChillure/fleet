@@ -542,6 +542,12 @@ pub fn host_is_this_machine(host: &AssignableHost) -> bool {
             return true;
         }
     }
+    host_advertises_local_addr(host)
+}
+
+/// Cross-workspace share: advertised non-loopback IP ∩ this plane.
+/// Hostname alone is impersonable (`ubuntu` on two boxes).
+fn host_advertises_local_addr(host: &AssignableHost) -> bool {
     let local_ips = local_nonloopback_ips();
     host.addrs
         .iter()
@@ -560,23 +566,41 @@ fn host_reachable_on_plane(host: &AssignableHost, need: IsolationClass, loopback
 }
 
 async fn list_assignable_hosts(store: &Store, project_id: Uuid) -> Option<Vec<AssignableHost>> {
-    match fleet_db::repos::worker_hosts::list_assignable(
+    let scoped = match fleet_db::repos::worker_hosts::list_assignable(
         store.pool(),
         project_id,
         fleet_db::WORKER_HOST_OFFLINE_AFTER,
     )
     .await
     {
-        Ok(hosts) => Some(hosts.iter().map(AssignableHost::from).collect()),
+        Ok(h) => h,
         Err(e) => {
             tracing::debug!(
                 error = %e,
                 project_id = %project_id,
                 "no assignable host"
             );
-            None
+            return None;
+        }
+    };
+    let extra = fleet_db::repos::worker_hosts::list_assignable_by_hostnames(
+        store.pool(),
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+        &local_machine_names(),
+    )
+    .await
+    .unwrap_or_default();
+    let mut hosts: Vec<AssignableHost> = scoped.iter().map(AssignableHost::from).collect();
+    for h in extra {
+        if hosts.iter().any(|x| x.id == h.id) {
+            continue;
+        }
+        let ah = AssignableHost::from(&h);
+        if host_advertises_local_addr(&ah) {
+            hosts.push(ah);
         }
     }
+    Some(hosts)
 }
 
 async fn count_remote_in_flight(store: &Store) -> Option<HashMap<Uuid, i64>> {
@@ -656,6 +680,15 @@ mod tests {
         if let Some(ip) = ips.first() {
             h.addrs = vec![ip.clone()];
             assert!(host_is_this_machine(&h), "advertised IP {ip}");
+            assert!(host_advertises_local_addr(&h), "share requires local IP");
+        }
+        h.hostname = local.first().cloned();
+        h.addrs.clear();
+        if h.hostname.is_some() {
+            assert!(
+                !host_advertises_local_addr(&h),
+                "same hostname without a local advertised IP must not share across workspaces"
+            );
         }
     }
 

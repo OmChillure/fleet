@@ -3692,6 +3692,90 @@ async fn cluster_label_only_from_bootstrap_null_created_by_migration_023() {
     );
 }
 
+/// The CP laptop is shared with every workspace on this plane without a
+/// `cluster` label (023 strips cluster from UI-paired hosts). Extra
+/// hostnames must list + assign; a foreign hostname must stay hidden.
+#[tokio::test]
+async fn extra_hostnames_make_this_machine_visible_and_assignable_across_workspaces() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let hostname = format!("dev-laptop-{}", Uuid::new_v4());
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "this-machine", expires).await;
+    pair_host(&pool, &token, &hostname).await;
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != host.id),
+        "non-cluster host must not be assignable in a foreign workspace without extra hostnames: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let visible_empty = worker_hosts::list_visible_for_workspace(&pool, ws_b, &[])
+        .await
+        .expect("visible empty");
+    assert!(
+        visible_empty.iter().all(|h| h.id != host.id),
+        "empty extra hostnames must not leak a foreign host"
+    );
+
+    let extra = vec![hostname.clone()];
+    let visible = worker_hosts::list_visible_for_workspace(&pool, ws_b, &extra)
+        .await
+        .expect("visible extra");
+    assert!(
+        visible.iter().any(|h| h.id == host.id),
+        "this-machine hostname must list in a foreign workspace: {:?}",
+        visible.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let assignable = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &extra,
+    )
+    .await
+    .expect("assignable extra");
+    assert!(
+        assignable.iter().any(|h| h.id == host.id),
+        "this-machine hostname must be assignable in a foreign workspace: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let fqdn = format!("{hostname}.lan");
+    let via_short = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &[fqdn],
+    )
+    .await
+    .expect("assignable fqdn needle");
+    assert!(
+        via_short.iter().any(|h| h.id == host.id),
+        "FQDN extra needle must match short hostname: {:?}",
+        via_short.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let other = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &[format!("other-box-{}", Uuid::new_v4())],
+    )
+    .await
+    .expect("assignable other");
+    assert!(
+        other.iter().all(|h| h.id != host.id),
+        "a different extra hostname must not pull this host"
+    );
+}
+
 #[tokio::test]
 async fn list_assignable_excludes_sandboxed_isolation() {
     let pool = connect_and_migrate().await;

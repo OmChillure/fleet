@@ -6,39 +6,43 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `754932d20917aad015073b557f8fb54784a5c1a5`
-- Tree-id: `7f91c858735c4b19c94f8e69448d1c07590a8ad4`
+- Tree-id: `36145c59e964a458ecd92069c2bad98972a3a8b7-9aa6b63e4781`
 
 ## Scenes
 
+- `api`
 - `chat`
 - `fleet`
 - `sandboxes`
 - `cases`
 - `inbox`
 - `agents`
+- `integrations`
 - `settings`
 - `runners`
 - `k8s`
 
 ## Pause steps
 
-- Fleet
-- Sandboxes
 - Runners / Self-hosted
 - Workers
+- Fleet
+- Sandboxes
 - Kubernetes sandboxes
+- Integrations
 - Cases
 - Chat
-- Inbox
-- Agents
 - Settings
 - Settings members
+- Inbox
+- Agents
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
+| `crates/fleet-db/src/repos/worker_hosts.rs` | `runners` |
 | `crates/fleet-driver/Cargo.toml` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/cli_session.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/harness.rs` | `fleet`, `sandboxes` |
@@ -50,11 +54,14 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-host/src/client.rs` | `runners` |
 | `crates/fleet-host/src/exec_k8s.rs` | `runners`, `k8s`, `fleet` |
 | `crates/fleet-host/src/spawn.rs` | `runners` |
+| `crates/fleet-integrations/src/config.rs` | `integrations` |
 | `crates/fleet-orchestrator/Cargo.toml` | `fleet` |
 | `crates/fleet-orchestrator/api/openapi.yaml` | `fleet` |
 | `crates/fleet-orchestrator/src/api/handlers.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/api/mod.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/api/worker_io.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/config/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/inbox.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/session_context.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/spawn.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/tick.rs` | `fleet` |
@@ -62,15 +69,21 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-orchestrator/src/sandbox/agent_loop.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/mod.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/remote.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/sandbox/share.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/team.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/store/host_pool.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/api_integration.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/host_picker_product.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/mock_runner.rs` | `fleet` |
 | `crates/fleet-runners-view/src/lib.rs` | `runners` |
 | `crates/fleet-server/src/cases.rs` | `cases` |
+| `crates/fleet-server/src/chat.rs` | `chat` |
 | `crates/fleet-server/src/chat_tools.rs` | `chat` |
+| `crates/fleet-server/src/config.rs` | `api`, `settings` |
 | `crates/fleet-server/src/tickets.rs` | `inbox` |
+| `crates/fleet-server/src/worker_hosts.rs` | `runners` |
 | `crates/fleet-ui/src/pages/agents/page.rs` | `agents` |
+| `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |
 | `crates/fleet-ui/src/pages/settings/page.rs` | `settings` |
 
 ## Film review (agent fills after recording)
@@ -80,11 +93,13 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes — API `/health.git_sha` and UI `/fleet-git-sha.txt` both `7f91c858735c4b19c94f8e69448d1c07590a8ad4` on host `:18280`/`:13230`. Clip `.tmp/demos/20260905T190844Z-chat-fleet-sandboxes-cases-inbox-agents-settings-runners.webm` (not committed). Ship images rebuilt with that same `FLEET_GIT_SHA`.
-- Frames + webm inspected: yes — 48 frames under `.tmp/demos/20260905T190844Z-frames/` and the `.webm`.
+- Recorded on final merge tree: yes (`36145c59e964a458ecd92069c2bad98972a3a8b7-9aa6b63e4781`; `/health.git_sha` and UI `/fleet-git-sha.txt` match)
+- Frames + webm inspected: `.tmp/demos/20260905T223118Z-frames/` (71 pngs) and `.tmp/demos/20260905T223118Z-extra-page@d3db88a2eeeb368880bd7043dff8e2b2.webm` (the 12K `…integrations.webm` sibling is a 1s stub — attach the extra-page file). First take `20260905T222440Z` is not proof (signup rate-limit).
 - Bugs found:
-  - Recorder flagged 7. After looking at the frames they are not product regressions from this change.
-  - Chat login → Workforce dashboard is the signed-in home. Composer then opened with runner/provider controls.
-  - Composer “disabled”: frame 06 is Provider=OpenAI “coming soon” with that toast. Placeholder still says Grok/Ollama required.
-  - Inbox Start monitor 400 (no connected app). Finish was not POSTed (recorder click). Empty Self-hosted list is correct (“API is not a runner”).
-  - Settings/Agents copy matches the runner-hosted workers change. No leaked secrets; emails are `*@example.test`.
+  - API index still advertises `http://localhost:3030` while this host stack is `:13230` (Kind remap). Health sha is this tree.
+  - Chat login “landed on Workforce” is a recorder false positive: dashboard first heading is Workforce; chat composer then sent “Human-test ping” as Grok on `viny-5700g`.
+  - Runners Apply click aborted: toast (`Command copied.`) sits in a `pointer-events-none` stack but a child still intercepts the Apply button. Pair panel + install command (`192.168.1.1:18280`) worked; token is in the frame — do not commit the video.
+  - Inbox Start monitor returned 400 (no listen source on a throwaway workspace). Page chrome is fine.
+  - k8s kubectl against this host has no Kind API server (expected). Fleet fixture start/tick/cancel still ran.
+  - `viny-5700g` shows `outdated` / `fleet-driver 0.0.2 · behind` (installed host package vs staged dist). Do not restage/auto-update that box unless asked.
+  - No leaked personal emails in the film (`*@example.test`).
