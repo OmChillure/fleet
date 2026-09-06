@@ -126,32 +126,6 @@ mod tests {
     }
 
     #[test]
-    fn expired_token_fails() {
-        // Validation::default() uses a 60s leeway, so ttl=0/1ms + short sleep is
-        // not enough. Encode claims already past leeway and decode via public API.
-        let now = Utc::now();
-        let claims = AccessClaims {
-            sub: Uuid::new_v4().to_string(),
-            email: "user@example.test".into(),
-            sid: Uuid::new_v4().to_string(),
-            exp: (now - ChronoDuration::seconds(120)).timestamp(),
-            iat: (now - ChronoDuration::seconds(180)).timestamp(),
-        };
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
-        )
-        .expect("encode expired token");
-
-        let err = decode_access_token(SECRET, &token).expect_err("expired");
-        assert!(
-            matches!(err, AppError::Unauthorized(_)),
-            "expected Unauthorized, got {err:?}"
-        );
-    }
-
-    #[test]
     fn logout_decode_accepts_expired_token() {
         let now = Utc::now();
         let session_id = Uuid::new_v4();

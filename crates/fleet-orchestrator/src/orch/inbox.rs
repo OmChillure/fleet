@@ -381,18 +381,46 @@ mod tests {
 
     #[test]
     fn materialize_rejects_parent_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        materialize_guest_proof(
-            dir.path(),
-            &json!({
-                "files": { "../outside": "nope", "work/ok.txt": "yes" }
-            }),
-        )
-        .unwrap();
-        assert!(!dir.path().parent().unwrap().join("outside").exists());
+        let parent = tempfile::tempdir().unwrap();
+        let work_dir = parent.path().join("session");
+        let escape = Uuid::new_v4();
+        let nested = Uuid::new_v4();
+        let backslash = Uuid::new_v4();
+        let mut files = serde_json::Map::new();
+        files.insert(format!("../{escape}"), json!("nope"));
+        files.insert(format!("work/../../{nested}"), json!("nope"));
+        files.insert(format!("..\\{backslash}"), json!("nope"));
+        files.insert("work/ok.txt".into(), json!("yes"));
+        materialize_guest_proof(&work_dir, &json!({ "files": files })).unwrap();
+        assert!(
+            !parent.path().join(escape.to_string()).exists(),
+            "../{escape} must not write beside session under the private parent"
+        );
+        assert!(
+            !parent.path().join(nested.to_string()).exists(),
+            "work/../../{nested} must not write beside session (starts_with(\"..\") would)"
+        );
+        assert!(
+            !parent.path().join(backslash.to_string()).exists(),
+            r"..\{backslash} must not write beside session"
+        );
+        assert!(
+            !work_dir.join(format!("..\\{backslash}")).exists(),
+            r"..\{backslash} must not be stored as a filename under work_dir"
+        );
+        let siblings: Vec<String> = std::fs::read_dir(parent.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("work/ok.txt")).unwrap(),
-            "yes"
+            siblings,
+            ["session"],
+            "escape keys must not create siblings of work_dir: {siblings:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join("work/ok.txt")).unwrap(),
+            "yes",
+            "safe work/ok.txt must still be materialized"
         );
     }
 

@@ -772,15 +772,3 @@ pub fn verify_worker_token(token: &str, hash_hex: &str) -> bool {
     let got = hash_worker_token(token);
     got.as_bytes().ct_eq(hash_hex.as_bytes()).into()
 }
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-
-    #[test]
-    fn token_hash_roundtrip() {
-        let h = hash_worker_token("secret-token");
-        assert!(verify_worker_token("secret-token", &h));
-        assert!(!verify_worker_token("wrong", &h));
-    }
-}

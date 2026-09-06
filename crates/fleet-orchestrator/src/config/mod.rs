@@ -259,143 +259,213 @@ mod tests {
     // Serialize env tests
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn clear_relevant() {
-        for k in [
-            "DATABASE_URL",
-            "ADMIN_TOKEN",
-            "AUTH_MODE",
-            "HTTP_ADDR",
-            "DATA_DIR",
-            "TICK_INTERVAL_S",
-            "MAX_AGENTS",
-            "LOCK_WAIT_TIMEOUT_S",
-            "API_PUBLIC_BASE",
-            "WORKER_PUBLIC_BASE",
-            "ORCHESTRATOR_PUBLIC_URL",
-        ] {
-            unsafe { env::remove_var(k) };
+    fn with_env<T>(pairs: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous: Vec<(&str, Option<String>)> =
+            pairs.iter().map(|(k, _)| (*k, env::var(k).ok())).collect();
+        // SAFETY: held under ENV_LOCK; restored before unlock / panic resume.
+        unsafe {
+            for (k, v) in pairs {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // SAFETY: restore prior process env before releasing the lock.
+        unsafe {
+            for (k, v) in previous {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        match result {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
         }
     }
 
     #[test]
-    fn load_defaults() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_relevant();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            env::set_var(
-                "DATABASE_URL",
-                "postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable",
-            )
-        };
-        unsafe { env::set_var("ADMIN_TOKEN", "test-admin-token") };
-        unsafe { env::set_var("DATA_DIR", dir.path()) };
-        let cfg = Config::from_env().unwrap();
-        assert_eq!(cfg.tick_interval, Duration::from_secs(5));
-        assert_eq!(cfg.max_agents, 3);
-        assert_eq!(cfg.auth_mode, AuthMode::Token);
-        assert_eq!(cfg.leadership_mode, "single_process");
-        assert!(cfg.data_dir.is_absolute());
-    }
-
-    #[test]
-    fn requires_database_url() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_relevant();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { env::set_var("ADMIN_TOKEN", "x") };
-        unsafe { env::set_var("DATA_DIR", dir.path()) };
-        assert!(Config::from_env().is_err());
-    }
-
-    #[test]
     fn admin_token_optional_in_token_mode() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
-        unsafe { env::set_var("AUTH_MODE", "token") };
-        unsafe { env::set_var("DATA_DIR", dir.path()) };
-        let cfg = Config::from_env().expect("ADMIN_TOKEN is optional");
+        let data_dir = dir.path().to_str().expect("utf-8 DATA_DIR").to_owned();
+        let cfg = with_env(
+            &[("ADMIN_TOKEN", None), ("DATA_DIR", Some(data_dir.as_str()))],
+            || {
+                Config::from_env_for_server("postgres://x", "127.0.0.1:8080")
+                    .expect("ADMIN_TOKEN is optional")
+            },
+        );
         assert!(cfg.admin_token.is_empty());
-        assert_eq!(cfg.auth_mode, AuthMode::Token);
     }
 
     #[test]
-    fn auth_none_requires_loopback() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_relevant();
+    fn from_env_copies_set_admin_token() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
-        unsafe { env::set_var("AUTH_MODE", "none") };
-        unsafe { env::set_var("HTTP_ADDR", ":8080") };
-        unsafe { env::set_var("DATA_DIR", dir.path()) };
-        assert!(Config::from_env().is_err());
-
-        unsafe { env::set_var("HTTP_ADDR", "127.0.0.1:8080") };
-        assert!(Config::from_env().is_ok());
+        let data_dir = dir.path().to_str().expect("utf-8 DATA_DIR").to_owned();
+        let cfg = with_env(
+            &[
+                ("ADMIN_TOKEN", Some("secret-token")),
+                ("DATA_DIR", Some(data_dir.as_str())),
+            ],
+            || {
+                Config::from_env_for_server("postgres://x", "127.0.0.1:8080")
+                    .expect("set ADMIN_TOKEN")
+            },
+        );
+        assert_eq!(cfg.admin_token, "secret-token");
     }
 
     #[test]
-    fn public_url_rewrites_wildcard_and_prefers_env() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
-        unsafe { env::remove_var("WORKER_PUBLIC_BASE") };
-        unsafe { env::remove_var("API_PUBLIC_BASE") };
-        assert_eq!(public_orchestrator_url(":8080"), "http://127.0.0.1:8080");
-        assert_eq!(
-            public_orchestrator_url("0.0.0.0:8080"),
-            "http://127.0.0.1:8080"
+    fn public_url_rewrites_port_only_bind() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", None),
+            ],
+            || public_orchestrator_url(":8080"),
         );
-        assert_eq!(
-            public_orchestrator_url("127.0.0.1:9090"),
-            "http://127.0.0.1:9090"
+        assert_eq!(got, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn public_url_rewrites_ipv4_unspecified_bind() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", None),
+            ],
+            || public_orchestrator_url("0.0.0.0:8080"),
         );
-        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080/") };
-        assert_eq!(
-            public_orchestrator_url("0.0.0.0:1"),
-            "http://localhost:8080"
+        assert_eq!(got, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn public_url_preserves_explicit_loopback_bind() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", None),
+            ],
+            || public_orchestrator_url("127.0.0.1:9090"),
         );
-        unsafe { env::remove_var("API_PUBLIC_BASE") };
-        unsafe { env::set_var("ORCHESTRATOR_PUBLIC_URL", "http://orch.internal:8081") };
-        assert_eq!(
-            public_orchestrator_url("0.0.0.0:1"),
-            "http://orch.internal:8081"
+        assert_eq!(got, "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn public_url_rewrites_ipv6_unspecified_bind() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", None),
+            ],
+            || public_orchestrator_url("[::]:8080"),
         );
-        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
+        assert_eq!(got, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn public_url_prefers_api_public_base_stripping_trailing_slash() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", Some("http://localhost:8080/")),
+            ],
+            || public_orchestrator_url("0.0.0.0:1"),
+        );
+        assert_eq!(got, "http://localhost:8080");
+    }
+
+    #[test]
+    fn public_url_prefers_orchestrator_public_url() {
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", Some("http://orch.internal:8081")),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", None),
+            ],
+            || public_orchestrator_url("0.0.0.0:1"),
+        );
+        assert_eq!(got, "http://orch.internal:8081");
+    }
+
+    #[test]
+    fn public_url_prefers_orchestrator_public_url_when_both_env_set() {
+        let got = with_env(
+            &[
+                (
+                    "ORCHESTRATOR_PUBLIC_URL",
+                    Some("http://api.agent-fleet.svc.cluster.local:8080"),
+                ),
+                ("WORKER_PUBLIC_BASE", Some("http://192.168.1.1:18280")),
+                ("API_PUBLIC_BASE", Some("http://localhost:8080")),
+            ],
+            || public_orchestrator_url("0.0.0.0:8080"),
+        );
+        assert_eq!(got, "http://api.agent-fleet.svc.cluster.local:8080");
     }
 
     #[test]
     fn public_url_prefers_worker_base_over_oauth_api_base() {
-        let _g = ENV_LOCK.lock().unwrap();
-        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
-        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080") };
-        unsafe { env::set_var("WORKER_PUBLIC_BASE", "http://192.168.1.1:18280") };
+        let got = with_env(
+            &[
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("API_PUBLIC_BASE", Some("http://localhost:8080")),
+                ("WORKER_PUBLIC_BASE", Some("http://192.168.1.1:18280")),
+            ],
+            || public_orchestrator_url("0.0.0.0:18280"),
+        );
         assert_eq!(
-            public_orchestrator_url("0.0.0.0:18280"),
+            got,
             "http://192.168.1.1:18280",
             "spawn/heartbeat must use the pair URL, not OAuth localhost:8080"
         );
-        unsafe { env::set_var("ORCHESTRATOR_PUBLIC_URL", "http://orch.internal:9") };
-        assert_eq!(
-            public_orchestrator_url("0.0.0.0:18280"),
-            "http://orch.internal:9"
-        );
-        unsafe { env::remove_var("ORCHESTRATOR_PUBLIC_URL") };
-        unsafe { env::remove_var("WORKER_PUBLIC_BASE") };
-        unsafe { env::remove_var("API_PUBLIC_BASE") };
     }
 
     #[test]
     fn from_env_snapshots_public_url_onto_config() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_relevant();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { env::set_var("DATABASE_URL", "postgres://x") };
-        unsafe { env::set_var("DATA_DIR", dir.path()) };
-        unsafe { env::set_var("API_PUBLIC_BASE", "http://localhost:8080") };
-        let cfg = Config::from_env().unwrap();
+        let data_dir = dir.path().to_str().expect("utf-8 DATA_DIR").to_owned();
+        let cfg = with_env(
+            &[
+                ("DATABASE_URL", Some("postgres://x")),
+                ("ADMIN_TOKEN", None),
+                ("AUTH_MODE", None),
+                ("HTTP_ADDR", None),
+                ("DATA_DIR", Some(data_dir.as_str())),
+                ("ORCHESTRATOR_PUBLIC_URL", None),
+                ("WORKER_PUBLIC_BASE", None),
+                ("API_PUBLIC_BASE", Some("http://localhost:8080")),
+            ],
+            || Config::from_env().expect("from_env"),
+        );
         assert_eq!(cfg.orchestrator_public_url, "http://localhost:8080");
-        unsafe { env::remove_var("API_PUBLIC_BASE") };
+    }
+
+    #[test]
+    fn public_url_blank_env_falls_through_to_bind_rewrite() {
+        for blank in ["", "   ", "/"] {
+            let got = with_env(
+                &[
+                    ("ORCHESTRATOR_PUBLIC_URL", Some(blank)),
+                    ("WORKER_PUBLIC_BASE", Some(blank)),
+                    ("API_PUBLIC_BASE", Some(blank)),
+                ],
+                || public_orchestrator_url("0.0.0.0:8080"),
+            );
+            assert_eq!(
+                got,
+                "http://127.0.0.1:8080",
+                "blank env {blank:?} must fall through to bind rewrite"
+            );
+        }
     }
 }

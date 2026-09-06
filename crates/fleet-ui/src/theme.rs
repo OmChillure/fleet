@@ -87,12 +87,29 @@ mod tests {
     #[test]
     fn from_storage_maps_aliases() {
         assert_eq!(Theme::from_storage("white"), Theme::White);
-        assert_eq!(Theme::from_storage("Light"), Theme::White);
-        assert_eq!(Theme::from_storage("black"), Theme::Black);
-        assert_eq!(Theme::from_storage(""), Theme::Black);
+        assert_eq!(Theme::from_storage("light"), Theme::White);
         assert_eq!(Theme::Black.as_storage(), "black");
         assert_eq!(Theme::White.as_storage(), "white");
-        assert_eq!(Theme::Black.label(), "Black");
-        assert_eq!(Theme::White.label(), "White");
+    }
+
+    #[test]
+    fn root_class_is_theme_black_or_white() {
+        assert_eq!(Theme::Black.root_class(), "theme-black");
+        assert_eq!(Theme::White.root_class(), "theme-white");
+    }
+
+    #[test]
+    fn toggle_swaps_black_and_white() {
+        assert_eq!(Theme::Black.toggle(), Theme::White);
+        assert_eq!(Theme::White.toggle(), Theme::Black);
+    }
+
+    #[test]
+    fn from_storage_trims_unknown_to_black() {
+        assert_eq!(Theme::from_storage(" WHITE "), Theme::White);
+        assert_eq!(Theme::from_storage(" Light "), Theme::White);
+        assert_eq!(Theme::from_storage("dark"), Theme::Black);
+        assert_eq!(Theme::from_storage("foo"), Theme::Black);
+        assert_eq!(Theme::from_storage("  "), Theme::Black);
     }
 }

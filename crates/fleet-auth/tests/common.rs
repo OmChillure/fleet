@@ -79,7 +79,7 @@ async fn app_with_config(config: AuthConfig) -> axum::Router {
     fleet_auth::router().with_state(state)
 }
 
-/// Parsed `Set-Cookie` name=value plus the raw header (for HttpOnly checks).
+/// Parsed `Set-Cookie` name=value plus the raw header (for Max-Age checks).
 #[derive(Debug, Clone)]
 pub struct ParsedSetCookie {
     pub name: String,
@@ -88,21 +88,6 @@ pub struct ParsedSetCookie {
 }
 
 impl ParsedSetCookie {
-    pub fn is_httponly(&self) -> bool {
-        self.raw
-            .split(';')
-            .any(|part| part.trim().eq_ignore_ascii_case("HttpOnly"))
-    }
-
-    pub fn path(&self) -> Option<&str> {
-        self.raw.split(';').find_map(|part| {
-            let p = part.trim();
-            p.split_once('=')
-                .filter(|(k, _)| k.eq_ignore_ascii_case("Path"))
-                .map(|(_, v)| v)
-        })
-    }
-
     pub fn max_age(&self) -> Option<i64> {
         self.raw.split(';').find_map(|part| {
             let p = part.trim();
@@ -110,12 +95,6 @@ impl ParsedSetCookie {
                 .filter(|(k, _)| k.eq_ignore_ascii_case("Max-Age"))
                 .and_then(|(_, v)| v.parse().ok())
         })
-    }
-
-    pub fn is_secure(&self) -> bool {
-        self.raw
-            .split(';')
-            .any(|part| part.trim().eq_ignore_ascii_case("Secure"))
     }
 }
 
@@ -224,21 +203,6 @@ pub async fn call(
             builder = builder.header(header::COOKIE, h);
         }
     }
-    call_finish(app, builder, body).await
-}
-
-pub async fn call_with_xff(
-    app: &axum::Router,
-    method: &str,
-    uri: &str,
-    xff: &str,
-    body: Option<Value>,
-) -> HttpOut {
-    let mut builder = Request::builder().method(method).uri(uri);
-    if body.is_some() {
-        builder = builder.header(header::CONTENT_TYPE, "application/json");
-    }
-    builder = builder.header("x-forwarded-for", xff);
     call_finish(app, builder, body).await
 }
 

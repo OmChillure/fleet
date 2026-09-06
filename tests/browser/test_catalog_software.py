@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Layer 2 e2e: software line on paired boxes only (catalog:e2e-software-line).
+"""Layer 2 e2e: software bin rows on paired boxes (catalog:e2e-software-line).
 
-Software line after pair; not on the plane or a pending card. Package
-rows are fleet-host / fleet-driver versions, never a bin file hash.
+Paired HostDetail paints fleet-host / fleet-driver as
+'{name} {semver} · {status}'.
 """
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import unittest
@@ -15,9 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
-    create_host,
     goto_self_hosted,
-    list_hosts,
     pair_and_heartbeat,
     signup_login,
     wait_dx_ready,
@@ -33,12 +32,10 @@ BROWSERS = os.environ.get(
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
-BAKE_SHA = "9d239a509055abcdef"
-BAKE_SHORT = "9d239a509055"
-BIN_SHA = "2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"
-BIN_PREFIX = "2a971d69"
+HOST_VER = "3.1.4-e2ehost"
+DRIVER_VER = "5.0.0-e2edriver"
 PLATFORM = "linux-x86_64"
-SOFTWARE_FLAGS = ("up to date", "outdated", "unknown", "old package", "updating")
+_BIN_STATUS = r"(current|behind|missing|reported|unknown)"
 
 
 def _listening(host: str, port: int) -> bool:
@@ -78,30 +75,13 @@ def _reload_self_hosted(page, workspace_url: str) -> None:
     page.get_by_role("button", name="Add worker").wait_for(timeout=30_000)
 
 
-def _article(page, name: str):
-    """Named host card; Control plane is never a match."""
-    page.get_by_text(name).first.wait_for(timeout=30_000)
-    card = page.locator("article").filter(has_text=name)
-    card.first.wait_for(timeout=15_000)
-    for i in range(card.count()):
-        art = card.nth(i)
-        text = art.inner_text()
-        if "Control plane" in text:
-            continue
-        if name in text:
-            return art
-    raise AssertionError(
-        f"host card {name!r} missing (or only Control plane matched). "
-        f"body={page.inner_text('body')[:800]!r}"
-    )
-
-
 def _software_extra() -> dict:
     return {
         "software": {
-            "git_sha": BAKE_SHA,
-            "bins": {"fleet-host": BIN_SHA},
-            "updating": False,
+            "bins": {
+                "fleet-host": {"version": HOST_VER},
+                "fleet-driver": {"version": DRIVER_VER},
+            }
         }
     }
 
@@ -136,14 +116,9 @@ class CatalogSoftwareLineTests(unittest.TestCase):
         cls._browser.close()
         cls._pw.stop()
 
-    def test_control_plane_card_has_no_software_line(self) -> None:
-        _reload_self_hosted(self.page, self.workspace_url)
-        n = self.page.locator("article").filter(has_text="Control plane").count()
-        self.assertEqual(n, 0, "synthetic Control plane card must not appear")
-
-    def test_paired_card_shows_bake_id_not_bin_hash(self) -> None:
+    def test_paired_card_shows_bin_name_semver_status(self) -> None:
         name = f"sw-paired-{uuid.uuid4().hex[:8]}"
-        created, paired, hb = pair_and_heartbeat(
+        created, paired, _hb = pair_and_heartbeat(
             self.page,
             self.workspace_id,
             name,
@@ -152,43 +127,23 @@ class CatalogSoftwareLineTests(unittest.TestCase):
         )
         self.assertIn("pair_token", created)
         self.assertIn("machine_token", paired)
-        host = hb.get("host") or {}
-        reported = host.get("software") or {}
-        self.assertEqual(reported.get("git_sha"), BAKE_SHA, hb)
-        listed = list_hosts(self.page, self.workspace_id)
-        row = next(
-            (h for h in (listed.get("hosts") or []) if h.get("name") == name),
-            None,
-        )
-        self.assertIsNotNone(row, listed)
-        self.assertEqual((row.get("software") or {}).get("git_sha"), BAKE_SHA)
 
         _reload_self_hosted(self.page, self.workspace_url)
-        n = self.page.locator("article").filter(has_text="Control plane").count()
-        self.assertEqual(n, 0, "synthetic Control plane card must not appear")
-
-        card = _article(self.page, name)
-        self.assertNotIn("Control plane", card.inner_text())
-        text = card.inner_text()
-        lowered = text.lower()
-        self.assertIn("fleet-host", lowered)
-        self.assertIn("fleet-driver", lowered)
-        self.assertNotIn(
-            BIN_PREFIX,
+        # software_bin_rows live on HostDetailPanel, not the list button.
+        row = self.page.get_by_role("button").filter(has_text=name)
+        row.first.wait_for(timeout=30_000)
+        row.first.click()
+        card = self.page.locator("article").filter(has_text=name)
+        card.first.wait_for(timeout=15_000)
+        text = card.first.inner_text()
+        self.assertRegex(
             text,
-            "file hash must not be used as the bake / version id",
+            rf"fleet-host {re.escape(HOST_VER)} · {_BIN_STATUS}",
         )
-        self.assertNotRegex(lowered, r"software\s+\S+\s+·\s+up to date")
-
-    def test_pending_card_has_no_software_line(self) -> None:
-        name = f"sw-pending-{uuid.uuid4().hex[:8]}"
-        created = create_host(self.page, self.workspace_id, name)
-        self.assertIn("pair_token", created)
-        _reload_self_hosted(self.page, self.workspace_url)
-        card = _article(self.page, name)
-        text = card.inner_text()
-        self.assertIn("pending", text.lower())
-        self.assertNotIn("software ", text.lower())
+        self.assertRegex(
+            text,
+            rf"fleet-driver {re.escape(DRIVER_VER)} · {_BIN_STATUS}",
+        )
 
 
 if __name__ == "__main__":

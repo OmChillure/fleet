@@ -1492,12 +1492,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_off_is_bash_only_in_tests() {
-        let w = resolve_worker_llm(None, None, "off", "");
-        assert!(w.backend.is_none());
-    }
-
-    #[test]
     fn settings_ollama_picks_model() {
         let w = resolve_worker_llm(None, None, "ollama", "tiny");
         assert_eq!(w.backend.as_deref(), Some("ollama"));
@@ -1532,6 +1526,45 @@ mod tests {
     }
 
     #[test]
+    fn plan_grok_wins_over_workspace_ollama_and_off() {
+        let w = resolve_worker_llm(Some("grok"), Some("grok-4.5"), "off", "");
+        assert_eq!(
+            w.backend.as_deref(),
+            Some("grok"),
+            "plan grok is the product source of truth even when Settings is off"
+        );
+        assert_eq!(w.model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn plan_provider_off_or_empty_falls_through_to_workspace_ollama() {
+        let off = resolve_worker_llm(Some("off"), Some("ignored"), "ollama", "llama3.2");
+        assert_eq!(off.backend.as_deref(), Some("ollama"));
+        assert_eq!(off.model.as_deref(), Some("llama3.2"));
+        let empty = resolve_worker_llm(Some(""), Some("ignored"), "ollama", "llama3.2");
+        assert_eq!(empty.backend.as_deref(), Some("ollama"));
+        assert_eq!(empty.model.as_deref(), Some("llama3.2"));
+    }
+
+    #[test]
+    fn plan_grok_empty_model_does_not_inherit_workspace_ollama_model() {
+        let w = resolve_worker_llm(Some("grok"), Some(""), "ollama", "llama3.2");
+        assert_eq!(w.backend.as_deref(), Some("grok"));
+        assert_ne!(
+            w.model.as_deref(),
+            Some("llama3.2"),
+            "empty plan model must not inherit Settings fleet_llm_model"
+        );
+    }
+
+    #[test]
+    fn plan_xai_alias_wins_over_settings_off() {
+        let w = resolve_worker_llm(Some("xai"), Some("grok-4.5"), "off", "");
+        assert_eq!(w.backend.as_deref(), Some("grok"));
+        assert_eq!(w.model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
     fn normalize_provider_maps_aliases_and_off() {
         assert_eq!(normalize_provider(""), None);
         assert_eq!(normalize_provider("off"), None);
@@ -1546,26 +1579,6 @@ mod tests {
         assert_eq!(normalize_provider("ollama").as_deref(), Some("ollama"));
     }
 
-    #[test]
-    fn grok_env_is_forced_off_in_unit_tests() {
-        assert!(!grok_env_enabled());
-        assert!(agent_backend().is_none());
-        let w = resolve_workspace_llm("off", "ignored");
-        assert!(!w.is_llm());
-    }
-
-    #[test]
-    fn safe_path_rejects_parent_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(safe_path(dir.path(), "../etc/passwd").is_err());
-        assert!(safe_path(dir.path(), "ok/file.txt").is_ok());
-        assert!(
-            safe_path(dir.path(), "")
-                .unwrap()
-                .ends_with(dir.path().file_name().unwrap())
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn safe_path_rejects_symlink_dir_escape() {
@@ -1576,15 +1589,58 @@ mod tests {
         assert!(safe_path(dir.path(), "out/secret").is_err());
     }
 
-    #[tokio::test]
-    async fn run_bash_times_out_and_kills() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = run_bash_limited(dir.path(), "sleep 8", Duration::from_millis(200)).await;
-        assert!(out.contains("timed out"), "{out}");
+    fn proc_is_live(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            return false;
+        };
+        !matches!(rest.trim_start().chars().next(), Some('Z'))
     }
 
     #[tokio::test]
-    async fn append_capped_does_not_reread_on_small_write() {
+    async fn run_bash_times_out_and_kills() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            std::path::Path::new("/proc/self").is_dir(),
+            "pid death is observed via /proc"
+        );
+        // $$ then exec: kill_on_drop reaps the sleeper. `bash -lc sleep 8` orphans it.
+        let started = std::time::Instant::now();
+        let out = run_bash_limited(
+            dir.path(),
+            "echo $$ > sleeper.pid; exec sleep 8",
+            Duration::from_millis(200),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout must return before sleep 8: {elapsed:?} {out}"
+        );
+        assert!(
+            out.starts_with("error:"),
+            "cutoff must fail the tool result, not empty stdout: {out}"
+        );
+
+        let pid: u32 = std::fs::read_to_string(dir.path().join("sleeper.pid"))
+            .expect("sleeper.pid")
+            .trim()
+            .parse()
+            .expect("sleeper pid");
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while proc_is_live(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !proc_is_live(pid),
+            "sleeper {pid} must be gone after timeout (kill_on_drop); {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_capped_under_cap_concatenates() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("log");
         append_capped(&p, b"hello\n", 100).await;
@@ -1593,12 +1649,55 @@ mod tests {
         assert_eq!(body, "hello\nworld\n");
     }
 
-    #[test]
-    fn truncate_appends_marker() {
-        let s = truncate("abcdef", 3);
-        assert!(s.starts_with("abc"));
-        assert!(s.contains("truncated"));
-        assert_eq!(truncate("hi", 10), "hi");
+    #[tokio::test]
+    async fn append_capped_over_cap_writes_marker_and_keeps_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("log");
+        let first = vec![b'a'; 80];
+        let second = vec![b'b'; 40];
+        append_capped(&p, &first, 100).await;
+        append_capped(&p, &second, 100).await;
+        let body = tokio::fs::read(&p).await.unwrap();
+        assert!(
+            body.starts_with(b"...(log truncated)\n"),
+            "over-cap rewrite must plant the truncated marker"
+        );
+        assert!(
+            body.windows(second.len()).any(|w| w == second.as_slice()),
+            "second chunk must survive the keep window"
+        );
+        let mut concat = first;
+        concat.extend_from_slice(&second);
+        assert_ne!(body, concat, "over-cap must not leave the 120-byte concat");
+    }
+
+    #[tokio::test]
+    async fn append_capped_equal_to_cap_still_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("log");
+        let first = vec![b'x'; 50];
+        let second = vec![b'y'; 50];
+        append_capped(&p, &first, 100).await;
+        append_capped(&p, &second, 100).await;
+        let body = tokio::fs::read(&p).await.unwrap();
+        let mut want = first;
+        want.extend_from_slice(&second);
+        assert_eq!(body, want);
+        assert!(
+            !body.windows(b"...(log truncated)\n".len()).any(|w| w == b"...(log truncated)\n"),
+            "len+chunk == cap must append, not take the truncate branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_capped_keep_window_starts_after_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("log");
+        // cap=16 → keep=8 starts inside "O\nWORLD"; snap to the next newline.
+        tokio::fs::write(&p, b"HELLO\nWORLD\n").await.unwrap();
+        append_capped(&p, b"TAIL\n", 16).await;
+        let body = tokio::fs::read(&p).await.unwrap();
+        assert_eq!(body, b"...(log truncated)\nWORLD\nTAIL\n");
     }
 
     async fn tool(
@@ -1611,38 +1710,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_tool_read_write_list_and_blocks_escape() {
+    async fn exec_tool_write_file_then_read_file_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("TEAM.md"), "# team\n").unwrap();
-
-        let wrote = tool(
+        let _ = tool(
             root,
             None,
             "write_file",
             &json!({ "path": "src/a.txt", "content": "hello" }),
         )
         .await;
-        assert!(wrote.contains("wrote"), "{wrote}");
-
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.txt")).unwrap(),
+            "hello"
+        );
         let read = tool(root, None, "read_file", &json!({ "path": "src/a.txt" })).await;
         assert_eq!(read, "hello");
+    }
 
+    #[tokio::test]
+    async fn exec_tool_list_dir_lists_workdir_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("TEAM.md"), "# team\n").unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
         let listing = tool(root, None, "list_dir", &json!({ "path": "." })).await;
-        assert!(listing.contains("TEAM.md"), "{listing}");
-        assert!(listing.contains("src/"), "{listing}");
+        assert_eq!(listing, "TEAM.md\nsrc/");
+    }
 
-        let escape = tool(root, None, "read_file", &json!({ "path": "../secret" })).await;
-        assert!(escape.contains("escapes"), "{escape}");
+    #[tokio::test]
+    async fn exec_tool_read_file_rejects_parent_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(dir.path().join("secret"), "outside-secret").unwrap();
+        let out = tool(&root, None, "read_file", &json!({ "path": "../secret" })).await;
+        assert!(out.starts_with("error:"), "{out}");
+        assert_ne!(out, "outside-secret");
+    }
 
+    #[tokio::test]
+    async fn exec_tool_read_team_returns_team_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("TEAM.md"), "# team\n").unwrap();
         let team = tool(root, None, "read_team", &json!({})).await;
-        assert!(team.contains("# team"), "{team}");
+        assert_eq!(team, "# team\n");
+    }
 
-        let unknown = tool(root, None, "explode", &json!({})).await;
-        assert!(unknown.contains("unknown tool"), "{unknown}");
+    #[tokio::test]
+    async fn exec_tool_unknown_name_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tool(dir.path(), None, "explode", &json!({})).await;
+        assert!(out.starts_with("error:"), "{out}");
+        assert!(out.contains("explode"), "{out}");
+    }
 
-        let bash = tool(root, None, "run_bash", &json!({ "command": "echo pong" })).await;
-        assert!(bash.contains("pong"), "{bash}");
+    #[tokio::test]
+    async fn exec_tool_write_file_and_list_dir_block_parent_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let outside = dir.path().join("secret");
+        std::fs::write(&outside, "outside").unwrap();
+        let write_out = tool(
+            &root,
+            None,
+            "write_file",
+            &json!({ "path": "../secret", "content": "leaked" }),
+        )
+        .await;
+        let list_out = tool(&root, None, "list_dir", &json!({ "path": ".." })).await;
+        assert!(write_out.starts_with("error:"), "{write_out}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+        assert!(list_out.starts_with("error:"), "{list_out}");
+        assert!(!list_out.contains("secret"), "{list_out}");
+    }
+
+    #[tokio::test]
+    async fn exec_tool_leading_slash_path_stays_in_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let host_abs = std::path::Path::new("/abs.txt");
+        assert!(
+            !host_abs.exists(),
+            "precondition: host /abs.txt must not exist"
+        );
+        let _ = tool(
+            root,
+            None,
+            "write_file",
+            &json!({ "path": "/abs.txt", "content": "inside" }),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("abs.txt")).unwrap(),
+            "inside"
+        );
+        assert!(!host_abs.exists(), "must not create host /abs.txt");
+    }
+
+    #[tokio::test]
+    async fn exec_tool_run_bash_cwd_is_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let _ = tool(
+            root,
+            None,
+            "run_bash",
+            &json!({ "command": "printf x > marker" }),
+        )
+        .await;
+        assert_eq!(std::fs::read_to_string(root.join("marker")).unwrap(), "x");
     }
 
     #[tokio::test]
@@ -1681,36 +1860,117 @@ mod tests {
             &json!({ "to": "t1", "reason": "add tests for /health" }),
         )
         .await;
-        assert!(out.contains("recorded"), "{out}");
+        assert!(!out.starts_with("error:"), "{out}");
         let req = crate::sandbox::share::read_changes_request(dir.path()).unwrap();
         assert_eq!(req.targets, ["t1"]);
-        assert!(dir.path().join("REVIEW.md").exists());
+        assert_eq!(req.reason, "add tests for /health");
+        let review = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert!(review.contains("t1"), "{review}");
+        assert!(review.contains("add tests for /health"), "{review}");
     }
 
-    struct FakeIo;
+    #[tokio::test]
+    async fn exec_tool_request_changes_missing_or_blank_reason_errors_without_file() {
+        for args in [
+            json!({ "to": "t1" }),
+            json!({ "to": "t1", "reason": "" }),
+            json!({ "to": "t1", "reason": "   " }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let out = tool(root, None, "request_changes", &args).await;
+            assert!(out.starts_with("error:"), "{out} args={args}");
+            assert!(
+                crate::sandbox::share::read_changes_request(root).is_none(),
+                "must not persist request_changes.json for {args}"
+            );
+            assert!(
+                !root.join("REVIEW.md").exists(),
+                "must not write REVIEW.md for {args}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_tool_request_changes_targets_list_without_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tool(
+            dir.path(),
+            None,
+            "request_changes",
+            &json!({ "targets": ["t1", "t2"], "reason": "x" }),
+        )
+        .await;
+        assert!(!out.starts_with("error:"), "{out}");
+        let req = crate::sandbox::share::read_changes_request(dir.path()).unwrap();
+        assert_eq!(req.targets, ["t1", "t2"]);
+        assert_eq!(req.reason, "x");
+    }
+
+    #[tokio::test]
+    async fn exec_tool_request_changes_star_to_leaves_targets_empty() {
+        for to in ["*", "team", "all"] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = tool(
+                dir.path(),
+                None,
+                "request_changes",
+                &json!({ "to": to, "reason": "fix deps" }),
+            )
+            .await;
+            assert!(!out.starts_with("error:"), "{out} to={to}");
+            let req = crate::sandbox::share::read_changes_request(dir.path()).unwrap();
+            assert!(
+                req.targets.is_empty(),
+                "to={to} must not push * into targets: {req:?}"
+            );
+            assert!(
+                out.contains("dependencies"),
+                "empty targets is the omit-to bounce-depends-on path: {out}"
+            );
+        }
+    }
+
+    struct RecordingIo {
+        calls: Mutex<Vec<(uuid::Uuid, String, String, Value)>>,
+        result: super::super::io::IntegrationResult,
+    }
+
+    impl RecordingIo {
+        fn new(result: super::super::io::IntegrationResult) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                result,
+            })
+        }
+    }
 
     #[async_trait::async_trait]
-    impl super::super::io::IntegrationInvoker for FakeIo {
+    impl super::super::io::IntegrationInvoker for RecordingIo {
         async fn invoke(
             &self,
-            _workspace_id: uuid::Uuid,
+            workspace_id: uuid::Uuid,
             provider: String,
             operation: String,
-            args: serde_json::Value,
+            args: Value,
         ) -> super::super::io::IntegrationResult {
-            super::super::io::IntegrationResult {
-                ok: true,
-                summary: format!("{provider}.{operation} ok"),
-                data: args,
-            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((workspace_id, provider, operation, args));
+            self.result.clone()
         }
     }
 
     #[tokio::test]
     async fn exec_tool_use_integration_goes_through_control_plane() {
         let dir = tempfile::tempdir().unwrap();
-        let inv: std::sync::Arc<dyn super::super::io::IntegrationInvoker> =
-            std::sync::Arc::new(FakeIo);
+        let rec = RecordingIo::new(super::super::io::IntegrationResult {
+            ok: true,
+            summary: "posted".into(),
+            data: json!({ "ts": 1 }),
+        });
+        let inv: std::sync::Arc<dyn super::super::io::IntegrationInvoker> = rec.clone();
         let out = exec_tool(
             dir.path(),
             None,
@@ -1724,51 +1984,185 @@ mod tests {
             uuid::Uuid::nil(),
         )
         .await;
-        assert!(out.contains("slack.post_message ok"), "{out}");
-        assert!(out.contains("C1"), "{out}");
+        let payload: Value = serde_json::from_str(&out).unwrap_or_else(|_| json!(out));
+        assert_eq!(
+            payload,
+            json!({
+                "ok": true,
+                "summary": "posted",
+                "data": { "ts": 1 }
+            })
+        );
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, uuid::Uuid::nil());
+        assert_eq!(calls[0].1, "slack");
+        assert_eq!(calls[0].2, "post_message");
+        assert_eq!(calls[0].3, json!({ "channel": "C1", "text": "hi" }));
+    }
+
+    #[tokio::test]
+    async fn exec_tool_use_integration_without_proxy_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({
+            "provider": "slack",
+            "operation": "post_message",
+            "args": { "channel": "C1" }
+        });
+        for name in ["use_integration", "integration_query"] {
+            let out = exec_tool(dir.path(), None, name, &args, None, uuid::Uuid::nil()).await;
+            assert!(
+                out.starts_with("error: no control-plane integration proxy on this worker"),
+                "{name}: {out}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_tool_use_integration_requires_provider_and_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = RecordingIo::new(super::super::io::IntegrationResult {
+            ok: true,
+            summary: "should-not-run".into(),
+            data: json!({}),
+        });
+        let cases = [
+            (json!({ "operation": "post_message" }), "error: provider required"),
+            (
+                json!({ "provider": 1, "operation": "post_message" }),
+                "error: provider required",
+            ),
+            (json!({ "provider": "slack" }), "error: operation required"),
+        ];
+        for (args, want) in cases {
+            let inv: std::sync::Arc<dyn super::super::io::IntegrationInvoker> = rec.clone();
+            let out = exec_tool(
+                dir.path(),
+                None,
+                "use_integration",
+                &args,
+                Some(inv),
+                uuid::Uuid::nil(),
+            )
+            .await;
+            assert_eq!(out, want, "{args}");
+        }
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "missing provider/operation must not invoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_tool_use_integration_forwards_workspace_id_and_serializes_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_id = uuid::Uuid::from_u128(0x575);
+        let rec = RecordingIo::new(super::super::io::IntegrationResult {
+            ok: false,
+            summary: "denied".into(),
+            data: json!({ "reason": "scope" }),
+        });
+        let inv: std::sync::Arc<dyn super::super::io::IntegrationInvoker> = rec.clone();
+        let out = exec_tool(
+            dir.path(),
+            None,
+            "use_integration",
+            &json!({
+                "provider": "slack",
+                "operation": "post_message",
+                "args": { "channel": "C1", "text": "hi" }
+            }),
+            Some(inv),
+            workspace_id,
+        )
+        .await;
+        let payload: Value = serde_json::from_str(&out).unwrap_or_else(|_| json!(out));
+        assert_eq!(
+            payload,
+            json!({
+                "ok": false,
+                "summary": "denied",
+                "data": { "reason": "scope" }
+            })
+        );
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, workspace_id);
+        assert_eq!(calls[0].1, "slack");
+        assert_eq!(calls[0].2, "post_message");
+        assert_eq!(calls[0].3, json!({ "channel": "C1", "text": "hi" }));
     }
 
     #[test]
-    fn ship_helpers_find_pr_owner_and_skip_junk() {
+    fn extract_github_pr_url_takes_pull_url_from_prose() {
         assert_eq!(
             extract_github_pr_url("see https://github.com/OmChillure/test/pull/2 thanks"),
             Some("https://github.com/OmChillure/test/pull/2".into())
         );
+    }
+
+    #[test]
+    fn extract_github_pr_url_skips_non_pull_and_strips_trailing_punct() {
+        assert_eq!(
+            extract_github_pr_url(
+                "see https://github.com/OmChillure/test and https://github.com/OmChillure/test/pull/2."
+            ),
+            Some("https://github.com/OmChillure/test/pull/2".into())
+        );
+    }
+
+    #[test]
+    fn find_owner_repo_skips_feature_branch_tokens() {
         assert_eq!(
             find_owner_repo("branch feature/calculator for OmChillure/test"),
             Some(("OmChillure".into(), "test".into()))
         );
+    }
+
+    #[test]
+    fn find_branch_takes_backticked_feature_name() {
         assert_eq!(
             find_branch("use `feature/calculator` please"),
             "feature/calculator"
         );
-        assert!(skip_ship_name("commit_payload.json"));
-        assert!(skip_ship_name("ship_all_files_commit.json"));
-        assert!(!skip_ship_name("page.tsx"));
+    }
+
+    #[test]
+    fn find_branch_defaults_to_agent_fleet_changes() {
+        assert_eq!(find_branch("ship OmChillure/test"), "agent-fleet/changes");
+    }
+
+    #[test]
+    fn collect_ship_files_omits_commit_and_ship_json() {
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("work");
         std::fs::create_dir_all(work.join("app")).unwrap();
-        std::fs::write(
-            work.join("SHIP.md"),
-            "PR: https://github.com/OmChillure/test/pull/2\n",
-        )
-        .unwrap();
         std::fs::write(work.join("commit_payload.json"), "{\"files\":[]}\n").unwrap();
+        std::fs::write(work.join("ship_all_files_commit.json"), "{}\n").unwrap();
         std::fs::write(
             work.join("app").join("page.tsx"),
             "export default function Page(){}\n",
         )
         .unwrap();
-        assert_eq!(
-            find_existing_pr_url(dir.path()).as_deref(),
-            Some("https://github.com/OmChillure/test/pull/2")
-        );
         let files = collect_ship_files(dir.path());
-        assert!(files.iter().any(|(p, _)| p == "app/page.tsx"), "{files:?}");
-        assert!(
-            files.iter().all(|(p, _)| p != "commit_payload.json"),
-            "{files:?}"
-        );
+        let names: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, ["app/page.tsx"]);
+    }
+
+    #[test]
+    fn collect_ship_files_omits_harness_md_dotfiles_and_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join("src")).unwrap();
+        std::fs::create_dir_all(work.join("node_modules")).unwrap();
+        std::fs::write(work.join("result.md"), "done\n").unwrap();
+        std::fs::write(work.join("TEAM.md"), "# team\n").unwrap();
+        std::fs::write(work.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(work.join("node_modules").join("x.js"), "module.exports=1\n").unwrap();
+        std::fs::write(work.join("src").join("lib.rs"), "pub fn f(){}\n").unwrap();
+        let files = collect_ship_files(dir.path());
+        let names: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, ["src/lib.rs"]);
     }
 
     #[tokio::test]

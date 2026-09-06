@@ -650,51 +650,69 @@ mod stream_parse_tests {
     use super::*;
 
     #[test]
-    fn parse_stream_line_reads_status_action_error_and_done() {
+    fn parse_stream_line_reads_status_text() {
         let status = parse_stream_line(r#"{"type":"status","text":"thinking"}"#).unwrap();
         match status {
             ChatStreamEvent::Status { text } => assert_eq!(text, "thinking"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_error_message() {
+        let err = parse_stream_line(r#"{"type":"error","error":"nope"}"#).unwrap();
+        match err {
+            ChatStreamEvent::Error { error } => assert_eq!(error, "nope"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_string_message_done() {
+        let done = parse_stream_line(
+            r#"{"type":"done","message":"plain","provider":"grok","conversation_id":"c2"}"#,
+        )
+        .expect("string message");
+        match done {
+            ChatStreamEvent::Done(res) => {
+                assert_eq!(res.message.content, "plain");
+                assert_eq!(res.provider, "grok");
+                assert_eq!(res.conversation_id.as_deref(), Some("c2"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_delta_text() {
+        let delta = parse_stream_line(r#"{"type":"delta","text":"tok"}"#).unwrap();
+        match delta {
+            ChatStreamEvent::Delta { text } => assert_eq!(text, "tok"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_action_includes_summary_and_run_id() {
         let action = parse_stream_line(
-            r#"{"type":"action","tool":"bash","ok":true,"summary":"ran"}"#,
+            r#"{"type":"action","tool":"bash","ok":true,"summary":"ran","run_id":"run-1","sandbox_ids":["sb-1"]}"#,
         )
         .unwrap();
         match action {
             ChatStreamEvent::Action(a) => {
                 assert_eq!(a.tool, "bash");
                 assert!(a.ok);
+                assert_eq!(a.summary, "ran");
+                assert_eq!(a.run_id.as_deref(), Some("run-1"));
+                assert_eq!(a.sandbox_ids.as_deref(), Some(["sb-1".to_string()].as_slice()));
             }
             other => panic!("{other:?}"),
         }
-        let err = parse_stream_line(r#"{"type":"error","error":"nope"}"#).unwrap();
-        match err {
-            ChatStreamEvent::Error { error } => assert_eq!(error, "nope"),
-            other => panic!("{other:?}"),
-        }
-        let done = parse_stream_line(
-            r#"{"type":"done","message":{"role":"assistant","content":"hi"},"model":"m","provider":"ollama","conversation_id":"c1"}"#,
-        )
-        .expect("object message");
-        let done_str = parse_stream_line(
-            r#"{"type":"done","message":"plain","provider":"grok","conversation_id":"c2"}"#,
-        )
-        .expect("string message");
-        match done_str {
-            ChatStreamEvent::Done(res) => {
-                assert_eq!(res.message.content, "plain");
-                assert_eq!(res.conversation_id.as_deref(), Some("c2"));
-            }
-            other => panic!("{other:?}"),
-        }
-        match done {
-            ChatStreamEvent::Done(res) => {
-                assert_eq!(res.message.role, "assistant");
-                assert_eq!(res.message.content, "hi");
-                assert_eq!(res.provider, "ollama");
-                assert_eq!(res.conversation_id.as_deref(), Some("c1"));
-            }
-            other => panic!("{other:?}"),
-        }
+    }
+
+    #[test]
+    fn parse_stream_line_unknown_type_and_invalid_json_are_none() {
+        assert!(parse_stream_line(r#"{"type":"ping"}"#).is_none());
+        assert!(parse_stream_line("not-json").is_none());
     }
 }

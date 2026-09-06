@@ -2206,23 +2206,82 @@ mod tests {
 
     #[test]
     fn parses_linear_and_jira_keys() {
+        // Unprefixed TEAM-N: resolve_ticket uses find_inbox_by_key, not a provider seed.
         let p = parse_ticket_ref("ENG-123").unwrap();
         assert_eq!(p.key, "ENG-123");
         assert!(p.provider.is_none());
-        let p = parse_ticket_ref("jira:PROJ-9").unwrap();
-        assert_eq!(p.provider.as_deref(), Some("jira"));
-        assert_eq!(p.key, "PROJ-9");
+    }
+
+    #[test]
+    fn parse_ticket_ref_linear_colon_prefix() {
+        let p = parse_ticket_ref("linear:ENG-123").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("linear"));
+        assert_eq!(p.key, "ENG-123");
+    }
+
+    #[test]
+    fn parse_ticket_ref_blank_or_provider_without_key_is_none() {
+        for raw in ["", "  ", "jira:"] {
+            assert!(
+                parse_ticket_ref(raw).is_none(),
+                "expected None for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ticket_ref_unknown_prefix_keeps_full_key() {
+        let p = parse_ticket_ref("foo:BAR-1").unwrap();
+        assert!(p.provider.is_none());
+        assert_eq!(p.key, "foo:BAR-1");
     }
 
     #[test]
     fn parses_github_hash_and_url() {
+        // Pasted owner/repo#N: resolve_ticket infers provider=github and seeds find_inbox.
         let p = parse_ticket_ref("acme/app#42").unwrap();
         assert_eq!(p.provider.as_deref(), Some("github"));
         assert_eq!(p.key, "acme/app#42");
+    }
+
+    #[test]
+    fn parse_ticket_ref_github_issues_url() {
         let p = parse_ticket_ref("https://github.com/acme/app/issues/7").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
         assert_eq!(p.key, "acme/app#7");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_num_splits_key() {
         let (o, r, n) = parse_github_owner_repo_num("acme/app#7").unwrap();
         assert_eq!((o, r, n), ("acme".into(), "app".into(), 7));
+    }
+
+    #[test]
+    fn github_colon_prefix_normalizes_hash_and_url() {
+        let p = parse_ticket_ref("github:acme/app#12").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#12");
+        let p = parse_ticket_ref("github:https://github.com/acme/app/issues/7").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#7");
+    }
+
+    #[test]
+    fn github_pull_and_http_urls_normalize_like_issues() {
+        let p = parse_ticket_ref("http://github.com/acme/app/pull/9").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#9");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_num_rejects_empty_owner_or_repo() {
+        for raw in ["/app#1", "acme/#1"] {
+            assert!(
+                parse_github_owner_repo_num(raw).is_none(),
+                "expected None for {raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -2241,8 +2300,8 @@ mod tests {
     }
 
     #[test]
-    fn inbox_message_and_page_are_single_ops_tasks() {
-        let slack = inbox_plan_tasks(
+    fn inbox_slack_message_is_single_handle_ops() {
+        let tasks = inbox_plan_tasks(
             "hello",
             "please look",
             ExternalRef {
@@ -2250,11 +2309,15 @@ mod tests {
                 key: "C1:1".into(),
             },
         );
-        assert_eq!(slack.len(), 1);
-        assert_eq!(slack[0].plan_task_id, "handle");
-        assert_eq!(slack[0].worker_profile, "ops");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "ops");
+        assert!(tasks[0].depends_on.is_empty());
+    }
 
-        let page = inbox_plan_tasks(
+    #[test]
+    fn inbox_notion_page_is_single_handle_analysis() {
+        let tasks = inbox_plan_tasks(
             "spec",
             "read this",
             ExternalRef {
@@ -2262,18 +2325,82 @@ mod tests {
                 key: "page-1".into(),
             },
         );
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].worker_profile, "analysis");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "analysis");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn inbox_teams_message_is_single_handle_ops() {
+        let tasks = inbox_plan_tasks(
+            "hello",
+            "please look",
+            ExternalRef {
+                provider: "teams".into(),
+                key: "T1:1".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "ops");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn inbox_confluence_page_is_single_handle_analysis() {
+        let tasks = inbox_plan_tasks(
+            "spec",
+            "read this",
+            ExternalRef {
+                provider: "confluence".into(),
+                key: "page-2".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "analysis");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn unknown_inbox_provider_defaults_to_ticket_work_review() {
+        let tasks = inbox_plan_tasks(
+            "foo:1",
+            "unknown provider",
+            ExternalRef {
+                provider: "foo".into(),
+                key: "1".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].plan_task_id, "work");
+        assert_eq!(tasks[0].worker_profile, "coding");
+        assert_eq!(tasks[1].plan_task_id, "review");
+        assert_eq!(tasks[1].worker_profile, "reviewer");
+        assert_eq!(tasks[1].depends_on, vec!["work".to_string()]);
     }
 
     #[test]
     fn parses_slack_and_notion_keys() {
+        // Extra-colon slack key: poll stores external_key as {channel}:{ts}.
         let p = parse_ticket_ref("slack:C123:171.1").unwrap();
         assert_eq!(p.provider.as_deref(), Some("slack"));
         assert_eq!(p.key, "C123:171.1");
-        let p = parse_ticket_ref("notion:page-abc").unwrap();
-        assert_eq!(p.provider.as_deref(), Some("notion"));
-        assert_eq!(p.key, "page-abc");
+    }
+
+    #[test]
+    fn parse_ticket_ref_slack_prefix_folds_case_and_trims_key() {
+        let p = parse_ticket_ref("Slack: C123:171.1").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("slack"));
+        assert_eq!(p.key, "C123:171.1");
+    }
+
+    #[test]
+    fn parse_ticket_ref_teams_colon_prefix_keeps_extra_colon_key() {
+        let p = parse_ticket_ref("teams:19:msg-1").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("teams"));
+        assert_eq!(p.key, "19:msg-1");
     }
 
     /// Inbox poll marks Jira/Bitbucket items closed via `status_done`.

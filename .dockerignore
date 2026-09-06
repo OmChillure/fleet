@@ -13,6 +13,9 @@ tests
 *.md
 !development.md
 docs/references
-crates/fleet-sandbox-driver/sandbox-lab
+crates/fleet-sandbox-driver/sandbox-lab/**
+!crates/fleet-sandbox-driver/sandbox-lab/config/
+!crates/fleet-sandbox-driver/sandbox-lab/config/examples/
+!crates/fleet-sandbox-driver/sandbox-lab/config/examples/**
 crates/fleet-server/data
 crates/fleet-ui/public/fleet-git-sha.txt

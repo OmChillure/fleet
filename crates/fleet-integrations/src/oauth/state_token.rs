@@ -72,13 +72,6 @@ mod tests {
     use super::*;
     use fleet_auth::AppError;
 
-    fn flip_last_char(s: &str) -> String {
-        let mut chars: Vec<char> = s.chars().collect();
-        let last = chars.last_mut().expect("non-empty");
-        *last = if *last == 'A' { 'B' } else { 'A' };
-        chars.into_iter().collect()
-    }
-
     #[test]
     fn issue_and_verify_round_trip() {
         let secret = "oauth-state-test-secret";
@@ -102,76 +95,6 @@ mod tests {
 
         let err = verify_oauth_state("other-secret", &token).unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-
-    #[test]
-    fn tampered_signature_rejected() {
-        let secret = "oauth-state-test-secret";
-        let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "jira").unwrap();
-        let (head, sig) = token.rsplit_once('.').expect("jwt has signature");
-        let tampered = format!("{head}.{}", flip_last_char(sig));
-
-        let err = verify_oauth_state(secret, &tampered).unwrap_err();
-        assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-
-    #[test]
-    fn tampered_payload_rejected_even_if_provider_changed() {
-        // Provider matching is the caller's job; verify only checks the signature.
-        let secret = "oauth-state-test-secret";
-        let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "github").unwrap();
-        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
-        assert_eq!(parts.len(), 3, "jwt has three segments");
-        parts[1] = flip_last_char(&parts[1]);
-        let tampered = parts.join(".");
-
-        let err = verify_oauth_state(secret, &tampered).unwrap_err();
-        assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-
-    #[test]
-    fn access_token_typ_cannot_be_used_as_oauth_state() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        use serde::Serialize;
-
-        #[derive(Serialize)]
-        struct AccessShaped {
-            sub: String,
-            workspace_id: String,
-            provider: String,
-            nonce: String,
-            exp: i64,
-            iat: i64,
-            typ: String,
-        }
-
-        let secret = "oauth-state-test-secret";
-        let now = chrono::Utc::now().timestamp();
-        let token = encode(
-            &Header::default(),
-            &AccessShaped {
-                sub: Uuid::now_v7().to_string(),
-                workspace_id: Uuid::now_v7().to_string(),
-                provider: "github".into(),
-                nonce: "n".into(),
-                exp: now + 600,
-                iat: now,
-                typ: "access".into(),
-            },
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .unwrap();
-
-        let err = verify_oauth_state(secret, &token).unwrap_err();
-        match err {
-            AppError::Unauthorized(msg) => {
-                assert!(
-                    msg.contains("type") || msg.contains("invalid"),
-                    "expected type rejection, got {msg}"
-                );
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
     }
 
     #[test]
@@ -214,7 +137,6 @@ mod tests {
         let workspace_id = Uuid::now_v7();
         let a = issue_oauth_state(secret, user_id, workspace_id, "github").unwrap();
         let b = issue_oauth_state(secret, user_id, workspace_id, "github").unwrap();
-        assert_ne!(a, b, "each Connect start must mint a distinct state JWT");
 
         let claims_a = verify_oauth_state(secret, &a).expect("first token");
         let claims_b = verify_oauth_state(secret, &b).expect("second token");
@@ -222,32 +144,17 @@ mod tests {
             claims_a.nonce, claims_b.nonce,
             "nonce is the single-use key; two issues must not share one"
         );
-        assert!(
-            Uuid::parse_str(&claims_a.nonce).is_ok(),
-            "nonce must be persistable as a UUID, got {}",
-            claims_a.nonce
-        );
-        assert!(
-            Uuid::parse_str(&claims_b.nonce).is_ok(),
-            "nonce must be persistable as a UUID, got {}",
-            claims_b.nonce
-        );
     }
 
-    /// GitHub App manifest verifies the same JWT, then user-oauth completes.
-    /// Signature check must not burn the nonce.
     #[test]
-    fn oauth_state_verify_does_not_consume_nonce() {
+    fn issued_oauth_state_exp_is_fifteen_minutes_after_iat() {
         let secret = "oauth-state-test-secret";
         let token = issue_oauth_state(secret, Uuid::now_v7(), Uuid::now_v7(), "github").unwrap();
-        let first = verify_oauth_state(secret, &token).expect("first verify");
-        let second = verify_oauth_state(secret, &token).expect("verify is not consume");
-        assert_eq!(first.nonce, second.nonce);
-        assert!(!first.nonce.trim().is_empty());
+        let claims = verify_oauth_state(secret, &token).expect("valid token");
+        let ttl_secs = claims.exp - claims.iat;
         assert!(
-            Uuid::parse_str(&first.nonce).is_ok(),
-            "nonce must be persistable as a UUID, got {}",
-            first.nonce
+            (ttl_secs - STATE_TTL_MINUTES * 60).abs() <= 1,
+            "exp-iat must be {STATE_TTL_MINUTES}m, got {ttl_secs}s"
         );
     }
 

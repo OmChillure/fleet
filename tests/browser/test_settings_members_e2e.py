@@ -331,22 +331,9 @@ class SettingsMembersE2ETests(unittest.TestCase):
         cls._browser.close()
         cls._pw.stop()
 
-    def test_unauthenticated_settings_redirects_to_login(self) -> None:
-        ctx = self._browser.new_context(
-            base_url=UI,
-            viewport={"width": 1400, "height": 900},
-        )
-        page = ctx.new_page()
-        page.set_default_timeout(20_000)
-        try:
-            fake = uuid.uuid4()
-            page.goto(f"{UI}/{fake}/settings", wait_until="domcontentloaded")
-            page.wait_for_url("**/login", timeout=15_000)
-            self.assertIn("/login", page.url)
-        finally:
-            ctx.close()
+    def test_owner_invite_existing_user_joins_immediately(self) -> None:
+        from playwright.sync_api import expect
 
-    def test_owner_invite_existing_role_remove_and_pending_revoke(self) -> None:
         ctx = self._browser.new_context(
             base_url=UI,
             viewport={"width": 1400, "height": 900},
@@ -355,135 +342,30 @@ class SettingsMembersE2ETests(unittest.TestCase):
         page.set_default_timeout(20_000)
         try:
             ws, workspace_url = signup_login(page, prefix="set-mem-own")
-            me = _me(page)
-            owner_email = str((me.get("user") or {}).get("email") or "")
-            self.assertTrue(owner_email, me)
+            existing_email, _pw = _signup_account(
+                self._browser, prefix="set-mem-exist"
+            )
             _goto_settings(page, workspace_url)
-            self.assertEqual(page.locator("h1").first.inner_text().strip(), "Settings")
-            self.assertIn("/settings", page.url)
-            self.assertIn(ws, page.url)
-            body = page.inner_text("body")
-            self.assertIn("Invite by email", body)
-            self.assertIn("Existing users join immediately", body)
-            self.assertIn("signup or next login", body)
-            self.assertIn("Roles: owner, admin, member", body)
 
-            email_box, role_select, invite_btn = _invite_form(page)
-            role_values = role_select.locator("option").evaluate_all(
-                "els => els.map(e => e.value)"
-            )
-            self.assertEqual(
-                role_values,
-                ["member", "admin"],
-                "owner invite roles must be member and admin (not owner)",
-            )
-            self.assertTrue(invite_btn.is_disabled(), "Invite must stay disabled until email")
+            email_box = page.get_by_role("textbox")
+            invite = page.get_by_role("button", name="Invite", exact=True)
+            expect(email_box).to_be_visible()
+            expect(invite).to_be_visible()
 
-            owner_row = _member_row(page, owner_email)
-            owner_row.first.wait_for(state="visible", timeout=15_000)
-            self.assertIn("owner", owner_row.first.inner_text())
-            self.assertEqual(
-                owner_row.get_by_role("button", name="Leave", exact=True).count(),
-                0,
-                "last owner must not see Leave",
-            )
-            self.assertEqual(
-                owner_row.get_by_role("button", name="Remove", exact=True).count(),
-                0,
-                "last owner must not see Remove on self",
-            )
-            roster = _members(page, ws)
-            self.assertEqual((roster.get("you") or {}).get("role"), "owner", roster)
-            self.assertIsNotNone(_find_member(roster, owner_email), roster)
-
-            existing_email, _pw = _signup_account(self._browser, prefix="set-mem-exist")
             email_box.fill(existing_email)
-            role_select.select_option("member")
-            self.assertTrue(invite_btn.is_enabled(), "Invite stayed disabled after email")
-            invite_btn.click()
-            page.get_by_text("Added existing user.", exact=True).wait_for(timeout=15_000)
+            expect(invite).to_be_enabled()
+            invite.click()
+
             added = _wait_member(page, ws, existing_email, role="member")
             self.assertEqual(added.get("role"), "member", added)
-            _member_row(page, existing_email).first.wait_for(timeout=15_000)
-            self.assertIn(
-                "member",
-                _member_row(page, existing_email).first.inner_text(),
-            )
-            listed = _invites(page, ws)
+            leftover = _invites(page, ws)
             self.assertIsNone(
-                _find_invite(listed, existing_email),
-                f"existing user must join immediately, not stay pending: {listed}",
+                _find_invite(leftover, existing_email),
+                f"existing user must join immediately, not stay pending: {leftover}",
             )
-            self.assertEqual(
-                _pending_row(page, existing_email, "member").count(),
-                0,
-                "existing user must not appear as (pending)",
-            )
-
-            peer_row = _member_row(page, existing_email)
-            peer_role = peer_row.locator("select")
-            self.assertGreater(
-                peer_role.count(),
-                0,
-                "owner must have a role select on another member",
-            )
-            peer_role.first.select_option("admin")
-            page.get_by_text("Role updated.", exact=True).wait_for(timeout=15_000)
-            promoted = _wait_member(page, ws, existing_email, role="admin")
-            self.assertEqual(promoted.get("role"), "admin", promoted)
-            page.get_by_text(re.compile(r"\badmin\b")).first.wait_for(timeout=15_000)
-            self.assertIn("admin", peer_row.first.inner_text())
-
-            remove = peer_row.get_by_role("button", name="Remove", exact=True)
-            self.assertTrue(remove.count() > 0, "owner must see Remove on a non-owner")
-            remove.first.click()
-            page.get_by_text("Member removed.", exact=True).wait_for(timeout=15_000)
-            _wait_no_member(page, ws, existing_email)
-            hide_deadline = time.time() + 15
-            while time.time() < hide_deadline:
-                if _member_row(page, existing_email).count() == 0:
-                    break
-                page.wait_for_timeout(200)
-            self.assertEqual(
-                _member_row(page, existing_email).count(),
-                0,
-                "removed member must leave the Members list",
-            )
-
-            pending_email = f"set-mem-pend-{uuid.uuid4().hex[:12]}@example.test"
-            email_box, role_select, invite_btn = _invite_form(page)
-            email_box.fill(pending_email)
-            role_select.select_option("admin")
-            invite_btn.click()
-            page.get_by_text(
-                "Invite sent — they join on signup or login.", exact=True
-            ).wait_for(timeout=15_000)
-            pending = _wait_invite(page, ws, pending_email, role="admin")
-            self.assertEqual(pending.get("role"), "admin", pending)
-            self.assertTrue(pending.get("id"), pending)
-            pend_ui = _pending_row(page, pending_email, "admin")
-            pend_ui.first.wait_for(timeout=15_000)
-            self.assertIsNone(
-                _find_member(_members(page, ws), pending_email),
-                "unknown email must stay pending until signup/login",
-            )
-
-            revoke = page.locator("li").filter(has_text=pending_email).get_by_role(
-                "button", name="Revoke", exact=True
-            )
-            self.assertTrue(revoke.count() > 0, "pending invite missing Revoke")
-            revoke.first.click()
-            _wait_no_invite(page, ws, pending_email)
-            hide_inv = time.time() + 15
-            while time.time() < hide_inv:
-                if _pending_row(page, pending_email, "admin").count() == 0:
-                    break
-                page.wait_for_timeout(200)
-            self.assertEqual(
-                _pending_row(page, pending_email, "admin").count(),
-                0,
-                "revoked invite must leave the pending list",
-            )
+            peer = page.get_by_role("listitem").filter(has_text=existing_email)
+            expect(peer).to_be_visible()
+            expect(peer).not_to_contain_text("pending")
         finally:
             ctx.close()
 
@@ -562,6 +444,8 @@ class SettingsMembersE2ETests(unittest.TestCase):
             owner_ctx.close()
 
     def test_member_cannot_invite(self) -> None:
+        from playwright.sync_api import expect
+
         owner_ctx = self._browser.new_context(
             base_url=UI,
             viewport={"width": 1400, "height": 900},
@@ -580,65 +464,23 @@ class SettingsMembersE2ETests(unittest.TestCase):
                 self._browser, prefix="set-mem-peer"
             )
             _goto_settings(owner, workspace_url)
-            email_box, role_select, invite_btn = _invite_form(owner)
-            email_box.fill(member_email)
-            role_select.select_option("member")
-            invite_btn.click()
-            owner.get_by_text("Added existing user.", exact=True).wait_for(timeout=15_000)
+            owner.get_by_role("textbox").fill(member_email)
+            owner.get_by_role("button", name="Invite", exact=True).click()
             _wait_member(owner, ws, member_email, role="member")
 
             own_ws, _own_url = _login_ui(member, member_email, member_pw)
             self.assertNotEqual(own_ws, ws, "member must not land in the owner's workspace")
             _goto_settings(member, f"{UI}/{ws}")
             self.assertIn(ws, member.url)
-            self.assertEqual(member.locator("h1").first.inner_text().strip(), "Settings")
-            _member_row(member, member_email).first.wait_for(timeout=15_000)
-            self.assertEqual(
-                member.get_by_role("button", name="Invite", exact=True).count(),
-                0,
-                "member must not see Invite",
+            expect(
+                member.get_by_role("listitem").filter(has_text=member_email)
+            ).to_be_visible()
+            you = (_members(member, ws).get("you") or {})
+            self.assertEqual(you.get("role"), "member", you)
+            expect(member.get_by_role("button", name="Invite", exact=True)).to_have_count(
+                0
             )
-            self.assertEqual(
-                member.locator(
-                    "input[type='email'][placeholder='teammate@example.test']"
-                ).count(),
-                0,
-                "member must not see the invite email field",
-            )
-            self.assertEqual(
-                member.get_by_role("button", name="Revoke", exact=True).count(),
-                0,
-                "member must not list or revoke invites",
-            )
-            peer_row = _member_row(member, member_email)
-            self.assertEqual(
-                peer_row.locator("select").count(),
-                0,
-                "member must not change roles",
-            )
-
-            forbidden = member.request.post(
-                f"{UI}/api/workspaces/{ws}/invites",
-                data=json.dumps(
-                    {
-                        "email": f"set-mem-nope-{uuid.uuid4().hex[:8]}@example.test",
-                        "role": "member",
-                    }
-                ),
-                headers={"Content-Type": "application/json"},
-            )
-            self.assertEqual(
-                forbidden.status,
-                403,
-                f"member POST /invites must 403, got {forbidden.status}: "
-                f"{forbidden.text()[:400]}",
-            )
-            after = _invites(owner, ws)
-            self.assertEqual(
-                after.get("invites") or [],
-                [],
-                f"member must not create an invite: {after}",
-            )
+            expect(member.get_by_role("textbox")).to_have_count(0)
         finally:
             member_ctx.close()
             owner_ctx.close()

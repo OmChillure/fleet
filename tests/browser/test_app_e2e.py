@@ -788,9 +788,13 @@ class BrowserE2ETests(unittest.TestCase):
             f"unexpected sessions heading {sessions_h1!r}",
         )
 
-        # Workspace accordion starts collapsed.
-        page.get_by_text("Workspace", exact=True).first.click()
-        page.get_by_role("link", name="Integrations", exact=True).click()
+        # Workspace accordion starts collapsed. The workspace switcher is also
+        # a button named Workspace; the accordion is the one with the ▸/▾ chevron.
+        integ = page.get_by_role("link", name="Integrations", exact=True)
+        if not integ.is_visible():
+            page.get_by_role("button", name="Workspace ▸").click()
+            integ.wait_for(state="visible", timeout=10_000)
+        integ.click()
         page.wait_for_url("**/integrations", timeout=10_000)
         page.wait_for_selector("h1")
         self.assertIn("Integration", page.locator("h1").first.inner_text())
@@ -928,7 +932,16 @@ class BrowserE2ETests(unittest.TestCase):
         click_add_worker(page)
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
-        page.get_by_role("button", name="Cancel").click()
+        with page.expect_response(
+            lambda r: r.request.method.upper() == "DELETE"
+            and "/worker-hosts/" in r.url,
+            timeout=15_000,
+        ) as revoke:
+            page.get_by_role("button", name="Cancel").click()
+        self.assertTrue(
+            revoke.value.ok,
+            f"Cancel DELETE leftover: {revoke.value.status}",
+        )
         page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
         self.assertNotIn(token, page.inner_text("body"))
         page.wait_for_timeout(500)
@@ -1177,8 +1190,12 @@ class BrowserE2ETests(unittest.TestCase):
         fleet = nav.get_by_role("link", name="Fleet", exact=True)
         self.assertTrue(fleet.first.is_visible())
         # Workspace accordion starts collapsed — expand, then assert Integrations.
-        page.get_by_text("Workspace", exact=True).first.click()
+        # The workspace switcher is also a button named Workspace; the accordion
+        # is the one with the ▸/▾ chevron.
         integ = nav.get_by_role("link", name="Integrations", exact=True)
+        if not integ.first.is_visible():
+            page.get_by_role("button", name="Workspace ▸").click()
+            integ.first.wait_for(state="visible", timeout=10_000)
         self.assertTrue(integ.first.is_visible())
         self.assertEqual(
             nav.get_by_role("link", name="Workers", exact=True).count(),

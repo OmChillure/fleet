@@ -21,8 +21,6 @@ use uuid::Uuid;
 use crate::client::SpawnPayload;
 use crate::config::LocalConfig;
 use crate::spawn::{LiveChild, host_child_bin, live_children};
-#[cfg(test)]
-use crate::spawn::child_env;
 
 /// etcd / CR env budget (same as orchestrator).
 pub const MAX_SPEC_MD_BYTES: usize = 200 * 1024;
@@ -480,46 +478,95 @@ mod tests {
         let env = HashMap::new();
         let opts = KubePodOpts::from_cfg(&cfg, &payload, &env);
         assert_eq!(opts.command, vec!["fleet-driver".to_string()]);
-        let filled = child_env(&payload, &HashMap::new(), Path::new(POD_WORK_DIR));
-        let spec = spec_from_payload(&payload, &filled, &opts).unwrap();
-        assert_eq!(
-            spec.command.as_ref().unwrap(),
-            &vec!["fleet-driver".to_string()]
-        );
-        assert_eq!(
-            spec.env.get("FLEET_HARNESS").map(String::as_str),
-            Some("mock")
-        );
     }
 
     #[test]
-    fn spec_maps_identity_env_ttl_and_strips_non_fleet() {
+    fn from_cfg_command_is_basename_of_absolute_driver_bin() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.fleet_driver_bin = "/opt/fleet/fleet-driver".into();
+        let opts = KubePodOpts::from_cfg(&cfg, &sample_payload(), &HashMap::new());
+        assert_eq!(opts.command, vec!["fleet-driver".to_string()]);
+    }
+
+    #[test]
+    fn from_cfg_command_ignores_fleet_harness_env() {
+        let cfg = LocalConfig::defaults();
+        let mut env = HashMap::new();
+        env.insert("FLEET_HARNESS".into(), "grok".into());
+        let opts = KubePodOpts::from_cfg(&cfg, &sample_payload(), &env);
+        assert_eq!(opts.command, vec!["fleet-driver".to_string()]);
+    }
+
+    #[test]
+    fn spec_strips_non_fleet_keeps_fleet_env() {
         let payload = sample_payload();
         let mut env = HashMap::new();
         env.insert("FLEET_WORKER_TOKEN".into(), "tok".into());
         env.insert("SECRET_TOKEN".into(), "nope".into());
         let spec = spec_from_payload(&payload, &env, &sample_opts()).unwrap();
-        assert_eq!(spec.session_id, payload.session_id.to_string());
-        assert_eq!(spec.project_id, payload.project_id.to_string());
-        assert_eq!(spec.plan_task_id.as_deref(), Some("t1"));
-        assert_eq!(spec.worker_profile.as_deref(), Some("coding"));
-        assert_eq!(spec.image, "agent-fleet-api:local");
-        assert_eq!(
-            spec.command.as_ref().unwrap(),
-            &vec!["fleet-driver".to_string()]
-        );
-        assert_eq!(spec.ttl_seconds, Some(600));
-        assert_eq!(spec.network.as_ref().unwrap().egress_mode, "none");
-        assert!(spec.network.as_ref().unwrap().allowlist.is_empty());
         assert_eq!(spec.env.get("FLEET_WORKER_TOKEN").unwrap(), "tok");
         assert_eq!(spec.env.get("FLEET_SPEC_MD").unwrap(), "Write work/plan.md");
         assert_eq!(spec.env.get("FLEET_WORK_DIR").unwrap(), POD_WORK_DIR);
         assert!(!spec.env.contains_key("SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn spec_maps_identity_and_ttl() {
+        let payload = sample_payload();
+        let spec = spec_from_payload(&payload, &HashMap::new(), &sample_opts()).unwrap();
+        assert_eq!(spec.session_id, payload.session_id.to_string());
+        assert_eq!(spec.project_id, payload.project_id.to_string());
+        assert_eq!(spec.plan_task_id.as_deref(), Some("t1"));
+        assert_eq!(spec.worker_profile.as_deref(), Some("coding"));
+        assert_eq!(spec.ttl_seconds, Some(600));
+    }
+
+    #[test]
+    fn cr_labels_sets_project() {
+        let payload = sample_payload();
         let labels = cr_labels(&payload, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(
             labels.get(LABEL_PROJECT).unwrap(),
             &payload.project_id.to_string()
         );
+    }
+
+    #[test]
+    fn spec_overwrites_orchestrator_url_and_api_base_from_opts() {
+        let mut env = HashMap::new();
+        env.insert("FLEET_ORCHESTRATOR_URL".into(), "http://stale:1".into());
+        env.insert("FLEET_API_BASE".into(), "http://stale:1".into());
+        let opts = sample_opts();
+        let spec = spec_from_payload(&sample_payload(), &env, &opts).unwrap();
+        assert_eq!(
+            spec.env.get("FLEET_ORCHESTRATOR_URL").unwrap(),
+            &opts.worker_api_url
+        );
+        assert_eq!(spec.env.get("FLEET_API_BASE").unwrap(), &opts.worker_api_url);
+    }
+
+    #[test]
+    fn spec_ttl_clamps_zero_timeout_to_one() {
+        let mut payload = sample_payload();
+        payload.timeout_s = 0;
+        let spec = spec_from_payload(&payload, &HashMap::new(), &sample_opts()).unwrap();
+        assert_eq!(spec.ttl_seconds, Some(1));
+    }
+
+    #[test]
+    fn cr_labels_sets_session_workspace_and_sandbox() {
+        let payload = sample_payload();
+        let cr_name = "550e8400-e29b-41d4-a716-446655440000";
+        let labels = cr_labels(&payload, cr_name);
+        assert_eq!(
+            labels.get(LABEL_SESSION).unwrap(),
+            &payload.session_id.to_string()
+        );
+        assert_eq!(
+            labels.get(LABEL_WORKSPACE).unwrap(),
+            &payload.project_id.to_string()
+        );
+        assert_eq!(labels.get(LABEL_SANDBOX).unwrap(), cr_name);
     }
 
     #[test]
@@ -548,10 +595,32 @@ mod tests {
     fn spec_rejects_oversized_md() {
         let mut payload = sample_payload();
         payload.task_spec = "x".repeat(MAX_SPEC_MD_BYTES + 1);
-        let err = spec_from_payload(&payload, &HashMap::new(), &sample_opts())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("bytes"), "{err}");
+        match spec_from_payload(&payload, &HashMap::new(), &sample_opts()) {
+            Ok(spec) => panic!(
+                "oversized task_spec became FLEET_SPEC_MD (len={})",
+                spec.env.get("FLEET_SPEC_MD").map(String::len).unwrap_or(0)
+            ),
+            Err(err) => {
+                let err = err.to_string();
+                assert!(err.contains(&MAX_SPEC_MD_BYTES.to_string()), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn spec_accepts_md_at_max_bytes() {
+        let mut payload = sample_payload();
+        payload.task_spec = "x".repeat(MAX_SPEC_MD_BYTES);
+        let spec = spec_from_payload(&payload, &HashMap::new(), &sample_opts()).unwrap();
+        assert_eq!(spec.env.get("FLEET_SPEC_MD"), Some(&payload.task_spec));
+    }
+
+    #[test]
+    fn spec_omits_fleet_spec_md_when_task_spec_empty() {
+        let mut payload = sample_payload();
+        payload.task_spec.clear();
+        let spec = spec_from_payload(&payload, &HashMap::new(), &sample_opts()).unwrap();
+        assert!(!spec.env.contains_key("FLEET_SPEC_MD"));
     }
 
     #[test]
@@ -563,5 +632,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("orchestrator_url"), "{err}");
+    }
+
+    #[test]
+    fn kube_pod_env_drops_host_absolute_bin_overrides() {
+        let mut extra = HashMap::new();
+        extra.insert("FLEET_MOCK_ACP_BIN".into(), "/host/mock-acp-agent".into());
+        let mut payload = sample_payload();
+        payload
+            .env
+            .insert("FLEET_WORK_CMD".into(), "echo host-only".into());
+        let env = crate::spawn::child_env_for_isolated_guest(
+            &payload,
+            &extra,
+            Path::new(POD_WORK_DIR),
+        );
+        let spec = spec_from_payload(&payload, &env, &sample_opts()).unwrap();
+        assert!(
+            !spec.env.contains_key("FLEET_MOCK_ACP_BIN"),
+            "host path must not ride into kube: {:?}",
+            spec.env
+        );
+        assert!(
+            !spec.env.contains_key("FLEET_WORK_CMD"),
+            "FLEET_WORK_CMD is host-only: {:?}",
+            spec.env
+        );
     }
 }

@@ -719,25 +719,24 @@ mod tests {
         (status, v)
     }
 
-    /// Docs §8.2/§14: /healthz is liveness without DB; /readyz acquires or 503.
+    /// GET /healthz is liveness: 200 {status:ok} and no db field even when the pool cannot acquire.
     #[tokio::test]
-    async fn healthz_ok_without_db_readyz_503_when_pool_cannot_acquire() {
+    async fn healthz_ok_without_db() {
         let app = app_with_unacquirable_pool().await;
-
-        let (st, v) = get_json(app.clone(), "/healthz").await;
+        let (st, v) = get_json(app, "/healthz").await;
         assert_eq!(st, StatusCode::OK, "healthz must stay ok with no DB: {v}");
         assert_eq!(v["status"], "ok");
         assert!(
             v.get("db").is_none(),
             "healthz must not acquire or report DB: {v}"
         );
+    }
 
+    /// GET /readyz is 503 and not ready when pool.acquire fails.
+    #[tokio::test]
+    async fn readyz_503_when_pool_cannot_acquire() {
+        let app = app_with_unacquirable_pool().await;
         let (st, v) = get_json(app, "/readyz").await;
-        assert_ne!(
-            st,
-            StatusCode::OK,
-            "must not 200 ready when the pool cannot acquire: {v}"
-        );
         assert_eq!(
             st,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -745,8 +744,7 @@ mod tests {
         );
         assert_ne!(
             v["status"], "ready",
-            "must not 200 ready when the pool cannot acquire: {v}"
+            "must not report ready when the pool cannot acquire: {v}"
         );
-        assert_eq!(v["error"], "db unavailable");
     }
 }

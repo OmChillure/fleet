@@ -201,7 +201,7 @@ fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSo
     // the staged tarball (different artifact, same number). When it is
     // behind, send desired so auto-update can apply — withholding it is
     // why 5700g stayed behind with auto_update on.
-    if should_withhold_desired(host, &staged, &local_hostname()) {
+    if should_withhold_desired(host, &staged, &local_hostname(), plane_git_sha()) {
         return None;
     }
     Some(staged)
@@ -212,9 +212,10 @@ fn should_withhold_desired(
     host: &WorkerHost,
     staged: &fleet_db::WorkerSoftwareManifest,
     local: &str,
+    plane: Option<&str>,
 ) -> bool {
     // Already running this process's bake: staged tarball is often older.
-    if host_reports_plane_bake(host) {
+    if host_reports_plane_bake(host, plane) {
         return true;
     }
     host_is_this_machine(host, local)
@@ -258,8 +259,8 @@ fn staged_pkg_version(staged: &fleet_db::WorkerSoftwareManifest, stem: &str) -> 
         .map(|s| s.to_string())
 }
 
-fn host_reports_plane_bake(host: &WorkerHost) -> bool {
-    sha_matches_plane(host.software_git_sha.as_deref(), plane_git_sha())
+fn host_reports_plane_bake(host: &WorkerHost, plane: Option<&str>) -> bool {
+    sha_matches_plane(host.software_git_sha.as_deref(), plane)
 }
 
 /// True when the host already runs this process's bake. Those boxes are
@@ -382,6 +383,20 @@ fn origin_is_loopback(headers: &HeaderMap) -> bool {
 /// Host of Origin/Referer only — not a substring in the query or a
 /// `localhost.evil` label.
 fn host_is_loopback_origin(raw: &str) -> bool {
+    // http::Uri::host() keeps brackets on IPv6 literals (`[::1]`).
+    if let Ok(uri) = raw.parse::<axum::http::Uri>() {
+        if let Some(host) = uri.host() {
+            let host = host.trim_matches(['[', ']']);
+            // Host only — a substring match would treat localhost.evil / ?next=localhost as loopback.
+            if host.eq_ignore_ascii_case("localhost")
+                || host.eq_ignore_ascii_case("127.0.0.1")
+                || host.eq_ignore_ascii_case("::1")
+                || host.to_ascii_lowercase().starts_with("127.")
+            {
+                return true;
+            }
+        }
+    }
     let rest = raw
         .split_once("://")
         .map(|(_, r)| r)
@@ -1417,10 +1432,58 @@ async fn http_complete(
 
 #[cfg(test)]
 mod plane_bake_tests {
-    use super::{host_on_manifest_versions, sha_matches_plane, should_withhold_desired};
+    use super::{
+        host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn headers(key: axum::http::HeaderName, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(key, HeaderValue::from_str(value).expect("header value"));
+        h
+    }
+
+    #[test]
+    fn origin_is_loopback_parses_host_not_substring() {
+        for origin in [
+            "http://localhost:3030",
+            "http://127.0.0.1:3030",
+            "http://[::1]:3030",
+        ] {
+            assert!(
+                origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "loopback Origin {origin}"
+            );
+        }
+        for origin in [
+            "http://localhost.evil.example.test",
+            "http://evil-127.0.0.1.example.test",
+            "http://192.168.1.50:3030",
+        ] {
+            assert!(
+                !origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "non-loopback Origin {origin}"
+            );
+        }
+        assert!(
+            !origin_is_loopback(&headers(
+                header::REFERER,
+                "http://192.168.1.50:3030/?next=http://localhost:3030"
+            )),
+            "Referer query localhost must not count as loopback"
+        );
+        assert!(
+            origin_is_loopback(&headers(header::REFERER, "http://[::1]:3030")),
+            "Referer [::1] is loopback"
+        );
+        assert!(
+            !origin_is_loopback(&HeaderMap::new()),
+            "no Origin/Referer is not loopback"
+        );
+    }
 
     #[test]
     fn origin_host_not_substring() {
@@ -1435,9 +1498,44 @@ mod plane_bake_tests {
 
     #[test]
     fn matching_sha_is_plane_bake() {
-        assert!(sha_matches_plane(Some("abc123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("ABC123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("  abc123  "), Some("abc123")));
+        for (got, plane, case) in [
+            (Some("abc123"), Some("abc123"), "exact"),
+            (Some("ABC123"), Some("abc123"), "case-insensitive"),
+            (Some("  abc123  "), Some("abc123"), "trimmed"),
+        ] {
+            assert!(
+                sha_matches_plane(got, plane),
+                "{case} reported sha is this process bake: got={got:?} plane={plane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sha_matches_plane_rejects_dirty_tree_id_suffix() {
+        // scripts/tree-id.sh: clean is 40 lowercase hex; dirty is HEAD-<12hex>.
+        let clean = "0123456789abcdef0123456789abcdef01234567";
+        let dirty = "0123456789abcdef0123456789abcdef01234567-aaaaaaaaaaaa";
+        assert!(
+            !sha_matches_plane(Some(dirty), Some(clean)),
+            "dirty host bake {dirty} is not the clean plane bake {clean}"
+        );
+    }
+
+    #[test]
+    fn should_withhold_desired_when_reported_sha_matches_plane_ignoring_case_and_trim() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some(" ABC123 ".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote host behind package versions still withholds when software_git_sha matches plane after trim+case"
+        );
     }
 
     #[test]
@@ -1533,7 +1631,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&host, &staged, "viny-5700g"),
+            !should_withhold_desired(&host, &staged, "viny-5700g", None),
             "behind plane box must get desired so auto-update can apply"
         );
         assert!(!host_on_manifest_versions(
@@ -1552,7 +1650,7 @@ mod plane_bake_tests {
                 "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
             })),
         );
-        assert!(should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(should_withhold_desired(&host, &staged, "viny-5700g", None));
         let remote = plane_host(
             "x1",
             Some(json!({
@@ -1561,7 +1659,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&remote, &staged, "viny-5700g"),
+            !should_withhold_desired(&remote, &staged, "viny-5700g", None),
             "remote hosts still receive desired"
         );
     }
@@ -1570,21 +1668,51 @@ mod plane_bake_tests {
     fn this_machine_without_report_must_receive_desired() {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
-        assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(!should_withhold_desired(&host, &staged, "viny-5700g", None));
     }
 
     #[test]
     fn host_on_this_process_bake_withholds_even_when_remote() {
-        let Some(plane) = super::plane_git_sha() else {
-            // Host cargo test without FLEET_GIT_SHA: bake check is off.
-            return;
-        };
         let staged = staged("0.0.2", "0.0.2");
         let mut host = plane_host("x1", None);
-        host.software_git_sha = Some(plane.to_string());
+        host.software_git_sha = Some("abc123".into());
         assert!(
-            should_withhold_desired(&host, &staged, "viny-5700g"),
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
             "a host already on this process bake must not get an older staged tarball"
+        );
+    }
+
+    #[test]
+    fn remote_other_bake_sha_still_receives_desired() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": "cargo", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
+            })),
+        );
+        host.software_git_sha = Some("old-dist".into());
+        assert!(
+            !should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote on a different bake still receives desired even when package versions match"
+        );
+    }
+
+    #[test]
+    fn this_machine_behind_but_on_plane_bake_still_withholds() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "viny-5700g",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some("abc123".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "plane bake withholds even when this-machine package versions are behind"
         );
     }
 

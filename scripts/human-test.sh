@@ -299,8 +299,7 @@ cmd_guide() {
     "Settings Isolation: process / container / vm. Save Container." \
     "Self-hosted: Add worker (token panel is enough). A process-only paired box must not take a container workspace." \
     "Fleet: Start 2-task run → Run tick. Tasks stay ready until a container-capable host is online. Never stub." \
-    "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." \
-    "Agent drive: python3 -m unittest tests.browser.test_unify_usability (artifacts in .tmp/usability/)." || return 0
+    "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." || return 0
 
   pause_step "This merge request" \
     "Inbox: follow-connected, pin on uncheck, webhook URL, Finish on an open row." \

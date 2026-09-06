@@ -2,7 +2,7 @@
 """Layer 2 e2e: Auto-update off + Update now (catalog:e2e-update-now).
 
 Button shows when the box is behind and auto-update is off; click becomes
-Update requested.
+Update requested and sets update_requested_at.
 """
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from runners_e2e_helpers import (  # noqa: E402
     list_hosts,
     pair_and_heartbeat,
     patch_host,
-    wait_dx_ready,
 )
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
@@ -35,7 +34,6 @@ BROWSERS = os.environ.get(
 )
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
-TOAST = "Update requested. The worker applies it on the next heartbeat if it can."
 BEHIND_SHA = "0000000000000000000000000000000000000000"
 BEHIND_BINS = {
     "fleet-host": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -74,17 +72,6 @@ def _require_playwright():
     return sync_playwright
 
 
-def _needs_software_update(host: dict[str, Any]) -> bool:
-    status = host.get("software_status")
-    if host.get("outdated") or status == "behind":
-        return True
-    if status == "current":
-        sw = host.get("software") or {}
-        sha = (sw.get("git_sha") or "").strip() if isinstance(sw, dict) else ""
-        return not sha
-    return False
-
-
 def _staged_linux(listed: dict[str, Any]) -> tuple[str, dict[str, str]]:
     sha = ""
     bins: dict[str, str] = {}
@@ -107,8 +94,8 @@ def _staged_linux(listed: dict[str, Any]) -> tuple[str, dict[str, str]]:
     return sha, bins
 
 
-def _mismatch_software(listed: dict[str, Any] | None) -> dict[str, Any]:
-    staged_sha, staged_bins = _staged_linux(listed or {})
+def _mismatch_software(listed: dict[str, Any]) -> dict[str, Any]:
+    staged_sha, staged_bins = _staged_linux(listed)
     git_sha = BEHIND_SHA
     if staged_sha and git_sha.lower() == staged_sha.lower():
         git_sha = "1111111111111111111111111111111111111111"
@@ -124,31 +111,41 @@ def _host_from_hb(hb: dict[str, Any]) -> dict[str, Any]:
     return host if isinstance(host, dict) else {}
 
 
+def _requested_at(host: dict[str, Any]) -> str:
+    raw = host.get("update_requested_at")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _get_host(page, workspace_id: str, host_id: str) -> dict[str, Any]:
+    res = page.request.get(f"{UI}/api/workspaces/{workspace_id}/worker-hosts/{host_id}")
+    if not res.ok:
+        raise AssertionError(
+            f"GET host {host_id}: {res.status} {res.text()[:400]}"
+        )
+    body = res.json()
+    if not isinstance(body, dict):
+        raise AssertionError(f"GET host not an object: {body!r}"[:400])
+    return body
+
+
 def _signup_api(page) -> tuple[str, str]:
     """Cookie session via API so a stuck dx rebuild banner cannot hang signup."""
     email = f"catalog-updnow-{uuid.uuid4().hex[:12]}@example.test"
     password = "e2e-pass-ok"
     headers = {"Content-Type": "application/json"}
-    created = None
-    last_err = ""
-    for _ in range(8):
-        created = page.request.post(
-            f"{UI}/api/auth/signup",
-            data=json.dumps(
-                {
-                    "email": email,
-                    "password": password,
-                    "display_name": "E2E catalog-updnow",
-                }
-            ),
-            headers=headers,
-        )
-        if created.status in {200, 201}:
-            break
-        last_err = f"signup {created.status}: {created.text()[:400]}"
-        page.wait_for_timeout(750)
-    if created is None or created.status not in {200, 201}:
-        raise RuntimeError(last_err or "signup failed")
+    created = page.request.post(
+        f"{UI}/api/auth/signup",
+        data=json.dumps(
+            {
+                "email": email,
+                "password": password,
+                "display_name": "E2E catalog-updnow",
+            }
+        ),
+        headers=headers,
+    )
+    if created.status not in {200, 201}:
+        raise RuntimeError(f"signup {created.status}: {created.text()[:400]}")
     logged = page.request.post(
         f"{UI}/api/auth/login",
         data=json.dumps({"email": email, "password": password}),
@@ -165,27 +162,6 @@ def _signup_api(page) -> tuple[str, str]:
     if not ws:
         raise RuntimeError(f"login missing workspace: {body!r}"[:400])
     return ws, f"{UI}/{ws}"
-
-
-def _wait_self_hosted(page, workspace_url: str) -> None:
-    last_err: Exception | None = None
-    for _ in range(8):
-        goto_self_hosted(page, workspace_url)
-        wait_dx_ready(page, timeout_ms=30_000)
-        try:
-            page.get_by_role("button", name="Add worker").wait_for(timeout=15_000)
-            return
-        except Exception as e:  # noqa: BLE001 — dx mid-rebuild / list still loading
-            last_err = e
-            page.wait_for_timeout(1_500)
-    body = ""
-    try:
-        body = page.inner_text("body")[:1500]
-    except Exception:
-        pass
-    raise AssertionError(
-        f"Self-hosted page not ready after pair. url={page.url} body={body!r}"
-    ) from last_err
 
 
 class CatalogUpdateNowTests(unittest.TestCase):
@@ -218,39 +194,28 @@ class CatalogUpdateNowTests(unittest.TestCase):
         cls._pw.stop()
 
     def test_update_now_when_behind_becomes_update_requested(self) -> None:
+        from playwright.sync_api import expect
+
         page = self.page
         ws, workspace_url = _signup_api(page)
-        suffix = uuid.uuid4().hex[:12]
-        name = f"updnow-box-{suffix}"
+        name = f"updnow-box-{uuid.uuid4().hex[:12]}"
 
         listed = list_hosts(page, ws)
-        software = _mismatch_software(listed)
+        staged_sha, staged_bins = _staged_linux(listed)
+        self.assertTrue(
+            staged_sha or staged_bins,
+            "staged linux-x86_64 package is required to mark a host behind "
+            "(scripts/stage-worker-dist.sh). Missing staged dist is a fail.",
+        )
         created, paired, hb = pair_and_heartbeat(
             page,
             ws,
             name,
-            heartbeat_extra={"software": software},
+            heartbeat_extra={"software": _mismatch_software(listed)},
         )
         host = _host_from_hb(hb)
-        machine = paired["machine_token"]
-        if not _needs_software_update(host):
-            # Old package: bins only, no bake id.
-            hb = heartbeat(
-                page,
-                machine,
-                {"software": {"bins": {"fleet-host": "not-the-staged-sha"}}},
-            )
-            host = _host_from_hb(hb)
-        if not _needs_software_update(host):
-            listed = list_hosts(page, ws)
-            hb = heartbeat(
-                page,
-                machine,
-                {"software": _mismatch_software(listed)},
-            )
-            host = _host_from_hb(hb)
         self.assertTrue(
-            _needs_software_update(host),
+            bool(host.get("outdated")) or host.get("software_status") == "behind",
             "API did not mark the host behind/outdated "
             f"(software_status={host.get('software_status')!r} "
             f"outdated={host.get('outdated')!r} desired={host.get('desired')!r})",
@@ -262,61 +227,38 @@ class CatalogUpdateNowTests(unittest.TestCase):
             patched.get("auto_update", True),
             f"PATCH auto_update=false: {patched}",
         )
-        gen = patched.get("settings_gen")
-        if gen:
-            heartbeat(page, machine, {"settings_ack_gen": int(gen)})
-
-        _wait_self_hosted(page, workspace_url)
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
+        self.assertFalse(
+            _requested_at(patched),
+            f"turning auto-update off must not request an update: {patched}",
         )
+        gen = patched.get("settings_gen")
+        self.assertIsNotNone(gen, f"PATCH auto_update must return settings_gen: {patched}")
+        heartbeat(
+            page,
+            paired["machine_token"],
+            {"settings_ack_gen": int(gen)},
+        )
+
+        goto_self_hosted(page, workspace_url)
+        expect(page.get_by_role("button", name="Add worker")).to_be_visible()
+        expect(page.locator("article").filter(has_text="Control plane")).to_have_count(0)
 
         card = page.locator("article").filter(has_text=name)
-        try:
-            card.first.wait_for(state="attached", timeout=30_000)
-        except Exception:
-            self.fail(
-                f"paired card {name!r} missing. "
-                f"url={page.url} body={page.inner_text('body')[:1500]!r}"
-            )
+        expect(card).to_be_visible()
         update_now = card.get_by_role("button", name="Update now")
-        if update_now.count() == 0 or not update_now.first.is_visible():
-            auto = card.locator("label").filter(has_text="Auto-update").locator("input")
-            self.assertGreater(auto.count(), 0, "paired card missing Auto-update")
-            if auto.first.is_checked():
-                auto.first.uncheck(force=True)
-            update_now = card.get_by_role("button", name="Update now")
-        self.assertGreater(
-            update_now.count(),
-            0,
-            f"Update now missing on behind card: {card.first.inner_text()[:800]!r}",
-        )
-        update_now.first.click(force=True)
+        expect(update_now).to_be_visible()
+        update_now.click()
+        expect(card.get_by_role("button", name="Update requested")).to_be_visible()
 
-        requested = card.get_by_role("button", name="Update requested")
-        try:
-            requested.first.wait_for(state="attached", timeout=15_000)
-        except Exception:
-            pass
-        body = card.first.inner_text()
+        got = _get_host(page, ws, host_id)
         self.assertTrue(
-            requested.count() > 0 or "Update requested" in body,
-            f"expected Update requested after click: {body[:800]!r}",
+            _requested_at(got),
+            f"GET update_requested_at must be set after Update now: {got}",
         )
-
-        toast = page.get_by_role("status").filter(has_text=TOAST)
-        try:
-            toast.first.wait_for(timeout=5_000)
-        except Exception:
-            toast = page.get_by_role("status").filter(has_text="Update requested")
-            try:
-                toast.first.wait_for(timeout=1_000)
-            except Exception:
-                toast = None
-        if toast is not None and toast.count() > 0:
-            self.assertTrue(toast.first.is_visible(), "toast present but hidden")
-            self.assertIn("Update requested", toast.first.inner_text())
+        self.assertFalse(
+            got.get("auto_update", True),
+            f"Update now must not flip auto-update: {got}",
+        )
 
 
 if __name__ == "__main__":

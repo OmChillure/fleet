@@ -62,7 +62,13 @@ fn request_create_host(
     }
     creating.set(true);
     spawn(async move {
-        match create_host(&workspace_id, &CreateHostBody::default()).await {
+        match create_host(
+            &workspace_id,
+            &CreateHostBody {
+                name: Some("worker".into()),
+            },
+        )
+        .await {
             Ok(created) => {
                 let mut list = hosts();
                 if !list.iter().any(|h| h.id == created.host.id) {

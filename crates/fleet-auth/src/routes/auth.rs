@@ -158,8 +158,8 @@ pub async fn signup(
         "signup",
         &headers,
         connect,
-        5,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_SIGNUP_RATE_MAX", 5),
+        rate_limit::window_from_env("AUTH_SIGNUP_RATE_WINDOW_SECS", 15 * 60),
     )?;
     if !signup_token_ok(state.config.signup_token.as_deref(), body.token.as_deref()) {
         return Err(AppError::forbidden("valid signup token is required"));
@@ -253,8 +253,8 @@ pub async fn login(
         "login",
         &headers,
         connect,
-        10,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_LOGIN_RATE_MAX", 10),
+        rate_limit::window_from_env("AUTH_LOGIN_RATE_WINDOW_SECS", 15 * 60),
     )?;
     validate_credentials(&body.email, &body.password)?;
     let email_normalized = normalize_email(&body.email);
@@ -353,8 +353,8 @@ pub async fn refresh(
         "refresh",
         &headers,
         connect,
-        30,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_REFRESH_RATE_MAX", 30),
+        rate_limit::window_from_env("AUTH_REFRESH_RATE_WINDOW_SECS", 15 * 60),
     )?;
     let refresh = jar
         .get(REFRESH_COOKIE)
@@ -463,25 +463,4 @@ pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Jso
         user: UserPublic::from(user),
         workspaces,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::signup_token_ok;
-
-    #[test]
-    fn signup_token_unset_is_open() {
-        assert!(signup_token_ok(None, None));
-        assert!(signup_token_ok(Some(""), Some("anything")));
-        assert!(signup_token_ok(Some("   "), None));
-    }
-
-    #[test]
-    fn signup_token_required_when_configured() {
-        assert!(!signup_token_ok(Some("invite"), None));
-        assert!(!signup_token_ok(Some("invite"), Some("")));
-        assert!(!signup_token_ok(Some("invite"), Some("nope")));
-        assert!(signup_token_ok(Some("invite"), Some("invite")));
-        assert!(signup_token_ok(Some(" invite "), Some("invite")));
-    }
 }

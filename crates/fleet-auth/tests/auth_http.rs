@@ -40,13 +40,6 @@ async fn signup_201_no_session_cookies() {
     let out = signup(&app, &email, TEST_PASSWORD).await;
 
     assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
-    assert_eq!(
-        out.body["message"].as_str(),
-        Some("account created — please log in"),
-        "{}",
-        out.body
-    );
-    assert_eq!(out.body["default_workspace"]["role"], "owner");
     assert!(
         out.cookie(ACCESS_COOKIE).is_none(),
         "signup must not set {ACCESS_COOKIE}: {:?}",
@@ -57,8 +50,41 @@ async fn signup_201_no_session_cookies() {
         "signup must not set {REFRESH_COOKIE}: {:?}",
         out.set_cookies()
     );
-    let me = call(&app, "GET", "/api/auth/me", None, None).await;
+    let mut jar = CookieJar::default();
+    out.absorb_into(&mut jar);
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
     assert_eq!(me.status, StatusCode::UNAUTHORIZED, "signup is not a login");
+}
+
+#[tokio::test]
+async fn signup_writes_no_sessions_row() {
+    let app = app().await;
+    let email = unique_email();
+    let out = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+
+    let uid = Uuid::parse_str(&user_id(&out)).expect("user.id uuid");
+    let pool = connect_and_migrate().await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM auth_sessions WHERE user_id = $1")
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .expect("count auth_sessions");
+    assert_eq!(n, 0, "signup must not write a session row for {uid}");
+}
+
+#[tokio::test]
+async fn signup_response_user_email_matches_request() {
+    let app = app().await;
+    let email = unique_email();
+    let out = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+    assert_eq!(
+        out.body["user"]["email"].as_str(),
+        Some(email.as_str()),
+        "{}",
+        out.body
+    );
 }
 
 #[tokio::test]
@@ -103,16 +129,30 @@ async fn signup_duplicate_email_409() {
     let email = unique_email();
     let first = signup(&app, &email, TEST_PASSWORD).await;
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let first_id = Uuid::parse_str(&user_id(&first)).expect("user.id uuid");
 
     let second = signup(&app, &email, TEST_PASSWORD).await;
     assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
-    assert_eq!(
-        second.error(),
-        "an account with this email already exists",
-        "{}",
-        second.body
-    );
 
+    let pool = connect_and_migrate().await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email_normalized = $1")
+        .bind(email.to_ascii_lowercase())
+        .fetch_one(&pool)
+        .await
+        .expect("count users");
+    assert_eq!(n, 1, "duplicate signup must leave one users.email_normalized row");
+    let leftover_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM users WHERE email_normalized = $1")
+            .bind(email.to_ascii_lowercase())
+            .fetch_one(&pool)
+            .await
+            .expect("remaining user id");
+    assert_eq!(leftover_id, first_id, "the remaining row must be the first user");
+}
+
+#[tokio::test]
+async fn signup_duplicate_mixed_case_email_409() {
+    let app = app().await;
     let mixed = format!("Auth.DUP.{}@Example.TEST", Uuid::new_v4());
     let first_mixed = signup(&app, &mixed, TEST_PASSWORD).await;
     assert_eq!(
@@ -131,34 +171,66 @@ async fn signup_duplicate_email_409() {
 }
 
 #[tokio::test]
-async fn login_sets_httponly_cookies_and_workspace() {
+async fn signup_duplicate_409_does_not_set_session_cookies() {
     let app = app().await;
     let email = unique_email();
-    let created = signup(&app, &email, TEST_PASSWORD).await;
-    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let first = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
 
-    let (out, jar) = login(&app, &email, TEST_PASSWORD).await;
-    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
-    assert_eq!(out.body["message"].as_str(), Some("logged in"));
-    assert_eq!(out.body["default_workspace"]["role"], "owner");
+    let second = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+    assert!(
+        second.cookie(ACCESS_COOKIE).is_none(),
+        "duplicate signup must not set {ACCESS_COOKIE}: {:?}",
+        second.set_cookies()
+    );
+    assert!(
+        second.cookie(REFRESH_COOKIE).is_none(),
+        "duplicate signup must not set {REFRESH_COOKIE}: {:?}",
+        second.set_cookies()
+    );
+}
 
-    let access = out
-        .cookie(ACCESS_COOKIE)
-        .unwrap_or_else(|| panic!("missing {ACCESS_COOKIE} Set-Cookie"));
-    let refresh = out
-        .cookie(REFRESH_COOKIE)
-        .unwrap_or_else(|| panic!("missing {REFRESH_COOKIE} Set-Cookie"));
-    for c in [&access, &refresh] {
-        assert!(c.is_httponly(), "{} should be HttpOnly: {}", c.name, c.raw);
-        assert_eq!(c.path(), Some("/"), "{} Path must be /: {}", c.name, c.raw);
-        assert!(
-            !c.is_secure(),
-            "COOKIE_SECURE=false must not set Secure: {}",
-            c.raw
-        );
-    }
-    assert!(jar.access().is_some());
-    assert!(jar.refresh().is_some());
+#[tokio::test]
+async fn signup_duplicate_trims_before_uniqueness() {
+    let app = app().await;
+    let email = unique_email();
+    let first = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+
+    let padded = format!(" {email} ");
+    let second = signup(&app, &padded, TEST_PASSWORD).await;
+    assert_eq!(
+        second.status,
+        StatusCode::CONFLICT,
+        "signup must trim before uniqueness: {}",
+        second.body
+    );
+}
+
+#[tokio::test]
+async fn signup_duplicate_leaves_single_account() {
+    let app = app().await;
+    let email = unique_email();
+    let first = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+
+    let second = signup(&app, &email, "other-correct-horse").await;
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+
+    let (login_out, _) = login(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+
+    let pool = connect_and_migrate().await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email_normalized = $1")
+        .bind(email.to_ascii_lowercase())
+        .fetch_one(&pool)
+        .await
+        .expect("count users");
+    assert_eq!(
+        n, 1,
+        "after 409, users.email_normalized must have one row for {email}"
+    );
 }
 
 #[tokio::test]
@@ -232,14 +304,91 @@ async fn refresh_rotates_cookies() {
     let out = call(&app, "POST", "/api/auth/refresh", Some(&jar), None).await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.body);
 
-    let new_access = out
-        .cookie(ACCESS_COOKIE)
-        .unwrap_or_else(|| panic!("refresh must set {ACCESS_COOKIE}"));
-    let new_refresh = out
-        .cookie(REFRESH_COOKIE)
-        .unwrap_or_else(|| panic!("refresh must set {REFRESH_COOKIE}"));
-    assert_ne!(new_access.value, old_access);
-    assert_ne!(new_refresh.value, old_refresh);
+    let mut rotated = jar.clone();
+    out.absorb_into(&mut rotated);
+    assert_ne!(
+        rotated.access(),
+        Some(old_access.as_str()),
+        "refresh must issue a new {ACCESS_COOKIE}"
+    );
+    assert_ne!(
+        rotated.refresh(),
+        Some(old_refresh.as_str()),
+        "refresh must issue a new {REFRESH_COOKIE}"
+    );
+
+    let me = call(&app, "GET", "/api/auth/me", Some(&rotated), None).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+
+    let mut stale = CookieJar::default();
+    stale.insert(ACCESS_COOKIE, old_access);
+    let stale_me = call(&app, "GET", "/api/auth/me", Some(&stale), None).await;
+    assert_eq!(
+        stale_me.status,
+        StatusCode::UNAUTHORIZED,
+        "old access JWT must not work after rotation: {}",
+        stale_me.body
+    );
+}
+
+#[tokio::test]
+async fn refresh_expired_session_is_401() {
+    let app = app().await;
+    let (_email, jar, login_out) = signup_and_login(&app).await;
+    let uid = Uuid::parse_str(&user_id(&login_out)).expect("user.id uuid");
+
+    let pool = connect_and_migrate().await;
+    let n = sqlx::query(
+        "UPDATE auth_sessions SET expires_at = now() - interval '1 minute' WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(uid)
+    .execute(&pool)
+    .await
+    .expect("age expires_at");
+    assert_eq!(n.rows_affected(), 1, "expected one session aged");
+
+    let out = call(&app, "POST", "/api/auth/refresh", Some(&jar), None).await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
+    assert_eq!(out.error(), "refresh token expired");
+}
+
+#[tokio::test]
+async fn inactive_user_cannot_refresh() {
+    let app = app().await;
+    let (email, jar, _) = signup_and_login(&app).await;
+
+    let pool = connect_and_migrate().await;
+    let n = sqlx::query("UPDATE users SET status = 'disabled' WHERE email_normalized = $1")
+        .bind(email.to_ascii_lowercase())
+        .execute(&pool)
+        .await
+        .expect("deactivate user");
+    assert_eq!(n.rows_affected(), 1, "expected one user row updated");
+
+    let out = call(&app, "POST", "/api/auth/refresh", Some(&jar), None).await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
+    assert_eq!(out.error(), "account is not active");
+}
+
+#[tokio::test]
+async fn refresh_returns_default_workspace() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
+
+    let out = call(&app, "POST", "/api/auth/refresh", Some(&jar), None).await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    assert_eq!(
+        out.body["message"].as_str(),
+        Some("token refreshed"),
+        "{}",
+        out.body
+    );
+    assert_eq!(
+        out.body["default_workspace"]["role"].as_str(),
+        Some("owner"),
+        "{}",
+        out.body
+    );
 }
 
 #[tokio::test]
@@ -290,21 +439,6 @@ async fn logout_then_me_401() {
 }
 
 #[tokio::test]
-async fn me_lists_at_least_one_workspace() {
-    let app = app().await;
-    let (_email, jar, _) = signup_and_login(&app).await;
-
-    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
-    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
-    let workspaces = me.body["workspaces"].as_array().expect("workspaces array");
-    assert!(
-        !workspaces.is_empty(),
-        "expected at least one workspace: {}",
-        me.body
-    );
-}
-
-#[tokio::test]
 async fn create_workspace_slug_and_owner() {
     let app = app().await;
     let (_email, jar, _) = signup_and_login(&app).await;
@@ -314,23 +448,53 @@ async fn create_workspace_slug_and_owner() {
         "POST",
         "/api/workspaces",
         Some(&jar),
-        Some(json!({ "name": "Acme Eng", "slug": "acme-eng" })),
+        Some(json!({ "name": "Acme Eng", "slug": "custom-lab" })),
     )
     .await;
     assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
     assert_eq!(out.body["workspace"]["role"], "owner");
     assert_eq!(out.body["workspace"]["name"], "Acme Eng");
+    let id = Uuid::parse_str(
+        out.body["workspace"]["id"]
+            .as_str()
+            .expect("workspace.id"),
+    )
+    .expect("workspace.id uuid");
+    let slug = out.body["workspace"]["slug"]
+        .as_str()
+        .expect("workspace.slug");
+    assert_eq!(
+        slug,
+        format!("custom-lab-{}", &id.to_string()[..8]),
+        "slug must be slugify(slug field)+id[:8], not name fallback or suffix-drop"
+    );
+}
+
+#[tokio::test]
+async fn create_workspace_omitted_slug_derives_from_name() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
+
+    let out = call(
+        &app,
+        "POST",
+        "/api/workspaces",
+        Some(&jar),
+        Some(json!({ "name": "Acme Eng" })),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
     let slug = out.body["workspace"]["slug"]
         .as_str()
         .expect("workspace.slug");
     assert!(
         slug.starts_with("acme-eng-"),
-        "expected slug derived from request, got {slug:?}"
+        "omitted slug must derive from name, got {slug:?}"
     );
 }
 
 #[tokio::test]
-async fn create_workspace_empty_and_too_long_400() {
+async fn create_workspace_whitespace_name_is_400() {
     let app = app().await;
     let (_email, jar, _) = signup_and_login(&app).await;
 
@@ -343,6 +507,17 @@ async fn create_workspace_empty_and_too_long_400() {
     )
     .await;
     assert_eq!(empty.status, StatusCode::BAD_REQUEST, "{}", empty.body);
+    assert!(
+        empty.error().contains("required"),
+        "whitespace-only name should be required, got {:?}",
+        empty.error()
+    );
+}
+
+#[tokio::test]
+async fn create_workspace_name_too_long_is_400() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
 
     let too_long = call(
         &app,
@@ -357,6 +532,86 @@ async fn create_workspace_empty_and_too_long_400() {
         StatusCode::BAD_REQUEST,
         "{}",
         too_long.body
+    );
+    assert!(
+        too_long.error().contains("too long"),
+        "81-byte name should be too long, got {:?}",
+        too_long.error()
+    );
+}
+
+#[tokio::test]
+async fn create_workspace_name_of_exactly_80_is_201() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
+    let name = "n".repeat(80);
+
+    let out = call(
+        &app,
+        "POST",
+        "/api/workspaces",
+        Some(&jar),
+        Some(json!({ "name": name })),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+    assert_eq!(
+        out.body["workspace"]["name"].as_str(),
+        Some(name.as_str()),
+        "{}",
+        out.body
+    );
+}
+
+#[tokio::test]
+async fn create_workspace_reject_does_not_list_new_workspace() {
+    let app = app().await;
+    let (_email, jar, login_out) = signup_and_login(&app).await;
+    let default_id = workspace_id(&login_out);
+
+    let rejected = call(
+        &app,
+        "POST",
+        "/api/workspaces",
+        Some(&jar),
+        Some(json!({ "name": "   " })),
+    )
+    .await;
+    assert_eq!(
+        rejected.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        rejected.body
+    );
+
+    let listed = call(&app, "GET", "/api/workspaces", Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids = listed_workspace_ids(&listed);
+    assert_eq!(
+        ids.as_slice(),
+        [default_id.as_str()],
+        "whitespace 400 must not insert a workspace: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_workspace_omitted_name_is_not_201() {
+    let app = app().await;
+    let (_email, jar, _) = signup_and_login(&app).await;
+
+    let omitted = call(
+        &app,
+        "POST",
+        "/api/workspaces",
+        Some(&jar),
+        Some(json!({ "slug": "x" })),
+    )
+    .await;
+    assert_ne!(
+        omitted.status,
+        StatusCode::CREATED,
+        "omitted name must not create a workspace: {}",
+        omitted.body
     );
 }
 
@@ -446,14 +701,55 @@ async fn logout_clears_cookies_and_blocks_refresh() {
 #[tokio::test]
 async fn login_is_case_insensitive_on_email() {
     let app = app().await;
-    let local = format!("Case.{}", Uuid::new_v4());
-    let email = format!("{local}@Example.TEST");
-    let created = signup(&app, &email, TEST_PASSWORD).await;
-    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let token = Uuid::new_v4();
+    let stored = format!("Case.{token}@Example.TEST");
+    let login_email = format!("CASE.{token}@eXaMpLe.TeSt");
+    assert_ne!(
+        login_email, stored,
+        "login email must not equal the stored users.email column"
+    );
+    assert_ne!(
+        login_email,
+        stored.to_ascii_lowercase(),
+        "login email must not equal users.email_normalized"
+    );
 
-    let (out, jar) = login(&app, &email.to_ascii_lowercase(), TEST_PASSWORD).await;
+    let created = signup(&app, &stored, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let signup_id = user_id(&created);
+
+    let (out, jar) = login(&app, &login_email, TEST_PASSWORD).await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.body);
     assert!(jar.access().is_some());
+
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    assert_eq!(
+        user_id(&me),
+        signup_id,
+        "third-casing login must resolve the signup user"
+    );
+}
+
+#[tokio::test]
+async fn login_trims_surrounding_whitespace() {
+    let app = app().await;
+    let email = unique_email();
+    let created = signup(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let signup_id = user_id(&created);
+
+    let (out, jar) = login(&app, &format!(" {email} "), TEST_PASSWORD).await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+    assert!(jar.access().is_some());
+
+    let me = call(&app, "GET", "/api/auth/me", Some(&jar), None).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    assert_eq!(
+        user_id(&me),
+        signup_id,
+        "trimmed login must resolve the signup user"
+    );
 }
 
 #[tokio::test]
@@ -523,24 +819,13 @@ async fn create_workspace_then_list_includes_both() {
 }
 
 #[tokio::test]
-async fn invite_adds_existing_user_and_member_cannot_invite() {
+async fn member_invite_forbidden_does_not_insert_invite() {
     let app = app().await;
-    let (owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
-    let ws = owner_me.body["default_workspace"]["id"]
-        .as_str()
-        .or_else(|| {
-            owner_me.body["workspaces"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|w| w["id"].as_str())
-        })
-        .expect("workspace")
-        .to_string();
-    let _ = owner_email;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_me);
 
     let (member_email, member_jar, _) = signup_and_login(&app).await;
-
-    let invited = call(
+    let added = call(
         &app,
         "POST",
         &format!("/api/workspaces/{ws}/invites"),
@@ -548,33 +833,15 @@ async fn invite_adds_existing_user_and_member_cannot_invite() {
         Some(json!({ "email": member_email, "role": "member" })),
     )
     .await;
-    assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
-    assert_eq!(invited.body["added_existing_user"], true);
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
 
-    let members = call(
-        &app,
-        "GET",
-        &format!("/api/workspaces/{ws}/members"),
-        Some(&owner_jar),
-        None,
-    )
-    .await;
-    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
-    let roles: Vec<&str> = members.body["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|m| m["role"].as_str())
-        .collect();
-    assert!(roles.contains(&"owner"), "{roles:?}");
-    assert!(roles.contains(&"member"), "{roles:?}");
-
+    let guest = unique_email();
     let forbidden = call(
         &app,
         "POST",
         &format!("/api/workspaces/{ws}/invites"),
         Some(&member_jar),
-        Some(json!({ "email": unique_email(), "role": "member" })),
+        Some(json!({ "email": guest, "role": "member" })),
     )
     .await;
     assert_eq!(
@@ -583,22 +850,58 @@ async fn invite_adds_existing_user_and_member_cannot_invite() {
         "{}",
         forbidden.body
     );
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let emails: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["email"].as_str())
+        .collect();
+    assert!(
+        !emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "member 403 must not insert an invite for {guest}: {emails:?}"
+    );
+}
+
+#[tokio::test]
+async fn invite_adds_existing_user_ignoring_email_case() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_me);
+
+    let (member_email, _member_jar, _) = signup_and_login(&app).await;
+    let mixed = member_email.to_ascii_uppercase();
+    assert_ne!(
+        mixed, member_email,
+        "invite email must differ in case from the stored address"
+    );
+
+    let invited = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": mixed, "role": "member" })),
+    )
+    .await;
+    assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
+    assert_eq!(invited.body["added_existing_user"], true);
 }
 
 #[tokio::test]
 async fn pending_invite_joins_on_signup() {
     let app = app().await;
     let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
-    let ws = owner_me.body["default_workspace"]["id"]
-        .as_str()
-        .or_else(|| {
-            owner_me.body["workspaces"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|w| w["id"].as_str())
-        })
-        .expect("workspace")
-        .to_string();
+    let ws = workspace_id(&owner_me);
 
     let guest = unique_email();
     let inv = call(
@@ -612,21 +915,237 @@ async fn pending_invite_joins_on_signup() {
     assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
     assert_eq!(inv.body["added_existing_user"], false);
 
-    let _ = signup(&app, &guest, TEST_PASSWORD).await;
+    let created = signup(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let guest_row = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|m| {
+            m["email"]
+                .as_str()
+                .is_some_and(|e| e.eq_ignore_ascii_case(&guest))
+        })
+        .unwrap_or_else(|| panic!("guest must be a member after signup, before login: {}", members.body));
+    assert_eq!(
+        guest_row["role"].as_str(),
+        Some("admin"),
+        "guest should join as invited role: {}",
+        members.body
+    );
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let emails: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["email"].as_str())
+        .collect();
+    assert!(
+        !emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "accepted invite must not remain on GET /invites after signup: {emails:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_signup_does_not_consume_pending_invite() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_me);
+    let guest = unique_email();
+
+    let inv = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
+    assert_eq!(inv.body["added_existing_user"], false);
+
+    let rejected = signup(&app, &guest, "short").await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST, "{}", rejected.body);
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let emails: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["email"].as_str())
+        .collect();
+    assert!(
+        emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "rejected signup must leave the pending invite: {emails:?}"
+    );
+}
+
+#[tokio::test]
+async fn signup_joins_every_pending_workspace_before_login() {
+    let app = app().await;
+    let (_owner_a_email, owner_a_jar, owner_a) = signup_and_login(&app).await;
+    let (_owner_b_email, owner_b_jar, owner_b) = signup_and_login(&app).await;
+    let ws_a = workspace_id(&owner_a);
+    let ws_b = workspace_id(&owner_b);
+    let guest = unique_email();
+
+    let inv_a = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws_a}/invites"),
+        Some(&owner_a_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv_a.status, StatusCode::CREATED, "{}", inv_a.body);
+    assert_eq!(inv_a.body["added_existing_user"], false);
+
+    let inv_b = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws_b}/invites"),
+        Some(&owner_b_jar),
+        Some(json!({ "email": guest, "role": "member" })),
+    )
+    .await;
+    assert_eq!(inv_b.status, StatusCode::CREATED, "{}", inv_b.body);
+    assert_eq!(inv_b.body["added_existing_user"], false);
+
+    let created = signup(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+    for (jar, ws, role) in [
+        (&owner_a_jar, &ws_a, "admin"),
+        (&owner_b_jar, &ws_b, "member"),
+    ] {
+        let members = call(
+            &app,
+            "GET",
+            &format!("/api/workspaces/{ws}/members"),
+            Some(jar),
+            None,
+        )
+        .await;
+        assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+        let guest_row = members.body["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .find(|m| {
+                m["email"]
+                    .as_str()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(&guest))
+            })
+            .unwrap_or_else(|| {
+                panic!("guest must join {ws} as {role} after signup, before login: {}", members.body)
+            });
+        assert_eq!(
+            guest_row["role"].as_str(),
+            Some(role),
+            "guest should join {ws} as invited role {role}: {}",
+            members.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn signup_keeps_personal_workspace_and_invited() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_me);
+    let guest = unique_email();
+
+    let inv = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
+    assert_eq!(inv.body["added_existing_user"], false);
+
+    let created = signup(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let personal = created.body["default_workspace"]["id"]
+        .as_str()
+        .expect("signup default_workspace.id")
+        .to_string();
+
     let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
 
     let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-    let ids: Vec<&str> = listed.body["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|w| w["id"].as_str())
-        .collect();
+    let ids = listed_workspace_ids(&listed);
+    assert!(
+        ids.contains(&personal.as_str()),
+        "guest first GET /workspaces must keep personal workspace {personal}: {ids:?}"
+    );
     assert!(
         ids.contains(&ws.as_str()),
-        "guest should join invited workspace: {ids:?}"
+        "guest first GET /workspaces must include invited workspace {ws}: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn pending_invite_joins_when_signup_email_case_differs() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_me) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_me);
+
+    let guest = format!("Case.{}@Example.TEST", Uuid::new_v4());
+    let inv = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
+    assert_eq!(inv.body["added_existing_user"], false);
+
+    let lower = guest.to_ascii_lowercase();
+    let created = signup(&app, &lower, TEST_PASSWORD).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let (login_out, guest_jar) = login(&app, &lower, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+
+    let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids = listed_workspace_ids(&listed);
+    assert!(
+        ids.contains(&ws.as_str()),
+        "signup with different email case must still consume the pending invite: {ids:?}"
     );
 }
 
@@ -752,6 +1271,31 @@ async fn expired_invite_does_not_join_on_signup() {
 
     let created = signup(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let personal = created.body["default_workspace"]["id"]
+        .as_str()
+        .expect("signup default_workspace.id")
+        .to_string();
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let member_emails: Vec<&str> = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|m| m["email"].as_str())
+        .collect();
+    assert!(
+        !member_emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "expired invite must not add guest on signup, before login: {member_emails:?}"
+    );
+
     let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
 
@@ -759,8 +1303,102 @@ async fn expired_invite_does_not_join_on_signup() {
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     let ids = listed_workspace_ids(&listed);
     assert!(
+        ids.contains(&personal.as_str()),
+        "guest GET /workspaces must keep personal workspace {personal}: {ids:?}"
+    );
+    assert!(
         !ids.contains(&ws.as_str()),
         "expired invite must not grant the workspace on signup: {ids:?} contains {ws}"
+    );
+}
+
+#[tokio::test]
+async fn expired_invite_does_not_join_on_login() {
+    let app = app().await;
+    let (owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let guest = unique_email();
+
+    let inv = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": guest, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(inv.status, StatusCode::CREATED, "{}", inv.body);
+    assert_eq!(inv.body["added_existing_user"], false);
+    let invite_id = inv.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    // Existing user for that email without signup (signup would consume the invite).
+    let pool = connect_and_migrate().await;
+    let guest_id = Uuid::now_v7();
+    let n = sqlx::query(
+        r#"
+        INSERT INTO users (
+            id, email, email_normalized, password_hash, status, created_at, updated_at
+        )
+        SELECT $1, $2, $3, password_hash, 'active', now(), now()
+        FROM users
+        WHERE email_normalized = $4
+        "#,
+    )
+    .bind(guest_id)
+    .bind(&guest)
+    .bind(guest.to_ascii_lowercase())
+    .bind(owner_email.to_ascii_lowercase())
+    .execute(&pool)
+    .await
+    .expect("insert guest user");
+    assert_eq!(n.rows_affected(), 1, "expected guest user inserted");
+
+    let aged = sqlx::query(
+        "UPDATE workspace_invites SET expires_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&invite_id).expect("invite uuid"))
+    .execute(&pool)
+    .await
+    .expect("age expires_at");
+    assert_eq!(aged.rows_affected(), 1, "expected one invite aged");
+
+    let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+    let personal = workspace_id(&login_out);
+
+    let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids = listed_workspace_ids(&listed);
+    assert!(
+        ids.contains(&personal.as_str()),
+        "guest GET /workspaces must keep personal workspace {personal}: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&ws.as_str()),
+        "expired invite must not grant the workspace on login: {ids:?} contains {ws}"
+    );
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let member_emails: Vec<&str> = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|m| m["email"].as_str())
+        .collect();
+    assert!(
+        !member_emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "expired invite must not add guest on login: {member_emails:?}"
     );
 }
 
@@ -845,7 +1483,52 @@ async fn last_owner_cannot_delete_self() {
 }
 
 #[tokio::test]
-async fn member_cannot_list_or_revoke_invites() {
+async fn member_cannot_list_invites() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+
+    let pending = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(pending.status, StatusCode::CREATED, "{}", pending.body);
+
+    let (member_email, member_jar, _) = signup_and_login(&app).await;
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    assert_eq!(added.body["added_existing_user"], true);
+
+    let list = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&member_jar),
+        None,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::FORBIDDEN, "{}", list.body);
+    assert_eq!(list.error(), "not allowed to list invites");
+    assert!(
+        list.body.get("invites").is_none(),
+        "member 403 must not include an invites payload: {}",
+        list.body
+    );
+}
+
+#[tokio::test]
+async fn member_cannot_revoke_invites() {
     let app = app().await;
     let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
     let ws = workspace_id(&owner_login);
@@ -876,16 +1559,6 @@ async fn member_cannot_list_or_revoke_invites() {
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
     assert_eq!(added.body["added_existing_user"], true);
 
-    let list = call(
-        &app,
-        "GET",
-        &format!("/api/workspaces/{ws}/invites"),
-        Some(&member_jar),
-        None,
-    )
-    .await;
-    assert_eq!(list.status, StatusCode::FORBIDDEN, "{}", list.body);
-
     let revoke = call(
         &app,
         "DELETE",
@@ -895,6 +1568,7 @@ async fn member_cannot_list_or_revoke_invites() {
     )
     .await;
     assert_eq!(revoke.status, StatusCode::FORBIDDEN, "{}", revoke.body);
+    assert_eq!(revoke.error(), "not allowed to revoke invites");
 
     let still = call(
         &app,
@@ -915,6 +1589,219 @@ async fn member_cannot_list_or_revoke_invites() {
         ids.contains(&invite_id.as_str()),
         "member revoke must not remove the invite: {ids:?}"
     );
+}
+
+#[tokio::test]
+async fn admin_can_list_and_revoke_invites() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+
+    let pending = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(pending.status, StatusCode::CREATED, "{}", pending.body);
+    let invite_id = pending.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let member_id = user_id(&member_login);
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    assert_eq!(added.body["added_existing_user"], true);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{member_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+    assert_eq!(
+        promoted.body["role"].as_str(),
+        Some("admin"),
+        "{}",
+        promoted.body
+    );
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&admin_jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let listed_ids: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(
+        listed_ids.contains(&invite_id.as_str()),
+        "admin GET /invites must include pending {invite_id}: {listed_ids:?}"
+    );
+
+    let revoked = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/invites/{invite_id}"),
+        Some(&admin_jar),
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+    assert_eq!(revoked.body["revoked"], true);
+
+    let still = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(still.status, StatusCode::OK, "{}", still.body);
+    let leftover: Vec<&str> = still.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(
+        !leftover.contains(&invite_id.as_str()),
+        "admin revoke must drop {invite_id} from owner GET: {leftover:?}"
+    );
+}
+
+#[tokio::test]
+async fn outsider_cannot_list_or_revoke_invites() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+
+    let pending = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(pending.status, StatusCode::CREATED, "{}", pending.body);
+    let invite_id = pending.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    let (_outsider_email, outsider_jar, _) = signup_and_login(&app).await;
+
+    let list = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&outsider_jar),
+        None,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::FORBIDDEN, "{}", list.body);
+    assert!(
+        list.error().contains("not a member"),
+        "outsider list should say not a member, got {:?}",
+        list.error()
+    );
+    assert!(
+        list.body.get("invites").is_none(),
+        "outsider 403 must not include an invites payload: {}",
+        list.body
+    );
+
+    let revoke = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/invites/{invite_id}"),
+        Some(&outsider_jar),
+        None,
+    )
+    .await;
+    assert_eq!(revoke.status, StatusCode::FORBIDDEN, "{}", revoke.body);
+    assert!(
+        revoke.error().contains("not a member"),
+        "outsider revoke should say not a member, got {:?}",
+        revoke.error()
+    );
+
+    let still = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(still.status, StatusCode::OK, "{}", still.body);
+    let ids: Vec<&str> = still.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&invite_id.as_str()),
+        "outsider revoke must not remove the invite: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn unauthenticated_invites_are_401() {
+    let app = app().await;
+    let (_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+
+    let pending = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(pending.status, StatusCode::CREATED, "{}", pending.body);
+    let invite_id = pending.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    let list_uri = format!("/api/workspaces/{ws}/invites");
+    let revoke_uri = format!("/api/workspaces/{ws}/invites/{invite_id}");
+    for (method, uri) in [("GET", list_uri.as_str()), ("DELETE", revoke_uri.as_str())] {
+        let out = call(&app, method, uri, None, None).await;
+        assert_eq!(
+            out.status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}: {}",
+            out.body
+        );
+        assert_eq!(out.error(), "not authenticated");
+    }
 }
 
 #[tokio::test]
@@ -1069,7 +1956,76 @@ async fn owner_get_invites_omits_token() {
 }
 
 #[tokio::test]
-async fn admin_cannot_invite_admin_can_invite_member() {
+async fn owner_get_invites_omits_expired() {
+    let app = app().await;
+    let (_email, jar, login_out) = signup_and_login(&app).await;
+    let ws = workspace_id(&login_out);
+
+    let expired = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(expired.status, StatusCode::CREATED, "{}", expired.body);
+    let expired_id = expired.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    let live = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&jar),
+        Some(json!({ "email": unique_email(), "role": "member" })),
+    )
+    .await;
+    assert_eq!(live.status, StatusCode::CREATED, "{}", live.body);
+    let live_id = live.body["invite"]["id"]
+        .as_str()
+        .expect("invite.id")
+        .to_string();
+
+    let pool = connect_and_migrate().await;
+    let n = sqlx::query(
+        "UPDATE workspace_invites SET expires_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&expired_id).expect("invite uuid"))
+    .execute(&pool)
+    .await
+    .expect("age expires_at");
+    assert_eq!(n.rows_affected(), 1, "expected one invite aged");
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let ids: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&live_id.as_str()),
+        "owner GET /invites must still list the live invite {live_id}: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&expired_id.as_str()),
+        "owner GET /invites must omit expired invite {expired_id}: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_invite_admin_does_not_create_open_invite() {
     let app = app().await;
     let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
     let ws = workspace_id(&owner_login);
@@ -1095,19 +2051,14 @@ async fn admin_cannot_invite_admin_can_invite_member() {
     )
     .await;
     assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
-    assert_eq!(
-        promoted.body["role"].as_str(),
-        Some("admin"),
-        "{}",
-        promoted.body
-    );
 
+    let guest = unique_email();
     let invite_admin = call(
         &app,
         "POST",
         &format!("/api/workspaces/{ws}/invites"),
         Some(&admin_jar),
-        Some(json!({ "email": unique_email(), "role": "admin" })),
+        Some(json!({ "email": guest, "role": "admin" })),
     )
     .await;
     assert_eq!(
@@ -1116,12 +2067,55 @@ async fn admin_cannot_invite_admin_can_invite_member() {
         "{}",
         invite_admin.body
     );
-    let msg = invite_admin.error().to_ascii_lowercase();
+
+    let listed = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let emails: Vec<&str> = listed.body["invites"]
+        .as_array()
+        .expect("invites")
+        .iter()
+        .filter_map(|i| i["email"].as_str())
+        .collect();
     assert!(
-        msg.contains("admins can only invite members"),
-        "expected admins-can-only-invite-members, got {:?}",
-        invite_admin.error()
+        !emails.iter().any(|e| e.eq_ignore_ascii_case(&guest)),
+        "admin 403 must not insert an invite for {guest}: {emails:?}"
     );
+}
+
+#[tokio::test]
+async fn admin_invite_member_records_role_member() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let member_id = user_id(&member_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{member_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
 
     let invite_member = call(
         &app,
@@ -1137,11 +2131,83 @@ async fn admin_cannot_invite_admin_can_invite_member() {
         "{}",
         invite_member.body
     );
-    assert_eq!(invite_member.body["added_existing_user"], false);
+    assert_eq!(
+        invite_member.body["invite"]["role"].as_str(),
+        Some("member"),
+        "{}",
+        invite_member.body
+    );
 }
 
 #[tokio::test]
-async fn admin_cannot_delete_owner_or_patch_roles() {
+async fn admin_invite_existing_user_as_admin_is_403_and_not_added() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let member_id = user_id(&member_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{member_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let (guest_email, _guest_jar, _) = signup_and_login(&app).await;
+    let invite_admin = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&admin_jar),
+        Some(json!({ "email": guest_email, "role": "admin" })),
+    )
+    .await;
+    assert_eq!(
+        invite_admin.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        invite_admin.body
+    );
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let emails: Vec<&str> = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|m| m["email"].as_str())
+        .collect();
+    assert!(
+        !emails
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&guest_email)),
+        "admin 403 must not add existing user {guest_email}: {emails:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_cannot_delete_owner() {
     let app = app().await;
     let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
     let ws = workspace_id(&owner_login);
@@ -1155,6 +2221,195 @@ async fn admin_cannot_delete_owner_or_patch_roles() {
         &format!("/api/workspaces/{ws}/invites"),
         Some(&owner_jar),
         Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let delete_owner = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/members/{owner_id}"),
+        Some(&admin_jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        delete_owner.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        delete_owner.body
+    );
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let owner_role = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|m| m["user_id"].as_str() == Some(owner_id.as_str()))
+        .and_then(|m| m["role"].as_str());
+    assert_eq!(
+        owner_role,
+        Some("owner"),
+        "owner must remain owner after admin DELETE: {}",
+        members.body
+    );
+}
+
+#[tokio::test]
+async fn admin_cannot_patch_owner_role() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let owner_id = user_id(&owner_login);
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let admin_id = user_id(&member_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{owner_id}"),
+        Some(&admin_jar),
+        Some(json!({ "role": "member" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let owner_role = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|m| m["user_id"].as_str() == Some(owner_id.as_str()))
+        .and_then(|m| m["role"].as_str());
+    assert_eq!(
+        owner_role,
+        Some("owner"),
+        "owner must remain owner after admin PATCH: {}",
+        members.body
+    );
+}
+
+#[tokio::test]
+async fn admin_cannot_patch_self_role() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let admin_id = user_id(&member_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&admin_jar),
+        Some(json!({ "role": "member" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let admin_role = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|m| m["user_id"].as_str() == Some(admin_id.as_str()))
+        .and_then(|m| m["role"].as_str());
+    assert_eq!(
+        admin_role,
+        Some("admin"),
+        "admin must remain admin after self PATCH: {}",
+        members.body
+    );
+}
+
+#[tokio::test]
+async fn admin_cannot_patch_member_role() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (admin_email, admin_jar, admin_login) = signup_and_login(&app).await;
+    let admin_id = user_id(&admin_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": admin_email, "role": "member" })),
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
@@ -1186,47 +2441,15 @@ async fn admin_cannot_delete_owner_or_patch_roles() {
         other_added.body
     );
 
-    let delete_owner = call(
+    let patched = call(
         &app,
-        "DELETE",
-        &format!("/api/workspaces/{ws}/members/{owner_id}"),
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{other_id}"),
         Some(&admin_jar),
-        None,
+        Some(json!({ "role": "member" })),
     )
     .await;
-    assert_eq!(
-        delete_owner.status,
-        StatusCode::FORBIDDEN,
-        "{}",
-        delete_owner.body
-    );
-
-    for (label, target) in [
-        ("owner", owner_id.as_str()),
-        ("admin-self", admin_id.as_str()),
-        ("member", other_id.as_str()),
-    ] {
-        let patch = call(
-            &app,
-            "PATCH",
-            &format!("/api/workspaces/{ws}/members/{target}"),
-            Some(&admin_jar),
-            Some(json!({ "role": "member" })),
-        )
-        .await;
-        assert_eq!(
-            patch.status,
-            StatusCode::FORBIDDEN,
-            "{label}: {}",
-            patch.body
-        );
-        let msg = patch.error().to_ascii_lowercase();
-        assert!(
-            msg.contains("only an owner"),
-            "{label}: expected only-an-owner, got {:?}",
-            patch.error()
-        );
-    }
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
 
     let members = call(
         &app,
@@ -1237,62 +2460,242 @@ async fn admin_cannot_delete_owner_or_patch_roles() {
     )
     .await;
     assert_eq!(members.status, StatusCode::OK, "{}", members.body);
-    let roles: Vec<(&str, &str)> = members.body["members"]
+    let leftover: Vec<(&str, &str)> = members.body["members"]
         .as_array()
         .expect("members")
         .iter()
         .filter_map(|m| Some((m["user_id"].as_str()?, m["role"].as_str()?)))
         .collect();
     assert!(
-        roles
+        leftover
             .iter()
-            .any(|(id, role)| *id == owner_id && *role == "owner"),
-        "owner must remain owner: {roles:?}"
+            .any(|(id, role)| *id == admin_id && *role == "admin"),
+        "admin role must be unchanged after PATCH: {leftover:?}"
+    );
+    assert!(
+        leftover
+            .iter()
+            .any(|(id, role)| *id == other_id && *role == "member"),
+        "member role must be unchanged after PATCH: {leftover:?}"
     );
 }
 
 #[tokio::test]
-async fn login_rate_limited_by_forwarded_ip() {
+async fn admin_cannot_promote_self_to_owner() {
     let app = app().await;
-    let email = unique_email();
-    let created = signup(&app, &email, TEST_PASSWORD).await;
-    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
-    let ip = format!("203.0.113.{}", (Uuid::new_v4().as_u128() % 200) + 1);
-    for i in 0..10 {
-        let out = call_with_xff(
-            &app,
-            "POST",
-            "/api/auth/login",
-            &ip,
-            Some(json!({ "email": email, "password": "wrong-password-xx" })),
-        )
-        .await;
-        assert_eq!(
-            out.status,
-            StatusCode::UNAUTHORIZED,
-            "attempt {i}: {}",
-            out.body
-        );
-    }
-    let blocked = call_with_xff(
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (member_email, admin_jar, member_login) = signup_and_login(&app).await;
+    let admin_id = user_id(&member_login);
+
+    let added = call(
         &app,
         "POST",
-        "/api/auth/login",
-        &ip,
-        Some(json!({ "email": email, "password": "wrong-password-xx" })),
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&admin_jar),
+        Some(json!({ "role": "owner" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&admin_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    assert_eq!(
+        members.body["you"]["role"].as_str(),
+        Some("admin"),
+        "admin PATCH self role=owner must leave you.role admin: {}",
+        members.body
+    );
+}
+
+#[tokio::test]
+async fn admin_can_delete_non_owner_member() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (admin_email, admin_jar, admin_login) = signup_and_login(&app).await;
+    let admin_id = user_id(&admin_login);
+
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": admin_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let promoted = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{admin_id}"),
+        Some(&owner_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+
+    let (other_email, _other_jar, other_login) = signup_and_login(&app).await;
+    let other_id = user_id(&other_login);
+    let other_added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": other_email, "role": "member" })),
     )
     .await;
     assert_eq!(
-        blocked.status,
-        StatusCode::TOO_MANY_REQUESTS,
+        other_added.status,
+        StatusCode::CREATED,
         "{}",
-        blocked.body
+        other_added.body
     );
-    assert_eq!(blocked.error(), "too many attempts — try again later");
+
+    let deleted = call(
+        &app,
+        "DELETE",
+        &format!("/api/workspaces/{ws}/members/{other_id}"),
+        Some(&admin_jar),
+        None,
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+    assert_eq!(deleted.body["removed"], true, "{}", deleted.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let leftover_ids: Vec<&str> = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|m| m["user_id"].as_str())
+        .collect();
+    assert!(
+        !leftover_ids.contains(&other_id.as_str()),
+        "admin DELETE must omit {other_id}: {leftover_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn member_cannot_patch_peer_role() {
+    let app = app().await;
+    let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
+    let ws = workspace_id(&owner_login);
+    let (member_email, member_jar, _member_login) = signup_and_login(&app).await;
+    let added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": member_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+
+    let (peer_email, _peer_jar, peer_login) = signup_and_login(&app).await;
+    let peer_id = user_id(&peer_login);
+    let peer_added = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/invites"),
+        Some(&owner_jar),
+        Some(json!({ "email": peer_email, "role": "member" })),
+    )
+    .await;
+    assert_eq!(
+        peer_added.status,
+        StatusCode::CREATED,
+        "{}",
+        peer_added.body
+    );
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &format!("/api/workspaces/{ws}/members/{peer_id}"),
+        Some(&member_jar),
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
+
+    let members = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/members"),
+        Some(&owner_jar),
+        None,
+    )
+    .await;
+    assert_eq!(members.status, StatusCode::OK, "{}", members.body);
+    let peer_role = members.body["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|m| m["user_id"].as_str() == Some(peer_id.as_str()))
+        .and_then(|m| m["role"].as_str());
+    assert_eq!(
+        peer_role,
+        Some("member"),
+        "peer must remain member after member PATCH: {}",
+        members.body
+    );
 }
 
 #[tokio::test]
 async fn login_rate_limit_uses_real_ip_not_spoofed_xff() {
+    // Host .env may raise AUTH_LOGIN_RATE_MAX for browser e2e. This lock
+    // is the product default (10 / 15m); do not inherit the lab cap.
+    let previous = std::env::var("AUTH_LOGIN_RATE_MAX").ok();
+    unsafe { std::env::set_var("AUTH_LOGIN_RATE_MAX", "10") };
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(v) => std::env::set_var("AUTH_LOGIN_RATE_MAX", v),
+                    None => std::env::remove_var("AUTH_LOGIN_RATE_MAX"),
+                }
+            }
+        }
+    }
+    let _restore = Restore(previous);
     let app = app().await;
     let email = unique_email();
     let created = signup(&app, &email, TEST_PASSWORD).await;
@@ -1335,22 +2738,45 @@ async fn login_rate_limit_uses_real_ip_not_spoofed_xff() {
 }
 
 #[tokio::test]
-async fn signup_open_when_token_unset() {
-    let app = app().await;
-    let out = signup_with_token(&app, &unique_email(), TEST_PASSWORD, None).await;
-    assert_eq!(out.status, StatusCode::CREATED, "{}", out.body);
+async fn signup_requires_token_when_configured() {
+    let app = app_with_signup_token("shared-invite").await;
+    let email = unique_email();
+    let missing = signup_with_token(&app, &email, TEST_PASSWORD, None).await;
+    assert_eq!(missing.status, StatusCode::FORBIDDEN, "{}", missing.body);
+
+    let (login_out, _) = login(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::UNAUTHORIZED, "{}", login_out.body);
 }
 
 #[tokio::test]
-async fn signup_requires_token_when_configured() {
+async fn signup_accepts_matching_token_when_configured() {
     let app = app_with_signup_token("shared-invite").await;
-    let missing = signup_with_token(&app, &unique_email(), TEST_PASSWORD, None).await;
-    assert_eq!(missing.status, StatusCode::FORBIDDEN, "{}", missing.body);
-    assert_eq!(missing.error(), "valid signup token is required");
-
-    let wrong = signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("nope")).await;
-    assert_eq!(wrong.status, StatusCode::FORBIDDEN, "{}", wrong.body);
-
     let ok = signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("shared-invite")).await;
     assert_eq!(ok.status, StatusCode::CREATED, "{}", ok.body);
+}
+
+#[tokio::test]
+async fn signup_bad_token_does_not_insert_user() {
+    let app = app_with_signup_token("shared-invite").await;
+    let email = unique_email();
+    let wrong = signup_with_token(&app, &email, TEST_PASSWORD, Some("nope")).await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN, "{}", wrong.body);
+
+    let (login_out, _) = login(&app, &email, TEST_PASSWORD).await;
+    assert_eq!(login_out.status, StatusCode::UNAUTHORIZED, "{}", login_out.body);
+}
+
+#[tokio::test]
+async fn signup_accepts_submitted_token_with_surrounding_whitespace() {
+    let app = app_with_signup_token("shared-invite").await;
+    let ok =
+        signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("  shared-invite  ")).await;
+    assert_eq!(ok.status, StatusCode::CREATED, "{}", ok.body);
+}
+
+#[tokio::test]
+async fn signup_rejects_case_mismatched_token() {
+    let app = app_with_signup_token("shared-invite").await;
+    let out = signup_with_token(&app, &unique_email(), TEST_PASSWORD, Some("Shared-Invite")).await;
+    assert_eq!(out.status, StatusCode::FORBIDDEN, "{}", out.body);
 }

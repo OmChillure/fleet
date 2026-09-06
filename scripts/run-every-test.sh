@@ -159,7 +159,8 @@ run_step unify-sku-contract \
 run_step host-dx-build host_dx_build
 run_step stack-identity python3 "${ROOT}/tests/browser/stack_identity.py"
 run_step cargo-workspace-lib \
-  cargo test --workspace --lib --exclude fleet-ui --locked
+  env -u AUTH_SIGNUP_RATE_MAX -u AUTH_LOGIN_RATE_MAX -u AUTH_REFRESH_RATE_MAX \
+    cargo test --workspace --lib --exclude fleet-ui --locked
 run_step cargo-sandbox-driver \
   cargo test -p fleet-sandbox-driver --locked
 run_step cargo-driver \
@@ -169,13 +170,18 @@ run_step cargo-driver-acp-grok \
 run_step orch-integration \
   cargo test -p fleet-orchestrator --locked \
     --test store_integration --test tick_integration --test api_integration \
-    --test e2e_matrix --test process_sandbox
+    --test e2e_matrix --test host_pool_spawn --test host_update_tick \
+    --test assignable_runner --test git_config_patch --test host_picker_product \
+    -- --test-threads=1
 run_step fleet-auth-tests \
-  cargo test -p fleet-auth --locked --tests
+  env -u AUTH_SIGNUP_RATE_MAX -u AUTH_LOGIN_RATE_MAX -u AUTH_REFRESH_RATE_MAX \
+    cargo test -p fleet-auth --locked --tests
 run_step fleet-server-tests \
-  cargo test -p fleet-server --locked --tests
+  env -u AUTH_SIGNUP_RATE_MAX -u AUTH_LOGIN_RATE_MAX -u AUTH_REFRESH_RATE_MAX \
+    cargo test -p fleet-server --locked --tests
 run_step fleet-db-tests \
-  cargo test -p fleet-db --locked --tests
+  env -u AUTH_SIGNUP_RATE_MAX -u AUTH_LOGIN_RATE_MAX -u AUTH_REFRESH_RATE_MAX \
+    cargo test -p fleet-db --locked --tests
 run_step record-demo-contract \
   python3 -m unittest tests.browser.test_record_demo_contract -q
 run_step human-surface-contract \

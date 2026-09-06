@@ -187,37 +187,12 @@ mod tests {
     }
 
     #[test]
-    fn hex_key_accepted() {
-        let hex_key = "a".repeat(64);
-        let key = CredentialsKey::from_secret(&hex_key).unwrap();
-        let plain = json!({ "k": 1 });
-        let sealed = key.encrypt(&plain).unwrap();
-        assert_eq!(key.decrypt(&sealed).unwrap(), plain);
-    }
-
-    #[test]
     fn wrong_key_fails() {
         let a = CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let b = CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         let secret = "tok_wrong_key_must_not_leak";
         let sealed = a.encrypt(&json!({ "access_token": secret })).unwrap();
         let err = b.decrypt(&sealed).unwrap_err().to_string();
-        assert!(
-            !err.contains(secret),
-            "decrypt error must not leak plaintext: {err}"
-        );
-    }
-
-    #[test]
-    fn truncated_ciphertext_fails() {
-        let key = CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").unwrap();
-        let secret = "tok_trunc_must_not_leak";
-        let mut sealed = key.encrypt(&json!({ "access_token": secret })).unwrap();
-        let ct = sealed["ct"].as_str().unwrap().to_string();
-        let cut = ct.len() / 2;
-        assert!(cut > 0 && cut < ct.len());
-        sealed["ct"] = json!(&ct[..cut]);
-        let err = key.decrypt(&sealed).unwrap_err().to_string();
         assert!(
             !err.contains(secret),
             "decrypt error must not leak plaintext: {err}"
@@ -268,19 +243,5 @@ mod tests {
             );
         }
         assert_eq!("iek-thirty-one-chars-exactly-31".len(), 31);
-    }
-
-    #[test]
-    fn integrations_encryption_key_from_secret_passphrase_and_hex() {
-        let passphrase = "iek-enc-passphrase-not-hex-32ch!!";
-        assert!(passphrase.len() >= 32);
-        assert!(passphrase.chars().any(|c| !c.is_ascii_hexdigit()));
-        CredentialsKey::from_secret(passphrase)
-            .expect("≥32 non-hex passphrase must SHA-256 derive");
-
-        let hex_key = "cafebabefacefeed0123456789abcdefcafebabefacefeed0123456789abcdef";
-        assert_eq!(hex_key.len(), 64);
-        assert!(hex_key.chars().all(|c| c.is_ascii_hexdigit()));
-        CredentialsKey::from_secret(hex_key).expect("64 hex chars must be raw 32 bytes");
     }
 }

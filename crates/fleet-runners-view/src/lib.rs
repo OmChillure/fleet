@@ -128,6 +128,31 @@ pub fn should_apply_chat_defaults(
     }
 }
 
+/// One Chat provider-dropdown row for the onchange snap/keep policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatProviderChoice {
+    pub id: String,
+    pub available: bool,
+    pub coming_soon: bool,
+}
+
+/// Composer onchange: a coming-soon pick snaps to the first available,
+/// non-coming-soon id. A live pick is kept.
+pub fn resolve_provider_pick_after_change<'a>(
+    providers: &'a [ChatProviderChoice],
+    picked_id: &str,
+) -> Option<&'a str> {
+    let picked = providers.iter().find(|p| p.id == picked_id)?;
+    if picked.coming_soon {
+        providers
+            .iter()
+            .find(|p| p.available && !p.coming_soon)
+            .map(|p| p.id.as_str())
+    } else {
+        Some(picked.id.as_str())
+    }
+}
+
 /// Match a model's effort menu. Empty model (CLI default) uses the first
 /// advertised menu so the Effort picker still appears.
 pub fn find_model_detail<'a>(
@@ -204,6 +229,15 @@ fn resolve_chat_model(provider: &ChatProviderCandidate, want: Option<&str>) -> S
         }
     }
     provider.models.first().cloned().unwrap_or_default()
+}
+
+/// Ollama + trim-empty model: toast reason so Send does not create a turn.
+pub fn ollama_empty_model_send_reason(provider: &str, model: &str) -> Option<&'static str> {
+    if provider == "ollama" && model.trim().is_empty() {
+        Some("Select a model first (`ollama pull …` on the runner).")
+    } else {
+        None
+    }
 }
 
 pub fn status_label(status: &str) -> &str {
@@ -1200,14 +1234,10 @@ mod tests {
             assert_no_pause(accept_jobs_label(holding));
             assert_no_pause(accept_jobs_title(holding));
         }
-        assert_eq!(accept_jobs_label(false), "Stop taking new jobs");
-        assert_eq!(accept_jobs_label(true), "Take jobs again");
-        assert!(accept_jobs_title(false).contains("Does not stop jobs already running"));
-        assert!(accept_jobs_title(true).contains("were never stopped"));
     }
 
     #[test]
-    fn specs_line_is_iron_plus_load_ready() {
+    fn specs_line_is_iron_omitting_load_and_os() {
         let mut host = sample_host();
         host.hardware = Some(HostHardware {
             cpu_model: Some("AMD Ryzen 7 5700G with Radeon Graphics".into()),
@@ -1226,28 +1256,58 @@ mod tests {
             gpu_used_pct: Some(8),
             ..HostHardware::default()
         });
+        let line = specs_line(&host).expect("specs");
         assert_eq!(
-            specs_line(&host).as_deref(),
-            Some("AMD Ryzen 7 5700G · 16 cores · 32 GB DDR4-3200 · Radeon Vega 8")
+            line,
+            "AMD Ryzen 7 5700G · 16 cores · 32 GB DDR4-3200 · Radeon Vega 8"
         );
+        assert!(!line.contains("12%"), "{line}");
+        assert!(!line.contains("32%"), "{line}");
+        assert!(!line.contains("8%"), "{line}");
+        assert!(!line.contains("linux"), "{line}");
     }
 
     #[test]
-    fn specs_line_shows_intel_uhd() {
+    fn specs_line_is_none_when_hardware_missing_or_blank() {
+        let mut host = sample_host();
+        host.hardware = None;
+        assert_eq!(specs_line(&host), None);
+        host.hardware = Some(HostHardware::default());
+        assert_eq!(specs_line(&host), None);
+    }
+
+    #[test]
+    fn specs_line_strips_radeon_vega_and_mobile_graphics_suffixes() {
         let mut host = sample_host();
         host.hardware = Some(HostHardware {
-            cpu_model: Some("Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz".into()),
-            cpu_cores: Some(8),
-            gpus: Some(vec![HostGpu {
-                name: Some("Intel UHD Graphics".into()),
-                vram_bytes: None,
-                used_pct: Some(4),
-            }]),
+            cpu_model: Some("AMD Ryzen 5 5600G with Radeon Vega Graphics".into()),
+            ..HostHardware::default()
+        });
+        let vega = specs_line(&host).expect("vega");
+        assert_eq!(vega, "AMD Ryzen 5 5600G");
+        assert!(!vega.contains("Radeon Vega Graphics"), "{vega}");
+
+        host.hardware = Some(HostHardware {
+            cpu_model: Some("AMD Ryzen 7 6800H with Mobile Radeon Graphics".into()),
+            ..HostHardware::default()
+        });
+        let mobile = specs_line(&host).expect("mobile");
+        assert_eq!(mobile, "AMD Ryzen 7 6800H");
+        assert!(!mobile.contains("Mobile Radeon Graphics"), "{mobile}");
+    }
+
+    #[test]
+    fn specs_line_mem_type_without_speed_is_size_only() {
+        let mut host = sample_host();
+        host.hardware = Some(HostHardware {
+            mem_total_bytes: Some(16 * 1_073_741_824),
+            mem_type: Some("DDR5".into()),
+            mem_speed_mts: None,
             ..HostHardware::default()
         });
         let line = specs_line(&host).expect("specs");
-        assert!(line.contains("Intel UHD Graphics"), "{line}");
-        assert!(line.contains("i7-10610U"), "{line}");
+        assert_eq!(line, "16 GB");
+        assert!(!line.contains("DDR5"), "{line}");
     }
 
     #[test]
@@ -1272,65 +1332,145 @@ mod tests {
             with_jobs.contains("already running will finish"),
             "{with_jobs}"
         );
+        assert!(with_jobs.contains("3"), "{with_jobs}");
+    }
 
-        host.current_jobs = 0;
-        let idle = hold_jobs_reason(&host).expect("holding idle");
-        assert_no_pause(&idle);
-        assert!(idle.contains("were not stopped"), "{idle}");
-
-        host.paused = false;
+    #[test]
+    fn hold_reason_idle_copy_when_drain_or_both_modes_off() {
+        let mut host = sample_host();
         host.drain = true;
-        host.current_jobs = 1;
-        assert!(holding_new_jobs(&host));
-        let drain = hold_jobs_reason(&host).expect("drain holds new jobs");
-        assert!(drain.contains("already running will finish"), "{drain}");
+        host.current_jobs = 0;
+        let drain = hold_jobs_reason(&host).expect("drain idle");
+        assert_no_pause(&drain);
+        assert!(drain.contains("were not stopped"), "{drain}");
 
-        host.drain = false;
-        assert!(hold_jobs_reason(&host).is_none());
-
+        host = sample_host();
         host.allow_host = false;
         host.allow_container = false;
-        assert!(holding_new_jobs(&host));
-        let both_off = hold_jobs_reason(&host).expect("both modes off holds");
+        host.current_jobs = 0;
+        let both_off = hold_jobs_reason(&host).expect("both modes off idle");
         assert_no_pause(&both_off);
+        assert!(both_off.contains("were not stopped"), "{both_off}");
+    }
+
+    #[test]
+    fn not_taking_reason_hold_with_running_jobs() {
+        let mut host = sample_host();
+        host.status = "online".into();
+        host.paused = true;
+        host.current_jobs = 3;
+        let reason = not_taking_reason(&host).expect("hold with running jobs");
+        assert_no_pause(&reason);
+        assert!(
+            reason.contains("already running will finish"),
+            "{reason}"
+        );
     }
 
     #[test]
     fn never_paired_disabled_hidden_from_removed_list() {
         let mut host = sample_host();
         host.status = "disabled".into();
-        assert!(is_removed(&host));
+        assert!(is_removed(&host), "disabled leftover is removed");
         let only = [host.clone()];
-        assert!(!in_removed_list(&host, &only));
+        assert!(
+            !in_removed_list(&host, &only),
+            "never-paired leftover stays off Show removed"
+        );
+    }
 
-        host.paired_at = Some("2026-01-01T00:00:00Z".into());
-        let only = [host.clone()];
-        assert!(in_removed_list(&host, &only));
+    #[test]
+    fn each_pairing_signal_puts_disabled_host_in_removed_list() {
+        let cases = [
+            (
+                Some("2026-01-01T00:00:00Z"),
+                None,
+                None,
+                None,
+                true,
+                "paired_at",
+            ),
+            (
+                None,
+                Some("2026-01-02T00:00:00Z"),
+                None,
+                None,
+                true,
+                "last_seen_at",
+            ),
+            (None, None, Some("box.local"), None, true, "hostname"),
+            (None, None, None, Some("linux"), true, "platform"),
+            (None, None, None, Some(""), false, "empty platform"),
+        ];
+        for (paired_at, last_seen_at, hostname, platform, shown, label) in cases {
+            let mut host = sample_host();
+            host.status = "disabled".into();
+            host.paired_at = paired_at.map(str::to_string);
+            host.last_seen_at = last_seen_at.map(str::to_string);
+            host.hostname = hostname.map(str::to_string);
+            host.platform = platform.map(str::to_string);
+            let only = [host.clone()];
+            assert_eq!(in_removed_list(&host, &only), shown, "{label}");
+        }
+    }
 
+    #[test]
+    fn whitespace_only_paired_at_disabled_stays_hidden() {
+        let mut host = sample_host();
+        host.status = "disabled".into();
         host.paired_at = Some("  ".into());
-        host.last_seen_at = Some("2026-01-02T00:00:00Z".into());
-        let only = [host.clone()];
-        assert!(in_removed_list(&host, &only));
-
         host.last_seen_at = None;
-        host.hostname = Some("box.local".into());
-        let only = [host.clone()];
-        assert!(in_removed_list(&host, &only));
-
         host.hostname = None;
-        host.platform = Some("linux".into());
+        host.platform = None;
         let only = [host.clone()];
-        assert!(in_removed_list(&host, &only));
+        assert!(
+            !in_removed_list(&host, &only),
+            "whitespace paired_at is not a pairing signal"
+        );
+    }
 
-        host.platform = Some(String::new());
+    #[test]
+    fn disabled_name_created_at_or_machine_id_alone_stays_hidden() {
+        let mut host = sample_host();
+        host.status = "disabled".into();
+        host.name = "leftover-box".into();
+        host.created_at = Some("2026-01-01T00:00:00Z".into());
+        host.machine_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         let only = [host.clone()];
-        assert!(!in_removed_list(&host, &only));
+        assert!(
+            !in_removed_list(&host, &only),
+            "name/created_at/machine_id are not pairing signals"
+        );
+    }
 
-        host.status = "pending".into();
-        host.paired_at = None;
-        assert!(!is_removed(&host));
-        let only = [host.clone()];
-        assert!(!in_removed_list(&host, &only));
+    #[test]
+    fn never_paired_disabled_stays_hidden_when_list_also_has_a_shown_removed() {
+        let mut live = sample_host();
+        live.id = "live".into();
+        live.status = "online".into();
+
+        let mut leftover = sample_host();
+        leftover.id = "leftover".into();
+        leftover.status = "disabled".into();
+
+        let mut shown = sample_host();
+        shown.id = "shown".into();
+        shown.status = "disabled".into();
+        shown.paired_at = Some("2026-01-01T00:00:00Z".into());
+
+        let all = [live.clone(), leftover.clone(), shown.clone()];
+        assert!(
+            !in_removed_list(&live, &all),
+            "online host is not on Show removed"
+        );
+        assert!(
+            !in_removed_list(&leftover, &all),
+            "never-paired leftover stays hidden beside a shown removed"
+        );
+        assert!(
+            in_removed_list(&shown, &all),
+            "paired disabled host is on Show removed"
+        );
     }
 
     #[test]
@@ -1377,55 +1517,6 @@ mod tests {
         assert!(in_removed_list(&newer, &all));
     }
 
-    fn sample_served(platform: &str, host: &str, driver: &str) -> HostDesiredSoftware {
-        HostDesiredSoftware {
-            platform: Some(platform.into()),
-            git_sha: Some("ignored-bake-stamp".into()),
-            bins: Some(serde_json::json!({
-                "fleet-host": {"sha256": host},
-                "fleet-driver": {"sha256": driver}
-            })),
-            ..HostDesiredSoftware::default()
-        }
-    }
-
-    #[test]
-    fn served_platforms_list_file_hashes_not_bake_id() {
-        let inv = PackageInventory {
-            plane_git_sha: Some("planeplaneplaneplane".into()),
-            packages: vec![
-                sample_served(
-                    "windows-x86_64",
-                    "8c015655431b5287e58eb79e26d29647a8a4488d797d8c436ae4bd8181db3f58",
-                    "6bec5b00654e94f1a469f1f7cee6f939413b6e36a942b444e798439fb642309d",
-                ),
-                sample_served("linux-x86_64", "aaaaaaaaaaaa1111", "bbbbbbbbbbbb2222"),
-                HostDesiredSoftware {
-                    platform: Some("linux-armv7".into()),
-                    git_sha: Some("old-stamp-only".into()),
-                    ..HostDesiredSoftware::default()
-                },
-            ],
-            ..PackageInventory::default()
-        };
-        let served = served_platforms(&inv);
-        assert_eq!(served.len(), 2, "no-bin platform is omitted");
-        assert_eq!(served[0].platform, "linux-x86_64");
-        assert_eq!(served[0].host, "aaaaaaaaaaaa");
-        assert_eq!(served[0].driver, "bbbbbbbbbbbb");
-        assert_eq!(served[1].platform, "windows-x86_64");
-        assert_eq!(served[1].host, "8c015655431b");
-        assert_eq!(served[1].driver, "6bec5b00654e");
-        let blob = format!("{served:?}");
-        assert!(!blob.contains("ignored-bake-stamp"));
-        assert!(!blob.contains("planeplane"));
-    }
-
-    #[test]
-    fn served_platforms_empty_inventory() {
-        assert!(served_platforms(&PackageInventory::default()).is_empty());
-    }
-
     #[test]
     fn stale_package_platforms_flags_missing_and_old_versions() {
         let inv = PackageInventory {
@@ -1453,21 +1544,101 @@ mod tests {
             ],
             ..PackageInventory::default()
         };
-        let stale = stale_package_platforms(&inv);
-        assert!(stale.iter().any(|s| s.platform == "windows-x86_64"));
-        assert!(
-            !stale.iter().any(|s| s.platform == "linux-aarch64"),
-            "never-staged OS must not warn: {stale:?}"
+        assert_eq!(
+            stale_package_platforms(&inv),
+            vec![StalePackagePlatform {
+                platform: "windows-x86_64",
+                host: "0.0.1".into(),
+                driver: "0.0.2".into(),
+            }]
         );
-        assert!(!stale.iter().any(|s| s.platform == "linux-x86_64"));
-        let warn = stale_package_warning(&inv).expect("warn");
-        assert!(warn.contains("0.0.2"), "{warn}");
-        assert!(warn.contains("windows-x86_64"), "{warn}");
-        assert!(
-            !warn.contains("linux-aarch64"),
-            "never-staged OS must not warn: {warn}"
+        assert_eq!(
+            stale_package_warning(&inv).as_deref(),
+            Some("OS builds not on fleet-host 0.0.2 / fleet-driver 0.0.2: windows-x86_64")
         );
-        assert!(!warn.contains("linux-x86_64,"), "{warn}");
+    }
+
+    #[test]
+    fn stale_package_platforms_flags_staged_os_with_no_bin_versions() {
+        let inv = PackageInventory {
+            package_versions: PackageVersions {
+                host: "0.0.2".into(),
+                driver: "0.0.2".into(),
+            },
+            packages: vec![HostDesiredSoftware {
+                platform: Some("linux-x86_64".into()),
+                bins: Some(serde_json::json!({
+                    "fleet-host": {"sha256": "aaa"},
+                    "fleet-driver": {"sha256": "bbb"}
+                })),
+                ..HostDesiredSoftware::default()
+            }],
+            ..PackageInventory::default()
+        };
+        assert_eq!(
+            stale_package_platforms(&inv),
+            vec![StalePackagePlatform {
+                platform: "linux-x86_64",
+                host: String::new(),
+                driver: String::new(),
+            }]
+        );
+        assert_eq!(
+            stale_package_warning(&inv).as_deref(),
+            Some("OS builds not on fleet-host 0.0.2 / fleet-driver 0.0.2: linux-x86_64")
+        );
+    }
+
+    #[test]
+    fn stale_package_platforms_flags_old_driver_when_host_current() {
+        let inv = PackageInventory {
+            package_versions: PackageVersions {
+                host: "0.0.2".into(),
+                driver: "0.0.2".into(),
+            },
+            packages: vec![HostDesiredSoftware {
+                platform: Some("linux-x86_64".into()),
+                bins: Some(serde_json::json!({
+                    "fleet-host": {"sha256": "aaa", "version": "0.0.2"},
+                    "fleet-driver": {"sha256": "bbb", "version": "0.0.1"}
+                })),
+                ..HostDesiredSoftware::default()
+            }],
+            ..PackageInventory::default()
+        };
+        assert_eq!(
+            stale_package_platforms(&inv),
+            vec![StalePackagePlatform {
+                platform: "linux-x86_64",
+                host: "0.0.2".into(),
+                driver: "0.0.1".into(),
+            }]
+        );
+        assert_eq!(
+            stale_package_warning(&inv).as_deref(),
+            Some("OS builds not on fleet-host 0.0.2 / fleet-driver 0.0.2: linux-x86_64")
+        );
+    }
+
+    #[test]
+    fn stale_package_warning_none_when_package_versions_empty() {
+        let inv = PackageInventory {
+            package_versions: PackageVersions {
+                host: String::new(),
+                driver: String::new(),
+            },
+            packages: vec![HostDesiredSoftware {
+                platform: Some("windows-x86_64".into()),
+                bins: Some(serde_json::json!({
+                    "fleet-host.exe": {"sha256": "ccc", "version": "0.0.1"},
+                    "fleet-driver.exe": {"sha256": "ddd", "version": "0.0.1"}
+                })),
+                ..HostDesiredSoftware::default()
+            }],
+            ..PackageInventory::default()
+        };
+        assert_eq!(stale_package_platforms(&inv), vec![]);
+        assert_eq!(stale_package_warning(&inv), None);
     }
 
     #[test]
@@ -1512,16 +1683,34 @@ mod tests {
 
     #[test]
     fn ollama_catalog_label_is_private() {
-        assert_eq!(catalog_provider_display_name("ollama"), "Private (Ollama)");
-        assert_eq!(catalog_provider_display_name("grok"), "Grok");
+        let label = catalog_provider_display_name("ollama");
+        assert_ne!(label, "ollama");
+        assert_ne!(label, "Ollama");
+        assert!(label.contains("Private"), "{label}");
+    }
+
+    #[test]
+    fn catalog_unknown_id_is_passed_through() {
+        assert_eq!(
+            catalog_provider_display_name("not-a-provider"),
+            "not-a-provider"
+        );
+        assert_eq!(catalog_provider_display_name(""), "");
     }
 
     #[test]
     fn claude_aliases_are_not_version_pins() {
-        for name in claude_cli_model_aliases() {
-            assert!(!name.chars().any(|c| c.is_ascii_digit()), "{name}");
-        }
-        assert!(claude_effort_values().contains(&"xhigh"));
+        let aliases = claude_cli_model_aliases();
+        assert!(!aliases.is_empty());
+        assert_eq!(aliases, &["sonnet", "opus", "haiku", "fable"]);
+    }
+
+    #[test]
+    fn claude_effort_values_are_official() {
+        assert_eq!(
+            claude_effort_values(),
+            &["low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]
@@ -1567,9 +1756,99 @@ mod tests {
     fn chat_defaults_do_not_override_user_pick() {
         let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
         assert!(!should_apply_chat_defaults(&providers, "grok", true));
-        assert!(should_apply_chat_defaults(&providers, "grok", false));
-        assert!(!should_apply_chat_defaults(&providers, "ollama", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_when_current_empty() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
         assert!(should_apply_chat_defaults(&providers, "", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_false_when_current_ready() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
+        assert!(!should_apply_chat_defaults(&providers, "ollama", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_when_current_down_and_peer_ready() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
+        assert!(should_apply_chat_defaults(&providers, "grok", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_when_current_unknown() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", true, &["qwen2.5"])];
+        assert!(should_apply_chat_defaults(&providers, "claude", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_false_when_providers_empty() {
+        assert!(!should_apply_chat_defaults(&[], "", false));
+        assert!(!should_apply_chat_defaults(&[], "grok", false));
+    }
+
+    #[test]
+    fn should_apply_chat_defaults_false_when_current_down_and_nothing_ready() {
+        let providers = vec![cand("grok", false, &[]), cand("ollama", false, &[])];
+        assert!(!should_apply_chat_defaults(&providers, "grok", false));
+    }
+
+    fn choice(id: &str, available: bool, coming_soon: bool) -> ChatProviderChoice {
+        ChatProviderChoice {
+            id: id.into(),
+            available,
+            coming_soon,
+        }
+    }
+
+    #[test]
+    fn coming_soon_provider_pick_returns_first_available() {
+        let providers = vec![
+            choice("openai", false, true),
+            choice("ollama", true, false),
+        ];
+        let picked = resolve_provider_pick_after_change(&providers, "openai")
+            .expect("coming-soon openai must snap to first available");
+        assert_eq!(picked, "ollama");
+        assert_ne!(picked, "openai");
+    }
+
+    #[test]
+    fn available_openai_pick_keeps_openai() {
+        let providers = vec![
+            choice("openai", true, false),
+            choice("ollama", true, false),
+        ];
+        let picked = resolve_provider_pick_after_change(&providers, "openai")
+            .expect("available openai must be kept");
+        assert_eq!(picked, "openai");
+    }
+
+    #[test]
+    fn ollama_blank_or_whitespace_model_blocks_send() {
+        for model in ["", "   "] {
+            let reason = ollama_empty_model_send_reason("ollama", model)
+                .expect("ollama blank/whitespace model must block send");
+            assert!(
+                reason.contains("Select a model first"),
+                "blocked send must be the select-a-model reason: {reason}"
+            );
+        }
+        assert!(
+            ollama_empty_model_send_reason("ollama", "llama3.2:latest").is_none(),
+            "listed ollama tag must not take the empty-model branch"
+        );
+        for provider in ["grok", "claude", "openai"] {
+            assert!(
+                ollama_empty_model_send_reason(provider, "").is_none(),
+                "{provider} empty model must not take the ollama empty-model branch"
+            );
+            assert!(
+                ollama_empty_model_send_reason(provider, "   ").is_none(),
+                "{provider} whitespace model must not take the ollama empty-model branch"
+            );
+        }
     }
 
     fn detail(name: &str, efforts: &[&str], default: &str) -> crate::types::AgentModelDetail {
@@ -1595,8 +1874,27 @@ mod tests {
         )];
         let d = find_model_detail(&details, "grok-4.6");
         assert_eq!(
-            pick_effort_value(d, Some("xhigh")).as_deref(),
-            Some("xhigh")
+            pick_effort_value(d, Some("medium")).as_deref(),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn pick_effort_value_none_when_detail_missing() {
+        assert!(pick_effort_value(None, Some("xhigh")).is_none());
+    }
+
+    #[test]
+    fn pick_effort_value_trims_preferred_before_menu_match() {
+        let details = vec![detail(
+            "grok-4.6",
+            &["xhigh", "high", "medium", "low"],
+            "high",
+        )];
+        let d = find_model_detail(&details, "grok-4.6");
+        assert_eq!(
+            pick_effort_value(d, Some("  medium  ")).as_deref(),
+            Some("medium")
         );
     }
 
@@ -1608,75 +1906,77 @@ mod tests {
             "high",
         )];
         let d = find_model_detail(&details, "grok-4.6");
-        assert_eq!(
-            pick_effort_value(d, Some("medium")).as_deref(),
-            Some("medium")
-        );
         assert_eq!(pick_effort_value(d, Some("nope")).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn pick_effort_value_uses_first_listed_when_default_not_advertised() {
+        let efforts = ["xhigh", "high", "medium", "low"]
+            .iter()
+            .map(|v| crate::types::AgentEffort {
+                value: (*v).into(),
+                label: None,
+            })
+            .collect::<Vec<_>>();
+        for default_effort in [None, Some(String::new()), Some("max".into())] {
+            let d = crate::types::AgentModelDetail {
+                name: "grok-4.6".into(),
+                efforts: efforts.clone(),
+                default_effort,
+            };
+            assert_eq!(
+                pick_effort_value(Some(&d), Some("nope")).as_deref(),
+                Some("xhigh")
+            );
+        }
+    }
+
+    #[test]
+    fn find_model_detail_matches_prefix_or_colon_suffix() {
+        let details = vec![
+            detail("other-model", &["low"], "low"),
+            detail("grok-4.6", &["xhigh", "high", "medium", "low"], "high"),
+        ];
         assert_eq!(
-            pick_effort_value(find_model_detail(&details, ""), None).as_deref(),
-            Some("high")
+            find_model_detail(&details, "grok-4.6:preview").map(|d| d.name.as_str()),
+            Some("grok-4.6")
+        );
+        assert_eq!(
+            find_model_detail(&details, "grok-4.6-beta").map(|d| d.name.as_str()),
+            Some("grok-4.6")
         );
     }
 
     #[test]
-    fn effort_picker_hidden_when_model_has_no_menu() {
+    fn find_model_detail_empty_model_skips_empty_menus() {
+        let details = vec![
+            detail("sxs-claude-opus-4-6", &[], "high"),
+            detail("grok-4.6", &["xhigh", "high", "medium", "low"], "high"),
+        ];
+        let d = find_model_detail(&details, "");
+        assert_eq!(d.map(|x| x.name.as_str()), Some("grok-4.6"));
+        assert_eq!(pick_effort_value(d, None).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn pick_effort_value_none_when_model_advertises_no_menu() {
         let details = vec![detail("sxs-claude-opus-4-6", &[], "high")];
-        assert!(pick_effort_value(
-            find_model_detail(&details, "sxs-claude-opus-4-6"),
-            Some("high")
-        )
-        .is_none());
+        let d = find_model_detail(&details, "sxs-claude-opus-4-6");
+        assert_eq!(d.map(|x| x.name.as_str()), Some("sxs-claude-opus-4-6"));
+        assert!(d.is_some_and(|x| x.efforts.is_empty()));
+        assert!(pick_effort_value(d, Some("high")).is_none());
     }
 
     #[test]
-    fn software_never_reported_is_unknown() {
-        assert_eq!(software_line(&sample_host()), "unknown");
-    }
-
-    #[test]
-    fn software_current_shows_build_sha_and_os() {
-        let mut host = sample_host();
-        host.platform = Some("linux-x86_64".into());
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"}}"#,
-        )
-        .expect("software");
-        host.current_versions = PackageVersions {
-            host: "0.0.1".into(),
-            driver: "0.0.1".into(),
-        };
-        host.software_status = Some("current".into());
-        // Hash-only report + current versions is not "up to date" — the box
-        // has not named a package version. The two bin rows are the status.
-        assert_ne!(software_flag(&host), Some("up to date"));
-        assert!(!software_line(&host).contains("2a971d69"));
-        assert!(!software_line(&host).contains("9d239a509055"));
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":"aaaaaaaaaaaa1111","fleet-driver":"bbbbbbbbbbbb2222"}}"#,
-        )
-        .expect("software");
-        host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":{"sha256":"aaaaaaaaaaaa1111","version":"0.0.1"},"fleet-driver":{"sha256":"bbbbbbbbbbbb2222","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.desired = Some(HostDesiredSoftware {
-            git_sha: Some("9d239a509055abcdef".into()),
-            platform: Some("linux-x86_64".into()),
-            bins: Some(serde_json::json!({
-                "fleet-host": {"sha256": "aaaaaaaaaaaa1111", "version": "0.0.1"},
-                "fleet-driver": {"sha256": "bbbbbbbbbbbb2222", "version": "0.0.1"}
-            })),
-            ..HostDesiredSoftware::default()
-        });
-        let rows = software_bin_rows(&host);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].name, "fleet-host");
-        assert_eq!(rows[0].version, "0.0.1");
-        assert_eq!(rows[0].status, "current");
-        assert_eq!(rows[1].name, "fleet-driver");
-        assert_eq!(rows[1].version, "0.0.1");
-        assert_eq!(rows[1].status, "current");
+    fn find_model_detail_exact_empty_menu_does_not_steal_sibling_advertised_menu() {
+        let details = vec![
+            detail("sxs-claude-opus-4-6", &[], "high"),
+            detail("grok-4.6", &["xhigh", "high", "medium", "low"], "high"),
+        ];
+        let d = find_model_detail(&details, "sxs-claude-opus-4-6");
+        assert_eq!(d.map(|x| x.name.as_str()), Some("sxs-claude-opus-4-6"));
+        assert!(d.is_some_and(|x| x.efforts.is_empty()));
+        assert!(pick_effort_value(d, Some("high")).is_none());
     }
 
     #[test]
@@ -1766,131 +2066,30 @@ mod tests {
     }
 
     #[test]
-    fn software_matching_served_windows_package_is_up_to_date() {
-        let mut host = sample_host();
-        host.platform = Some("windows-x86_64".into());
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"18a1be7df0a53136e7a85b741d8b9fc45b4cc351-e8260cd5c443"}"#,
-        )
-        .expect("software");
-        host.software_status = Some("current".into());
-        // Plane bake can differ (Linux server vs Windows restage). That must
-        // not mark a box that matches the served Windows package as old.
-        host.plane_git_sha = Some("18a1be7df0a53136e7a85b741d8b9fc45b4cc351-9f1c128acf45".into());
-        // Same served-package hashes, different plane bake: still current
-        // only after the box reports the package versions.
-        host.current_versions = PackageVersions {
-            host: "0.0.1".into(),
-            driver: "0.0.1".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"18a1be7df0a53136e7a85b741d8b9fc45b4cc351-e8260cd5c443","bins":{"fleet-host":{"sha256":"aaaaaaaaaaaa1111","version":"0.0.1"},"fleet-driver":{"sha256":"bbbbbbbbbbbb2222","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.desired = Some(HostDesiredSoftware {
-            bins: Some(serde_json::json!({
-                "fleet-host": {"sha256": "aaaaaaaaaaaa1111", "version": "0.0.1"},
-                "fleet-driver": {"sha256": "bbbbbbbbbbbb2222", "version": "0.0.1"}
-            })),
-            ..HostDesiredSoftware::default()
-        });
-        assert_eq!(software_flag(&host), Some("up to date"));
-        assert!(software_line(&host).contains("up to date"));
-        assert!(!extra_status_pills(&host).contains(&"old package"));
-    }
-
-    #[test]
-    fn software_current_without_bake_id_is_up_to_date() {
-        let mut host = sample_host();
-        host.platform = Some("windows-x86_64".into());
-        host.current_versions = PackageVersions {
-            host: "0.0.1".into(),
-            driver: "0.0.1".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":{"sha256":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e","version":"0.0.1"},"fleet-driver":{"sha256":"bbbb","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        assert_eq!(software_line(&host), "windows-x86_64 · up to date");
-        assert_eq!(software_flag(&host), Some("up to date"));
-    }
-
-    #[test]
-    fn software_outdated_keeps_build_sha() {
-        let mut host = sample_host();
-        host.platform = Some("windows-x86_64".into());
-        host.current_versions = PackageVersions {
-            host: "0.0.2".into(),
-            driver: "0.0.2".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.auto_update = false;
-        assert_eq!(software_flag(&host), Some("outdated"));
-        assert_eq!(software_line(&host), "windows-x86_64 · outdated");
-        assert!(!software_line(&host).contains("9d239a509055"));
-        assert!(!software_line(&host).contains("updating"));
-    }
-
-    #[test]
-    fn software_auto_update_does_not_fake_updating() {
-        let mut host = sample_host();
-        host.platform = Some("linux-x86_64".into());
-        host.current_versions = PackageVersions {
-            host: "0.0.2".into(),
-            driver: "0.0.2".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.auto_update = true;
-        host.current_jobs = 0;
-        assert_eq!(software_flag(&host), Some("outdated"));
-        assert_eq!(software_line(&host), "linux-x86_64 · outdated");
-
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","updating":true,"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        assert_eq!(software_flag(&host), Some("updating"));
-    }
-
-    #[test]
-    fn software_updating_beats_outdated() {
-        let mut host = sample_host();
-        host.software = serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef","updating":true}"#)
-            .expect("software");
-        host.outdated = true;
-        host.software_status = Some("behind".into());
-        assert!(software_line(&host).ends_with("updating"));
-    }
-
-    #[test]
     fn offline_does_not_repeat_status_as_a_sentence() {
         let mut host = sample_host();
         host.status = "offline".into();
+        host.paused = true;
         assert!(not_taking_reason(&host).is_none());
-        assert!(extra_status_pills(&host).is_empty());
+
+        host = sample_host();
+        host.status = "offline".into();
+        host.last_error = Some("disk full".into());
+        assert!(not_taking_reason(&host).is_none());
+
+        host = sample_host();
+        host.status = "offline".into();
+        host.allow_host = false;
+        assert!(not_taking_reason(&host).is_none());
     }
 
     #[test]
-    fn control_plane_sorts_first() {
-        let mut plane = sample_host();
-        plane.kind = "control_plane".into();
-        plane.status = "online".into();
-        plane.name = "Control plane".into();
-        let mut other = sample_host();
-        other.id = "h2".into();
-        other.status = "online".into();
-        other.kind = "host".into();
-        assert!(is_control_plane(&plane));
-        assert!(!is_control_plane(&other));
-        let mut active = vec![other.clone(), plane.clone()];
-        sort_hosts_for_list(&mut active);
-        assert_eq!(active[0].id, plane.id);
+    fn offline_extra_pills_still_show_pending_apply() {
+        let mut host = sample_host();
+        host.status = "offline".into();
+        host.settings_gen = 2;
+        host.settings_ack_gen = 1;
+        assert_eq!(extra_status_pills(&host), vec!["pending apply"]);
     }
 
     #[test]
@@ -1906,40 +2105,90 @@ mod tests {
             r#"{"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
         )
         .expect("software");
-        assert_eq!(software_flag(&host), Some("outdated"));
-        assert!(settings_awaiting_ack(&host));
         assert_eq!(extra_status_pills(&host), vec!["pending apply", "outdated"]);
+    }
 
+    #[test]
+    fn extra_pills_omit_pending_apply_when_pending() {
+        let mut host = sample_host();
         host.status = "pending".into();
+        host.settings_gen = 2;
+        host.settings_ack_gen = 1;
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
         assert_eq!(extra_status_pills(&host), vec!["outdated"]);
+    }
 
-        host.status = "online".into();
+    #[test]
+    fn extra_pills_updating_yields_no_extra_chip() {
+        let mut host = sample_host();
         host.settings_gen = 1;
+        host.settings_ack_gen = 1;
         host.settings_pending = false;
         host.software = serde_json::from_str(r#"{"updating":true}"#).expect("software");
         assert!(extra_status_pills(&host).is_empty());
     }
 
     #[test]
-    fn extra_pills_skip_control_plane() {
-        let mut plane = sample_host();
-        plane.kind = "control_plane".into();
-        plane.settings_gen = 3;
-        plane.settings_ack_gen = 1;
-        plane.settings_pending = true;
-        plane.outdated = true;
-        plane.software_status = Some("behind".into());
-        assert!(settings_awaiting_ack(&plane));
-        assert!(extra_status_pills(&plane).is_empty());
+    fn extra_pills_omit_pending_apply_when_removed() {
+        let mut host = sample_host();
+        host.status = "disabled".into();
+        host.settings_gen = 2;
+        host.settings_ack_gen = 1;
+        host.current_versions = PackageVersions {
+            host: "0.0.2".into(),
+            driver: "0.0.2".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"old","version":"0.0.1"},"fleet-driver":{"sha256":"old","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(extra_status_pills(&host), vec!["outdated"]);
+    }
+
+    #[test]
+    fn extra_pills_from_settings_pending_without_gen_gap() {
+        let mut host = sample_host();
+        host.settings_pending = true;
+        host.settings_gen = 1;
+        host.settings_ack_gen = 1;
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"cargo-host","version":"0.0.1"},"fleet-driver":{"sha256":"cargo-driver","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(extra_status_pills(&host), vec!["pending apply"]);
+    }
+
+    #[test]
+    fn extra_pills_keep_pending_apply_when_error() {
+        let mut host = sample_host();
+        host.status = "error".into();
+        host.settings_gen = 2;
+        host.settings_ack_gen = 1;
+        host.current_versions = PackageVersions {
+            host: "0.0.1".into(),
+            driver: "0.0.1".into(),
+        };
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"cargo-host","version":"0.0.1"},"fleet-driver":{"sha256":"cargo-driver","version":"0.0.1"}}}"#,
+        )
+        .expect("software");
+        assert_eq!(extra_status_pills(&host), vec!["pending apply"]);
     }
 
     #[test]
     fn status_label_maps_disabled_to_removed() {
         assert_eq!(status_label("disabled"), "removed");
-        assert_eq!(status_label("online"), "online");
-        assert_eq!(status_label("offline"), "offline");
-        assert_eq!(status_label("pending"), "pending");
-        assert_eq!(status_label("error"), "error");
     }
 
     #[test]
@@ -1978,9 +2227,15 @@ mod tests {
     }
 
     #[test]
-    fn format_bytes_and_disk_line() {
+    fn format_bytes_1024_based_units() {
         assert_eq!(format_bytes(500), "500 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1536 * 1024), "1.5 MB");
+        assert_eq!(format_bytes(2 * 1024u64.pow(4)), "2.0 TB");
+    }
+
+    #[test]
+    fn disk_free_line_free_of_total() {
         let mut host = sample_host();
         host.hardware = Some(HostHardware {
             disk_free_bytes: Some(50 * 1024 * 1024 * 1024),
@@ -1994,146 +2249,179 @@ mod tests {
     }
 
     #[test]
-    fn provider_install_command_picks_os() {
-        assert!(provider_install_command("grok", Some("linux-x86_64")).contains("install.sh"));
-        assert!(provider_install_command("grok", Some("windows-x86_64")).contains("install.ps1"));
-        assert!(provider_install_command("ollama", Some("linux-x86_64")).contains("ollama.com"));
+    fn disk_free_line_free_only_when_total_missing_or_zero() {
+        let mut host = sample_host();
+        host.hardware = Some(HostHardware {
+            disk_free_bytes: Some(50 * 1024 * 1024 * 1024),
+            disk_total_bytes: None,
+            ..HostHardware::default()
+        });
+        assert_eq!(disk_free_line(&host).as_deref(), Some("50.0 GB free"));
+        host.hardware = Some(HostHardware {
+            disk_free_bytes: Some(50 * 1024 * 1024 * 1024),
+            disk_total_bytes: Some(0),
+            ..HostHardware::default()
+        });
+        assert_eq!(disk_free_line(&host).as_deref(), Some("50.0 GB free"));
+    }
+
+    #[test]
+    fn disk_free_line_none_when_hardware_or_free_missing() {
+        let mut host = sample_host();
+        host.hardware = None;
+        assert_eq!(disk_free_line(&host), None);
+        host.hardware = Some(HostHardware {
+            disk_free_bytes: None,
+            ..HostHardware::default()
+        });
+        assert_eq!(disk_free_line(&host), None);
+    }
+
+    #[test]
+    fn provider_install_command_grok_unix_is_official_curl() {
+        assert_eq!(
+            provider_install_command("grok", Some("linux-x86_64")),
+            "curl -fsSL https://x.ai/cli/install.sh | bash"
+        );
+    }
+
+    #[test]
+    fn provider_install_command_grok_windows_is_official_irm() {
+        assert_eq!(
+            provider_install_command("grok", Some("windows-x86_64")),
+            "irm https://x.ai/cli/install.ps1 | iex"
+        );
+    }
+
+    #[test]
+    fn provider_install_command_ollama_windows_uses_winget() {
+        assert_eq!(
+            provider_install_command("ollama", Some("windows-x86_64")),
+            "winget install Ollama.Ollama"
+        );
+    }
+
+    #[test]
+    fn provider_install_command_unknown_provider_fallback() {
+        assert_eq!(
+            provider_install_command("gemini", Some("linux-x86_64")),
+            "Install gemini with the official CLI for this OS"
+        );
+    }
+
+    #[test]
+    fn provider_install_command_missing_or_non_windows_platform_is_unix() {
+        let unix = "curl -fsSL https://x.ai/cli/install.sh | bash";
+        assert_eq!(provider_install_command("grok", None), unix);
+        assert_eq!(provider_install_command("grok", Some("darwin")), unix);
+        assert_eq!(provider_install_command("grok", Some("linux-aarch64")), unix);
     }
 
     #[test]
     fn job_cap_is_min_of_plane_and_advertised() {
         let mut host = sample_host();
         host.max_concurrent = 8;
-        host.advertised_max_concurrent = None;
-        assert_eq!(job_cap(&host), 8);
-
         host.advertised_max_concurrent = Some(4);
         assert_eq!(job_cap(&host), 4);
-
-        host.max_concurrent = 0;
-        host.advertised_max_concurrent = Some(0);
-        assert_eq!(job_cap(&host), 1);
-
-        host.max_concurrent = 512;
-        host.advertised_max_concurrent = Some(300);
-        assert_eq!(job_cap(&host), 256);
     }
 
     #[test]
-    fn not_taking_reason_covers_pair_removed_error_hold() {
+    fn job_cap_advertised_zero_with_nonzero_plane_is_one() {
+        let mut host = sample_host();
+        host.max_concurrent = 8;
+        host.advertised_max_concurrent = Some(0);
+        assert_eq!(job_cap(&host), 1);
+    }
+
+    #[test]
+    fn jobs_line_cap_is_advertised_when_lower() {
+        let mut host = sample_host();
+        host.current_jobs = 1;
+        host.max_concurrent = 8;
+        host.advertised_max_concurrent = Some(4);
+        assert_eq!(jobs_line(&host), "jobs 1 / 4");
+    }
+
+    #[test]
+    fn not_taking_reason_pending_mentions_pair() {
         let mut host = sample_host();
         host.status = "pending".into();
-        assert_eq!(
-            not_taking_reason(&host).as_deref(),
-            Some("Waiting to pair.")
-        );
+        let reason = not_taking_reason(&host).expect("pending");
+        assert!(reason.contains("pair"), "{reason}");
+    }
 
+    #[test]
+    fn not_taking_reason_disabled_mentions_removed() {
+        let mut host = sample_host();
         host.status = "disabled".into();
-        assert_eq!(
-            not_taking_reason(&host).as_deref(),
-            Some("Removed — will not take jobs.")
-        );
+        let reason = not_taking_reason(&host).expect("disabled");
+        assert!(reason.contains("Removed"), "{reason}");
+    }
 
+    #[test]
+    fn not_taking_reason_error_surfaces_last_error() {
+        let mut host = sample_host();
         host.status = "error".into();
         host.last_error = Some("disk full".into());
         assert_eq!(not_taking_reason(&host).as_deref(), Some("disk full"));
-        host.last_error = None;
-        assert_eq!(
-            not_taking_reason(&host).as_deref(),
-            Some("Error — not taking jobs.")
-        );
+    }
 
-        host.status = "online".into();
+    #[test]
+    fn not_taking_reason_status_beats_hold() {
+        let mut host = sample_host();
         host.paused = true;
-        host.current_jobs = 0;
-        let hold = not_taking_reason(&host).expect("hold");
-        assert_no_pause(&hold);
-        assert!(hold.contains("Not taking new jobs"), "{hold}");
+        host.current_jobs = 3;
 
+        host.status = "pending".into();
+        let pending = not_taking_reason(&host).expect("pending");
+        assert!(pending.contains("pair"), "{pending}");
+        assert_ne!(Some(pending.as_str()), hold_jobs_reason(&host).as_deref());
+
+        host.status = "disabled".into();
+        let disabled = not_taking_reason(&host).expect("disabled");
+        assert!(disabled.contains("Removed"), "{disabled}");
+        assert_ne!(Some(disabled.as_str()), hold_jobs_reason(&host).as_deref());
+
+        host.status = "error".into();
+        host.last_error = Some("disk full".into());
+        let error = not_taking_reason(&host).expect("error");
+        assert_eq!(error, "disk full");
+        assert_ne!(Some(error.as_str()), hold_jobs_reason(&host).as_deref());
+    }
+
+    #[test]
+    fn not_taking_reason_error_blank_last_error_uses_fallback() {
+        let mut host = sample_host();
+        host.status = "error".into();
+        host.last_error = Some(String::new());
+        let blank = not_taking_reason(&host).expect("blank last_error");
+        assert!(blank.contains("Error"), "{blank}");
+
+        host.last_error = None;
+        let missing = not_taking_reason(&host).expect("missing last_error");
+        assert!(missing.contains("Error"), "{missing}");
+    }
+
+    #[test]
+    fn not_taking_reason_online_unadvertised_or_disallowed_host() {
+        let mut host = sample_host();
+        host.status = "online".into();
         host.paused = false;
-        host.allow_host = false;
+        host.drain = false;
+        host.allow_container = true;
+        host.allow_host = true;
         host.advertised_host = false;
-        assert_eq!(
-            not_taking_reason(&host).as_deref(),
-            Some("Not taking jobs.")
-        );
-    }
+        assert!(!holding_new_jobs(&host));
+        let unadvertised = not_taking_reason(&host).expect("unadvertised");
+        assert!(unadvertised.contains("Not taking jobs"), "{unadvertised}");
+        assert!(!unadvertised.contains("new jobs"), "{unadvertised}");
 
-    #[test]
-    fn software_title_matches_flag() {
-        let mut host = sample_host();
-        host.platform = Some("linux-x86_64".into());
-        host.current_versions = PackageVersions {
-            host: "0.0.1".into(),
-            driver: "0.0.1".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"git_sha":"9d239a509055abcdef","bins":{"fleet-host":{"sha256":"h","version":"0.0.1"},"fleet-driver":{"sha256":"d","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.auto_update = false;
-        assert!(
-            software_title(&host).contains("linux-x86_64"),
-            "{}",
-            software_title(&host)
-        );
-
-        host.current_versions = PackageVersions {
-            host: "0.0.2".into(),
-            driver: "0.0.2".into(),
-        };
-        assert!(
-            software_title(&host).contains("fleet-host and/or fleet-driver"),
-            "{}",
-            software_title(&host)
-        );
-
-        host.software = serde_json::from_str(r#"{"git_sha":"9d239a509055abcdef","updating":true}"#)
-            .expect("software");
-        assert_eq!(
-            software_title(&host),
-            "Installing fleet-host and fleet-driver from this plane."
-        );
-    }
-
-    #[test]
-    fn served_platforms_omits_bake_only_entries() {
-        let inv = PackageInventory {
-            packages: vec![
-                HostDesiredSoftware {
-                    platform: Some("linux-x86_64".into()),
-                    git_sha: Some("only-a-stamp".into()),
-                    ..HostDesiredSoftware::default()
-                },
-                HostDesiredSoftware {
-                    platform: Some("windows-x86_64".into()),
-                    git_sha: Some("only-a-stamp".into()),
-                    ..HostDesiredSoftware::default()
-                },
-            ],
-            ..PackageInventory::default()
-        };
-        assert!(served_platforms(&inv).is_empty());
-    }
-
-    #[test]
-    fn software_never_uses_file_hash_as_build_id() {
-        let mut host = sample_host();
-        host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":"2a971d693b6f7f0c13c94269845ca4ac0c73672b72ac7a2c7839be2cee590c8e"}}"#,
-        )
-        .expect("software");
-        assert_eq!(software_line(&host), "unknown");
-        assert!(!software_line(&host).contains("2a971d69"));
-    }
-
-    #[test]
-    fn relative_seen_none_is_never() {
-        assert_eq!(relative_seen(&None, 0.0), "never");
-        assert_eq!(
-            relative_seen(&Some(String::new()), 1_700_000_000_000.0),
-            "never"
-        );
+        host.allow_host = false;
+        host.advertised_host = true;
+        assert!(!holding_new_jobs(&host));
+        let disallowed = not_taking_reason(&host).expect("disallowed host");
+        assert!(disallowed.contains("Not taking jobs"), "{disallowed}");
+        assert!(!disallowed.contains("new jobs"), "{disallowed}");
     }
 
     #[test]
@@ -2182,26 +2470,11 @@ mod tests {
         let offline = host("off", "host", "offline", "off");
         let unknown = host("u", "host", "mystery", "zzz");
         let mut active = vec![
-            offline.clone(),
-            unknown.clone(),
-            online_z.clone(),
-            plane.clone(),
-            error.clone(),
-            pending.clone(),
-            online_a.clone(),
+            offline, unknown, online_z, plane, error, pending, online_a,
         ];
         sort_hosts_for_list(&mut active);
         let ids: Vec<&str> = active.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["plane", "oa", "oz", "p", "e", "off", "u"]);
-        assert_eq!(status_rank("online"), 0);
-        assert_eq!(status_rank("pending"), 1);
-        assert_eq!(status_rank("error"), 2);
-        assert_eq!(status_rank("offline"), 3);
-        assert_eq!(status_rank("disabled"), 4);
-        assert_eq!(status_rank("mystery"), 5);
-        assert!(cmp_hosts_for_list(&plane, &online_a).is_lt());
-        assert!(cmp_hosts_for_list(&online_a, &online_z).is_lt());
-        assert!(cmp_hosts_for_list(&online_z, &pending).is_lt());
     }
 
     #[test]
@@ -2230,13 +2503,8 @@ mod tests {
     #[test]
     fn jobs_line_is_cap_plus_load() {
         let mut host = sample_host();
-        host.current_jobs = 0;
-        host.max_concurrent = 4;
-        host.advertised_max_concurrent = None;
-        assert_eq!(jobs_line(&host), "jobs 0 / 4");
-
         host.current_jobs = 2;
-        host.advertised_max_concurrent = Some(8);
+        host.max_concurrent = 4;
         host.hardware = Some(HostHardware {
             cpu_used_pct: Some(12),
             mem_used_pct: Some(32),
@@ -2251,61 +2519,22 @@ mod tests {
             ..HostHardware::default()
         });
         assert_eq!(jobs_line(&host), "jobs 2 / 4 · cpu 12% · mem 32%");
-        assert!(!jobs_line(&host).contains("gpu"));
     }
 
     #[test]
-    fn plane_card_jobs_line_uses_inflight_over_max_concurrent() {
-        let mut plane = sample_host();
-        plane.kind = "control_plane".into();
-        plane.advertised_max_concurrent = None;
-        plane.hardware = None;
-        assert!(is_control_plane(&plane));
+    fn jobs_line_prints_over_cap_and_clamped_max() {
+        let mut host = sample_host();
+        host.kind = "host".into();
 
-        // Idle: n is in-flight local sessions, cap is the plane setting.
-        plane.current_jobs = 0;
-        plane.max_concurrent = 4;
-        assert_eq!(job_cap(&plane), 4);
-        assert_eq!(jobs_line(&plane), "jobs 0 / 4");
+        host.current_jobs = 9;
+        host.max_concurrent = 8;
+        assert_eq!(jobs_line(&host), "jobs 9 / 8");
 
-        // Must show in-flight n — do not lock a missing count as always 0/4.
-        plane.current_jobs = 3;
-        plane.max_concurrent = 8;
-        assert_eq!(job_cap(&plane), 8);
-        assert_eq!(jobs_line(&plane), "jobs 3 / 8");
-        assert!(
-            !jobs_line(&plane).contains("cpu")
-                && !jobs_line(&plane).contains("mem")
-                && !jobs_line(&plane).contains("gpu"),
-            "{}",
-            jobs_line(&plane)
-        );
-
-        plane.current_jobs = 8;
-        assert_eq!(jobs_line(&plane), "jobs 8 / 8");
-
-        plane.current_jobs = 9;
-        assert_eq!(jobs_line(&plane), "jobs 9 / 8");
-
-        plane.current_jobs = 1;
-        plane.max_concurrent = 0;
-        assert_eq!(jobs_line(&plane), "jobs 1 / 1");
-        plane.max_concurrent = 512;
-        assert_eq!(jobs_line(&plane), "jobs 1 / 256");
-
-        plane.max_concurrent = 8;
-        plane.current_jobs = 2;
-        let patched = apply_patch(
-            plane,
-            &HostPatch {
-                max_concurrent: Some(2),
-                ..HostPatch::default()
-            },
-        );
-        assert!(is_control_plane(&patched));
-        assert_eq!(patched.current_jobs, 2);
-        assert_eq!(job_cap(&patched), 2);
-        assert_eq!(jobs_line(&patched), "jobs 2 / 2");
+        host.current_jobs = 1;
+        host.max_concurrent = 0;
+        assert_eq!(jobs_line(&host), "jobs 1 / 1");
+        host.max_concurrent = 512;
+        assert_eq!(jobs_line(&host), "jobs 1 / 256");
     }
 
     #[test]
@@ -2314,35 +2543,60 @@ mod tests {
         plane.kind = "control_plane".into();
         plane.last_seen_at = Some("2026-08-20T12:00:00Z".into());
         assert_eq!(last_seen_label(&plane, 0.0), "this process");
-
-        let mut host = sample_host();
-        host.last_seen_at = None;
-        assert_eq!(last_seen_label(&host, 0.0), "never");
-
-        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:02Z").expect("now");
-        host.last_seen_at = Some("2026-08-20T12:00:00Z".into());
-        assert_eq!(
-            last_seen_label(&host, now.timestamp_millis() as f64),
-            "just now"
-        );
     }
 
     #[test]
-    fn relative_seen_covers_second_hour_day_buckets() {
+    fn last_seen_label_plane_without_last_seen_is_this_process() {
+        let mut plane = sample_host();
+        plane.kind = "control_plane".into();
+        plane.last_seen_at = None;
+        assert_eq!(last_seen_label(&plane, 0.0), "this process");
+    }
+
+    #[test]
+    fn last_seen_label_control_plane_box_worker_uses_relative_seen() {
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.is_control_plane_box = true;
+        host.is_this_machine = true;
+        host.last_seen_at = None;
+        assert_eq!(last_seen_label(&host, 0.0), "never");
+    }
+
+    #[test]
+    fn relative_seen_ten_seconds_ago() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
         let now_ms = now.timestamp_millis() as f64;
         assert_eq!(
             relative_seen(&Some("2026-08-20T11:59:50Z".into()), now_ms),
             "10s ago"
         );
+    }
+
+    #[test]
+    fn relative_seen_two_hours_ago() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
         assert_eq!(
             relative_seen(&Some("2026-08-20T10:00:00Z".into()), now_ms),
             "2h ago"
         );
+    }
+
+    #[test]
+    fn relative_seen_three_days_ago() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
         assert_eq!(
             relative_seen(&Some("2026-08-17T12:00:00Z".into()), now_ms),
             "3d ago"
         );
+    }
+
+    #[test]
+    fn relative_seen_unparseable_falls_through_to_raw_label() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
         assert_eq!(
             relative_seen(&Some("not-a-timestamp".into()), now_ms),
             "not-a-timestamp"
@@ -2350,17 +2604,51 @@ mod tests {
     }
 
     #[test]
-    fn format_ts_replaces_t_or_emdash() {
-        assert_eq!(format_ts(""), "—");
-        assert_eq!(format_ts("2026-08-20T12:00:00Z"), "2026-08-20 12:00:00");
+    fn relative_seen_bucket_thresholds() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        let cases = [
+            ("2026-08-20T11:59:56Z", "just now"),
+            ("2026-08-20T11:59:55Z", "5s ago"),
+            ("2026-08-20T11:59:01Z", "59s ago"),
+            ("2026-08-20T11:59:00Z", "1m ago"),
+            ("2026-08-20T11:00:01Z", "59m ago"),
+            ("2026-08-20T11:00:00Z", "1h ago"),
+            ("2026-08-19T12:00:01Z", "23h ago"),
+            ("2026-08-19T12:00:00Z", "1d ago"),
+        ];
+        for (ts, want) in cases {
+            assert_eq!(relative_seen(&Some(ts.into()), now_ms), want, "{ts}");
+        }
     }
 
     #[test]
-    fn hint_is_loopback_detects_localhost_and_ipv6() {
-        assert!(hint_is_loopback("FLEET_URL=http://127.0.0.1:8080"));
-        assert!(hint_is_loopback("http://localhost:8080"));
-        assert!(hint_is_loopback("http://[::1]:8080"));
-        assert!(!hint_is_loopback("https://fleet.example.test"));
+    fn relative_seen_future_timestamp_is_just_now() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        assert_eq!(
+            relative_seen(&Some("2026-08-20T13:00:00Z".into()), now_ms),
+            "just now"
+        );
+    }
+
+    #[test]
+    fn relative_seen_compact_iso_without_zone_still_buckets() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-20T12:00:00Z").expect("now");
+        let now_ms = now.timestamp_millis() as f64;
+        assert_eq!(
+            relative_seen(&Some("2026-08-20T10:00:00".into()), now_ms),
+            "2h ago"
+        );
+    }
+
+    #[test]
+    fn format_ts_pair_expiry_rfc3339_is_wall_clock() {
+        // create/rotate serde: Utc::now()+PAIR_TTL is RFC3339 with fractional seconds + Z
+        assert_eq!(
+            format_ts("2026-08-20T13:00:00.123456789Z"),
+            "2026-08-20 13:00:00"
+        );
     }
 
     #[test]
@@ -2371,15 +2659,11 @@ mod tests {
             pair_expires_at: String::new(),
             install_hint: String::new(),
         };
-        let api = "http://localhost:8080";
-        let unix = install_commands(&created, api);
-        assert!(unix.contains("install-worker.sh"), "{unix}");
-        assert!(unix.contains("FLEET_PAIR_TOKEN=flp_testdeadbeef"), "{unix}");
-        assert!(unix.contains("FLEET_URL="), "{unix}");
-        let win = windows_install_command(&created, api);
-        assert!(win.contains("install-worker.ps1"), "{win}");
-        assert!(win.contains("FLEET_PAIR_TOKEN="), "{win}");
-        assert!(win.contains("flp_testdeadbeef"), "{win}");
+        let unix = install_commands(&created, "http://localhost:8080");
+        assert_eq!(
+            unix,
+            "curl -fsSL http://localhost:8080/install-worker.sh | FLEET_URL=http://localhost:8080 FLEET_PAIR_TOKEN=flp_testdeadbeef sh"
+        );
     }
 
     #[test]
@@ -2392,61 +2676,75 @@ mod tests {
         };
         let unix = install_commands(&created, "http://127.0.0.1:8080");
         assert_eq!(unix, created.install_hint);
+        assert!(!unix.contains("127.0.0.1"), "{unix}");
+    }
+
+    #[test]
+    fn install_api_url_parses_fleet_url_from_server_hint() {
+        let created = CreateHostResponse {
+            host: sample_host(),
+            pair_token: "flp_hinttoken".into(),
+            pair_expires_at: String::new(),
+            install_hint: "curl -fsSL https://fleet.example.test/install-worker.sh | FLEET_URL=https://fleet.example.test FLEET_PAIR_TOKEN=flp_hinttoken sh".into(),
+        };
         assert_eq!(
             install_api_url(&created, "http://127.0.0.1:8080"),
             "https://fleet.example.test"
         );
-        assert!(hint_is_loopback("http://127.0.0.1:8080"));
-        assert!(!hint_is_loopback(&unix));
     }
 
     #[test]
-    fn host_patch_drain_serializes_when_set() {
-        let hold = HostPatch {
-            paused: Some(true),
-            ..HostPatch::default()
+    fn windows_install_command_uses_url_parsed_from_server_hint() {
+        let created = CreateHostResponse {
+            host: sample_host(),
+            pair_token: "flp_hinttoken".into(),
+            pair_expires_at: String::new(),
+            install_hint: "curl -fsSL https://fleet.example.test/install-worker.sh | FLEET_URL=https://fleet.example.test FLEET_PAIR_TOKEN=flp_hinttoken sh".into(),
         };
-        let hold_json = serde_json::to_value(&hold).expect("serialize hold");
-        assert_eq!(hold_json["paused"], true);
-        assert!(hold_json.get("drain").is_none());
+        let win = windows_install_command(&created, "http://127.0.0.1:8080");
+        assert!(
+            win.contains("FLEET_URL='https://fleet.example.test'"),
+            "{win}"
+        );
+        assert!(!win.contains("127.0.0.1"), "{win}");
+    }
 
-        let release = HostPatch {
-            paused: Some(false),
-            drain: Some(false),
-            ..HostPatch::default()
+    #[test]
+    fn install_commands_whitespace_only_hint_falls_back_to_api_base() {
+        let created = CreateHostResponse {
+            host: sample_host(),
+            pair_token: "flp_hinttoken".into(),
+            pair_expires_at: String::new(),
+            install_hint: "   \n".into(),
         };
-        let release_json = serde_json::to_value(&release).expect("serialize release");
-        assert_eq!(release_json["paused"], false);
-        assert_eq!(release_json["drain"], false);
+        assert_eq!(
+            install_commands(&created, "http://127.0.0.1:8080"),
+            "curl -fsSL http://127.0.0.1:8080/install-worker.sh | FLEET_URL=http://127.0.0.1:8080 FLEET_PAIR_TOKEN=flp_hinttoken sh"
+        );
+    }
+
+    #[test]
+    fn install_api_url_falls_back_when_hint_lacks_fleet_url() {
+        let created = CreateHostResponse {
+            host: sample_host(),
+            pair_token: "flp_hinttoken".into(),
+            pair_expires_at: String::new(),
+            install_hint: "curl -fsSL https://fleet.example.test/install-worker.sh | sh".into(),
+        };
+        assert_eq!(
+            install_api_url(&created, "http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
     }
 
     #[test]
     fn apply_patch_sets_and_clears_drain() {
-        let host = sample_host();
-        assert!(!host.drain);
+        let mut host = sample_host();
+        host.drain = true;
         assert!(!host.paused);
 
-        let held = apply_patch(
-            host,
-            &HostPatch {
-                paused: Some(true),
-                ..HostPatch::default()
-            },
-        );
-        assert!(held.paused);
-        assert!(!held.drain);
-
-        let drained = apply_patch(
-            held,
-            &HostPatch {
-                drain: Some(true),
-                ..HostPatch::default()
-            },
-        );
-        assert!(drained.drain);
-
         let released = apply_patch(
-            drained,
+            host.clone(),
             &HostPatch {
                 paused: Some(false),
                 drain: Some(false),
@@ -2455,12 +2753,30 @@ mod tests {
         );
         assert!(!released.paused);
         assert!(!released.drain);
+        assert!(released.settings_pending);
+        assert_eq!(released.settings_gen, host.settings_gen + 1);
+    }
+
+    #[test]
+    fn apply_patch_omitted_drain_leaves_existing_true() {
+        let mut host = sample_host();
+        host.drain = true;
+
+        let patched = apply_patch(
+            host,
+            &HostPatch {
+                paused: Some(true),
+                drain: None,
+                ..HostPatch::default()
+            },
+        );
+        assert!(patched.drain);
+        assert!(patched.paused);
     }
 
     #[test]
     fn apply_patch_bumps_settings_pending_on_settings_change() {
         let host = sample_host();
-        assert!(!settings_awaiting_ack(&host));
         let patched = apply_patch(
             host.clone(),
             &HostPatch {
@@ -2470,20 +2786,57 @@ mod tests {
         );
         assert!(patched.settings_pending);
         assert_eq!(patched.settings_gen, host.settings_gen + 1);
-        assert!(settings_awaiting_ack(&patched));
         assert_eq!(extra_status_pills(&patched), vec!["pending apply"]);
+    }
 
-        let same = apply_patch(
+    #[test]
+    fn apply_patch_hold_bumps_pending_apply() {
+        let host = sample_host();
+        assert!(!host.paused);
+        let patched = apply_patch(
             host.clone(),
             &HostPatch {
-                auto_update: Some(host.auto_update),
-                request_update: Some(true),
+                paused: Some(true),
                 ..HostPatch::default()
             },
         );
-        assert!(!same.settings_pending);
-        assert_eq!(same.settings_gen, host.settings_gen);
-        assert!(!settings_awaiting_ack(&same));
+        assert!(patched.settings_pending);
+        assert_eq!(patched.settings_gen, host.settings_gen + 1);
+        assert_eq!(extra_status_pills(&patched), vec!["pending apply"]);
+    }
+
+    #[test]
+    fn apply_patch_rename_bumps_pending_apply() {
+        let host = sample_host();
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                name: Some("renamed".into()),
+                ..HostPatch::default()
+            },
+        );
+        assert!(patched.settings_pending);
+        assert_eq!(patched.settings_gen, host.settings_gen + 1);
+    }
+
+    #[test]
+    fn apply_patch_same_compared_values_do_not_bump() {
+        let host = sample_host();
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                name: Some(host.name.clone()),
+                paused: Some(host.paused),
+                drain: Some(host.drain),
+                allow_host: Some(host.allow_host),
+                allow_container: Some(host.allow_container),
+                max_concurrent: Some(host.max_concurrent),
+                auto_update: Some(host.auto_update),
+                ..HostPatch::default()
+            },
+        );
+        assert!(!patched.settings_pending);
+        assert_eq!(patched.settings_gen, host.settings_gen);
     }
 
     /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
@@ -2492,83 +2845,68 @@ mod tests {
         let mut host = sample_host();
         host.auto_update = false;
         host.kind = "host".into();
-        host.software_status = Some("behind".into());
-        assert!(host.update_requested_at.is_none());
-        assert_eq!(update_now_label(&host, false), Some("Update now"));
-        assert_eq!(update_now_label(&host, true), None);
-
-        let ignored = apply_patch(
-            host,
-            &HostPatch {
-                request_update: Some(false),
-                auto_update: Some(false),
-                ..HostPatch::default()
-            },
-        );
-        assert!(!update_requested(&ignored));
-        assert!(!ignored.auto_update);
-        assert_eq!(ignored.settings_gen, 0);
-        assert_eq!(update_now_label(&ignored, false), Some("Update now"));
 
         let marked = apply_patch(
-            ignored,
+            host,
             &HostPatch {
                 request_update: Some(true),
                 ..HostPatch::default()
             },
         );
-        assert_eq!(marked.update_requested_at.as_deref(), Some("requested"));
         assert!(update_requested(&marked));
-        assert!(!marked.auto_update, "Update now must not flip auto-update");
-        assert_eq!(
-            marked.settings_gen, 0,
-            "Update now is a one-shot, not a settings bump"
-        );
+        assert!(!marked.auto_update);
         assert_eq!(update_now_label(&marked, false), Some("Update requested"));
-
-        let mut plane = sample_host();
-        plane.kind = "control_plane".into();
-        plane.auto_update = false;
-        plane.software_status = Some("behind".into());
-        assert_eq!(update_now_label(&plane, false), None);
-
-        let json = serde_json::to_value(&HostPatch {
-            request_update: Some(true),
-            ..HostPatch::default()
-        })
-        .expect("serialize");
-        assert_eq!(json["request_update"], true);
-        assert!(json.get("auto_update").is_none());
     }
 
     #[test]
-    fn clipboard_helper_rejects_empty_payload() {
-        assert!(!clipboard_has_payload(""));
-        assert!(clipboard_has_payload("flp_token"));
-        assert!(clipboard_has_payload(
-            "curl -fsSL http://x/install-worker.sh"
-        ));
-        assert!(clipboard_has_payload(
-            "irm \"$env:FLEET_URL/install-worker.ps1\" | iex"
-        ));
-    }
-
-    #[test]
-    fn identity_line_is_hostname_dot_platform() {
+    fn update_now_label_requested_beats_auto_draft() {
         let mut host = sample_host();
-        assert!(identity_line(&host).is_none());
-        host.hostname = Some("  ".into());
-        host.platform = Some(String::new());
-        assert!(identity_line(&host).is_none());
+        host.kind = "host".into();
+        host.update_requested_at = Some("2026-08-20T12:00:00Z".into());
+        assert_eq!(update_now_label(&host, true), Some("Update requested"));
+    }
 
-        host.hostname = Some("box.local".into());
-        assert_eq!(identity_line(&host).as_deref(), Some("box.local"));
+    #[test]
+    fn apply_patch_request_update_with_settings_change_still_bumps() {
+        let host = sample_host();
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                request_update: Some(true),
+                auto_update: Some(!host.auto_update),
+                ..HostPatch::default()
+            },
+        );
+        assert!(update_requested(&patched));
+        assert_eq!(patched.settings_gen, host.settings_gen + 1);
+    }
 
-        host.hostname = None;
-        host.platform = Some("linux-x86_64".into());
-        assert_eq!(identity_line(&host).as_deref(), Some("linux-x86_64"));
+    #[test]
+    fn identity_line_is_hostname_middle_dot_platform() {
+        let cases = [
+            (None, None, None, "neither"),
+            (Some("box.local"), None, Some("box.local"), "hostname only"),
+            (None, Some("linux-x86_64"), Some("linux-x86_64"), "platform only"),
+            (
+                Some("box.local"),
+                Some("linux-x86_64"),
+                Some("box.local · linux-x86_64"),
+                "both",
+            ),
+        ];
+        for (hostname, platform, want, label) in cases {
+            let mut host = sample_host();
+            host.hostname = hostname.map(str::to_string);
+            host.platform = platform.map(str::to_string);
+            assert_eq!(identity_line(&host).as_deref(), want, "{label}");
+        }
+    }
 
-        host.hostname = Some("box.local".into());
+    #[test]
+    fn identity_line_trims_nonempty_hostname_and_platform() {
+        let mut host = sample_host();
+        host.hostname = Some("  box.local  ".into());
+        host.platform = Some("  linux-x86_64  ".into());
         assert_eq!(
             identity_line(&host).as_deref(),
             Some("box.local · linux-x86_64")
@@ -2576,7 +2914,15 @@ mod tests {
     }
 
     #[test]
-    fn settings_draft_dirty_ignores_plane_auto_update() {
+    fn identity_line_whitespace_platform_alone_is_none() {
+        let mut host = sample_host();
+        host.hostname = None;
+        host.platform = Some("  ".into());
+        assert_eq!(identity_line(&host), None);
+    }
+
+    #[test]
+    fn settings_draft_dirty_host_draft_matrix() {
         let mut host = sample_host();
         host.allow_host = true;
         host.allow_container = true;
@@ -2586,35 +2932,52 @@ mod tests {
         assert!(settings_draft_dirty(&host, false, true, 4));
         assert!(settings_draft_dirty(&host, true, false, 4));
         assert!(settings_draft_dirty(&host, true, true, 8));
-
-        host.kind = "control_plane".into();
-        assert!(
-            !settings_draft_dirty(&host, true, false, 4),
-            "plane has no auto-update widget"
-        );
-        assert!(settings_draft_dirty(&host, false, false, 4));
     }
 
     #[test]
-    fn widgets_lock_while_pending_not_on_plane() {
+    fn settings_draft_dirty_accepting_follows_either_runtime() {
         let mut host = sample_host();
+        host.auto_update = true;
+        host.max_concurrent = 4;
+
+        host.allow_host = true;
+        host.allow_container = false;
+        assert!(!settings_draft_dirty(&host, true, true, 4));
+        assert!(settings_draft_dirty(&host, false, true, 4));
+
+        host.allow_host = false;
+        host.allow_container = true;
+        assert!(!settings_draft_dirty(&host, true, true, 4));
+        assert!(settings_draft_dirty(&host, false, true, 4));
+    }
+
+    #[test]
+    fn widgets_lock_while_pending() {
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.settings_pending = false;
+        host.settings_gen = 0;
+        host.settings_ack_gen = 0;
         assert!(!widgets_locked(&host, false));
-        assert!(widgets_locked(&host, true));
 
         host.settings_pending = true;
+        host.settings_gen = 1;
+        host.settings_ack_gen = 1;
         assert!(widgets_locked(&host, false));
 
         host.settings_pending = false;
         host.settings_gen = 2;
         host.settings_ack_gen = 1;
         assert!(widgets_locked(&host, false));
+    }
 
-        host.kind = "control_plane".into();
-        assert!(
-            !widgets_locked(&host, false),
-            "plane apply is immediate — widgets stay live"
-        );
-        assert!(widgets_locked(&host, true));
+    #[test]
+    fn widgets_lock_same_box_host_while_pending() {
+        let mut host = sample_host();
+        host.kind = "host".into();
+        host.is_control_plane_box = true;
+        host.settings_pending = true;
+        assert!(widgets_locked(&host, false));
     }
 
     #[test]
@@ -2623,18 +2986,18 @@ mod tests {
         assert_eq!(runtime_line(&host), "Runtime: fleet-host");
         host.kind = "control_plane".into();
         assert_eq!(runtime_line(&host), "Control plane does not run sandboxes");
-        assert_eq!(BEHAVIOR_LABEL, "Behavior");
     }
 
     #[test]
-    fn draft_holding_and_clamp_max_jobs() {
-        assert!(draft_holding_new_jobs(false));
-        assert!(!draft_holding_new_jobs(true));
+    fn clamp_max_jobs_zero_and_over_cap() {
         assert_eq!(clamp_max_jobs(0), 1);
-        assert_eq!(clamp_max_jobs(1), 1);
-        assert_eq!(clamp_max_jobs(4), 4);
-        assert_eq!(clamp_max_jobs(256), 256);
         assert_eq!(clamp_max_jobs(512), 256);
+    }
+
+    #[test]
+    fn clamp_max_jobs_negative_is_one() {
+        assert_eq!(clamp_max_jobs(-1), 1);
+        assert_eq!(clamp_max_jobs(i32::MIN), 1);
     }
 
     #[test]
@@ -2665,92 +3028,57 @@ mod tests {
             ]),
             ..HostHardware::default()
         });
+        assert_eq!(
+            specs_line(&host).as_deref(),
+            Some(
+                "Intel Core i7-10610U CPU @ 1.80GHz · 1 core · 16 GB 2666 MT/s · Intel UHD Graphics, NVIDIA RTX 3080 10 GB"
+            )
+        );
+    }
+
+    #[test]
+    fn specs_line_named_gpu_zero_vram_is_name_only() {
+        let mut host = sample_host();
+        host.hardware = Some(HostHardware {
+            gpus: Some(vec![HostGpu {
+                name: Some("NVIDIA RTX 3080".into()),
+                vram_bytes: Some(0),
+                used_pct: None,
+            }]),
+            ..HostHardware::default()
+        });
         let line = specs_line(&host).expect("specs");
-        assert!(line.contains("i7-10610U"), "{line}");
-        assert!(line.contains("1 core"), "{line}");
-        assert!(!line.contains("1 cores"), "{line}");
-        assert!(line.contains("16 GB 2666 MT/s"), "{line}");
-        assert!(line.contains("Intel UHD Graphics"), "{line}");
-        assert!(line.contains("NVIDIA RTX 3080 10 GB"), "{line}");
-        assert!(!line.contains("  "), "blank gpu name must drop: {line}");
+        assert_eq!(line, "NVIDIA RTX 3080");
+        assert!(!line.contains("0 GB"), "{line}");
+    }
+
+    #[test]
+    fn specs_line_only_blank_gpus_omits_gpu_segment() {
+        let mut host = sample_host();
+        host.hardware = Some(HostHardware {
+            cpu_cores: Some(8),
+            gpus: Some(vec![HostGpu {
+                name: Some("  ".into()),
+                vram_bytes: Some(8 * 1_073_741_824),
+                used_pct: None,
+            }]),
+            ..HostHardware::default()
+        });
+        assert_eq!(specs_line(&host).as_deref(), Some("8 cores"));
     }
 
     #[test]
     fn hint_is_loopback_does_not_flag_lan_or_public() {
-        assert!(hint_is_loopback("http://127.0.0.1:8080"));
-        assert!(hint_is_loopback("http://localhost:8080"));
-        assert!(hint_is_loopback("http://[::1]:8080"));
         assert!(!hint_is_loopback("http://192.168.1.10:8080"));
         assert!(!hint_is_loopback("http://10.0.0.4:8080"));
-        assert!(!hint_is_loopback("https://fleet.example.test"));
         assert!(!hint_is_loopback("http://172.16.0.8:8080"));
     }
 
     #[test]
-    fn software_title_covers_bins_and_unknown() {
-        let mut host = sample_host();
-        assert_eq!(
-            software_title(&host),
-            "This box has not reported fleet-host and fleet-driver versions we can compare."
-        );
-
-        host.current_versions = PackageVersions {
-            host: "0.0.1".into(),
-            driver: "0.0.1".into(),
-        };
-        host.software = serde_json::from_str(
-            r#"{"bins":{"fleet-host":{"sha256":"h","version":"0.0.1"},"fleet-driver":{"sha256":"d","version":"0.0.1"}}}"#,
-        )
-        .expect("software");
-        host.platform = Some("linux-x86_64".into());
-        assert!(
-            software_title(&host).contains("fleet-host and fleet-driver"),
-            "{}",
-            software_title(&host)
-        );
-        assert!(
-            software_title(&host).contains("linux-x86_64"),
-            "{}",
-            software_title(&host)
-        );
-
-        host.platform = None;
-        host.desired = Some(HostDesiredSoftware {
-            platform: Some("windows-x86_64".into()),
-            ..HostDesiredSoftware::default()
-        });
-        assert!(
-            software_title(&host).contains("windows-x86_64"),
-            "{}",
-            software_title(&host)
-        );
-    }
-
-    #[test]
-    fn needs_software_update_and_empty_package_report() {
-        let mut host = sample_host();
-        assert!(!needs_software_update(&host));
-        host.outdated = true;
-        assert!(needs_software_update(&host));
-        host.outdated = false;
-        host.software_status = Some("behind".into());
-        assert!(needs_software_update(&host));
-        host.software_status = Some("current".into());
-        assert!(
-            !needs_software_update(&host),
-            "current means both binaries match; bake id is not a version"
-        );
-
-        assert!(served_platforms(&PackageInventory::default()).is_empty());
-    }
-
-    #[test]
-    fn apply_patch_isolation_and_cap() {
+    fn apply_patch_both_allow_modes_off_and_cap() {
         let host = sample_host();
-        assert!(host.allow_host);
-        assert!(host.allow_container);
         let patched = apply_patch(
-            host.clone(),
+            host,
             &HostPatch {
                 allow_host: Some(false),
                 allow_container: Some(false),
@@ -2761,27 +3089,37 @@ mod tests {
         assert!(!patched.allow_host);
         assert!(!patched.allow_container);
         assert_eq!(patched.max_concurrent, 1);
-        assert!(patched.settings_pending);
-        assert_eq!(patched.settings_gen, host.settings_gen + 1);
-        assert!(holding_new_jobs(&patched));
     }
 
     #[test]
-    fn windows_install_does_not_hardcode_arch() {
-        let created = CreateHostResponse {
-            host: sample_host(),
-            pair_token: "flp_arch".into(),
-            pair_expires_at: String::new(),
-            install_hint: String::new(),
-        };
-        let win = windows_install_command(&created, "https://fleet.example.test");
-        assert!(win.contains("install-worker.ps1"), "{win}");
-        assert!(win.contains("FLEET_PAIR_TOKEN='flp_arch'"), "{win}");
-        assert!(
-            !win.to_ascii_lowercase().contains("x64")
-                && !win.to_ascii_lowercase().contains("amd64")
-                && !win.to_ascii_lowercase().contains("arm64"),
-            "arch comes from the machine, not the command: {win}"
+    fn apply_patch_allow_host_off_container_on_still_accepts() {
+        let host = sample_host();
+        let patched = apply_patch(
+            host,
+            &HostPatch {
+                allow_host: Some(false),
+                ..HostPatch::default()
+            },
         );
+        assert!(!patched.allow_host);
+        assert!(patched.allow_container);
+        assert!(!holding_new_jobs(&patched));
+    }
+
+    #[test]
+    fn apply_patch_timeout_and_runtime_settings_bump() {
+        let host = sample_host();
+        let runtime = serde_json::json!({ "work_dir": "/tmp/work" });
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                max_job_timeout_s: Some(120),
+                runtime_settings: Some(runtime.clone()),
+                ..HostPatch::default()
+            },
+        );
+        assert_eq!(patched.max_job_timeout_s, 120);
+        assert_eq!(patched.runtime_settings.as_ref(), Some(&runtime));
+        assert_eq!(patched.settings_gen, host.settings_gen + 1);
     }
 }

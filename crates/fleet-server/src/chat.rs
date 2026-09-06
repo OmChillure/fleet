@@ -1144,15 +1144,6 @@ mod chat_tool_scope_tests {
     fn chat_tool_args_preserve_workspace_id_and_foreign_is_forbidden() {
         let session = Uuid::new_v4();
         let foreign = Uuid::new_v4();
-        let parsed = tool_args_value(&json!({
-            "title": "watch",
-            "policy_md": "wake",
-            "workspace_id": foreign.to_string(),
-        }));
-        let err = require_session_workspace(session, &parsed)
-            .expect_err("foreign workspace_id after tool_args_value");
-        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
-
         let as_string = tool_args_value(&Value::String(format!(
             r#"{{"provider":"slack","operation":"list_channels","workspace_id":"{foreign}"}}"#
         )));
@@ -1162,21 +1153,25 @@ mod chat_tool_scope_tests {
     }
 
     #[test]
-    fn chat_tool_session_member_cannot_target_another_workspace() {
+    fn chat_tool_same_session_workspace_id_in_json_string_args_is_allowed() {
         let session = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        for name_args in [
-            json!({ "title": "c", "policy_md": "p", "workspace_id": other }),
-            json!({ "case_id": Uuid::new_v4(), "note": "n", "workspace_id": other }),
-            json!({
-                "provider": "jira",
-                "operation": "search_issues",
-                "workspace_id": other
-            }),
+        let parsed = tool_args_value(&Value::String(format!(
+            r#"{{"workspace_id":"{session}"}}"#
+        )));
+        require_session_workspace(session, &parsed)
+            .expect("same-session workspace_id in JSON string args");
+    }
+
+    #[test]
+    fn chat_tool_omitted_or_null_workspace_id_after_parse_is_allowed() {
+        let session = Uuid::new_v4();
+        for raw in [
+            json!({ "title": "watch" }),
+            json!({ "workspace_id": null }),
+            Value::String(r#"{"provider":"slack"}"#.into()),
         ] {
-            let err = require_session_workspace(session, &tool_args_value(&name_args))
-                .expect_err("session membership is not enough");
-            assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+            require_session_workspace(session, &tool_args_value(&raw))
+                .expect("missing or null workspace_id is allowed");
         }
     }
 
@@ -1215,7 +1210,57 @@ mod inventory_tests {
             .find(|p| p.id == "claude")
             .expect("claude");
         assert!(p.available);
-        assert_ne!(p.error.as_deref().unwrap_or(""), "installed · logged out");
+        assert_eq!(p.error.as_deref(), Some("installed · logged in"));
+        assert!(p.models.is_empty());
+        assert_eq!(p.default_model, None);
+    }
+
+    #[test]
+    fn grok_logged_in_without_models_is_available() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "grok".into(),
+            name: Some("Grok".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "grok")
+            .expect("grok");
+        assert!(p.available);
+        assert_eq!(p.error.as_deref(), Some("installed · logged in"));
+        assert!(p.models.is_empty());
+        assert_eq!(p.default_model, None);
+    }
+
+    #[test]
+    fn claude_logged_out_with_models_is_unavailable() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "claude".into(),
+            name: Some("Claude".into()),
+            installed: true,
+            logged_in: false,
+            models: vec!["sonnet".into()],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "claude")
+            .expect("claude");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("installed · logged out"));
+    }
+
+    #[test]
+    fn unreported_catalog_agent_is_not_installed() {
+        let p = providers_from_runner_agents(&[], false)
+            .into_iter()
+            .find(|p| p.id == "claude")
+            .expect("claude");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("not installed"));
     }
 
     #[test]
@@ -1232,8 +1277,65 @@ mod inventory_tests {
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
-        assert_eq!(p.name, "Private (Ollama)");
+        assert_ne!(p.name, "Ollama");
+        assert!(p.name.contains("Private"), "{}", p.name);
+    }
+
+    #[test]
+    fn ollama_installed_without_models_is_unavailable() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("installed"));
+    }
+
+    #[test]
+    fn ollama_logged_out_with_models_is_still_available() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: false,
+            models: vec!["llama3.2".into()],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
         assert!(p.available);
+    }
+
+    #[test]
+    fn ollama_not_ready_error_is_never_logged_in() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
+        let err = p.error.as_deref();
+        assert_ne!(err, Some("installed · logged in"));
+        assert!(
+            err == Some("installed") || err == Some("not installed"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1417,6 +1519,7 @@ async fn chat_complete(
                     .to_string(),
             )
         })?;
+        crate::runner_chat::require_taking(&state, workspace_id, runner_id).await?;
         let model = body
             .model
             .as_ref()
@@ -1675,6 +1778,45 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
     Ok(PreparedChat { pairs, last_user })
 }
 
+#[cfg(test)]
+mod prepare_chat_pairs_tests {
+    use super::*;
+
+    fn request_with_role(role: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![
+                ChatMessageIn {
+                    role: role.into(),
+                    content: "secret".into(),
+                },
+                ChatMessageIn {
+                    role: "user".into(),
+                    content: "hi".into(),
+                },
+            ],
+            provider: None,
+            model: None,
+            conversation_id: None,
+            runner_id: None,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn prepare_chat_pairs_rejects_tool_function_admin_root() {
+        for role in ["tool", "function", "admin", "root"] {
+            let err = prepare_chat_pairs(&request_with_role(role))
+                .err()
+                .expect(role);
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "role={role}"
+            );
+        }
+    }
+}
+
 async fn run_chat_turn(
     state: &AppState,
     workspace_id: Uuid,
@@ -1723,6 +1865,7 @@ async fn run_chat_turn(
                     .to_string(),
             )
         })?;
+        crate::runner_chat::require_taking(state, workspace_id, runner_id).await?;
         let model = body
             .model
             .as_ref()

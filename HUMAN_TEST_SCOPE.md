@@ -6,10 +6,13 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `754932d20917aad015073b557f8fb54784a5c1a5`
-- Tree-id: `36145c59e964a458ecd92069c2bad98972a3a8b7-9aa6b63e4781`
+- Tree-id: `191360a4450fd6af799dc33a7946baeeca6443f1-1ad7572073cc`
 
 ## Scenes
 
+- `auth`
+- `shell`
+- `workspace`
 - `api`
 - `chat`
 - `fleet`
@@ -20,70 +23,224 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 - `integrations`
 - `settings`
 - `runners`
+- `cloud`
+- `partners`
+- `sessions`
+- `lab`
+- `kind`
 - `k8s`
+- `unify`
 
 ## Pause steps
 
+- Unify runners
 - Runners / Self-hosted
-- Workers
-- Fleet
-- Sandboxes
-- Kubernetes sandboxes
-- Integrations
-- Cases
-- Chat
+- Signup
+- Login
+- Login wall
+- Workspace switcher
 - Settings
 - Settings members
-- Inbox
 - Agents
+- Fleet
+- Chat
+- Workers
+- Cases
+- Integrations
+- Sandboxes
+- Kubernetes sandboxes
+- Runners / Cloud
+- Runners / Partners
+- Inbox
+- Sidebar
+- User menu
+- Chat history
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
+| `crates/agent-fleet-contracts/src/isolation.rs` | `unify`, `runners` |
+| `crates/fleet-auth/src/config.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/cookies.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/rate_limit.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/routes/auth.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/routes/members.rs` | `auth`, `workspace`, `settings` |
+| `crates/fleet-auth/src/routes/personas.rs` | `auth`, `workspace`, `agents` |
+| `crates/fleet-auth/src/routes/workspaces.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/tokens.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/auth_http.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/common.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/personas_ids.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/personas_no_llm.rs` | `auth`, `workspace` |
+| `crates/fleet-bus/src/codec.rs` | `fleet` |
+| `crates/fleet-bus/src/keys.rs` | `fleet` |
+| `crates/fleet-bus/src/lib.rs` | `fleet` |
+| `crates/fleet-bus/src/session.rs` | `fleet` |
+| `crates/fleet-chat-md/src/lib.rs` | `chat` |
+| `crates/fleet-db/src/models/worker_host.rs` | `runners` |
+| `crates/fleet-db/src/repos/cases.rs` | `cases` |
+| `crates/fleet-db/src/repos/integrations.rs` | `integrations` |
 | `crates/fleet-db/src/repos/worker_hosts.rs` | `runners` |
 | `crates/fleet-driver/Cargo.toml` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/acp.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/bin/mock_acp_agent.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/cli_session.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/config.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/harness.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/lib.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/main.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/mock_ollama.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/ollama_loop.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-driver/src/orch.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/provision.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/report.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/terminal.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/tests/acp_grok.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/tests/acp_mock.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/tests/worker_protocol.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-host/src/agents.rs` | `runners` |
+| `crates/fleet-host/src/chat_cli.rs` | `runners` |
 | `crates/fleet-host/src/client.rs` | `runners` |
+| `crates/fleet-host/src/config.rs` | `runners` |
 | `crates/fleet-host/src/exec_k8s.rs` | `runners`, `k8s`, `fleet` |
+| `crates/fleet-host/src/hardware.rs` | `runners` |
+| `crates/fleet-host/src/paths.rs` | `runners` |
+| `crates/fleet-host/src/platform.rs` | `runners` |
+| `crates/fleet-host/src/run.rs` | `runners` |
+| `crates/fleet-host/src/software.rs` | `runners` |
 | `crates/fleet-host/src/spawn.rs` | `runners` |
+| `crates/fleet-host/src/update.rs` | `runners` |
+| `crates/fleet-integrations/src/catalog.rs` | `integrations` |
 | `crates/fleet-integrations/src/config.rs` | `integrations` |
+| `crates/fleet-integrations/src/crypto.rs` | `integrations` |
+| `crates/fleet-integrations/src/oauth/callback_error.rs` | `integrations` |
+| `crates/fleet-integrations/src/oauth/github_app.rs` | `integrations` |
+| `crates/fleet-integrations/src/oauth/state_token.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/bitbucket/client.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/github/client.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/github/tools/reads.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/github/tools/writes.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/mod.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/notion/client.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/notion/tools/pages.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/slack/client.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/slack/tools/conversations.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/mod.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/sanitize.rs` | `integrations` |
+| `crates/fleet-integrations/src/routes.rs` | `integrations` |
+| `crates/fleet-integrations/tests/oauth_callback_workspace_bind.rs` | `integrations` |
+| `crates/fleet-integrations/tests/oauth_state_reuse.rs` | `integrations` |
+| `crates/fleet-integrations/tests/proxy_workspace_isolation.rs` | `integrations` |
+| `crates/fleet-operator/src/crd.rs` | `kind` |
+| `crates/fleet-operator/src/reconcile.rs` | `kind` |
 | `crates/fleet-orchestrator/Cargo.toml` | `fleet` |
+| `crates/fleet-orchestrator/Makefile` | `fleet` |
 | `crates/fleet-orchestrator/api/openapi.yaml` | `fleet` |
 | `crates/fleet-orchestrator/src/api/handlers.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/api/mod.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/api/worker_io.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/config/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/capacity.rs` | `fleet`, `unify`, `runners` |
+| `crates/fleet-orchestrator/src/domain/deps.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/git_remote.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/ids.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/isolation.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/retry.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/status.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/notify/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/deps_step.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/inbox.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/materialize_step.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/review.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/rollup.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/session_context.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/spawn.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/tick.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/orch/validate_done.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/personas.rs` | `fleet` |
 | `crates/fleet-orchestrator/src/sandbox/agent_loop.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/sandbox/git_isolate.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/sandbox/io.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/mod.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/remote.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/share.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/sandbox/team.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/sandbox/team_chat.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/sandbox/worker_script.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-orchestrator/src/store/host_pool.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/store/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/store/tick_ops.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sync/io.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sync/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/validate/mod.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/api_integration.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/assignable_runner.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/e2e_matrix.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/git_config_patch.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/guest_harness_claim.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/host_picker_product.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_pool_spawn.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_update_tick.rs` | `fleet` |
 | `crates/fleet-orchestrator/tests/mock_runner.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/orchestrator_url_snapshot.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/store_integration.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/tick_integration.rs` | `fleet` |
 | `crates/fleet-runners-view/src/lib.rs` | `runners` |
+| `crates/fleet-runners-view/src/placeholders.rs` | `runners` |
+| `crates/fleet-runners-view/src/routes.rs` | `runners` |
+| `crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_compose_image_pins.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_gitssh_live.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_host_e2e.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_host_services.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_infra_kustomize.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_install_contract.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_install_dx.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_install_worker.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_kind_smoke.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_lab_env.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_publish_lab_job.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_runner_guest_e2e.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_tools_by_job.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_wsexec_signed_error.py` | `lab` |
+| `crates/fleet-sandbox-driver/sandbox-lab/workspace/tests/test_workspace_agent_protocol.py` | `lab` |
+| `crates/fleet-sandbox-driver/src/acp.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/handshake.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/harness.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/job.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/opencode_config.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/pi_config.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/policy.rs` | `lab` |
+| `crates/fleet-sandbox-driver/src/provision.rs` | `lab` |
+| `crates/fleet-sandbox-driver/tests/fixtures/mock_acp_agent.py` | `lab` |
+| `crates/fleet-sandbox-driver/tests/job_fixtures.rs` | `lab` |
 | `crates/fleet-server/src/cases.rs` | `cases` |
 | `crates/fleet-server/src/chat.rs` | `chat` |
 | `crates/fleet-server/src/chat_tools.rs` | `chat` |
 | `crates/fleet-server/src/config.rs` | `api`, `settings` |
+| `crates/fleet-server/src/fleet_routes.rs` | `fleet` |
+| `crates/fleet-server/src/grok.rs` | `chat` |
+| `crates/fleet-server/src/install_routes.rs` | `runners` |
+| `crates/fleet-server/src/local_models.rs` | `chat` |
+| `crates/fleet-server/src/package_versions.rs` | `runners` |
+| `crates/fleet-server/src/partners.rs` | `cloud`, `partners` |
+| `crates/fleet-server/src/providers.rs` | `chat` |
 | `crates/fleet-server/src/tickets.rs` | `inbox` |
 | `crates/fleet-server/src/worker_hosts.rs` | `runners` |
+| `crates/fleet-ui/src/components/sidebar.rs` | `shell` |
 | `crates/fleet-ui/src/pages/agents/page.rs` | `agents` |
+| `crates/fleet-ui/src/pages/cases/page.rs` | `cases` |
+| `crates/fleet-ui/src/pages/chat/api.rs` | `chat` |
+| `crates/fleet-ui/src/pages/chat/page.rs` | `chat` |
+| `crates/fleet-ui/src/pages/runners/cloud/page.rs` | `cloud`, `partners` |
+| `crates/fleet-ui/src/pages/runners/mod.rs` | `runners` |
+| `crates/fleet-ui/src/pages/runners/partners/page.rs` | `partners` |
 | `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |
+| `crates/fleet-ui/src/pages/sandboxes/shape.rs` | `sandboxes` |
+| `crates/fleet-ui/src/pages/sessions/shape.rs` | `sessions` |
 | `crates/fleet-ui/src/pages/settings/page.rs` | `settings` |
 
 ## Film review (agent fills after recording)
@@ -93,13 +250,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes (`36145c59e964a458ecd92069c2bad98972a3a8b7-9aa6b63e4781`; `/health.git_sha` and UI `/fleet-git-sha.txt` match)
-- Frames + webm inspected: `.tmp/demos/20260905T223118Z-frames/` (71 pngs) and `.tmp/demos/20260905T223118Z-extra-page@d3db88a2eeeb368880bd7043dff8e2b2.webm` (the 12K `…integrations.webm` sibling is a 1s stub — attach the extra-page file). First take `20260905T222440Z` is not proof (signup rate-limit).
-- Bugs found:
-  - API index still advertises `http://localhost:3030` while this host stack is `:13230` (Kind remap). Health sha is this tree.
-  - Chat login “landed on Workforce” is a recorder false positive: dashboard first heading is Workforce; chat composer then sent “Human-test ping” as Grok on `viny-5700g`.
-  - Runners Apply click aborted: toast (`Command copied.`) sits in a `pointer-events-none` stack but a child still intercepts the Apply button. Pair panel + install command (`192.168.1.1:18280`) worked; token is in the frame — do not commit the video.
-  - Inbox Start monitor returned 400 (no listen source on a throwaway workspace). Page chrome is fine.
-  - k8s kubectl against this host has no Kind API server (expected). Fleet fixture start/tick/cancel still ran.
-  - `viny-5700g` shows `outdated` / `fleet-driver 0.0.2 · behind` (installed host package vs staged dist). Do not restage/auto-update that box unless asked.
-  - No leaked personal emails in the film (`*@example.test`).
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)

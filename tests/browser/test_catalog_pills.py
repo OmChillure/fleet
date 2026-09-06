@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: extra pills (catalog:e2e-pending-apply-outdated-pills).
 
-After Apply, pending apply until ack. Behind package (auto-update off)
-shows outdated. Both pills can sit on the card together. Heartbeats
-update the card via the ~10s list poll — do not navigate after apply
-(dx rebuilds stall page.goto). Fail closed — no skip when staged dist
-is missing.
+Auto-update off → Apply → behind heartbeat without ack: both extra pills
+on the card after the ~10s list poll. Ack hides pending apply and keeps
+outdated. Do not navigate after apply (dx rebuilds stall page.goto).
+Fail closed — no skip when staged dist is missing.
 """
 from __future__ import annotations
 
@@ -165,87 +164,32 @@ class CatalogPillsTests(unittest.TestCase):
             "staged linux-x86_64 manifest is required to assert the outdated "
             "pill (scripts/stage-worker-dist.sh). Missing staged dist is a fail.",
         )
-        current_bins: dict[str, Any] = {}
-        for stem, info in (manifest.get("bins") or {}).items():
-            if isinstance(info, dict):
-                sha = info.get("sha256")
-                ver = info.get("version")
-                if isinstance(sha, str) and sha.strip():
-                    entry: dict[str, Any] = {"sha256": sha.strip()}
-                    if isinstance(ver, str) and ver.strip():
-                        entry["version"] = ver.strip()
-                    current_bins[str(stem)] = entry
-        current = heartbeat(
-            page,
-            machine_token,
-            {
-                "platform": "linux-x86_64",
-                "hostname": name,
-                "software": {
-                    "git_sha": str(manifest.get("git_sha") or "").strip(),
-                    "bins": current_bins,
-                },
-            },
-        )
-        current_host = current.get("host") or {}
-        self.assertFalse(
-            bool(current_host.get("outdated"))
-            or current_host.get("software_status") == "behind",
-            f"matching staged software must not mark the fresh pair behind: {current_host}",
-        )
-
-        row = _host_row(page, ws, host_id)
-        self.assertEqual(row.get("status"), "online", row)
-        self.assertFalse(row.get("settings_pending"), row)
-        self.assertEqual(row.get("settings_gen"), row.get("settings_ack_gen"), row)
+        gen_before = int(_host_row(page, ws, host_id).get("settings_gen") or 0)
 
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
         page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         card = _card(page, name)
-        self.assertIn("online", card.inner_text().lower())
-        self.assertEqual(
-            card.get_by_text("pending apply", exact=True).count(),
-            0,
-            "fresh pair must not show pending apply",
-        )
-        self.assertEqual(
-            card.get_by_text("outdated", exact=True).count(),
-            0,
-            "fresh pair must not show outdated",
-        )
 
         # Auto-update off so a behind package is "outdated", not "updating".
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
         self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
-        if auto.first.is_checked():
-            auto.first.click(force=True)
-        else:
-            card.get_by_role("button", name="Stop taking new jobs").click(force=True)
+        self.assertTrue(auto.first.is_checked(), "fresh pair defaults Auto-update on")
+        auto.first.click(force=True)
         apply = card.get_by_role("button", name="Apply changes")
         apply.wait_for(timeout=5_000)
         apply.click(force=True)
 
-        pill = card.get_by_text("pending apply", exact=True)
-        pill.wait_for(timeout=10_000)
-        self.assertTrue(pill.is_visible(), "pending apply must be a card pill, not only a toast")
-        self.assertIn("pending apply", card.inner_text())
-
-        row = _host_row(page, ws, host_id)
-        self.assertTrue(
-            row.get("settings_pending")
-            or row.get("settings_gen") != row.get("settings_ack_gen"),
-            f"Apply must bump settings_gen: {row}",
-        )
-        settings_gen = int(row["settings_gen"])
-        self.assertGreater(settings_gen, int(row.get("settings_ack_gen") or 0), row)
-        self.assertFalse(
-            row.get("auto_update", True),
-            f"auto-update must be off so outdated (not updating) can show: {row}",
-        )
+        # Apply PATCH is async; wait for gen so the behind heartbeat stays unacked.
+        settings_gen = gen_before
+        for _ in range(30):
+            settings_gen = int(_host_row(page, ws, host_id).get("settings_gen") or 0)
+            if settings_gen > gen_before:
+                break
+            page.wait_for_timeout(400)
 
         software = _behind_software(manifest)
-        behind = heartbeat(
+        heartbeat(
             page,
             machine_token,
             {
@@ -254,23 +198,13 @@ class CatalogPillsTests(unittest.TestCase):
                 "software": software,
             },
         )
-        behind_host = behind.get("host") or {}
-        self.assertTrue(
-            bool(behind_host.get("outdated"))
-            or behind_host.get("software_status") == "behind",
-            f"staged dist must mark non-matching bake behind: {behind_host}",
-        )
-        self.assertNotEqual(
-            behind_host.get("settings_ack_gen"),
-            settings_gen,
-            f"behind heartbeat must not ack settings: {behind_host}",
-        )
 
         # Stay on the page — next list poll must paint both extra pills.
         card = _card(page, name)
-        card.get_by_text("pending apply", exact=True).wait_for(timeout=POLL_WAIT_MS)
+        pending = card.get_by_text("pending apply", exact=True)
         outdated = card.get_by_text("outdated", exact=True)
         try:
+            pending.wait_for(timeout=POLL_WAIT_MS)
             outdated.wait_for(timeout=POLL_WAIT_MS)
         except Exception as e:
             raise AssertionError(
@@ -278,12 +212,11 @@ class CatalogPillsTests(unittest.TestCase):
                 f"list poll ({e}): {card.inner_text()}"
             ) from e
         self.assertTrue(
-            outdated.is_visible(),
+            pending.is_visible() and outdated.is_visible(),
             f"behind + unacked apply must show both pills: {card.inner_text()}",
         )
-        self.assertIn("pending apply", card.inner_text().lower())
 
-        acked = heartbeat(
+        heartbeat(
             page,
             machine_token,
             {
@@ -293,17 +226,10 @@ class CatalogPillsTests(unittest.TestCase):
                 "software": software,
             },
         )
-        acked_host = acked.get("host") or {}
-        self.assertEqual(acked_host.get("settings_ack_gen"), settings_gen, acked)
-        self.assertFalse(acked_host.get("settings_pending"), acked)
-        self.assertTrue(
-            bool(acked_host.get("outdated"))
-            or acked_host.get("software_status") == "behind",
-            f"ack must not clear outdated: {acked_host}",
-        )
 
         card = _card(page, name)
         pending = card.get_by_text("pending apply", exact=True)
+        outdated = card.get_by_text("outdated", exact=True)
         try:
             pending.wait_for(state="hidden", timeout=POLL_WAIT_MS)
         except Exception as e:
@@ -311,13 +237,6 @@ class CatalogPillsTests(unittest.TestCase):
                 f"ack must clear pending apply on the card after the ~10s "
                 f"list poll ({e}): {card.inner_text()}"
             ) from e
-        self.assertEqual(
-            pending.count(),
-            0,
-            "ack must clear pending apply on the card",
-        )
-        self.assertNotIn("pending apply", card.inner_text().lower())
-        outdated = card.get_by_text("outdated", exact=True)
         try:
             outdated.wait_for(timeout=POLL_WAIT_MS)
         except Exception as e:

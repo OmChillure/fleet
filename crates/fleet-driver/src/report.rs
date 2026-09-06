@@ -42,15 +42,45 @@ mod tests {
     #[test]
     fn write_artifacts_makes_result_md_long_enough_for_validate_done() {
         let dir = tempfile::tempdir().unwrap();
-        write_artifacts(
-            dir.path(),
-            &json!({ "ok": true, "stop_reason": "end_turn" }),
-            "hello from mock agent",
-        )
-        .unwrap();
+        write_artifacts(dir.path(), &json!({ "ok": true }), "").unwrap();
         let md = std::fs::read_to_string(dir.path().join("result.md")).unwrap();
         assert!(md.trim().chars().count() >= 20, "{md}");
+        assert!(md.contains("No transcript was produced"), "{md}");
+    }
+
+    #[test]
+    fn write_artifacts_embeds_stop_reason_else_completed() {
+        let with_reason = tempfile::tempdir().unwrap();
+        write_artifacts(
+            with_reason.path(),
+            &json!({ "ok": true, "stop_reason": "end_turn" }),
+            "",
+        )
+        .unwrap();
+        let with_md = std::fs::read_to_string(with_reason.path().join("result.md")).unwrap();
+        assert!(with_md.contains("ACP end_turn."), "{with_md}");
+
+        let missing = tempfile::tempdir().unwrap();
+        write_artifacts(missing.path(), &json!({ "ok": true }), "").unwrap();
+        let missing_md = std::fs::read_to_string(missing.path().join("result.md")).unwrap();
+        assert!(missing_md.contains("ACP completed."), "{missing_md}");
+
+        let empty_reason = tempfile::tempdir().unwrap();
+        write_artifacts(
+            empty_reason.path(),
+            &json!({ "ok": true, "stop_reason": "" }),
+            "",
+        )
+        .unwrap();
+        let empty_md = std::fs::read_to_string(empty_reason.path().join("result.md")).unwrap();
+        assert!(empty_md.contains("ACP completed."), "{empty_md}");
+    }
+
+    #[test]
+    fn write_artifacts_creates_work_dir_for_coding_exists_work() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+        write_artifacts(dir.path(), &json!({ "ok": true }), "").unwrap();
         assert!(dir.path().join("work").is_dir());
-        assert!(md.contains("hello from mock agent"), "{md}");
     }
 }

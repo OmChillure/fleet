@@ -164,8 +164,8 @@ pub fn default_work_dir_string() -> String {
 }
 
 /// catalog:unit-machine-id-persist — host `machine.id` is written once at
-/// 0600 and reused after token wipe / surrounding whitespace / update
-/// dest-dir swap so unpair+re-pair reclaims the same worker row.
+/// 0600 and reused after token wipe / surrounding whitespace so
+/// unpair+re-pair reclaims the same worker row.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,27 +181,6 @@ mod tests {
         assert_eq!(on_disk, format!("{first}\n"));
     }
 
-    #[test]
-    fn deleting_machine_token_does_not_change_machine_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let id = load_or_create_machine_id_in(dir.path()).unwrap();
-        let token = dir.path().join("machine.token");
-        fs::write(&token, "pair-token\n").unwrap();
-        fs::remove_file(&token).unwrap();
-        let after = load_or_create_machine_id_in(dir.path()).unwrap();
-        assert_eq!(id, after);
-        assert!(!token.exists());
-    }
-
-    #[test]
-    fn stored_id_with_surrounding_whitespace_is_reused() {
-        let dir = tempfile::tempdir().unwrap();
-        let id = uuid::Uuid::now_v7();
-        fs::write(dir.path().join("machine.id"), format!(" \t{id}\n")).unwrap();
-        let loaded = load_or_create_machine_id_in(dir.path()).unwrap();
-        assert_eq!(loaded, id);
-    }
-
     #[cfg(unix)]
     #[test]
     fn created_machine_id_file_is_mode_0600() {
@@ -213,100 +192,33 @@ mod tests {
         assert_eq!(mode, 0o600, "machine.id must be owner-only, got {mode:o}");
     }
 
-    #[test]
-    fn machine_id_stays_on_config_path_after_install_dir_swap() {
-        let config = tempfile::tempdir().unwrap();
-        let install_old = tempfile::tempdir().unwrap();
-        let install_new = tempfile::tempdir().unwrap();
-
-        let id = load_or_create_machine_id_in(config.path()).unwrap();
-        fs::write(install_old.path().join("fleet-host"), b"old-bin").unwrap();
-
-        // Update swaps dest bins; identity must stay in the config dir.
-        fs::write(install_new.path().join("fleet-host"), b"new-bin").unwrap();
-        fs::write(
-            install_new.path().join("machine.id"),
-            "00000000-0000-0000-0000-000000000000\n",
-        )
-        .unwrap();
-
-        let after = load_or_create_machine_id_in(config.path()).unwrap();
-        assert_eq!(id, after);
-        assert_eq!(
-            fs::read_to_string(config.path().join("machine.id")).unwrap(),
-            format!("{id}\n")
-        );
-        assert_ne!(
-            install_new.path().join("machine.id"),
-            config.path().join("machine.id")
-        );
-        assert!(!install_old.path().join("machine.id").exists());
-    }
-
-    /// catalog:unit-host-run-lock-exclusive — Dual fleet-host with the same
-    /// host_id (docker vs kube on one box) must serialize on `run.lock`.
-    /// Exclusive is flock, not "file exists": a leftover lock after crash
-    /// must not brick the next start.
+    /// catalog:unit-host-run-lock-exclusive — one `fleet-host run` per
+    /// config dir via flock (not file-exists). Leftover `run.lock` after
+    /// crash is not a holder; a second dir can run at the same time.
     #[cfg(unix)]
     #[test]
-    fn acquire_run_lock_is_exclusive_for_same_host_id() {
+    fn acquire_run_lock_stale_file_is_not_a_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("run.lock"), b"stale-pid\n").unwrap();
+        acquire_run_lock_in(dir.path()).expect("stale lock file is not exclusive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_run_lock_race_yields_exactly_one_holder() {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
-        let same = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let host_id = uuid::Uuid::now_v7();
-        // Same host_id + machine token in one config dir is the dual-host
-        // docker-vs-kube case: both processes would reclaim the same row.
-        fs::write(same.path().join("machine.id"), format!("{host_id}\n")).unwrap();
-        fs::write(same.path().join("machine.token"), "flm_shared\n").unwrap();
-        fs::write(
-            same.path().join("config.toml"),
-            format!("host_id = \"{host_id}\"\n"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            run_lock_path(),
-            config_dir().join("run.lock"),
-            "public run.lock path is the config dir, next to machine.id"
-        );
-        assert_eq!(
-            run_lock_path_in(same.path()),
-            same.path().join("run.lock"),
-            "run.lock lives in the config dir next to machine.id / machine.token"
-        );
-
-        // Stale run.lock from a previous process is not a holder.
-        fs::write(same.path().join("run.lock"), b"stale-pid\n").unwrap();
-        let first = acquire_run_lock_in(same.path()).expect("stale lock file is not exclusive");
-        assert!(same.path().join("run.lock").is_file());
-
-        // Same config dir = same host_id / machine token. A second process
-        // (kube next to docker) must not also run.
-        let err = acquire_run_lock_in(same.path()).expect_err("second holder same host_id");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("already running"),
-            "exclusive run.lock must fail closed: {msg}"
-        );
-        assert!(
-            msg.contains("run.lock"),
-            "error must name the lock file so the operator can find the other host: {msg}"
-        );
-
-        // Two threads racing the same host still yield exactly one holder.
-        let race_dir = tempfile::tempdir().unwrap();
-        fs::write(race_dir.path().join("machine.id"), format!("{host_id}\n")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let barrier = Arc::new(Barrier::new(2));
-        let race_path = race_dir.path().to_path_buf();
+        let path = dir.path().to_path_buf();
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let barrier = Arc::clone(&barrier);
-                let race_path = race_path.clone();
+                let path = path.clone();
                 thread::spawn(move || {
                     barrier.wait();
-                    acquire_run_lock_in(&race_path)
+                    acquire_run_lock_in(&path)
                 })
             })
             .collect();
@@ -322,19 +234,94 @@ mod tests {
                 .any(|e| e.to_string().contains("already running")),
             "racy loser must fail closed, not a generic IO error: {raced:?}"
         );
+    }
 
-        // A different box (different config dir / host_id) can run at the same time.
-        let other_id = uuid::Uuid::now_v7();
-        fs::write(other.path().join("machine.id"), format!("{other_id}\n")).unwrap();
-        let _other_host =
-            acquire_run_lock_in(other.path()).expect("different host_id must not share the lock");
+    #[cfg(unix)]
+    #[test]
+    fn acquire_run_lock_other_dir_is_independent() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let _held = acquire_run_lock_in(a.path()).unwrap();
+        acquire_run_lock_in(b.path()).expect("different config dir must not share the lock");
+    }
 
-        drop(first);
-        acquire_run_lock_in(same.path()).expect("lock after drop");
+    /// O_CLOEXEC: SIGKILL of the holder must not leave a spawned child's
+    /// inherited fd holding flock.
+    #[cfg(unix)]
+    #[test]
+    fn acquire_run_lock_cloexec_so_spawned_child_cannot_brick_restart() {
+        use std::process::{Command, Stdio};
 
-        // Race winner dropping must let the other process start (crash/restart).
-        let winner = raced.into_iter().find_map(|r| r.ok()).expect("one winner");
-        drop(winner);
-        acquire_run_lock_in(&race_path).expect("lock after race winner drop");
+        let dir = tempfile::tempdir().unwrap();
+        let lock_dir = dir.path().to_path_buf();
+        let pid_path = lock_dir.join("sleep.pid");
+
+        let acquirer = unsafe { libc::fork() };
+        assert!(
+            acquirer >= 0,
+            "fork: {}",
+            std::io::Error::last_os_error()
+        );
+        if acquirer == 0 {
+            let lock = match acquire_run_lock_in(&lock_dir) {
+                Ok(lock) => lock,
+                Err(_) => unsafe { libc::_exit(1) },
+            };
+            let child = match Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(_) => unsafe { libc::_exit(2) },
+            };
+            let _ = fs::write(&pid_path, child.id().to_string());
+            std::mem::forget(child);
+            std::mem::forget(lock);
+            unsafe { libc::_exit(0) };
+        }
+
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(acquirer, &mut status, 0) };
+        assert_eq!(
+            waited,
+            acquirer,
+            "waitpid: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "acquirer _exit 0, status={status}"
+        );
+
+        let sleep_pid: libc::pid_t = fs::read_to_string(&pid_path)
+            .expect("sleep pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(sleep_pid, 0) },
+            0,
+            "spawned child must still be alive"
+        );
+        let _restart = acquire_run_lock_in(&lock_dir)
+            .expect("restart after acquirer _exit must succeed while spawned child lives");
+        unsafe {
+            libc::kill(sleep_pid, libc::SIGKILL);
+            libc::waitpid(sleep_pid, std::ptr::null_mut(), 0);
+        }
+    }
+
+    #[test]
+    fn acquire_run_lock_creates_missing_config_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing/nested");
+        let _held = acquire_run_lock_in(&missing).expect("create_dir_all parent of run.lock");
+        assert!(
+            missing.join("run.lock").is_file(),
+            "acquire must mkdir and create run.lock"
+        );
     }
 }

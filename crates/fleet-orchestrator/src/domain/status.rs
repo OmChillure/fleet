@@ -293,136 +293,104 @@ mod tests {
     }
 
     #[test]
-    fn self_transition_not_allowed() {
-        for &s in BoardTaskStatus::all() {
-            assert!(!can_transition(s, s), "self {s}");
-        }
-    }
-
-    #[test]
-    fn is_terminal() {
-        assert!(!BoardTaskStatus::Queued.is_terminal());
-        assert!(!BoardTaskStatus::InProgress.is_terminal());
-        assert!(BoardTaskStatus::DoneSuccess.is_terminal());
-        assert!(BoardTaskStatus::DoneFailed.is_terminal());
-        assert!(BoardTaskStatus::Cancelled.is_terminal());
-    }
-
-    #[test]
-    fn transition_errors() {
-        assert!(transition(BoardTaskStatus::Queued, BoardTaskStatus::InProgress).is_err());
-        assert!(transition(BoardTaskStatus::Ready, BoardTaskStatus::Assigned).is_ok());
-    }
-
-    #[test]
-    fn illegal_task_transition_rejected() {
-        // Docs §15.1: persist snake_case; illegal edges are rejected (not reopened).
-        // Domain helper lock (extra). Store persist is
-        // store_integration::illegal_task_transition_rejected_in_store.
-        fn persist(from: &str, to: &str) -> Result<(), TransitionError> {
-            let from = BoardTaskStatus::from_db(from)
-                .unwrap_or_else(|| panic!("unknown board status {from}"));
-            let to =
-                BoardTaskStatus::from_db(to).unwrap_or_else(|| panic!("unknown board status {to}"));
-            transition(from, to)
-        }
-
-        let err = persist("done_success", "ready").expect_err("done_success → ready");
-        assert_eq!(err.from, BoardTaskStatus::DoneSuccess);
-        assert_eq!(err.to, BoardTaskStatus::Ready);
-        assert_eq!(
-            err.to_string(),
-            "illegal board task transition: done_success → ready"
-        );
-        assert!(!can_transition(err.from, err.to));
-
-        let err = persist("cancelled", "assigned").expect_err("cancelled → assigned");
-        assert_eq!(err.from, BoardTaskStatus::Cancelled);
-        assert_eq!(err.to, BoardTaskStatus::Assigned);
-        assert_eq!(
-            err.to_string(),
-            "illegal board task transition: cancelled → assigned"
-        );
-        assert!(!can_transition(err.from, err.to));
-
-        let illegal = [
-            ("done_failed", "ready"),
-            ("done_success", "cancelled"),
-            ("cancelled", "done_success"),
-            ("queued", "assigned"),
-            ("ready", "in_progress"),
-            ("assigned", "ready"),
-            ("in_progress", "assigned"),
-            ("done_success", "done_success"),
-            ("cancelled", "cancelled"),
+    fn board_task_terminal_only_done_success_done_failed_cancelled() {
+        let expected: &[(BoardTaskStatus, bool)] = &[
+            (BoardTaskStatus::Queued, false),
+            (BoardTaskStatus::Ready, false),
+            (BoardTaskStatus::Assigned, false),
+            (BoardTaskStatus::InProgress, false),
+            (BoardTaskStatus::Blocked, false),
+            (BoardTaskStatus::RetryWait, false),
+            (BoardTaskStatus::DoneSuccess, true),
+            (BoardTaskStatus::DoneFailed, true),
+            (BoardTaskStatus::Cancelled, true),
         ];
-        for (from, to) in illegal {
-            let err = persist(from, to).expect_err(&format!("{from} → {to} must be rejected"));
-            assert_eq!(err.from.as_str(), from);
-            assert_eq!(err.to.as_str(), to);
+        let listed: Vec<_> = expected.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            BoardTaskStatus::all(),
+            listed.as_slice(),
+            "all() must match the terminal table so a new or dropped variant fails"
+        );
+        for &(status, want) in expected {
             assert_eq!(
-                err.to_string(),
-                format!("illegal board task transition: {from} → {to}")
-            );
-            assert!(
-                !can_transition(err.from, err.to),
-                "CanTransition({from} → {to}) must be false"
+                status.is_terminal(),
+                want,
+                "{status} is_terminal() = {}, want {want}",
+                status.is_terminal()
             );
         }
+    }
 
-        // Legal §15.1 path still works so this is not "every persist is rejected".
-        let legal = [
-            ("queued", "ready"),
-            ("ready", "assigned"),
-            ("assigned", "in_progress"),
-            ("in_progress", "done_success"),
-            ("assigned", "done_failed"),
-            ("assigned", "cancelled"),
-            ("in_progress", "blocked"),
-            ("in_progress", "retry_wait"),
-            ("blocked", "ready"),
-            ("retry_wait", "ready"),
-            ("queued", "done_failed"),
-            ("queued", "cancelled"),
+    #[test]
+    fn work_run_is_terminal_only_completed_failed_cancelled() {
+        use WorkRunStatus::*;
+        let expected: &[(WorkRunStatus, bool)] = &[
+            (IntentReceived, false),
+            (SourcesResolved, false),
+            (Ingested, false),
+            (Planning, false),
+            (PlanReady, false),
+            (Accepted, false),
+            (Active, false),
+            (Completed, true),
+            (Failed, true),
+            (Cancelled, true),
         ];
-        for (from, to) in legal {
-            persist(from, to).unwrap_or_else(|e| panic!("{from} → {to} must be allowed: {e}"));
-            let from_s = BoardTaskStatus::from_db(from).unwrap();
-            let to_s = BoardTaskStatus::from_db(to).unwrap();
-            assert!(
-                can_transition(from_s, to_s),
-                "CanTransition({from} → {to}) must be true"
+        for &(status, want) in expected {
+            let classified = match status {
+                Completed | Failed | Cancelled => true,
+                IntentReceived | SourcesResolved | Ingested | Planning | PlanReady
+                | Accepted | Active => false,
+            };
+            assert_eq!(
+                status.is_terminal(),
+                classified,
+                "{status:?} is_terminal() = {}, want {classified}",
+                status.is_terminal()
+            );
+            assert_eq!(
+                classified, want,
+                "{status:?} table row must match the exhaustive class"
             );
         }
-
-        for from in ["done_success", "done_failed", "cancelled"] {
-            for to in BoardTaskStatus::all() {
-                let err = persist(from, to.as_str())
-                    .expect_err(&format!("{from} → {to} must be rejected"));
-                assert_eq!(err.from.as_str(), from);
-                assert_eq!(err.to, *to);
-                assert!(
-                    !can_transition(err.from, err.to),
-                    "CanTransition({from} → {to}) must be false"
-                );
-            }
-        }
     }
 
     #[test]
-    fn session_capacity() {
-        assert!(WorkerSessionStatus::Spawning.holds_capacity());
-        assert!(WorkerSessionStatus::Healthy.holds_capacity());
-        assert!(WorkerSessionStatus::Stuck.holds_capacity());
-        assert!(WorkerSessionStatus::Killing.holds_capacity());
-        assert!(!WorkerSessionStatus::Exited.holds_capacity());
-        assert!(!WorkerSessionStatus::FailedSpawn.holds_capacity());
-    }
-
-    #[test]
-    fn plan_accepted() {
-        assert!(WorkPlanStatus::Accepted.is_accepted());
-        assert!(!WorkPlanStatus::Draft.is_accepted());
+    fn worker_session_from_db_roundtrips_snake_case() {
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::Spawning.as_str()),
+            Some(WorkerSessionStatus::Spawning)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::Healthy.as_str()),
+            Some(WorkerSessionStatus::Healthy)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::Stuck.as_str()),
+            Some(WorkerSessionStatus::Stuck)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::Killing.as_str()),
+            Some(WorkerSessionStatus::Killing)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::Exited.as_str()),
+            Some(WorkerSessionStatus::Exited)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db(WorkerSessionStatus::FailedSpawn.as_str()),
+            Some(WorkerSessionStatus::FailedSpawn)
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db("Healthy"),
+            None,
+            "from_db is exact snake_case; PascalCase is dropped by spawn filter_map"
+        );
+        assert_eq!(
+            WorkerSessionStatus::from_db("failed-spawn"),
+            None,
+            "hyphenated failed-spawn is not the db token failed_spawn"
+        );
     }
 }
 

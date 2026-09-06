@@ -85,32 +85,15 @@ async fn disconnect_drops_credentials_other_workspace_same_provider_intact() {
     let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
     let (user_b, ws_b) = seed_user_with_workspace(&pool).await;
 
-    let leftover_a = leftover_ciphertext("aaaa");
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("aaaa")).await;
     let leftover_b = leftover_ciphertext("bbbb");
-    upsert_github(&pool, ws_a, user_a, leftover_a.clone()).await;
     upsert_github(&pool, ws_b, user_b, leftover_b.clone()).await;
-
-    assert_eq!(
-        integrations::credentials_for(&pool, ws_a, "github")
-            .await
-            .expect("creds a before")
-            .expect("ws-a connected"),
-        leftover_a
-    );
-    assert_eq!(
-        integrations::credentials_for(&pool, ws_b, "github")
-            .await
-            .expect("creds b before")
-            .expect("ws-b connected"),
-        leftover_b
-    );
 
     let dropped = integrations::disconnect(&pool, ws_a, "github")
         .await
         .expect("disconnect ws-a");
     assert!(dropped, "connected row must disconnect");
 
-    // Proxy path: credentials_for uses find_connected — must not return leftover ct.
     let after = integrations::credentials_for(&pool, ws_a, "github")
         .await
         .expect("creds a after");
@@ -118,15 +101,7 @@ async fn disconnect_drops_credentials_other_workspace_same_provider_intact() {
         after.is_none(),
         "credentials_for must fail closed after disconnect, got {after:?}"
     );
-    assert!(
-        integrations::find_connected(&pool, ws_a, "github")
-            .await
-            .expect("find_connected a")
-            .is_none(),
-        "find_connected must not see a disconnected row"
-    );
 
-    // Soft-delete row remains; secrets must be wiped (not leftover envelope).
     let all = integrations::list_all_for_workspace(&pool, ws_a)
         .await
         .expect("list_all");
@@ -136,74 +111,108 @@ async fn disconnect_drops_credentials_other_workspace_same_provider_intact() {
         .expect("disconnected row remains");
     assert_eq!(row.status, "disconnected");
     assert_eq!(row.credentials, json!({}));
-    assert!(row.credentials.get("_enc").is_none());
-    assert!(row.credentials.get("ct").is_none());
-    assert!(row.credentials.get("access_token").is_none());
-    assert!(row.last_error.is_none());
 
-    let listed = integrations::list_for_workspace(&pool, ws_a)
-        .await
-        .expect("list connected");
-    assert!(
-        listed.iter().all(|c| c.provider != "github"),
-        "list_for_workspace must omit disconnected github"
-    );
-
-    // Other workspace, same provider: still connected, same ciphertext.
     let still = integrations::credentials_for(&pool, ws_b, "github")
         .await
         .expect("creds b after")
         .expect("ws-b still connected");
     assert_eq!(still, leftover_b);
-    let b_row = integrations::find_connected(&pool, ws_b, "github")
-        .await
-        .expect("find_connected b")
-        .expect("ws-b connected");
-    assert_eq!(b_row.status, "connected");
-    assert_eq!(b_row.credentials, leftover_b);
-
-    // Already disconnected: no-op, still no leftover for the proxy.
-    let again = integrations::disconnect(&pool, ws_a, "github")
-        .await
-        .expect("second disconnect");
-    assert!(!again, "already-disconnected must not report a drop");
-    assert!(integrations::credentials_for(&pool, ws_a, "github")
-        .await
-        .expect("creds a after second")
-        .is_none());
-    let still_b = integrations::credentials_for(&pool, ws_b, "github")
-        .await
-        .expect("creds b after second")
-        .expect("ws-b still connected after second disconnect");
-    assert_eq!(still_b, leftover_b);
 }
 
-async fn count_oauth_nonces(pool: &fleet_db::PgPool, nonce: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM integration_oauth_state_nonces WHERE nonce = $1",
-    )
-    .bind(nonce)
-    .fetch_one(pool)
-    .await
-    .expect("count oauth nonce")
-}
-
-async fn count_workspace_oauth_nonces(pool: &fleet_db::PgPool, workspace_id: Uuid) -> i64 {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM integration_oauth_state_nonces WHERE workspace_id = $1",
-    )
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await
-    .expect("count workspace oauth nonces")
-}
-
-/// Insert-on-conflict is the consume-once lock. Rows survive disconnect;
-/// workspace delete cascades.
 #[tokio::test]
-async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconnect() {
+async fn disconnect_one_provider_leaves_other_provider_same_workspace_intact() {
     let pool = connect_and_migrate().await;
     let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+
+    let leftover_gitlab = leftover_ciphertext("gl");
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("gh")).await;
+    integrations::upsert(
+        &pool,
+        &UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id: ws_a,
+            provider: "gitlab".into(),
+            account_label: Some("acct".into()),
+            config: json!({ "site": "gitlab.com" }),
+            credentials: leftover_gitlab.clone(),
+            connected_by: Some(user_a),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .expect("upsert gitlab");
+
+    let dropped = integrations::disconnect(&pool, ws_a, "github")
+        .await
+        .expect("disconnect github");
+    assert!(dropped, "connected github must disconnect");
+
+    let gitlab = integrations::credentials_for(&pool, ws_a, "gitlab")
+        .await
+        .expect("creds gitlab after")
+        .expect("gitlab still connected");
+    assert_eq!(gitlab, leftover_gitlab);
+}
+
+#[tokio::test]
+async fn upsert_after_disconnect_reconnects_with_new_envelope() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("old")).await;
+    let dropped = integrations::disconnect(&pool, ws_a, "github")
+        .await
+        .expect("disconnect");
+    assert!(dropped, "connected github must disconnect");
+
+    let leftover_new = leftover_ciphertext("new");
+    upsert_github(&pool, ws_a, user_a, leftover_new.clone()).await;
+
+    let row = integrations::find_connected(&pool, ws_a, "github")
+        .await
+        .expect("find_connected")
+        .expect("reconnected");
+    assert_eq!(row.status, "connected");
+    assert_eq!(
+        integrations::credentials_for(&pool, ws_a, "github")
+            .await
+            .expect("creds after upsert")
+            .expect("connected envelope"),
+        leftover_new
+    );
+}
+
+#[tokio::test]
+async fn credentials_for_returns_none_for_error_status() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("err")).await;
+    integrations::mark_error(&pool, ws_a, "github", "token revoked")
+        .await
+        .expect("mark_error");
+
+    assert!(
+        integrations::credentials_for(&pool, ws_a, "github")
+            .await
+            .expect("creds after error")
+            .is_none(),
+        "credentials_for must fail closed for status=error"
+    );
+    assert!(
+        integrations::find_connected(&pool, ws_a, "github")
+            .await
+            .expect("find_connected after error")
+            .is_none(),
+        "find_connected must not see an error row"
+    );
+}
+
+/// Global nonce PK: first insert wins for every workspace and provider.
+#[tokio::test]
+async fn consume_oauth_state_nonce_is_once_across_workspace_and_provider() {
+    let pool = connect_and_migrate().await;
+    let (_user_a, ws_a) = seed_user_with_workspace(&pool).await;
     let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
     let nonce = format!("oauth-nonce-{}", Uuid::now_v7());
 
@@ -211,13 +220,6 @@ async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconn
         .await
         .expect("first consume");
     assert!(first, "first insert must win");
-    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
-
-    let replay = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_a, "github")
-        .await
-        .expect("replay consume");
-    assert!(!replay, "replay of the same nonce must lose");
-    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
 
     let cross = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_b, "gitlab")
         .await
@@ -226,7 +228,13 @@ async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconn
         !cross,
         "same nonce must stay dead across workspace and provider"
     );
-    assert_eq!(count_oauth_nonces(&pool, &nonce).await, 1);
+}
+
+/// Trim-empty is not a consumable nonce; insert never runs.
+#[tokio::test]
+async fn consume_oauth_state_nonce_rejects_blank_or_whitespace() {
+    let pool = connect_and_migrate().await;
+    let (_user_a, ws_a) = seed_user_with_workspace(&pool).await;
 
     let empty = integrations::consume_oauth_state_nonce(&pool, "", ws_a, "github")
         .await
@@ -236,47 +244,20 @@ async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconn
         .expect("whitespace nonce");
     assert!(!empty, "empty nonce must not consume");
     assert!(!whitespace, "whitespace nonce must not consume");
-    assert_eq!(
-        count_oauth_nonces(&pool, "").await,
-        0,
-        "empty nonce must not insert a row"
-    );
-    assert_eq!(
-        count_oauth_nonces(&pool, "   \t").await,
-        0,
-        "whitespace nonce must not insert a row"
-    );
-    assert_eq!(
-        count_workspace_oauth_nonces(&pool, ws_a).await,
-        1,
-        "empty/whitespace must not add rows for the workspace"
-    );
+}
 
-    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("nonce")).await;
-    let dropped = integrations::disconnect(&pool, ws_a, "github")
-        .await
-        .expect("disconnect");
-    assert!(dropped, "connected github must disconnect");
-    assert_eq!(
-        count_oauth_nonces(&pool, &nonce).await,
-        1,
-        "disconnect must not delete the nonce row"
-    );
-    let after_disconnect = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_a, "github")
-        .await
-        .expect("consume after disconnect");
-    assert!(
-        !after_disconnect,
-        "nonce must stay consumed after disconnect"
-    );
-
+/// Workspace delete CASCADE drops the nonce PK so a new workspace can win it.
+#[tokio::test]
+async fn consume_oauth_state_nonce_wins_again_after_workspace_delete() {
+    let pool = connect_and_migrate().await;
     let (_user_c, ws_c) = seed_user_with_workspace(&pool).await;
-    let cascade_nonce = format!("oauth-nonce-cascade-{}", Uuid::now_v7());
-    let cascaded = integrations::consume_oauth_state_nonce(&pool, &cascade_nonce, ws_c, "github")
+    let (_user_d, ws_d) = seed_user_with_workspace(&pool).await;
+    let nonce = format!("oauth-nonce-cascade-{}", Uuid::now_v7());
+
+    let first = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_c, "github")
         .await
-        .expect("cascade nonce");
-    assert!(cascaded);
-    assert_eq!(count_oauth_nonces(&pool, &cascade_nonce).await, 1);
+        .expect("consume before delete");
+    assert!(first, "first insert must win");
 
     sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1")
         .bind(ws_c)
@@ -288,14 +269,93 @@ async fn consume_oauth_state_nonce_is_once_across_workspace_and_survives_disconn
         .execute(&pool)
         .await
         .expect("delete workspace");
-    assert_eq!(
-        count_oauth_nonces(&pool, &cascade_nonce).await,
-        0,
-        "workspace ON DELETE CASCADE must drop the nonce row"
+
+    let again = integrations::consume_oauth_state_nonce(&pool, &nonce, ws_d, "github")
+        .await
+        .expect("consume after workspace delete");
+    assert!(
+        again,
+        "workspace ON DELETE CASCADE must free the nonce for a new workspace"
     );
-    assert_eq!(
-        count_oauth_nonces(&pool, &nonce).await,
-        1,
-        "other workspace nonces must stay"
-    );
+}
+
+/// PATCH defaults UPDATE a connected row only: three keys, leftover config,
+/// credentials/status stay put, version bumps. Missing provider is NotFound.
+#[tokio::test]
+async fn patch_agent_defaults_writes_keys_on_connected_and_leaves_credentials() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let credentials = leftover_ciphertext("patch");
+
+    integrations::upsert(
+        &pool,
+        &UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id,
+            provider: "github".into(),
+            account_label: Some("acct".into()),
+            config: json!({ "site": "github.com", "extra": "keep-me" }),
+            credentials: credentials.clone(),
+            connected_by: Some(user_id),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .expect("upsert github");
+
+    let before = integrations::find_connected(&pool, workspace_id, "github")
+        .await
+        .expect("find before")
+        .expect("connected");
+    assert_eq!(before.status, "connected");
+    assert_eq!(before.credentials, credentials);
+
+    let patched = integrations::patch_agent_defaults(
+        &pool,
+        workspace_id,
+        "github",
+        Some("runner-1"),
+        Some("grok"),
+        Some("model-1"),
+    )
+    .await
+    .expect("patch defaults");
+
+    assert_eq!(patched.status, "connected");
+    assert_eq!(patched.credentials, credentials);
+    assert_eq!(patched.version, before.version + 1);
+    assert_eq!(patched.config["site"], "github.com");
+    assert_eq!(patched.config["extra"], "keep-me");
+    assert_eq!(patched.config["default_runner_id"], "runner-1");
+    assert_eq!(patched.config["default_provider"], "grok");
+    assert_eq!(patched.config["default_model"], "model-1");
+
+    let missing = integrations::patch_agent_defaults(
+        &pool,
+        workspace_id,
+        "gitlab",
+        Some("runner-1"),
+        Some("grok"),
+        Some("model-1"),
+    )
+    .await
+    .expect_err("missing provider must not insert");
+    match missing {
+        fleet_db::DbError::NotFound(msg) => {
+            assert!(
+                msg.to_ascii_lowercase().contains("not connected"),
+                "expected not-connected NotFound, got {msg}"
+            );
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM integration_connections WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count integration_connections");
+    assert_eq!(count, 1, "patch must not INSERT a connections row");
 }

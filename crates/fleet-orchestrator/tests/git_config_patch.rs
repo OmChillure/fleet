@@ -1,6 +1,6 @@
-//! Docs §6.9 / §8.2: admin PATCH `/v1/projects/{id}/config` shares cookie
-//! `PATCH …/fleet/config` semantics — empty URL clears; git_ref without URL
-//! is 400; garbage URL is 400. Requires DATABASE_URL.
+//! Docs §6.9 / §8.2: admin PATCH `/v1/projects/{id}/config` persist/400
+//! second line — empty URL clears; git_ref without URL is 400; garbage URL
+//! is 400 and leaves the stored remote. Requires DATABASE_URL.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -86,226 +86,286 @@ async fn json_req(
     (status, v)
 }
 
-/// Docs §6.9 / §8.2: admin PATCH matches cookie PATCH for clear / 400s.
-#[tokio::test]
-async fn admin_patch_config_empty_url_clears_git_ref_without_url_and_garbage_url_are_400() {
-    let (app, store) = app_and_store().await;
-    let token = "test-admin";
-    let url = "https://github.com/acme/app.git";
+const ADMIN: &str = "test-admin";
+const REPO: &str = "https://github.com/acme/app.git";
 
-    let (st, proj) = json_req(
-        app.clone(),
-        "POST",
-        "/v1/projects",
-        Some(token),
-        Some(json!({"name": format!("git-cfg-{}", Uuid::new_v4()), "max_agents": 3})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CREATED, "{proj}");
-    let pid = proj["id"].as_str().expect("project id").to_string();
-    let project_id = Uuid::parse_str(&pid).expect("project uuid");
-    let cfg_uri = format!("/v1/projects/{pid}/config");
-    assert!(
-        proj["config"]["repo_url"].is_null(),
-        "new project has no remote: {proj}"
-    );
-
-    let ref_only_new = json_req(
-        app.clone(),
-        "PATCH",
-        &cfg_uri,
-        Some(token),
-        Some(json!({ "git_ref": "feature" })),
-    )
-    .await;
-    assert_eq!(
-        ref_only_new.0,
-        StatusCode::BAD_REQUEST,
-        "git_ref without URL on a new project: {}",
-        ref_only_new.1
-    );
-    let err = ref_only_new.1["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("repo_url"),
-        "ref-without-URL must mention repo_url: {}",
-        ref_only_new.1
-    );
-    let still_none = store
-        .get_project_config(project_id)
+async fn seed_project(store: &fleet_orchestrator::store::Store) -> Uuid {
+    store
+        .create_project(&format!("git-cfg-{}", Uuid::new_v4()), 3)
         .await
-        .expect("config after ref-only 400");
-    assert!(
-        still_none.git_remote().is_none(),
-        "ref-only 400 must not bind a remote: {:?}",
-        still_none.repo_url
-    );
+        .expect("project")
+        .id
+}
 
-    let (st, set) = json_req(
-        app.clone(),
-        "PATCH",
-        &cfg_uri,
-        Some(token),
-        Some(json!({ "repo_url": url, "git_ref": "develop" })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "set remote: {set}");
-    assert_eq!(set["repo_url"], url);
-    assert_eq!(set["git_ref"], "develop");
-    let stored = store
-        .get_project_config(project_id)
-        .await
-        .expect("config after set");
-    let remote = stored
-        .git_remote()
-        .expect("set remote must persist as git_remote()");
-    assert_eq!(remote.url, url);
-    assert_eq!(remote.git_ref, "develop");
-
-    let (st, ref_ok) = json_req(
-        app.clone(),
-        "PATCH",
-        &cfg_uri,
-        Some(token),
-        Some(json!({ "git_ref": "feature" })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "git_ref with existing URL: {ref_ok}");
-    assert_eq!(ref_ok["repo_url"], url);
-    assert_eq!(ref_ok["git_ref"], "feature");
-
-    for bad in [
-        "not a url",
-        "-e evil",
-        "ftp://example.com/r.git",
-        "https://example.com/has space.git",
-        "javascript:alert(1)",
-    ] {
-        let (st, out) = json_req(
-            app.clone(),
-            "PATCH",
-            &cfg_uri,
-            Some(token),
-            Some(json!({ "repo_url": bad })),
+async fn bind_remote(
+    store: &fleet_orchestrator::store::Store,
+    project_id: Uuid,
+    git_ref: &str,
+) {
+    store
+        .set_project_git_remote(
+            project_id,
+            Some(&fleet_orchestrator::domain::ProjectGitRemote {
+                url: REPO.into(),
+                git_ref: git_ref.into(),
+            }),
         )
-        .await;
-        assert_eq!(
-            st,
-            StatusCode::BAD_REQUEST,
-            "invalid repo_url={bad:?} must 400: {out}"
-        );
-        let err = out["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("repo_url"),
-            "invalid repo_url={bad:?} error should mention repo_url: {out}"
-        );
-        let still = store
-            .get_project_config(project_id)
-            .await
-            .expect("config after invalid PATCH");
-        let still_remote = still
-            .git_remote()
-            .expect("invalid URL must leave the remote bound");
-        assert_eq!(still_remote.url, url);
-        assert_eq!(still_remote.git_ref, "feature");
-    }
+        .await
+        .expect("fixture bind remote");
+}
+
+fn config_uri(project_id: Uuid) -> String {
+    format!("/v1/projects/{project_id}/config")
+}
+
+/// Empty repo_url 200 drops git_remote() so new tasks do not clone.
+#[tokio::test]
+async fn admin_patch_empty_url_clears() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "develop").await;
+    let cfg_uri = config_uri(pid);
 
     let (st, cleared) = json_req(
         app.clone(),
         "PATCH",
         &cfg_uri,
-        Some(token),
+        Some(ADMIN),
         Some(json!({ "repo_url": "" })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "empty URL: {cleared}");
     assert!(
-        cleared["repo_url"].is_null()
-            || cleared["repo_url"]
-                .as_str()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty(),
+        cleared["repo_url"].is_null(),
         "empty repo_url must clear: {cleared}"
     );
-    let after_clear = store
-        .get_project_config(project_id)
+    let after = store
+        .get_project_config(pid)
         .await
         .expect("config after clear");
     assert!(
-        after_clear.git_remote().is_none(),
+        after.git_remote().is_none(),
         "empty URL must drop git_remote() so new tasks do not clone: {:?}",
-        after_clear.repo_url
+        after.repo_url
     );
 
-    let (st, got) = json_req(app.clone(), "GET", &cfg_uri, Some(token), None).await;
+    let (st, got) = json_req(app, "GET", &cfg_uri, Some(ADMIN), None).await;
     assert_eq!(st, StatusCode::OK, "{got}");
     assert!(
-        got["repo_url"].is_null()
-            || got["repo_url"]
-                .as_str()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty(),
+        got["repo_url"].is_null(),
         "GET after clear must show no remote: {got}"
     );
+}
 
-    let (st, ref_only) = json_req(
-        app.clone(),
-        "PATCH",
-        &cfg_uri,
-        Some(token),
-        Some(json!({ "git_ref": "other" })),
-    )
-    .await;
-    assert_eq!(
-        st,
-        StatusCode::BAD_REQUEST,
-        "git_ref without URL: {ref_only}"
-    );
-    let err = ref_only["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("repo_url"),
-        "ref-without-URL error should mention repo_url: {ref_only}"
-    );
-    let still_clear = store
-        .get_project_config(project_id)
-        .await
-        .expect("config after ref-only 400");
-    assert!(
-        still_clear.git_remote().is_none(),
-        "ref-only 400 must not resurrect the remote: {:?}",
-        still_clear.repo_url
-    );
+/// git_ref without a bound URL is 400 and does not bind a remote.
+#[tokio::test]
+async fn admin_patch_git_ref_without_url_is_400() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    let cfg_uri = config_uri(pid);
 
-    let (st, set_again) = json_req(
-        app.clone(),
-        "PATCH",
-        &cfg_uri,
-        Some(token),
-        Some(json!({ "repo_url": url, "git_ref": "develop" })),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{set_again}");
-    let (st, clear_with_ref) = json_req(
+    let (st, out) = json_req(
         app,
         "PATCH",
         &cfg_uri,
-        Some(token),
+        Some(ADMIN),
+        Some(json!({ "git_ref": "feature" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "git_ref without URL: {out}");
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after ref-only 400");
+    assert!(
+        still.git_remote().is_none(),
+        "ref-only 400 must not bind a remote: {:?}",
+        still.repo_url
+    );
+}
+
+/// One garbage repo_url is 400 and leaves the stored remote.
+#[tokio::test]
+async fn admin_patch_garbage_url_is_400_leaves_remote() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "feature").await;
+    let cfg_uri = config_uri(pid);
+
+    let (st, out) = json_req(
+        app,
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "repo_url": "not a url" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "garbage URL must 400: {out}");
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after invalid PATCH");
+    let remote = still
+        .git_remote()
+        .expect("invalid URL must leave the remote bound");
+    assert_eq!(remote.url, REPO);
+    assert_eq!(remote.git_ref, "feature");
+}
+
+/// Empty repo_url + git_ref is 200 and still clears, not 400.
+#[tokio::test]
+async fn admin_patch_empty_url_with_git_ref_clears() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "develop").await;
+    let cfg_uri = config_uri(pid);
+
+    let (st, out) = json_req(
+        app,
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
         Some(json!({ "repo_url": "", "git_ref": "other" })),
     )
     .await;
     assert_eq!(
         st,
         StatusCode::OK,
-        "empty URL + git_ref must clear, not 400: {clear_with_ref}"
+        "empty URL + git_ref must clear, not 400: {out}"
     );
-    let after_empty_with_ref = store
-        .get_project_config(project_id)
+    let after = store
+        .get_project_config(pid)
         .await
         .expect("config after empty+ref");
     assert!(
-        after_empty_with_ref.git_remote().is_none(),
+        after.git_remote().is_none(),
         "empty URL + git_ref must drop git_remote(): {:?}",
-        after_empty_with_ref.repo_url
+        after.repo_url
+    );
+}
+
+/// Invalid git_ref after a bound URL is 400 and leaves the remote.
+#[tokio::test]
+async fn admin_patch_invalid_git_ref_is_400_leaves_remote() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "develop").await;
+    let cfg_uri = config_uri(pid);
+
+    let (st, out) = json_req(
+        app.clone(),
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "git_ref": "feat/../x" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "feat/../x: {out}");
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after feat/../x");
+    let remote = still
+        .git_remote()
+        .expect("invalid git_ref must leave the remote bound");
+    assert_eq!(remote.url, REPO);
+    assert_eq!(remote.git_ref, "develop");
+
+    let (st, out) = json_req(
+        app.clone(),
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "git_ref": "has space" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "has space: {out}");
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after has space");
+    let remote = still
+        .git_remote()
+        .expect("invalid git_ref must leave the remote bound");
+    assert_eq!(remote.url, REPO);
+    assert_eq!(remote.git_ref, "develop");
+
+    let (st, out) = json_req(
+        app,
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "git_ref": "-bad" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "-bad: {out}");
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after -bad");
+    let remote = still
+        .git_remote()
+        .expect("invalid git_ref must leave the remote bound");
+    assert_eq!(remote.url, REPO);
+    assert_eq!(remote.git_ref, "develop");
+}
+
+/// Credential userinfo URL is 400, does not echo the secret, leaves the remote.
+#[tokio::test]
+async fn admin_patch_userinfo_url_is_400_without_echoing_secret() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "develop").await;
+    let cfg_uri = config_uri(pid);
+
+    let (st, out) = json_req(
+        app,
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "repo_url": "https://user:unique-secret@example.test/acme.git" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "userinfo URL must 400: {out}");
+    assert!(
+        !out.to_string().contains("unique-secret"),
+        "400 must not echo credentials: {out}"
+    );
+    let still = store
+        .get_project_config(pid)
+        .await
+        .expect("config after userinfo 400");
+    let remote = still
+        .git_remote()
+        .expect("userinfo URL must leave the remote bound");
+    assert_eq!(remote.url, REPO);
+    assert_eq!(remote.git_ref, "develop");
+}
+
+/// Whitespace-only repo_url is 200 and drops git_remote().
+#[tokio::test]
+async fn admin_patch_whitespace_url_clears() {
+    let (app, store) = app_and_store().await;
+    let pid = seed_project(&store).await;
+    bind_remote(&store, pid, "develop").await;
+    let cfg_uri = config_uri(pid);
+
+    let (st, out) = json_req(
+        app,
+        "PATCH",
+        &cfg_uri,
+        Some(ADMIN),
+        Some(json!({ "repo_url": "   " })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "whitespace URL: {out}");
+    let after = store
+        .get_project_config(pid)
+        .await
+        .expect("config after whitespace clear");
+    assert!(
+        after.git_remote().is_none(),
+        "whitespace URL must drop git_remote(): {:?}",
+        after.repo_url
     );
 }

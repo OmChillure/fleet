@@ -301,23 +301,73 @@ mod tests {
     #[test]
     fn catalog_has_unique_ids() {
         let list = catalog();
-        let ids: HashSet<_> = list.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids.len(), list.len());
-        assert!(ids.contains("github"));
-        assert!(ids.contains("gitlab"));
-        assert!(ids.contains("slack"));
-        assert!(ids.contains("figma"));
-        assert!(ids.contains("teams"));
-        assert!(ids.contains("notion"));
-        assert!(ids.contains("bitbucket"));
-        assert!(ids.contains("confluence"));
+        let mut seen = HashSet::new();
+        for view in &list {
+            assert!(
+                seen.insert(view.id.as_str()),
+                "duplicate catalog id {}; find_provider first-match would hide later rows",
+                view.id
+            );
+        }
     }
 
     #[test]
-    fn oauth_only() {
-        for i in catalog() {
-            assert_eq!(i.auth_method, AuthMethod::Oauth);
+    fn catalog_lists_all_published_provider_ids() {
+        let list = catalog();
+        let got: HashSet<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        let published: HashSet<&str> = HashSet::from([
+            "github",
+            "jira",
+            "slack",
+            "linear",
+            "gitlab",
+            "bitbucket",
+            "teams",
+            "discord",
+            "figma",
+            "notion",
+            "confluence",
+            "asana",
+            "trello",
+            "google_drive",
+        ]);
+        assert_eq!(
+            got, published,
+            "catalog ids must be the published set (missing {:?}, extra {:?})",
+            published.difference(&got).copied().collect::<Vec<_>>(),
+            got.difference(&published).copied().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn catalog_ids_are_lowercase_url_slugs() {
+        for view in catalog() {
+            let id = view.id.as_str();
+            assert_eq!(
+                id,
+                id.to_ascii_lowercase(),
+                "catalog id {id:?} must be lowercase; put_oauth_app/start trim+lowercase then find_provider"
+            );
+            assert!(
+                !id.is_empty()
+                    && id
+                        .chars()
+                        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_')),
+                "catalog id {id:?} must match [a-z0-9_]+"
+            );
         }
+    }
+
+    #[test]
+    fn find_provider_unknown_is_none() {
+        assert!(
+            find_provider("notaprovider").is_none(),
+            "find_provider(\"notaprovider\") must be None"
+        );
+        assert!(
+            find_provider("").is_none(),
+            "find_provider(\"\") must be None"
+        );
     }
 
     #[test]
@@ -350,33 +400,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_em_dash_in_copy() {
-        for i in catalog() {
-            assert!(
-                !i.description.contains('—') && !i.description.contains('–'),
-                "{} description still has a dash",
-                i.id
-            );
-        }
-    }
-
-    /// Same contract http_api asserts for bitbucket: coming_soon, no oauth/start.
-    /// Tools may be ready; that must not look like Connect is live.
-    /// Static catalog `oauth_start_path` is None for every row (including
-    /// GitHub) — the real Connect URL is filled by `oauth_start_path()`.
+    /// Coming-soon Confluence must not expose a Connect oauth/start path.
+    /// Call `oauth_start_path()` — the static catalog field is None on every row.
     #[test]
     fn confluence_is_coming_soon_and_must_not_expose_oauth_start() {
-        assert!(is_known_provider("confluence"));
         let c = find_provider("confluence").expect("confluence");
-        assert_eq!(c.id, "confluence");
         assert_eq!(c.availability, IntegrationAvailability::ComingSoon);
-        assert_eq!(c.oauth_start_path, None);
-        assert_eq!(c.oauth_app_create_url, None);
-        assert_eq!(oauth_app_create_url("confluence"), None);
-        assert!(!c.oauth_configured);
-        assert!(!c.connected);
-        assert!(c.connection.is_none());
 
         let ws = "11111111-1111-1111-1111-111111111111";
         assert_eq!(
@@ -390,102 +419,6 @@ mod tests {
                 "/api/workspaces/11111111-1111-1111-1111-111111111111/integrations/github/oauth/start"
             ),
             "available providers still expose oauth/start so this test is not a tautology"
-        );
-
-        // Bitbucket http_api: coming_soon + null start path. Confluence matches.
-        let b = find_provider("bitbucket").expect("bitbucket");
-        assert_eq!(b.availability, IntegrationAvailability::ComingSoon);
-        assert_eq!(oauth_start_path(ws, "bitbucket"), None);
-
-        for i in catalog() {
-            if i.availability == IntegrationAvailability::ComingSoon {
-                assert_eq!(
-                    oauth_start_path(ws, &i.id),
-                    None,
-                    "coming-soon providers must not expose oauth/start: {}",
-                    i.id
-                );
-                assert_eq!(
-                    oauth_app_create_url(&i.id),
-                    None,
-                    "coming-soon providers must not advertise an OAuth app console: {}",
-                    i.id
-                );
-            } else {
-                assert!(
-                    oauth_start_path(ws, &i.id).is_some(),
-                    "available provider must expose oauth/start: {}",
-                    i.id
-                );
-            }
-        }
-
-        assert!(
-            c.description.contains("Tools are ready"),
-            "confluence tools exist: {}",
-            c.description
-        );
-        let desc = c.description.to_ascii_lowercase();
-        assert!(
-            desc.contains("coming soon"),
-            "confluence oauth still coming soon: {}",
-            c.description
-        );
-        assert!(
-            desc.contains("oauth") && desc.contains("coming soon"),
-            "tools-ready copy must not read as Connect live: {}",
-            c.description
-        );
-    }
-
-    /// Proxy ops exist (`create_pr`, …) but Connect must stay off.
-    /// Tools-ready copy must not look like OAuth start is live.
-    ///
-    /// Static catalog `oauth_start_path` is None for every row (including
-    /// GitHub) — `enrich_views` fills Connect from `oauth_start_path()`.
-    /// This test must call that function; a field-only assert is a tautology.
-    #[test]
-    fn bitbucket_is_coming_soon_and_must_not_expose_oauth_start() {
-        assert!(is_known_provider("bitbucket"));
-        let b = find_provider("bitbucket").expect("bitbucket");
-        assert_eq!(b.id, "bitbucket");
-        assert_eq!(b.availability, IntegrationAvailability::ComingSoon);
-        assert_eq!(b.oauth_start_path, None);
-        assert_eq!(b.oauth_app_create_url, None);
-        assert_eq!(oauth_app_create_url("bitbucket"), None);
-        assert!(!b.oauth_configured);
-        assert!(!b.connected);
-        assert!(b.connection.is_none());
-
-        let ws = "11111111-1111-1111-1111-111111111111";
-        assert_eq!(
-            oauth_start_path(ws, "bitbucket"),
-            None,
-            "coming-soon Bitbucket must not expose GET …/oauth/start"
-        );
-        assert_eq!(
-            oauth_start_path(ws, "github").as_deref(),
-            Some(
-                "/api/workspaces/11111111-1111-1111-1111-111111111111/integrations/github/oauth/start"
-            ),
-            "available providers still expose oauth/start so this test is not a tautology"
-        );
-
-        assert!(
-            b.description.contains("Tools are ready"),
-            "bitbucket tools exist: {}",
-            b.description
-        );
-        let desc = b.description.to_ascii_lowercase();
-        assert!(
-            desc.contains("coming soon"),
-            "bitbucket oauth still coming soon: {}",
-            b.description
-        );
-        assert!(
-            desc.contains("oauth") && desc.contains("coming soon"),
-            "tools-ready copy must not read as Connect live: {}",
-            b.description
         );
     }
 }

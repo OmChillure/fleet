@@ -9,7 +9,7 @@ use fleet_db::repos::control_plane_events;
 use serde_json::json;
 use uuid::Uuid;
 
-use common::{connect_and_migrate, require_database_url};
+use common::connect_and_migrate;
 
 fn sandbox_failed_body(message_id: Uuid) -> serde_json::Value {
     json!({
@@ -26,8 +26,26 @@ fn sandbox_failed_body(message_id: Uuid) -> serde_json::Value {
     })
 }
 
+/// Drain: insert_event persists unpublished BusMessage rows.
 #[tokio::test]
-async fn insert_list_and_mark_published() {
+async fn insert_event_starts_unpublished() {
+    let pool = connect_and_migrate().await;
+    let message_id = Uuid::now_v7();
+    let row = control_plane_events::insert_event(
+        &pool,
+        message_id,
+        "sandbox.failed",
+        sandbox_failed_body(message_id),
+    )
+    .await
+    .expect("insert");
+    assert_eq!(row.message_id, message_id);
+    assert!(row.published_at.is_none());
+}
+
+/// Drain: list_unpublished is published_at IS NULL, oldest-first.
+#[tokio::test]
+async fn list_unpublished_returns_inserted_oldest_first() {
     let pool = connect_and_migrate().await;
     let first_id = Uuid::now_v7();
     let second_id = Uuid::now_v7();
@@ -39,11 +57,6 @@ async fn insert_list_and_mark_published() {
     )
     .await
     .expect("insert first");
-    assert_eq!(first.message_id, first_id);
-    assert_eq!(first.event_type, "sandbox.failed");
-    assert!(first.published_at.is_none());
-    assert_eq!(first.body["type"], "sandbox.failed");
-
     let second = control_plane_events::insert_event(
         &pool,
         second_id,
@@ -56,32 +69,55 @@ async fn insert_list_and_mark_published() {
     let unpublished = control_plane_events::list_unpublished(&pool, 1000)
         .await
         .expect("list");
-    let ours: Vec<_> = unpublished
-        .iter()
-        .filter(|e| e.id == first.id || e.id == second.id)
-        .collect();
+    assert!(
+        unpublished.windows(2).all(|w| {
+            (w[0].created_at, w[0].id) <= (w[1].created_at, w[1].id)
+        }),
+        "unpublished page must be oldest-first (created_at, then id)"
+    );
+    // Shared DB may already have ≥1000 unpublished rows; this test's newest
+    // inserts then sit past the drain page. Only assert membership when the
+    // page is not already full of older leftovers.
     if unpublished.len() < 1000 {
+        let ours: Vec<_> = unpublished
+            .iter()
+            .filter(|e| e.id == first.id || e.id == second.id)
+            .collect();
         assert_eq!(ours.len(), 2, "both inserted events must be unpublished");
-        assert!(
-            ours.iter().position(|e| e.id == first.id)
-                < ours.iter().position(|e| e.id == second.id),
-            "unpublished must be oldest-first"
-        );
-    } else {
-        assert!(
-            first.published_at.is_none() && second.published_at.is_none(),
-            "inserted rows stay unpublished when the global outbox is already full"
-        );
+        let first_pos = ours
+            .iter()
+            .position(|e| e.id == first.id)
+            .expect("first in drain set");
+        let second_pos = ours
+            .iter()
+            .position(|e| e.id == second.id)
+            .expect("second in drain set");
+        assert!(first_pos < second_pos, "unpublished must be oldest-first");
     }
+}
+
+/// Drain: mark_published stamps published_at once; rematch is a no-op.
+#[tokio::test]
+async fn mark_published_stamps_once() {
+    let pool = connect_and_migrate().await;
+    let message_id = Uuid::now_v7();
+    let row = control_plane_events::insert_event(
+        &pool,
+        message_id,
+        "sandbox.failed",
+        sandbox_failed_body(message_id),
+    )
+    .await
+    .expect("insert");
 
     assert!(
-        control_plane_events::mark_published(&pool, first.id)
+        control_plane_events::mark_published(&pool, row.id)
             .await
             .expect("mark"),
         "first mark must update the row"
     );
     assert!(
-        !control_plane_events::mark_published(&pool, first.id)
+        !control_plane_events::mark_published(&pool, row.id)
             .await
             .expect("mark again"),
         "second mark of the same row is a no-op"
@@ -91,15 +127,144 @@ async fn insert_list_and_mark_published() {
         .await
         .expect("list after mark");
     assert!(
-        still.iter().all(|e| e.id != first.id),
+        still.iter().all(|e| e.id != row.id),
         "published row must leave the unpublished set"
     );
-    if still.len() < 1000 {
-        assert!(
-            still.iter().any(|e| e.id == second.id),
-            "second event must remain unpublished"
-        );
-    }
+}
+
+/// Drain: marking one row leaves a sibling unpublished for retry.
+#[tokio::test]
+async fn mark_published_leaves_sibling_unpublished() {
+    let pool = connect_and_migrate().await;
+    let workspace_id = Uuid::now_v7();
+    let first_id = Uuid::now_v7();
+    let second_id = Uuid::now_v7();
+    let first = control_plane_events::insert_event(
+        &pool,
+        first_id,
+        "sandbox.failed",
+        scoped_body(first_id, workspace_id),
+    )
+    .await
+    .expect("insert first");
+    let second = control_plane_events::insert_event(
+        &pool,
+        second_id,
+        "sandbox.ready",
+        scoped_body(second_id, workspace_id),
+    )
+    .await
+    .expect("insert second");
+
+    assert!(
+        control_plane_events::mark_published(&pool, first.id)
+            .await
+            .expect("mark first"),
+        "first mark must stamp"
+    );
+
+    let first_row = control_plane_events::get_in_workspace(&pool, workspace_id, first.id)
+        .await
+        .expect("get first")
+        .expect("first still in workspace");
+    assert!(
+        first_row.published_at.is_some(),
+        "marked row must be stamped"
+    );
+    let second_row = control_plane_events::get_in_workspace(&pool, workspace_id, second.id)
+        .await
+        .expect("get second")
+        .expect("sibling still in workspace");
+    assert!(
+        second_row.published_at.is_none(),
+        "second event must remain unpublished"
+    );
+}
+
+/// subscribe_loop persists inbound samples already published so drain does not re-put them.
+#[tokio::test]
+async fn insert_inbound_published_absent_from_list_unpublished() {
+    let pool = connect_and_migrate().await;
+    let message_id = Uuid::now_v7();
+    let row = control_plane_events::insert_inbound_published(
+        &pool,
+        message_id,
+        "sandbox.ready",
+        json!({ "message_id": message_id, "type": "sandbox.ready" }),
+    )
+    .await
+    .expect("insert inbound published")
+    .expect("inbound inserted");
+
+    let unpublished = control_plane_events::list_unpublished(&pool, 1000)
+        .await
+        .expect("list");
+    assert!(
+        unpublished.iter().all(|e| e.id != row.id),
+        "already-published inbound must not enter the drain set"
+    );
+}
+
+/// Drain treats mark_published's bool as "this row was stamped".
+#[tokio::test]
+async fn mark_published_unknown_id_returns_false() {
+    let pool = connect_and_migrate().await;
+    let workspace_id = Uuid::now_v7();
+    let message_id = Uuid::now_v7();
+    let sibling = control_plane_events::insert_event(
+        &pool,
+        message_id,
+        "sandbox.failed",
+        scoped_body(message_id, workspace_id),
+    )
+    .await
+    .expect("insert sibling");
+
+    assert!(
+        !control_plane_events::mark_published(&pool, Uuid::now_v7())
+            .await
+            .expect("mark unknown"),
+        "unknown id must not report stamped"
+    );
+
+    let sibling_row = control_plane_events::get_in_workspace(&pool, workspace_id, sibling.id)
+        .await
+        .expect("get sibling")
+        .expect("sibling still in workspace");
+    assert!(
+        sibling_row.published_at.is_none(),
+        "unknown mark must not drain other unpublished rows"
+    );
+}
+
+/// subscribe_loop inbound persist is ON CONFLICT (message_id) DO NOTHING.
+#[tokio::test]
+async fn insert_inbound_published_duplicate_message_id_returns_none() {
+    let pool = connect_and_migrate().await;
+    let message_id = Uuid::now_v7();
+    let body = json!({ "message_id": message_id, "type": "sandbox.ready" });
+    control_plane_events::insert_inbound_published(
+        &pool,
+        message_id,
+        "sandbox.ready",
+        body.clone(),
+    )
+    .await
+    .expect("first inbound")
+    .expect("first inbound inserted");
+
+    let second = control_plane_events::insert_inbound_published(
+        &pool,
+        message_id,
+        "sandbox.ready",
+        body,
+    )
+    .await
+    .expect("duplicate inbound must not error");
+    assert!(
+        second.is_none(),
+        "duplicate inbound message_id is ON CONFLICT DO NOTHING"
+    );
 }
 
 #[tokio::test]
@@ -133,6 +298,7 @@ async fn duplicate_message_id_is_conflict() {
     assert!(err.is_unique_violation());
 }
 
+/// Drain: list_unpublished honors LIMIT so drain_loop cannot load the whole table.
 #[tokio::test]
 async fn list_unpublished_respects_limit() {
     let pool = connect_and_migrate().await;
@@ -150,7 +316,38 @@ async fn list_unpublished_respects_limit() {
     let one = control_plane_events::list_unpublished(&pool, 1)
         .await
         .expect("limit 1");
-    assert_eq!(one.len(), 1);
+    assert_eq!(
+        one.len(),
+        1,
+        "list_unpublished(1) must page exactly one unpublished row"
+    );
+    assert!(
+        one[0].published_at.is_none(),
+        "LIMIT page must be an unpublished row (published_at IS NULL)"
+    );
+}
+
+/// Drain: list_unpublished(0) clamps to 1 so LIMIT 0 cannot empty the drain.
+#[tokio::test]
+async fn list_unpublished_zero_limit_clamps_to_one() {
+    let pool = connect_and_migrate().await;
+    let message_id = Uuid::now_v7();
+    control_plane_events::insert_event(
+        &pool,
+        message_id,
+        "sandbox.failed",
+        sandbox_failed_body(message_id),
+    )
+    .await
+    .expect("insert");
+    let one = control_plane_events::list_unpublished(&pool, 0)
+        .await
+        .expect("limit 0");
+    assert_eq!(
+        one.len(),
+        1,
+        "list_unpublished(0) must clamp to 1, not empty the drain"
+    );
 }
 
 fn scoped_body(message_id: Uuid, workspace_id: Uuid) -> serde_json::Value {
@@ -170,113 +367,28 @@ fn scoped_body(message_id: Uuid, workspace_id: Uuid) -> serde_json::Value {
     })
 }
 
-/// List/get for workspace A must never return workspace B rows.
+/// Tenant list: list_for_workspace honors LIMIT (same clamp as unpublished drain).
 #[tokio::test]
-async fn list_and_get_never_return_another_workspace_events() {
-    let _ = require_database_url();
+async fn list_for_workspace_respects_limit() {
     let pool = connect_and_migrate().await;
-
     let workspace_a = Uuid::now_v7();
-    let workspace_b = Uuid::now_v7();
-    let msg_a = Uuid::now_v7();
-    let msg_b_open = Uuid::now_v7();
-    let msg_b_published = Uuid::now_v7();
-    let msg_a_tenant = Uuid::now_v7();
-
-    let a = control_plane_events::insert_event(
-        &pool,
-        msg_a,
-        "sandbox.failed",
-        scoped_body(msg_a, workspace_a),
-    )
-    .await
-    .expect("insert A");
-
-    let a_tenant = control_plane_events::insert_event(
-        &pool,
-        msg_a_tenant,
-        "sandbox.ready",
-        json!({
-            "message_id": msg_a_tenant,
-            "tenant_id": workspace_a,
-            "type": "sandbox.ready"
-        }),
-    )
-    .await
-    .expect("insert A tenant_id-only");
-
-    let b_open = control_plane_events::insert_event(
-        &pool,
-        msg_b_open,
-        "sandbox.failed",
-        scoped_body(msg_b_open, workspace_b),
-    )
-    .await
-    .expect("insert B unpublished");
-
-    let b_pub = control_plane_events::insert_inbound_published(
-        &pool,
-        msg_b_published,
-        "sandbox.ready",
-        scoped_body(msg_b_published, workspace_b),
-    )
-    .await
-    .expect("insert B published")
-    .expect("B published inserted");
-
-    let listed_a = control_plane_events::list_for_workspace(&pool, workspace_a, 1000)
+    for _ in 0..3 {
+        let message_id = Uuid::now_v7();
+        control_plane_events::insert_event(
+            &pool,
+            message_id,
+            "sandbox.failed",
+            scoped_body(message_id, workspace_a),
+        )
         .await
-        .expect("list A");
-    assert!(
-        listed_a.iter().any(|e| e.id == a.id),
-        "workspace A must see its own event"
-    );
-    assert!(
-        listed_a.iter().any(|e| e.id == a_tenant.id),
-        "workspace A must see tenant_id-only rows"
-    );
-    assert!(
-        listed_a
-            .iter()
-            .all(|e| e.id != b_open.id && e.id != b_pub.id),
-        "list for workspace A must not include workspace B rows"
-    );
-
-    let listed_b = control_plane_events::list_for_workspace(&pool, workspace_b, 1000)
+        .expect("insert");
+    }
+    let one = control_plane_events::list_for_workspace(&pool, workspace_a, 1)
         .await
-        .expect("list B");
-    assert!(listed_b.iter().any(|e| e.id == b_open.id));
-    assert!(listed_b.iter().any(|e| e.id == b_pub.id));
-    assert!(
-        listed_b.iter().all(|e| e.id != a.id && e.id != a_tenant.id),
-        "list for workspace B must not include workspace A rows"
+        .expect("limit 1");
+    assert_eq!(
+        one.len(),
+        1,
+        "list_for_workspace(A, 1) must page exactly one workspace-A row"
     );
-
-    let got = control_plane_events::get_in_workspace(&pool, workspace_a, a.id)
-        .await
-        .expect("get A in A")
-        .expect("A must be readable in A");
-    assert_eq!(got.id, a.id);
-    assert_eq!(got.message_id, msg_a);
-
-    let cross_open = control_plane_events::get_in_workspace(&pool, workspace_a, b_open.id)
-        .await
-        .expect("cross get unpublished");
-    assert!(
-        cross_open.is_none(),
-        "get in workspace A must not return workspace B unpublished row"
-    );
-
-    let cross_pub = control_plane_events::get_in_workspace(&pool, workspace_a, b_pub.id)
-        .await
-        .expect("cross get published");
-    assert!(
-        cross_pub.is_none(),
-        "get in workspace A must not return workspace B published row"
-    );
-
-    let missing = control_plane_events::get_in_workspace(&pool, workspace_a, Uuid::now_v7())
-        .await
-        .expect("missing id");
-    assert!(missing.is_none());
 }

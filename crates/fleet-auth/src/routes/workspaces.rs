@@ -209,26 +209,3 @@ pub async fn create_workspace(
         }),
     ))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recreate_slug_is_deterministic() {
-        let base = "user-abcd1234";
-        assert_eq!(unique_default_workspace_slug(base, 0), base);
-        assert_eq!(
-            unique_default_workspace_slug(base, 1),
-            "user-abcd1234-recreated"
-        );
-        assert_eq!(
-            unique_default_workspace_slug(base, 2),
-            "user-abcd1234-recreated-2"
-        );
-        assert_eq!(
-            unique_default_workspace_slug(base, 1),
-            unique_default_workspace_slug(base, 1)
-        );
-    }
-}

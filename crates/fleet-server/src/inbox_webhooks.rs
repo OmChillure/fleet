@@ -868,10 +868,18 @@ mod tests {
     }
 
     #[test]
-    fn github_hmac_accepts_valid_and_rejects_bad() {
+    fn github_hmac_accepts_literal_sha256_header() {
         let body = b"{\"zen\":\"hi\"}";
-        let sig = format!("sha256={}", hmac_hex(b"s3cret", body));
-        assert!(github_signature_ok("s3cret", &sig, body));
+        assert!(github_signature_ok(
+            "s3cret",
+            "sha256=b18ce78d18646301e6811d72dbafbde385e5ab0f65482fdb261485ca0773c8bc",
+            body,
+        ));
+    }
+
+    #[test]
+    fn github_hmac_rejects_bad_sha256_header() {
+        let body = b"{\"zen\":\"hi\"}";
         assert!(!github_signature_ok("s3cret", "sha256=deadbeef", body));
     }
 
@@ -879,13 +887,11 @@ mod tests {
     fn slack_url_verification_is_challenge() {
         let bytes =
             serde_json::to_vec(&json!({"type":"url_verification","challenge":"abc"})).unwrap();
-        assert_eq!(slack_challenge(&bytes).unwrap()["challenge"], "abc");
-        let parsed = parse_event("slack", &HeaderMap::new(), &bytes).unwrap();
-        assert!(matches!(parsed, ParsedEvent::Ignore));
+        assert_eq!(slack_challenge(&bytes), Some(json!({"challenge":"abc"})));
     }
 
     #[test]
-    fn parses_jira_and_linear() {
+    fn parses_jira_issue_created() {
         let jira = json!({
             "webhookEvent": "jira:issue_created",
             "issue": { "key": "ENG-9", "fields": { "summary": "Login", "status": { "name": "To Do" } } }
@@ -897,9 +903,18 @@ mod tests {
         )
         .unwrap();
         match parsed {
-            ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-9"),
-            other => panic!("{other:?}"),
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "jira");
+                assert_eq!(items[0].key, "ENG-9");
+                assert_eq!(items[0].title, "Login");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_linear_issue_create() {
         let linear = json!({
             "type": "Issue",
             "action": "create",
@@ -912,9 +927,101 @@ mod tests {
         )
         .unwrap();
         match parsed {
-            ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-3"),
-            other => panic!("{other:?}"),
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "linear");
+                assert_eq!(items[0].key, "ENG-3");
+                assert_eq!(items[0].title, "Ship");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_linear_non_issue_without_identifier_is_ignored() {
+        let body = json!({
+            "type": "Comment",
+            "action": "create",
+            "data": { "body": "note" }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
+    }
+
+    #[test]
+    fn parse_jira_done_and_linear_completed_mark_closed() {
+        let jira = json!({
+            "webhookEvent": "jira:issue_updated",
+            "issue": { "key": "ENG-9", "fields": { "summary": "Login", "status": { "name": "Done" } } }
+        });
+        let parsed = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&jira).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+        let linear_completed = json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ENG-3", "title": "Ship", "state": { "type": "completed" } }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&linear_completed).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+        let linear_canceled = json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ENG-3", "title": "Ship", "state": { "type": "canceled" } }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&linear_canceled).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_jira_missing_issue_or_key_is_err() {
+        let missing_issue = json!({ "webhookEvent": "jira:issue_created" });
+        let err = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&missing_issue).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "missing issue");
+        let missing_key = json!({
+            "webhookEvent": "jira:issue_created",
+            "issue": { "fields": { "summary": "Login" } }
+        });
+        let err = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&missing_key).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "missing issue.key");
     }
 
     #[test]
@@ -952,12 +1059,54 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_without_project_or_kind_is_ignored() {
-        let bare = json!({ "object_attributes": { "iid": 3, "title": "x" } });
+    fn gitlab_issue_with_project_and_kind_ingests_key() {
+        let body = json!({
+            "object_kind": "issue",
+            "project": { "path_with_namespace": "acme/app" },
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
         let parsed = parse_event(
             "gitlab",
             &HeaderMap::new(),
-            &serde_json::to_vec(&bare).unwrap(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].key, "acme/app#3");
+                assert_eq!(items[0].title, "x");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gitlab_issue_kind_without_project_is_ignored() {
+        let body = json!({
+            "object_kind": "issue",
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
+        let parsed = parse_event(
+            "gitlab",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
+    }
+
+    #[test]
+    fn gitlab_unknown_kind_with_project_is_ignored() {
+        let body = json!({
+            "object_kind": "push",
+            "project": { "path_with_namespace": "acme/app" },
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
+        let parsed = parse_event(
+            "gitlab",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
         )
         .unwrap();
         assert!(matches!(parsed, ParsedEvent::Ignore));

@@ -9,7 +9,6 @@
 [[rule]]
 paths = [
   "crates/fleet-ui/src/pages/home",
-  "crates/fleet-ui/src/pages/home.rs",
 ]
 scenes = ["landing"]
 pauses = ["Landing"]
@@ -152,7 +151,6 @@ paths = [
   "crates/fleet-db/src/models/worker_host.rs",
   "crates/fleet-ui/src/pages/runners/self_hosted",
   "crates/fleet-ui/src/pages/runners/mod.rs",
-  "crates/fleet-ui/src/pages/runners/redirects.rs",
   "crates/fleet-ui/src/pages/workers",
   "crates/fleet-runners-view",
   "scripts/install-worker",
@@ -214,7 +212,6 @@ pauses = ["Kubernetes sandboxes"]
 [[rule]]
 paths = [
   "crates/fleet-host/src/exec_k8s.rs",
-  "crates/fleet-orchestrator/src/sandbox/k8s.rs",
 ]
 scenes = ["k8s", "fleet"]
 pauses = ["Kubernetes sandboxes", "Fleet"]

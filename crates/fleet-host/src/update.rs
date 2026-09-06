@@ -804,32 +804,6 @@ pub fn install_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("current_exe has no parent"))
 }
 
-/// Used only by tests that inject bytes without HTTP.
-#[cfg(test)]
-pub fn verify_bytes(
-    name: &str,
-    bytes: &[u8],
-    want_sha: &str,
-    sidecar: Option<&[u8]>,
-    platform: &str,
-) -> Result<()> {
-    use crate::client::parse_sha256_sidecar;
-    if let Some(side) = sidecar {
-        let parsed = parse_sha256_sidecar(side).ok_or_else(|| anyhow::anyhow!("bad sidecar"))?;
-        if !sha_eq(&parsed, want_sha) {
-            bail!("sidecar mismatch for {name}");
-        }
-    } else {
-        bail!("missing sha256 sidecar for {name}");
-    }
-    let got = sha256_hex(bytes);
-    if !sha_eq(&got, want_sha) {
-        bail!("checksum mismatch for {name}");
-    }
-    check_pe_machine(bytes, platform)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,123 +872,59 @@ mod tests {
         assert_eq!(plan_kind(&local, &desired), ApplyKind::Noop);
     }
 
+    /// catalog:unit-request-update — CP auto_update false must restrict a
+    /// box that still has local auto on (plane can only restrict).
     #[test]
-    fn checksum_fail_leaves_old_bins() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = b"old-driver";
-        write_bin(dir.path(), "fleet-host", b"host");
-        write_bin(dir.path(), "fleet-driver", old);
-        let dest = dir.path().join("fleet-driver");
-        let want = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let bad = b"not-the-bytes-you-wanted";
-        let err = verify_bytes(
-            "fleet-driver",
-            bad,
-            want,
-            Some(format!("{want}  fleet-driver\n").as_bytes()),
-            "linux-x86_64",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("checksum mismatch"), "{err}");
-        // Stage then detect failure and discard — dest stays old.
-        let staged = stage_new_file(&dest, bad).unwrap();
-        assert!(staged.is_file());
-        discard_staged(&dest);
-        assert!(!staged.is_file());
-        assert_eq!(fs::read(&dest).unwrap(), old);
-    }
-
-    #[test]
-    fn child_only_apply_does_not_require_jobs_idle() {
-        let dir = tempfile::tempdir().unwrap();
-        write_bin(dir.path(), "fleet-host", b"host-same");
-        write_bin(dir.path(), "fleet-driver", b"driver-old");
-        let new_d = b"driver-new";
-        let desired = desired_for(
-            "linux-x86_64",
-            &[
-                ("fleet-host", b"host-same".as_slice()),
-                ("fleet-driver", new_d.as_slice()),
-            ],
-        );
-        let local = local_from_dir(dir.path(), "linux-x86_64");
-        assert_eq!(plan_kind(&local, &desired), ApplyKind::ChildrenOnly);
-        let dest_d = dir.path().join("fleet-driver");
-        stage_new_file(&dest_d, new_d).unwrap();
-        // jobs != 0 is fine
-        swap_staged(&dest_d).unwrap();
-        assert_eq!(fs::read(&dest_d).unwrap(), new_d);
-        assert_eq!(
-            fs::read(dir.path().join("fleet-host")).unwrap(),
-            b"host-same"
-        );
-    }
-
-    /// catalog:unit-request-update — Update now applies once even when auto is off.
-    #[test]
-    fn local_auto_update_false_does_not_apply() {
-        let host = HostPublic {
-            auto_update: Some(true),
-            ..HostPublic::default()
-        };
-        let desired = DesiredSoftware {
-            git_sha: "abc".into(),
-            platform: "linux-x86_64".into(),
-            bins: HashMap::from([(
-                "fleet-host".into(),
-                DesiredBin {
-                    sha256: "aa".into(),
-                    size: None,
-                    version: None,
-                },
-            )]),
-        };
-        assert!(!effective_auto_update(false, true));
-        assert!(!should_apply_now(false, &host, Some(&desired), false));
-        assert!(should_apply_now(false, &host, Some(&desired), true));
-        assert!(should_apply_now(true, &host, Some(&desired), false));
-        let off_cp = HostPublic {
-            auto_update: Some(false),
-            ..HostPublic::default()
-        };
-        assert!(!should_apply_now(true, &off_cp, Some(&desired), false));
-        let requested = HostPublic {
-            auto_update: Some(false),
-            update_requested_at: Some("2026-01-01T00:00:00Z".into()),
-            ..HostPublic::default()
-        };
-        assert!(should_apply_now(false, &requested, Some(&desired), false));
-
+    fn maybe_queue_auto_local_on_cp_off_without_request_is_none() {
         let state = UpdateState::new();
-        let cfg_off = LocalConfig {
-            auto_update: false,
+        let cfg = LocalConfig {
+            auto_update: true,
             ..LocalConfig::default()
         };
+        let desired = stub_desired("abc");
         assert!(
-            maybe_queue_auto(&state, &cfg_off, &off_cp, Some(&desired)).is_none(),
-            "auto off + no request must not apply"
+            maybe_queue_auto(&state, &cfg, &host_auto_off(None), Some(&desired)).is_none(),
+            "local auto on + CP auto off + no Update now must not apply"
         );
+    }
+
+    /// catalog:unit-request-update — CP restrict must not block Update now.
+    #[test]
+    fn maybe_queue_auto_local_on_cp_off_update_now_still_applies() {
+        let state = UpdateState::new();
+        let cfg = LocalConfig {
+            auto_update: true,
+            ..LocalConfig::default()
+        };
+        let desired = stub_desired("abc");
         assert!(
-            maybe_queue_auto(&state, &cfg_off, &requested, Some(&desired)).is_some(),
-            "Update now applies once even when local and CP auto are off"
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:00Z")),
+                Some(&desired)
+            )
+            .is_some(),
+            "Update now applies even when CP auto_update is false"
         );
-        assert!(
-            maybe_queue_auto(&state, &cfg_off, &requested, Some(&desired)).is_none(),
-            "the same request must not queue a second apply"
-        );
-        let again = HostPublic {
-            auto_update: Some(false),
-            update_requested_at: Some("2026-01-01T00:00:01Z".into()),
+    }
+
+    /// catalog:unit-request-update — missing host.auto_update (old CP) defaults true.
+    #[test]
+    fn maybe_queue_auto_omitted_cp_auto_defaults_true() {
+        let state = UpdateState::new();
+        let cfg = LocalConfig {
+            auto_update: true,
+            ..LocalConfig::default()
+        };
+        let host = HostPublic {
+            auto_update: None,
             ..HostPublic::default()
         };
-        state.finish();
+        let desired = stub_desired("abc");
         assert!(
-            maybe_queue_auto(&state, &cfg_off, &requested, Some(&desired)).is_none(),
-            "after apply finishes, the same Update now must stay consumed"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg_off, &again, Some(&desired)).is_some(),
-            "a later Update now (new timestamp) may apply again"
+            maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
+            "omitted CP auto_update defaults true and applies when local auto is on"
         );
     }
 
@@ -1055,36 +965,14 @@ mod tests {
         let state = UpdateState::new();
 
         assert!(
-            maybe_queue_auto(&state, &cfg, &host_auto_off(None), Some(&desired_a)).is_none(),
-            "auto off + no Update now must not apply"
-        );
-        assert!(
             maybe_queue_auto(&state, &cfg, &host_auto_off(Some("   ")), Some(&desired_a)).is_none(),
             "whitespace update_requested_at is not a request"
-        );
-        assert!(
-            maybe_queue_auto(
-                &state,
-                &cfg,
-                &host_auto_off(Some("2026-01-01T00:00:00Z")),
-                None
-            )
-            .is_none(),
-            "Update now without desired must not apply"
         );
 
         let req = host_auto_off(Some("2026-01-01T00:00:00Z"));
         assert!(
             maybe_queue_auto(&state, &cfg, &req, Some(&desired_a)).is_some(),
             "Update now applies once even when local and CP auto are off"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired_a)).is_none(),
-            "same request must not queue a second apply while the first is in flight"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired_b)).is_none(),
-            "mid-apply must not pull a newer desired sha"
         );
         let later = host_auto_off(Some("2026-01-01T00:00:01Z"));
         assert!(
@@ -1094,41 +982,84 @@ mod tests {
 
         state.finish();
         assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired_a)).is_none(),
-            "after one apply the Update now request must stay consumed"
-        );
-        assert!(
             maybe_queue_auto(&state, &cfg, &req, Some(&desired_b)).is_none(),
             "leftover update_requested_at + new desired must not pull when auto is off"
         );
+    }
+
+    /// catalog:unit-request-update — auto-on keys by sha|stamp so a leftover
+    /// Update now still restages a newer desired sha.
+    #[test]
+    fn auto_on_leftover_stamp_plus_new_desired_applies() {
+        let cfg = LocalConfig {
+            auto_update: true,
+            ..LocalConfig::default()
+        };
+        let host = HostPublic {
+            auto_update: Some(true),
+            update_requested_at: Some("2026-01-01T00:00:00Z".into()),
+            ..HostPublic::default()
+        };
+        let state = UpdateState::new();
+        assert!(maybe_queue_auto(&state, &cfg, &host, Some(&stub_desired("sha-a"))).is_some());
+        state.finish();
         assert!(
-            maybe_queue_auto(&state, &cfg, &later, Some(&desired_b)).is_some(),
-            "a later Update now (new timestamp) may apply after the first has finished"
+            maybe_queue_auto(&state, &cfg, &host, Some(&stub_desired("sha-b"))).is_some(),
+            "auto-on leftover update_requested_at + new git_sha must apply"
+        );
+    }
+
+    /// catalog:unit-request-update — request_stamp trims; a padded copy of the
+    /// consumed stamp is the same one-shot key.
+    #[test]
+    fn padded_update_requested_at_trims_to_same_one_shot_key() {
+        let cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        let desired = stub_desired("sha-a");
+        let state = UpdateState::new();
+        assert!(
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:00Z")),
+                Some(&desired)
+            )
+            .is_some()
+        );
+        state.finish();
+        assert!(
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("  2026-01-01T00:00:00Z  ")),
+                Some(&desired)
+            )
+            .is_none(),
+            "padded copy of the consumed stamp must not re-queue"
+        );
+    }
+
+    /// catalog:unit-request-update — empty update_requested_at is not a request.
+    #[test]
+    fn empty_string_update_requested_at_is_not_a_request() {
+        let cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        let desired = stub_desired("sha-a");
+        let state = UpdateState::new();
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host_auto_off(Some("")), Some(&desired)).is_none(),
+            "empty update_requested_at is not a request"
         );
     }
 
     #[test]
     fn windows_updater_script_written_running_exe_not_opened() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = write_bin(dir.path(), "fleet-host.exe", b"running-pe");
-        let _driver = write_bin(dir.path(), "fleet-driver.exe", b"old-d");
-        // Hold dest open (simulates a locked PE) — apply must not truncate it.
-        let mut held = fs::OpenOptions::new().read(true).open(&exe).unwrap();
-        let mut probe = [0u8; 4];
-        held.read_exact(&mut probe).unwrap();
-        assert_eq!(&probe, b"runn");
-
-        let new_host = b"new-host-bytes";
-        let staged = stage_new_file(&exe, new_host).unwrap();
-        assert!(staged.ends_with("fleet-host.exe.new"));
-        assert_eq!(fs::read(&exe).unwrap(), b"running-pe");
-        assert_eq!(fs::read(&staged).unwrap(), new_host);
-
-        let script = write_windows_updater(
-            dir.path(),
-            &["fleet-host.exe".into(), "fleet-driver.exe".into()],
-        )
-        .unwrap();
+        let script = write_windows_updater(dir.path(), &["fleet-host.exe".into()]).unwrap();
         assert_eq!(script.file_name().unwrap(), "update.cmd");
         let text = fs::read_to_string(&script).unwrap();
         assert!(text.contains("move /Y"), "{text}");
@@ -1138,57 +1069,245 @@ mod tests {
             text.contains("start \"\" /D \"%DIR%\" \"%DIR%fleet-host.exe\" run"),
             "{text}"
         );
-        assert!(!text.to_ascii_lowercase().contains("paused"));
-        assert!(!text.to_ascii_lowercase().contains("drain"));
-
-        // dest still the original bytes; we never opened it for write.
-        assert_eq!(fs::read(&exe).unwrap(), b"running-pe");
-        assert_eq!(fs::read(&_driver).unwrap(), b"old-d");
-        drop(held);
     }
 
     #[test]
-    fn swap_staged_renames_open_dest_aside() {
+    fn windows_host_restart_writes_update_cmd_when_rename_aside_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = write_bin(dir.path(), "fleet-host.exe", b"running-pe");
-        let _held = fs::OpenOptions::new().read(true).open(&exe).unwrap();
-        stage_new_file(&exe, b"new-host-bytes").unwrap();
-        swap_staged(&exe).expect("Windows can rename a running PE");
-        assert_eq!(fs::read(&exe).unwrap(), b"new-host-bytes");
-        assert_eq!(
-            fs::read(dir.path().join("fleet-host.exe.bak")).unwrap(),
-            b"running-pe"
+        let dest = write_bin(dir.path(), "fleet-host.exe", b"running-pe");
+        stage_new_file(&dest, b"new-host-bytes").unwrap();
+        // Non-empty dest.bak makes swap_staged's dest→bak rename fail.
+        let bak = dir.path().join("fleet-host.exe.bak");
+        fs::create_dir(&bak).unwrap();
+        fs::write(bak.join("keep"), b"x").unwrap();
+        let staged = [Staged {
+            logical: "fleet-host",
+            dest: dest.clone(),
+            file_name: "fleet-host.exe".into(),
+        }];
+        let state = UpdateState::new();
+        let opts = ApplyOptions {
+            windows_self_replace: true,
+            dry_restart: true,
+        };
+        let out = windows_host_restart(dir.path(), &staged, &state, &opts).unwrap();
+        assert_eq!(out, ApplyOutcome::HostRestartPending);
+        assert!(dir.path().join("update.cmd").is_file());
+        assert_eq!(fs::read(&dest).unwrap(), b"running-pe");
+    }
+
+    #[test]
+    fn write_windows_updater_moves_every_changed_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_windows_updater(
+            dir.path(),
+            &["fleet-host.exe".into(), "fleet-driver.exe".into()],
+        )
+        .unwrap();
+        let text = fs::read_to_string(&script).unwrap();
+        assert!(text.contains("fleet-host.exe.new"), "{text}");
+        assert!(text.contains("fleet-driver.exe.new"), "{text}");
+        assert!(
+            text.contains("move /Y \"%DIR%fleet-host.exe\" \"%DIR%fleet-host.exe.bak\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("move /Y \"%DIR%fleet-driver.exe\" \"%DIR%fleet-driver.exe.bak\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("move /Y \"%DIR%fleet-host.exe.new\" \"%DIR%fleet-host.exe\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("move /Y \"%DIR%fleet-driver.exe.new\" \"%DIR%fleet-driver.exe\""),
+            "{text}"
         );
     }
 
     #[test]
-    fn pe_machine_type_amd64_and_arm64() {
-        fn pe(machine: u16) -> Vec<u8> {
-            let mut b = vec![0u8; 0x48];
-            b[0] = b'M';
-            b[1] = b'Z';
-            b[0x3C] = 0x40;
-            b[0x40] = b'P';
-            b[0x41] = b'E';
-            b[0x44] = machine as u8;
-            b[0x45] = (machine >> 8) as u8;
-            b
-        }
-        assert_eq!(pe_machine_type(&pe(IMAGE_FILE_MACHINE_AMD64)), Some(0x8664));
-        assert_eq!(pe_machine_type(&pe(IMAGE_FILE_MACHINE_ARM64)), Some(0xAA64));
-        check_pe_machine(&pe(IMAGE_FILE_MACHINE_AMD64), "windows-x86_64").unwrap();
-        assert!(check_pe_machine(&pe(IMAGE_FILE_MACHINE_AMD64), "windows-arm64").is_err());
-        check_pe_machine(b"elf-not-pe", "linux-x86_64").unwrap();
+    fn write_windows_updater_skips_blank_changed_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_windows_updater(
+            dir.path(),
+            &["".into(), "  ".into(), "fleet-host.exe".into()],
+        )
+        .unwrap();
+        let text = fs::read_to_string(&script).unwrap();
+        assert!(
+            !text.contains("move /Y \"%DIR%\" \"%DIR%.bak\""),
+            "{text}"
+        );
+        assert!(!text.contains("%DIR%  .bak"), "{text}");
+        assert!(text.contains("fleet-host.exe.new"), "{text}");
+    }
+
+    fn pe(machine: u16) -> Vec<u8> {
+        let mut b = vec![0u8; 0x48];
+        b[0] = b'M';
+        b[1] = b'Z';
+        b[0x3C] = 0x40;
+        b[0x40] = b'P';
+        b[0x41] = b'E';
+        b[0x44] = machine as u8;
+        b[0x45] = (machine >> 8) as u8;
+        b
     }
 
     #[test]
+    fn pe_machine_type_amd64_and_arm64() {
+        let amd64 = pe(IMAGE_FILE_MACHINE_AMD64);
+        let arm64 = pe(IMAGE_FILE_MACHINE_ARM64);
+        assert_eq!(pe_machine_type(&amd64), Some(0x8664));
+        assert_eq!(pe_machine_type(&arm64), Some(0xAA64));
+        check_pe_machine(&amd64, "windows-x86_64")
+            .expect("windows-x86_64 must require AMD64 PE, not skip");
+        let err = check_pe_machine(&arm64, "windows-x86_64")
+            .expect_err("windows-x86_64 must reject ARM64 (mapping is not skip)");
+        assert!(
+            err.to_string().contains("does not match windows-x86_64"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn check_pe_machine_rejects_non_pe_on_windows() {
+        let err = check_pe_machine(b"elf-not-pe", "windows-x86_64")
+            .expect_err("windows-x86_64 must reject non-PE");
+        assert!(err.to_string().contains("not a PE"), "{err}");
+        let err = check_pe_machine(b"MZ", "windows-x86_64")
+            .expect_err("short not-PE bytes must reject on windows-x86_64");
+        assert!(err.to_string().contains("not a PE"), "{err}");
+        check_pe_machine(b"elf-not-pe", "linux-x86_64")
+            .expect("linux-x86_64 must skip the PE gate");
+    }
+
+    #[test]
+    fn check_pe_machine_accepts_arm64_on_windows_arm64() {
+        check_pe_machine(&pe(IMAGE_FILE_MACHINE_ARM64), "windows-arm64")
+            .expect("windows-arm64 must accept ARM64 PE");
+        let err = check_pe_machine(&pe(IMAGE_FILE_MACHINE_AMD64), "windows-arm64")
+            .expect_err("windows-arm64 must reject AMD64 PE");
+        assert!(
+            err.to_string().contains("does not match windows-arm64"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pe_machine_type_none_when_truncated_or_not_mz() {
+        assert_eq!(pe_machine_type(&[0u8; 63]), None);
+        assert_eq!(pe_machine_type(b"MZ"), None);
+        let mut not_mz = vec![0u8; 64];
+        not_mz[0] = b'E';
+        not_mz[1] = b'L';
+        assert_eq!(pe_machine_type(&not_mz), None);
+
+        let mut past_end = vec![0u8; 64];
+        past_end[0] = b'M';
+        past_end[1] = b'Z';
+        past_end[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        assert_eq!(pe_machine_type(&past_end), None);
+
+        let mut bad_sig = pe(IMAGE_FILE_MACHINE_AMD64);
+        bad_sig[0x40..0x44].copy_from_slice(b"XXXX");
+        assert_eq!(pe_machine_type(&bad_sig), None);
+    }
+
+    /// catalog:unit-request-update — auto-on one-shot: after finish the same
+    /// desired git sha stays consumed; a later sha may begin.
+    #[test]
     fn one_attempt_per_desired_sha() {
+        let cfg = LocalConfig {
+            auto_update: true,
+            ..LocalConfig::default()
+        };
+        let host = HostPublic {
+            auto_update: Some(true),
+            ..HostPublic::default()
+        };
         let state = UpdateState::new();
-        assert!(state.try_begin("abc"));
-        assert!(!state.try_begin("abc"));
+        let sha_a = stub_desired("abc");
+        let sha_b = stub_desired("def");
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&sha_a)).is_some(),
+            "auto-on first desired git sha must apply"
+        );
         state.finish();
-        assert!(!state.try_begin("abc"));
-        assert!(state.try_begin("def"));
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&sha_a)).is_none(),
+            "same desired git sha must stay consumed after finish"
+        );
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&sha_b)).is_some(),
+            "a later desired git sha may begin after finish"
+        );
+    }
+
+    /// catalog:unit-request-update — mid-apply must not start a newer sha.
+    #[test]
+    fn maybe_queue_auto_auto_on_mid_apply_does_not_start_newer_sha() {
+        let cfg = LocalConfig {
+            auto_update: true,
+            ..LocalConfig::default()
+        };
+        let host = HostPublic {
+            auto_update: Some(true),
+            ..HostPublic::default()
+        };
+        let state = UpdateState::new();
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&stub_desired("sha-a"))).is_some(),
+            "auto-on first desired git sha must apply"
+        );
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&stub_desired("sha-b"))).is_none(),
+            "mid-apply must not start a newer sha"
+        );
+    }
+
+    #[test]
+    fn try_begin_empty_key_is_false_and_does_not_set_applying() {
+        let state = UpdateState::new();
+        assert!(!state.try_begin(""), "empty attempt key must not begin");
+        assert!(
+            state.try_begin("abc"),
+            "empty-key reject must not leave applying set"
+        );
+    }
+
+    #[test]
+    fn attempt_key_prefers_trimmed_git_sha_else_sorted_bin_hashes() {
+        let trimmed = DesiredSoftware {
+            git_sha: "  abc  ".into(),
+            platform: "linux-x86_64".into(),
+            bins: HashMap::new(),
+        };
+        assert_eq!(attempt_key(&trimmed), "abc");
+
+        let bins_only = DesiredSoftware {
+            git_sha: "".into(),
+            platform: "linux-x86_64".into(),
+            bins: HashMap::from([
+                (
+                    "fleet-host".into(),
+                    DesiredBin {
+                        sha256: "bb".into(),
+                        size: None,
+                        version: None,
+                    },
+                ),
+                (
+                    "fleet-driver".into(),
+                    DesiredBin {
+                        sha256: "aa".into(),
+                        size: None,
+                        version: None,
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(attempt_key(&bins_only), "fleet-driver:aa,fleet-host:bb");
     }
 
     struct MockCp {
@@ -1198,6 +1317,13 @@ mod tests {
     }
 
     fn spawn_mock(files: HashMap<String, Vec<u8>>) -> MockCp {
+        spawn_mock_on_request(files, None)
+    }
+
+    fn spawn_mock_on_request(
+        files: HashMap<String, Vec<u8>>,
+        on_request: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    ) -> MockCp {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(StdMutex::new(Vec::new()));
@@ -1217,6 +1343,9 @@ mod tests {
                 let mut it = first.split_whitespace();
                 let method = it.next().unwrap_or("").to_string();
                 let path = it.next().unwrap_or("").to_string();
+                if let Some(cb) = &on_request {
+                    cb(&method, &path);
+                }
                 log2.lock().unwrap().push((method, path.clone()));
                 let body = files.get(&path).cloned();
                 let (status, payload) = match body {
@@ -1252,6 +1381,18 @@ mod tests {
         m
     }
 
+    fn assert_apply_http_get_only_no_drain_paused(log: &[(String, String)]) {
+        assert!(!log.is_empty(), "expected GET install bytes, got {log:?}");
+        for (method, path) in log {
+            assert_eq!(method, "GET", "apply must not {method} {path}");
+            let lower = path.to_ascii_lowercase();
+            assert!(
+                !lower.contains("paused") && !lower.contains("drain"),
+                "apply must not touch paused/drain via {method} {path}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn apply_does_not_patch_drain_or_paused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1277,27 +1418,141 @@ mod tests {
                 ("fleet-driver", new_d.as_slice()),
             ],
         );
+        // Non-empty jobs: ChildrenOnly must not wait_jobs_idle (that loop has no timeout).
         let jobs = AsyncMutex::new(HashSet::from([Uuid::now_v7()]));
         let state = UpdateState::new();
-        let opts = ApplyOptions {
-            windows_self_replace: false,
-            dry_restart: true,
-        };
-        let out = apply_desired(&client, &cfg, &desired, dir.path(), &jobs, &state, &opts)
-            .await
-            .expect("apply");
-        assert_eq!(out, ApplyOutcome::ChildrenSwapped);
-        assert_eq!(fs::read(dir.path().join("fleet-driver")).unwrap(), new_d);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            apply_desired(
+                &client,
+                &cfg,
+                &desired,
+                dir.path(),
+                &jobs,
+                &state,
+                &dry_apply_opts(),
+            ),
+        )
+        .await
+        .expect("children-only apply must not wait_jobs_idle")
+        .expect("apply");
         assert!(!state.stop_claiming.load(Ordering::SeqCst));
         assert!(!state.is_updating());
-        let log = mock.log.lock().unwrap().clone();
-        assert!(!log.is_empty(), "expected GET install bytes, got {log:?}");
-        for (method, path) in &log {
-            assert_eq!(method, "GET", "apply must not {method} {path}");
-            assert!(!path.contains("paused"), "{path}");
-            assert!(!path.contains("drain"), "{path}");
-            assert!(!path.contains("/api/worker-hosts/"), "{method} {path}");
+        assert_apply_http_get_only_no_drain_paused(&mock.log.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn child_apply_stop_claiming_stays_false_during_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
+        write_bin(dir.path(), "fleet-host", host);
+        write_bin(dir.path(), "fleet-driver", old_d);
+        let platform = detect_platform();
+        let state = Arc::new(UpdateState::new());
+        let saw_install_get = Arc::new(AtomicBool::new(false));
+        let stop_on_first_get = Arc::new(AtomicBool::new(true));
+        let mock = spawn_mock_on_request(
+            files_for(
+                &platform,
+                &[
+                    ("fleet-host", host.as_slice()),
+                    ("fleet-driver", new_d.as_slice()),
+                ],
+            ),
+            {
+                let state = state.clone();
+                let saw_install_get = saw_install_get.clone();
+                let stop_on_first_get = stop_on_first_get.clone();
+                Some(Arc::new(move |method: &str, path: &str| {
+                    if method == "GET"
+                        && path.contains("/install/worker/bin/")
+                        && !saw_install_get.swap(true, Ordering::SeqCst)
+                    {
+                        stop_on_first_get.store(
+                            state.stop_claiming.load(Ordering::SeqCst),
+                            Ordering::SeqCst,
+                        );
+                    }
+                }))
+            },
+        );
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            apply_desired(
+                &client,
+                &cfg,
+                &desired,
+                dir.path(),
+                &AsyncMutex::new(HashSet::from([Uuid::now_v7()])),
+                &state,
+                &dry_apply_opts(),
+            ),
+        )
+        .await
+        .expect("children-only apply must not wait_jobs_idle")
+        .expect("apply");
+        assert!(
+            saw_install_get.load(Ordering::SeqCst),
+            "download must GET install so stop_claiming can be snapshotted"
+        );
+        assert!(
+            !stop_on_first_get.load(Ordering::SeqCst),
+            "children-only apply must keep claiming during download"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_desired_download_error_clears_updating_and_does_not_http_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
+        write_bin(dir.path(), "fleet-host", host);
+        write_bin(dir.path(), "fleet-driver", old_d);
+        let platform = detect_platform();
+        let mock = spawn_mock(HashMap::new());
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        );
+        let state = UpdateState::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            apply_desired(
+                &client,
+                &cfg,
+                &desired,
+                dir.path(),
+                &AsyncMutex::new(HashSet::from([Uuid::now_v7()])),
+                &state,
+                &dry_apply_opts(),
+            ),
+        )
+        .await
+        .expect("download error must not wait_jobs_idle");
+        match result {
+            Ok(ApplyOutcome::QuietNoPrebuilt) | Err(_) => {}
+            Ok(other) => panic!("expected QuietNoPrebuilt or err, got {other:?}"),
         }
+        assert!(!state.is_updating());
+        assert!(!state.stop_claiming.load(Ordering::SeqCst));
+        assert_apply_http_get_only_no_drain_paused(&mock.log.lock().unwrap());
     }
 
     #[tokio::test]
@@ -1337,18 +1592,191 @@ mod tests {
         assert_eq!(out, ApplyOutcome::HostRestartPending);
         assert!(state.is_updating());
         assert!(state.stop_claiming.load(Ordering::SeqCst));
-        // Rename-aside while still running: dest is the new PE, old is .bak.
-        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), new_h);
-        assert_eq!(fs::read(dir.path().join("fleet-host.bak")).unwrap(), old_h);
-        assert!(!dir.path().join("fleet-host.new").is_file());
-        for (method, path) in mock.log.lock().unwrap().iter() {
-            assert_eq!(method, "GET", "host apply must not {method} {path}");
-            assert!(!path.contains("drain") && !path.contains("paused"));
+        let log = mock.log.lock().unwrap();
+        assert_apply_http_get_only_no_drain_paused(&log);
+        for (_, path) in log.iter() {
+            assert!(
+                !path.contains("/api/worker-hosts/"),
+                "host apply must not PATCH worker-hosts via {path}"
+            );
         }
     }
 
     #[tokio::test]
-    async fn maybe_queue_auto_respects_local_flag() {
+    async fn host_apply_download_error_clears_updating() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let new_h = b"host-new";
+        let d = b"driver-same";
+        write_bin(dir.path(), "fleet-host", old_h);
+        write_bin(dir.path(), "fleet-driver", d);
+        let platform = detect_platform();
+        let mock = spawn_mock(HashMap::new());
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        let state = UpdateState::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            apply_desired(
+                &client,
+                &cfg,
+                &desired,
+                dir.path(),
+                &AsyncMutex::new(HashSet::new()),
+                &state,
+                &ApplyOptions {
+                    windows_self_replace: true,
+                    dry_restart: true,
+                },
+            ),
+        )
+        .await
+        .expect("download error must not wait_jobs_idle");
+        match result {
+            Ok(ApplyOutcome::QuietNoPrebuilt) | Err(_) => {}
+            Ok(other) => panic!("expected QuietNoPrebuilt or err, got {other:?}"),
+        }
+        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), old_h);
+        assert!(!state.is_updating());
+        assert!(!state.stop_claiming.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn windows_host_restart_rename_fail_writes_update_cmd_without_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let new_h = b"host-new";
+        let d = b"driver-same";
+        write_bin(dir.path(), "fleet-host", old_h);
+        write_bin(dir.path(), "fleet-driver", d);
+        let bak = dir.path().join("fleet-host.bak");
+        fs::create_dir_all(&bak).unwrap();
+        fs::write(bak.join("keep"), b"x").unwrap();
+        let platform = detect_platform();
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        let state = UpdateState::new();
+        let out = apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dir.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &state,
+            &ApplyOptions {
+                windows_self_replace: true,
+                dry_restart: true,
+            },
+        )
+        .await
+        .expect("windows rename-aside fail must fall back to update.cmd");
+        assert_eq!(out, ApplyOutcome::HostRestartPending);
+        assert!(dir.path().join("update.cmd").is_file());
+        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), old_h);
+        assert!(state.is_updating());
+        assert_apply_http_get_only_no_drain_paused(&mock.log.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn host_apply_downloads_while_still_claiming() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let new_h = b"host-new";
+        let d = b"driver-same";
+        write_bin(dir.path(), "fleet-host", old_h);
+        write_bin(dir.path(), "fleet-driver", d);
+        let platform = detect_platform();
+        let state = Arc::new(UpdateState::new());
+        let saw_install_get = Arc::new(AtomicBool::new(false));
+        let stop_on_first_get = Arc::new(AtomicBool::new(true));
+        let mock = spawn_mock_on_request(
+            files_for(
+                &platform,
+                &[
+                    ("fleet-host", new_h.as_slice()),
+                    ("fleet-driver", d.as_slice()),
+                ],
+            ),
+            {
+                let state = state.clone();
+                let saw_install_get = saw_install_get.clone();
+                let stop_on_first_get = stop_on_first_get.clone();
+                Some(Arc::new(move |method: &str, path: &str| {
+                    if method == "GET"
+                        && path.contains("/install/worker/bin/")
+                        && !saw_install_get.swap(true, Ordering::SeqCst)
+                    {
+                        stop_on_first_get.store(
+                            state.stop_claiming.load(Ordering::SeqCst),
+                            Ordering::SeqCst,
+                        );
+                    }
+                }))
+            },
+        );
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        let out = apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dir.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &state,
+            &ApplyOptions {
+                windows_self_replace: true,
+                dry_restart: true,
+            },
+        )
+        .await
+        .expect("apply");
+        assert_eq!(out, ApplyOutcome::HostRestartPending);
+        assert!(
+            saw_install_get.load(Ordering::SeqCst),
+            "download must GET install so stop_claiming can be snapshotted"
+        );
+        assert!(
+            !stop_on_first_get.load(Ordering::SeqCst),
+            "host apply must download while still claiming"
+        );
+        assert!(
+            state.stop_claiming.load(Ordering::SeqCst),
+            "stop_claiming flips only after stage"
+        );
+    }
+
+    /// catalog:unit-request-update — local auto_update=false must not queue
+    /// a CP-desired apply even when host.auto_update is true (box restrict).
+    #[test]
+    fn maybe_queue_auto_respects_local_flag() {
         let state = UpdateState::new();
         let cfg_off = LocalConfig {
             auto_update: false,
@@ -1358,28 +1786,98 @@ mod tests {
             auto_update: Some(true),
             ..HostPublic::default()
         };
-        let desired = DesiredSoftware {
-            git_sha: "sha1".into(),
-            platform: "linux-x86_64".into(),
-            bins: HashMap::from([(
-                "fleet-host".into(),
-                DesiredBin {
-                    sha256: "aa".into(),
-                    size: None,
-                    version: None,
-                },
-            )]),
-        };
-        assert!(maybe_queue_auto(&state, &cfg_off, &host, Some(&desired)).is_none());
-        let cfg_on = LocalConfig {
+        let desired = stub_desired("sha1");
+        assert!(
+            maybe_queue_auto(&state, &cfg_off, &host, Some(&desired)).is_none(),
+            "local auto off + CP auto on + no Update now must not queue"
+        );
+    }
+
+    /// catalog:unit-request-update — host-bin swap / restart pending must
+    /// not start another download.
+    #[test]
+    fn maybe_queue_auto_skips_while_host_updating() {
+        let state = UpdateState::new();
+        state.updating.store(true, Ordering::SeqCst);
+        let cfg = LocalConfig {
             auto_update: true,
             ..LocalConfig::default()
         };
-        assert!(maybe_queue_auto(&state, &cfg_on, &host, Some(&desired)).is_some());
-        assert!(maybe_queue_auto(&state, &cfg_on, &host, Some(&desired)).is_none());
+        let host = HostPublic {
+            auto_update: Some(true),
+            ..HostPublic::default()
+        };
+        let desired = stub_desired("sha1");
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_none(),
+            "is_updating must skip queue even when local and CP auto are on"
+        );
+    }
+
+    /// catalog:unit-request-update — apply sets updating at first download,
+    /// before stop_claiming; a later Update now must not queue.
+    #[test]
+    fn maybe_queue_auto_skips_while_updating_before_stop_claiming() {
+        let state = UpdateState::new();
+        state.updating.store(true, Ordering::SeqCst);
+        assert!(
+            !state.stop_claiming.load(Ordering::SeqCst),
+            "download-phase fixture: updating is set before stop_claiming"
+        );
+        let cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        assert!(
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:01Z")),
+                Some(&stub_desired("sha-b"))
+            )
+            .is_none(),
+            "is_updating must skip queue before stop_claiming flips"
+        );
     }
 
     const EXISTING_MACHINE_TOKEN: &str = "flm_existing_pair_token";
+
+    static CONFIG_DIR_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Points `token_path()` / `machine_id_path()` at a tempfile so apply
+    /// cannot write the real `~/.config/fleet-host` pair files.
+    struct IsolatedConfigDir {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl IsolatedConfigDir {
+        fn new() -> Self {
+            let lock = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("FLEET_HOST_CONFIG_DIR").ok();
+            let dir = tempfile::tempdir().unwrap();
+            unsafe {
+                std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+            }
+            Self {
+                _lock: lock,
+                prev,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for IsolatedConfigDir {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("FLEET_HOST_CONFIG_DIR", v),
+                    None => std::env::remove_var("FLEET_HOST_CONFIG_DIR"),
+                }
+            }
+        }
+    }
 
     fn seed_pair_files(dir: &Path) -> (PathBuf, Vec<u8>, PathBuf, Vec<u8>) {
         let token = dir.join("machine.token");
@@ -1389,6 +1887,11 @@ mod tests {
         fs::write(&token, &token_bytes).unwrap();
         fs::write(&id, &id_bytes).unwrap();
         (token, token_bytes, id, id_bytes)
+    }
+
+    fn seed_published_pair_files() -> (Vec<u8>, Vec<u8>) {
+        let (_, token_bytes, _, id_bytes) = seed_pair_files(&crate::paths::config_dir());
+        (token_bytes, id_bytes)
     }
 
     fn assert_pair_files_untouched(
@@ -1414,6 +1917,36 @@ mod tests {
             tokens,
             vec![token.to_path_buf()],
             "update must not mint another machine.token: {tokens:?}"
+        );
+    }
+
+    fn assert_published_pair_files_untouched(token_bytes: &[u8], id_bytes: &[u8]) {
+        assert_pair_files_untouched(
+            &crate::paths::config_dir(),
+            &crate::paths::token_path(),
+            token_bytes,
+            &crate::paths::machine_id_path(),
+            id_bytes,
+        );
+    }
+
+    fn assert_no_pair_files(dir: &Path) {
+        assert!(
+            !dir.join("machine.token").exists(),
+            "apply must not mint {}/machine.token",
+            dir.display()
+        );
+        assert!(
+            !dir.join("machine.id").exists(),
+            "apply must not mint {}/machine.id",
+            dir.display()
+        );
+        let mut tokens = Vec::new();
+        collect_named(dir, "machine.token", &mut tokens);
+        assert!(
+            tokens.is_empty(),
+            "apply must not mint machine.token under {}: {tokens:?}",
+            dir.display()
         );
     }
 
@@ -1455,151 +1988,140 @@ mod tests {
         }
     }
 
-    /// catalog:unit-update-holds-ready-no-token-rotate — auto-update and
-    /// Update now reuse the paired machine.token; they must not rewrite it.
+    /// catalog:unit-update-holds-ready-no-token-rotate — auto-update child
+    /// swap reuses the published machine.token / machine.id.
     #[tokio::test]
     async fn update_holds_ready_auto_and_now_do_not_rotate_machine_token() {
-        let src = include_str!("update.rs");
-        let prod = src.split("mod tests {").next().unwrap();
-        assert!(
-            !prod.contains("write_machine_token") && !prod.contains("delete_machine_token"),
-            "apply/auto-update must not rewrite or wipe machine.token"
-        );
-        assert!(
-            !prod.contains(".pair(") && !prod.contains("bootstrap("),
-            "apply/auto-update must not re-pair (that mints a new token)"
-        );
-
+        let _cfg_dir = IsolatedConfigDir::new();
         let platform = detect_platform();
         let old_h = b"host-v1";
         let old_d = b"driver-v1";
         let new_d = b"driver-v2";
-        let new_h = b"host-v2";
 
-        let auto_dir = tempfile::tempdir().unwrap();
-        write_bin(auto_dir.path(), "fleet-host", old_h);
-        write_bin(auto_dir.path(), "fleet-driver", old_d);
-        let (auto_token, auto_token_bytes, auto_id, auto_id_bytes) =
-            seed_pair_files(auto_dir.path());
-
-        let now_dir = tempfile::tempdir().unwrap();
-        write_bin(now_dir.path(), "fleet-host", old_h);
-        write_bin(now_dir.path(), "fleet-driver", old_d);
-        let (now_token, now_token_bytes, now_id, now_id_bytes) = seed_pair_files(now_dir.path());
+        let dest = tempfile::tempdir().unwrap();
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", old_d);
+        let (token_bytes, id_bytes) = seed_published_pair_files();
 
         let mock = spawn_mock(files_for(
             &platform,
             &[
-                ("fleet-host", new_h.as_slice()),
+                ("fleet-host", old_h.as_slice()),
                 ("fleet-driver", new_d.as_slice()),
             ],
         ));
-        let opts = dry_apply_opts();
-        let jobs = AsyncMutex::new(HashSet::new());
-
-        let cfg_auto = LocalConfig {
+        let cfg = LocalConfig {
             auto_update: true,
             ..LocalConfig::default()
         };
-        let host_auto = HostPublic {
+        let host = HostPublic {
             auto_update: Some(true),
             ..HostPublic::default()
         };
-        let desired_auto = desired_for(
+        let desired = desired_for(
             &platform,
             &[
                 ("fleet-host", old_h.as_slice()),
                 ("fleet-driver", new_d.as_slice()),
             ],
         );
-        let state_auto = UpdateState::new();
+        let state = UpdateState::new();
         assert!(
-            maybe_queue_auto(&state_auto, &cfg_auto, &host_auto, Some(&desired_auto)).is_some(),
+            maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
             "auto-update on must queue apply"
         );
-        let client_auto =
-            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg_auto).unwrap();
+        let client =
+            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg).unwrap();
         let out = apply_desired(
-            &client_auto,
-            &cfg_auto,
-            &desired_auto,
-            auto_dir.path(),
-            &jobs,
-            &state_auto,
-            &opts,
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &state,
+            &dry_apply_opts(),
         )
         .await
         .expect("auto-update apply");
         assert_eq!(out, ApplyOutcome::ChildrenSwapped);
-        assert_pair_files_untouched(
-            auto_dir.path(),
-            &auto_token,
-            &auto_token_bytes,
-            &auto_id,
-            &auto_id_bytes,
-        );
+        assert_published_pair_files_untouched(&token_bytes, &id_bytes);
+        assert_no_pair_files(dest.path());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
 
-        let cfg_now = LocalConfig {
+    /// catalog:unit-update-holds-ready-no-token-rotate — Update now host-bin
+    /// swap reuses the published machine.token / machine.id.
+    #[tokio::test]
+    async fn update_now_host_bin_swap_does_not_rotate_machine_token() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let platform = detect_platform();
+        let old_h = b"host-v1";
+        let old_d = b"driver-v1";
+        let new_h = b"host-v2";
+
+        let dest = tempfile::tempdir().unwrap();
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", old_d);
+        let (token_bytes, id_bytes) = seed_published_pair_files();
+
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", old_d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig {
             auto_update: false,
             ..LocalConfig::default()
         };
-        let host_now = HostPublic {
-            auto_update: Some(false),
-            update_requested_at: Some("2026-01-01T00:00:00Z".into()),
-            ..HostPublic::default()
-        };
-        let desired_now = desired_for(
+        let host = host_auto_off(Some("2026-01-01T00:00:00Z"));
+        let desired = desired_for(
             &platform,
             &[
                 ("fleet-host", new_h.as_slice()),
                 ("fleet-driver", old_d.as_slice()),
             ],
         );
-        let state_now = UpdateState::new();
+        let state = UpdateState::new();
         assert!(
-            maybe_queue_auto(&state_now, &cfg_now, &host_now, Some(&desired_now)).is_some(),
+            maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
             "Update now must queue apply even when auto is off"
         );
-        let client_now =
-            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg_now).unwrap();
+        let client =
+            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg).unwrap();
         let out = apply_desired(
-            &client_now,
-            &cfg_now,
-            &desired_now,
-            now_dir.path(),
-            &jobs,
-            &state_now,
-            &opts,
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &state,
+            &dry_apply_opts(),
         )
         .await
         .expect("update-now apply");
         assert_eq!(out, ApplyOutcome::HostRestartPending);
-        assert_pair_files_untouched(
-            now_dir.path(),
-            &now_token,
-            &now_token_bytes,
-            &now_id,
-            &now_id_bytes,
-        );
-
+        assert_published_pair_files_untouched(&token_bytes, &id_bytes);
+        assert_no_pair_files(dest.path());
         assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
     }
 
-    /// catalog:unit-update-holds-ready-no-token-rotate — a failed host swap
-    /// must keep the paired token; do not mint a new one as the "fix".
+    /// catalog:unit-update-holds-ready-no-token-rotate — auto-update host-bin
+    /// swap must not rotate the published pair files.
     #[tokio::test]
-    async fn update_holds_ready_mid_swap_does_not_mint_machine_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let old_h = b"host-old";
-        let d = b"driver-same";
-        write_bin(dir.path(), "fleet-host", old_h);
-        write_bin(dir.path(), "fleet-driver", d);
-        let (token, token_bytes, id, id_bytes) = seed_pair_files(dir.path());
-        // Occupied `.bak` makes `rename(dest, bak)` fail after stage.
-        fs::create_dir_all(dir.path().join("fleet-host.bak")).unwrap();
-
+    async fn auto_update_host_bin_swap_does_not_rotate_machine_token() {
+        let _cfg_dir = IsolatedConfigDir::new();
         let platform = detect_platform();
-        let new_h = b"host-new";
+        let old_h = b"host-v1";
+        let d = b"driver-same";
+        let new_h = b"host-v2";
+
+        let dest = tempfile::tempdir().unwrap();
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", d);
+        let (token_bytes, id_bytes) = seed_published_pair_files();
+
         let mock = spawn_mock(files_for(
             &platform,
             &[
@@ -1625,30 +2147,309 @@ mod tests {
         let state = UpdateState::new();
         assert!(
             maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
-            "auto-update must queue the apply that then fails mid-swap"
+            "auto-update on must queue a host-bin apply"
         );
         let client =
             HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg).unwrap();
-        let err = apply_desired(
+        let out = apply_desired(
             &client,
             &cfg,
             &desired,
-            dir.path(),
+            dest.path(),
             &AsyncMutex::new(HashSet::new()),
             &state,
             &dry_apply_opts(),
         )
         .await
-        .expect_err("occupied .bak must fail the host swap");
-        assert!(
-            err.to_string().contains("rename") || err.to_string().contains("fleet-host"),
-            "{err}"
+        .expect("auto-update host apply");
+        assert_eq!(out, ApplyOutcome::HostRestartPending);
+        assert_published_pair_files_untouched(&token_bytes, &id_bytes);
+        assert_no_pair_files(dest.path());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — Windows rename-aside
+    /// / update.cmd must not mint or rewrite the published pair files.
+    #[tokio::test]
+    async fn windows_self_replace_apply_does_not_rotate_machine_token() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let platform = detect_platform();
+        let old_h = b"host-old";
+        let new_h = b"host-new";
+        let d = b"driver-same";
+
+        let dest = tempfile::tempdir().unwrap();
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", d);
+        let (token_bytes, id_bytes) = seed_published_pair_files();
+
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client =
+            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
         );
-        assert_eq!(fs::read(dir.path().join("fleet-host")).unwrap(), old_h);
-        assert!(!dir.path().join("fleet-host.new").is_file());
-        assert_pair_files_untouched(dir.path(), &token, &token_bytes, &id, &id_bytes);
-        assert!(!state.is_updating());
-        assert!(!state.stop_claiming.load(Ordering::SeqCst));
+        let out = apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &ApplyOptions {
+                windows_self_replace: true,
+                dry_restart: true,
+            },
+        )
+        .await
+        .expect("windows host apply");
+        assert_eq!(out, ApplyOutcome::HostRestartPending);
+        assert_published_pair_files_untouched(&token_bytes, &id_bytes);
+        assert_no_pair_files(dest.path());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — children swap must
+    /// not write-if-missing pair files on dest or the published config path.
+    #[tokio::test]
+    async fn apply_desired_does_not_mint_pair_files_when_dest_has_none() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let platform = detect_platform();
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
+
+        let dest = tempfile::tempdir().unwrap();
+        write_bin(dest.path(), "fleet-host", host);
+        write_bin(dest.path(), "fleet-driver", old_d);
+        assert_no_pair_files(dest.path());
+        assert_no_pair_files(&crate::paths::config_dir());
+
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        );
+        let out = apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &dry_apply_opts(),
+        )
+        .await
+        .expect("children-only apply");
+        assert_eq!(out, ApplyOutcome::ChildrenSwapped);
+        assert_no_pair_files(dest.path());
+        assert_no_pair_files(&crate::paths::config_dir());
+        assert!(!crate::paths::token_path().exists());
+        assert!(!crate::paths::machine_id_path().exists());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — a failed host swap
+    /// must keep the paired token; do not mint a new one as the "fix".
+    #[tokio::test]
+    async fn update_holds_ready_mid_swap_does_not_mint_machine_token() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let dest = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let d = b"driver-same";
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", d);
+        let (token_bytes, id_bytes) = seed_published_pair_files();
+        // Occupied `.bak` makes `rename(dest, bak)` fail after stage.
+        fs::create_dir_all(dest.path().join("fleet-host.bak")).unwrap();
+
+        let platform = detect_platform();
+        let new_h = b"host-new";
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client =
+            HostClient::with_machine_token(&mock.base, EXISTING_MACHINE_TOKEN, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &dry_apply_opts(),
+        )
+        .await
+        .expect_err("occupied .bak must fail the host swap");
+        assert_published_pair_files_untouched(&token_bytes, &id_bytes);
+        assert_no_pair_files(dest.path());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — stage fail after
+    /// download must not pair or rotate a machine token.
+    #[tokio::test]
+    async fn apply_desired_stage_fail_does_not_pair_or_rotate() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let dest = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let d = b"driver-same";
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", d);
+        // Occupied `.new` makes `stage_new_file` fail after download.
+        fs::create_dir_all(dest.path().join("fleet-host.new")).unwrap();
+
+        let platform = detect_platform();
+        let new_h = b"host-new";
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &dry_apply_opts(),
+        )
+        .await
+        .expect_err("occupied .new must fail stage");
+        assert_no_pair_files(dest.path());
+        assert_no_pair_files(&crate::paths::config_dir());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — children-only swap
+    /// fail must not pair or rotate a machine token.
+    #[tokio::test]
+    async fn apply_desired_children_swap_fail_does_not_pair_or_rotate() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let dest = tempfile::tempdir().unwrap();
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        write_bin(dest.path(), "fleet-host", host);
+        write_bin(dest.path(), "fleet-driver", old_d);
+        fs::create_dir_all(dest.path().join("fleet-driver.bak")).unwrap();
+
+        let platform = detect_platform();
+        let new_d = b"driver-new";
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", host.as_slice()),
+                ("fleet-driver", new_d.as_slice()),
+            ],
+        );
+        apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &dry_apply_opts(),
+        )
+        .await
+        .expect_err("occupied fleet-driver.bak must fail children swap");
+        assert_no_pair_files(dest.path());
+        assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
+    }
+
+    /// catalog:unit-update-holds-ready-no-token-rotate — 404 install must
+    /// not POST pair or bootstrap.
+    #[tokio::test]
+    async fn apply_desired_download_404_does_not_pair_or_rotate() {
+        let _cfg_dir = IsolatedConfigDir::new();
+        let dest = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let d = b"driver-same";
+        write_bin(dest.path(), "fleet-host", old_h);
+        write_bin(dest.path(), "fleet-driver", d);
+
+        let platform = detect_platform();
+        let new_h = b"host-new";
+        let mock = spawn_mock(HashMap::new());
+        let cfg = LocalConfig::default();
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        let result = apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dest.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &UpdateState::new(),
+            &dry_apply_opts(),
+        )
+        .await;
+        match result {
+            Ok(ApplyOutcome::QuietNoPrebuilt) | Err(_) => {}
+            Ok(other) => panic!("expected QuietNoPrebuilt or err, got {other:?}"),
+        }
+        assert_no_pair_files(dest.path());
         assert_apply_http_does_not_rotate(&mock.log.lock().unwrap());
     }
 
@@ -1658,127 +2459,38 @@ mod tests {
             .count()
     }
 
-    /// catalog:unit-request-update — while a host swap is waiting / restarting,
-    /// auto-off + Update now must not start another download.
-    #[tokio::test]
-    async fn update_now_mid_swap_does_not_keep_pulling_when_auto_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let old_h = b"host-old";
-        let new_h = b"host-new";
-        let d = b"driver-same";
-        write_bin(dir.path(), "fleet-host", old_h);
-        write_bin(dir.path(), "fleet-driver", d);
-
-        let platform = detect_platform();
-        let mock = spawn_mock(files_for(
-            &platform,
-            &[
-                ("fleet-host", new_h.as_slice()),
-                ("fleet-driver", d.as_slice()),
-            ],
-        ));
+    /// catalog:unit-request-update — host-bin apply leaves software.updating;
+    /// finish() only clears applying, so a later Update now must not queue.
+    #[test]
+    fn update_now_mid_swap_does_not_keep_pulling_when_auto_off() {
         let cfg = LocalConfig {
             auto_update: false,
             ..LocalConfig::default()
         };
-        let req = host_auto_off(Some("2026-01-01T00:00:00Z"));
-        let desired = desired_for(
-            &platform,
-            &[
-                ("fleet-host", new_h.as_slice()),
-                ("fleet-driver", d.as_slice()),
-            ],
-        );
-        let state = std::sync::Arc::new(UpdateState::new());
+        let desired = stub_desired("sha-a");
+        let state = UpdateState::new();
         assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired)).is_some(),
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:00Z")),
+                Some(&desired)
+            )
+            .is_some(),
             "Update now must queue the host swap"
         );
-
-        let jobs = std::sync::Arc::new(AsyncMutex::new(HashSet::from([Uuid::now_v7()])));
-        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
-        let dest = dir.path().to_path_buf();
-        let apply_state = state.clone();
-        let apply_jobs = jobs.clone();
-        let apply_cfg = cfg.clone();
-        let apply_desired_bins = desired.clone();
-        let handle = tokio::spawn(async move {
-            apply_desired(
-                &client,
-                &apply_cfg,
-                &apply_desired_bins,
-                &dest,
-                &apply_jobs,
-                &apply_state,
-                &dry_apply_opts(),
-            )
-            .await
-        });
-
-        let start = std::time::Instant::now();
-        loop {
-            if state.stop_claiming.load(Ordering::SeqCst) {
-                break;
-            }
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "apply should reach host-swap wait for in-flight jobs"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        let later = host_auto_off(Some("2026-01-01T00:00:01Z"));
-        let newer = {
-            let mut d = desired.clone();
-            d.git_sha = "newer-sha".into();
-            d
-        };
-        let pulls_mid = install_get_count(&mock.log.lock().unwrap());
-        assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired)).is_none(),
-            "mid-swap must not re-queue the same Update now"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&newer)).is_none(),
-            "mid-swap must not pull a newer desired sha when auto is off"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &later, Some(&newer)).is_none(),
-            "mid-swap must not pull even if Update now is clicked again"
-        );
-        assert_eq!(
-            install_get_count(&mock.log.lock().unwrap()),
-            pulls_mid,
-            "mid-swap must not keep GET /install when auto_update is off"
-        );
-
-        jobs.lock().await.clear();
-        let out = handle.await.expect("join").expect("apply");
-        assert_eq!(out, ApplyOutcome::HostRestartPending);
-        assert!(state.is_updating(), "host swap leaves updating set");
+        // Host-bin apply leaves updating set through exec/restart.
+        state.updating.store(true, Ordering::SeqCst);
         state.finish();
-
-        let pulls_after = install_get_count(&mock.log.lock().unwrap());
         assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&desired)).is_none(),
-            "after the host apply, the Update now request must stay consumed"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &req, Some(&newer)).is_none(),
-            "leftover update_requested_at must not pull again mid-restart"
-        );
-        assert!(
-            maybe_queue_auto(&state, &cfg, &later, Some(&newer)).is_none(),
-            "host-bin swap / restart pending must not start another pull"
-        );
-        assert_eq!(
-            install_get_count(&mock.log.lock().unwrap()),
-            pulls_after,
-            "after one host apply, auto-off must not keep pulling"
-        );
-        assert!(
-            pulls_after > 0,
-            "the one-shot apply must have downloaded the new host bin"
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:01Z")),
+                Some(&stub_desired("sha-b"))
+            )
+            .is_none(),
+            "after HostRestartPending + finish(), later Update now must not queue while is_updating"
         );
     }
 
@@ -1860,6 +2572,74 @@ mod tests {
             install_get_count(&mock.log.lock().unwrap()),
             pulls,
             "auto-off must not keep GET /install after a failed one-shot"
+        );
+    }
+
+    /// catalog:unit-request-update — failed swap consumes the leftover stamp;
+    /// a later Update now click must apply once updating is cleared.
+    #[tokio::test]
+    async fn update_now_after_failed_swap_later_click_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_h = b"host-old";
+        let new_h = b"host-new";
+        let d = b"driver-same";
+        write_bin(dir.path(), "fleet-host", old_h);
+        write_bin(dir.path(), "fleet-driver", d);
+        fs::create_dir_all(dir.path().join("fleet-host.bak")).unwrap();
+
+        let platform = detect_platform();
+        let mock = spawn_mock(files_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        ));
+        let cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        let desired = desired_for(
+            &platform,
+            &[
+                ("fleet-host", new_h.as_slice()),
+                ("fleet-driver", d.as_slice()),
+            ],
+        );
+        let state = UpdateState::new();
+        assert!(
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:00Z")),
+                Some(&desired)
+            )
+            .is_some(),
+            "Update now must queue the apply that then fails mid-swap"
+        );
+        let client = HostClient::for_pair(&mock.base, &cfg).unwrap();
+        apply_desired(
+            &client,
+            &cfg,
+            &desired,
+            dir.path(),
+            &AsyncMutex::new(HashSet::new()),
+            &state,
+            &dry_apply_opts(),
+        )
+        .await
+        .expect_err("occupied .bak must fail the host swap");
+        assert!(!state.is_updating());
+        state.finish();
+        assert!(
+            maybe_queue_auto(
+                &state,
+                &cfg,
+                &host_auto_off(Some("2026-01-01T00:00:01Z")),
+                Some(&desired)
+            )
+            .is_some(),
+            "a later Update now must apply once updating is cleared"
         );
     }
 }

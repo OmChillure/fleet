@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration build run
+.PHONY: test test-unit test-integration build
 
 test:
 	cargo test -p fleet-orchestrator
@@ -12,7 +12,3 @@ test-integration:
 
 build:
 	cargo build -p fleet-orchestrator --release
-
-run:
-	@echo "WARNING: single-process leadership — do not run multiple replicas against the same DB"
-	cargo run -p fleet-orchestrator

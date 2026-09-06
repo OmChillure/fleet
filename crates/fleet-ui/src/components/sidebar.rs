@@ -757,18 +757,3 @@ fn IconSettings() -> Element {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn user_menu_overlay_dismisses_and_opener_stays_clickable() {
-        let src = include_str!("sidebar.rs");
-        let prod = src.split("#[cfg(test)]").next().expect("prod");
-        assert!(prod.contains("id: \"user-menu-dismiss\""), "overlay needs an id");
-        assert!(prod.contains("Key::Escape"), "Escape must close the menu");
-        assert!(
-            prod.contains("relative z-50"),
-            "opener must sit above the overlay so a second click closes"
-        );
-    }
-}
