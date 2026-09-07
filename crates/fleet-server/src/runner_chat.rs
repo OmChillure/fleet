@@ -13,6 +13,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat::ChatProgress;
+use crate::chat_tools::{
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace,
+};
 use crate::state::AppState;
 
 const POLL: Duration = Duration::from_millis(400);
@@ -55,11 +59,12 @@ pub async fn run_on_runner(
     effort: Option<&str>,
     pairs: &[(String, String)],
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+    conversation_id: Option<Uuid>,
 ) -> AppResult<(String, String)> {
     if chat_turn_is_empty(pairs) {
         return Err(AppError::bad_request("empty chat turn".to_string()));
     }
-    let host = require_taking(state, workspace_id, runner_id).await?;
+        let host = require_taking(state, workspace_id, runner_id).await?;
 
     let prompt = format_transcript(pairs);
     let claim_id = Uuid::now_v7();
@@ -94,7 +99,262 @@ pub async fn run_on_runner(
     )
     .await;
 
-    wait_for_result(&state.db, claim_id, model, progress, &host.name, provider).await
+    wait_for_result(
+        &state.db,
+        claim_id,
+        model,
+        progress,
+        &host.name,
+        provider,
+        conversation_id,
+    )
+    .await
+}
+
+const RUNNER_TOOL_PROTOCOL: &str = "\n\
+# How to call tools from this runner\n\
+The official CLI has no native tool_calls. To use Slack, GitHub, Notion, or fleet,\n\
+reply with ONLY this JSON (no prose around it):\n\
+{\"tool_calls\":[{\"name\":\"integration_query\",\"arguments\":{\"provider\":\"slack\",\"operation\":\"…\",\"args\":{}}}]}\n\
+You may emit several calls in one array. After they run you will get results.\n\
+When you are done, reply in plain language — not JSON.\n\
+Do not claim a write succeeded unless a tool result has ok:true.\n";
+
+/// LLM on the paired runner; tools (`integration_query`, `launch_agent_plan`, …)
+/// stay on the control plane so tokens never leave it.
+pub async fn run_tools_on_runner(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    runner_id: Uuid,
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+    history: &[(String, String)],
+    progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
+    conversation_id: Option<Uuid>,
+) -> AppResult<(String, String, Vec<ChatAction>)> {
+    let _host = require_taking(state, workspace_id, runner_id).await?;
+    let system = {
+        let mut s = system_prompt_for_workspace(state, workspace_id).await;
+        s.push_str(RUNNER_TOOL_PROTOCOL);
+        s
+    };
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(history.len() + 4);
+    pairs.push(("system".into(), system));
+    pairs.extend(history.iter().cloned());
+
+    let mut actions: Vec<ChatAction> = Vec::new();
+    let mut used_model = if model.trim().is_empty() {
+        provider.to_string()
+    } else {
+        model.to_string()
+    };
+    let mut max_rounds = MAX_TOOL_ROUNDS;
+    let mut round = 0usize;
+
+    while round < max_rounds {
+        let (reply_model, text) = run_on_runner(
+            state,
+            workspace_id,
+            runner_id,
+            provider,
+            model,
+            effort,
+            &pairs,
+            progress,
+            conversation_id,
+        )
+        .await?;
+        if !reply_model.trim().is_empty() {
+            used_model = reply_model;
+        }
+        let Some(calls) = parse_runner_tool_calls(&text) else {
+            let mut content = text.trim().to_string();
+            if let Some(rewritten) = rewrite_if_asked_to_continue(&content, &actions) {
+                content = rewritten;
+            }
+            if content.is_empty() && !actions.is_empty() {
+                let summary = actions
+                    .iter()
+                    .map(|a| format!("• {}: {}", a.tool, a.summary))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                content = format!("Done.\n{summary}");
+            }
+            return Ok((used_model, content, actions));
+        };
+
+        pairs.push(("assistant".into(), text));
+        let llm = ChatLlmContext {
+            provider: provider.to_string(),
+            model: used_model.clone(),
+            runner_id: Some(runner_id),
+            effort: effort.map(str::to_string),
+        };
+        let prior: Vec<Value> = actions.iter().filter_map(|a| a.detail.clone()).collect();
+        let mut tool_blob = String::new();
+        let n_calls = calls.len();
+        for (name, args) in calls {
+            emit(
+                progress,
+                ChatProgress::Status {
+                    text: format!("Using {name}…"),
+                },
+            )
+            .await;
+            let (result_json, action) = execute_tool_with_retry(
+                state,
+                workspace_id,
+                user_id,
+                &name,
+                &args,
+                &llm,
+                &prior,
+            )
+            .await;
+            emit(progress, ChatProgress::from_action(&action)).await;
+            let line = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
+            if !tool_blob.is_empty() {
+                tool_blob.push('\n');
+            }
+            tool_blob.push_str(&format!("{name}: {line}"));
+            actions.push(action);
+        }
+        pairs.push((
+            "user".into(),
+            format!("Tool results (control plane; tokens stayed here):\n{tool_blob}"),
+        ));
+        let failed: Vec<&ChatAction> = actions.iter().rev().take(n_calls).filter(|a| !a.ok).collect();
+        if !failed.is_empty() {
+            pairs.push(("system".into(), crate::retry::fail_nudge(&failed)));
+            let extra = max_rounds - MAX_TOOL_ROUNDS;
+            if extra < crate::retry::EXTRA_ROUNDS_ON_FAIL {
+                max_rounds += 1;
+            }
+        }
+        round += 1;
+    }
+
+    if actions.is_empty() {
+        return Err(AppError::bad_request(
+            "runner used tools for too many rounds without a final reply".to_string(),
+        ));
+    }
+    let summary = actions
+        .iter()
+        .map(|a| format!("• {}: {}", a.tool, a.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((used_model, format!("Done.\n{summary}"), actions))
+}
+
+/// Pull `tool_calls` out of official-CLI plain text.
+pub(crate) fn parse_runner_tool_calls(text: &str) -> Option<Vec<(String, Value)>> {
+    let v = extract_json_object(text)?;
+    if let Some(arr) = v.get("tool_calls").and_then(|x| x.as_array()) {
+        let mut out = Vec::new();
+        for c in arr {
+            let Some(name) = c
+                .get("name")
+                .or_else(|| c.get("tool"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let args = tool_args_value(
+                c.get("arguments")
+                    .or_else(|| c.get("args"))
+                    .cloned()
+                    .unwrap_or(json!({})),
+            );
+            out.push((name.to_string(), args));
+        }
+        if out.is_empty() { None } else { Some(out) }
+    } else {
+        let name = v
+            .get("name")
+            .or_else(|| v.get("tool"))
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        if !looks_like_fleet_tool(name) {
+            return None;
+        }
+        let args = tool_args_value(
+            v.get("arguments")
+                .or_else(|| v.get("args"))
+                .cloned()
+                .unwrap_or(json!({})),
+        );
+        Some(vec![(name.to_string(), args)])
+    }
+}
+
+fn looks_like_fleet_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "integration_query"
+            | "list_integrations"
+            | "get_integration"
+            | "launch_agent_plan"
+            | "launch_agent_task"
+            | "list_agent_personas"
+            | "swap_agent"
+            | "get_fleet_status"
+            | "list_sandboxes"
+            | "list_tasks"
+            | "list_runs"
+            | "read_team_chat"
+            | "send_team_message"
+            | "monitor_tickets"
+            | "list_tickets"
+            | "finish_ticket"
+            | "start_case"
+            | "list_cases"
+            | "get_case"
+            | "observe_case"
+            | "cancel_case"
+    )
+}
+
+fn tool_args_value(args: Value) -> Value {
+    if let Some(s) = args.as_str() {
+        serde_json::from_str(s).unwrap_or(json!({}))
+    } else if args.is_null() {
+        json!({})
+    } else {
+        args
+    }
+}
+
+fn extract_json_object(text: &str) -> Option<Value> {
+    let t = text.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(t)
+        && v.is_object()
+    {
+        return Some(v);
+    }
+    if let Some(inner) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```JSON"))
+    {
+        let inner = inner.strip_prefix('\n').unwrap_or(inner);
+        if let Some(end) = inner.find("```") {
+            if let Ok(v) = serde_json::from_str::<Value>(inner[..end].trim())
+                && v.is_object()
+            {
+                return Some(v);
+            }
+        }
+    }
+    let start = t.find('{')?;
+    let end = t.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let slice = &t[start..=end];
+    serde_json::from_str(slice).ok().filter(Value::is_object)
 }
 
 /// `DELETE` revoke sets `status=disabled` and drops the machine token, but
@@ -173,6 +433,7 @@ async fn wait_for_result(
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
     host_name: &str,
     provider: &str,
+    _conversation_id: Option<Uuid>,
 ) -> AppResult<(String, String)> {
     let deadline = tokio::time::Instant::now() + WAIT;
     let started = tokio::time::Instant::now();
@@ -300,5 +561,26 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parses_tool_calls_from_plain_cli_text() {
+        let raw = r#"{"tool_calls":[{"name":"integration_query","arguments":{"provider":"slack","operation":"list_channels"}}]}"#;
+        let calls = parse_runner_tool_calls(raw).expect("json object");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "integration_query");
+        assert_eq!(calls[0].1["provider"], "slack");
+
+        let fenced = "```json\n{\"tool_calls\":[{\"name\":\"launch_agent_plan\",\"arguments\":{\"title\":\"do it\",\"tasks\":[]}}]}\n```";
+        let calls = parse_runner_tool_calls(fenced).expect("fence");
+        assert_eq!(calls[0].0, "launch_agent_plan");
+
+        let single = r#"Sure — {"name":"integration_query","arguments":{"provider":"notion","operation":"append_text"}}"#;
+        let calls = parse_runner_tool_calls(single).expect("embedded");
+        assert_eq!(calls[0].0, "integration_query");
+        assert_eq!(calls[0].1["provider"], "notion");
+
+        assert!(parse_runner_tool_calls("I'll read Slack and write Notion.").is_none());
+        assert!(parse_runner_tool_calls(r#"{"name":"not_a_fleet_tool","arguments":{}}"#).is_none());
     }
 }

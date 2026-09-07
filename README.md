@@ -74,12 +74,10 @@ dx serve --package fleet-ui --port 3030
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
-   The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
-   specialist `worker_profile`s, `read_team_chat` / `send_team_message`) and
-   **integration_query** (Slack, Notion, GitHub, GitLab, Jira, Linear, … — tokens stay
-   on the control plane). A normal sentence is enough: “read Slack, implement it, push
-   to GitHub, write it in Notion.” Workers can `use_integration` mid-run; plan `outputs`
-   write back when the run ends.
+   Grok / Claude / Ollama run on a paired runner’s official CLI. The control
+   plane still executes fleet tools (`integration_query`, `launch_agent_plan`)
+   from that reply so Slack → GitHub → Notion works without tokens leaving
+   the plane. Plan `outputs` write back when a run ends.
    Live workers
    message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
    and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**

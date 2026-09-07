@@ -1396,14 +1396,16 @@ async fn chat_complete(
             &last_user,
         )
         .await?;
-        let (used_model, content) = crate::runner_chat::run_on_runner(
+        let (used_model, content, actions) = crate::runner_chat::run_tools_on_runner(
             &state,
             workspace_id,
+            user.id,
             runner_id,
             &provider,
             &model,
             body.effort.as_deref(),
             &pairs_for_llm,
+            None,
             None,
         )
         .await?;
@@ -1414,7 +1416,7 @@ async fn chat_complete(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(Json(ChatResponse {
@@ -1424,7 +1426,7 @@ async fn chat_complete(
             },
             model: used_model,
             provider,
-            actions: vec![],
+            actions,
             conversation_id,
         }));
     }
@@ -1691,15 +1693,17 @@ async fn run_chat_turn(
             last_user,
         )
         .await?;
-        let (used_model, content) = crate::runner_chat::run_on_runner(
+        let (used_model, content, actions) = crate::runner_chat::run_tools_on_runner(
             state,
             workspace_id,
+            user_id,
             runner_id,
             &provider,
             &model,
             body.effort.as_deref(),
             &pairs_for_llm,
             progress.as_ref(),
+            None,
         )
         .await?;
         persist_user_and_assistant(
@@ -1709,7 +1713,7 @@ async fn run_chat_turn(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(ChatProgress::Done {
@@ -1717,7 +1721,7 @@ async fn run_chat_turn(
             model: used_model,
             provider,
             conversation_id,
-            actions: vec![],
+            actions,
         });
     }
 
