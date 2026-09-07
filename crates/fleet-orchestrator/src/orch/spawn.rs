@@ -158,18 +158,18 @@ pub async fn schedule_and_spawn(
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
-        // Guest is fleet-driver (ACP). Harness from the plane, else mock.
+        // Guest is fleet-driver. Real models use the official CLI on the
+        // paired host (same family as chat_turn). mock is tests/fixtures.
         if req
             .env
             .get("FLEET_HARNESS")
             .map(|s| s.trim().is_empty())
             .unwrap_or(true)
         {
-            let harness = match req.agent_backend.as_deref() {
-                Some("grok") => "grok",
-                _ => "mock",
-            };
-            req.env.insert("FLEET_HARNESS".into(), harness.into());
+            req.env.insert(
+                "FLEET_HARNESS".into(),
+                harness_for_backend(req.agent_backend.as_deref()).into(),
+            );
         }
         if let Some(model) = req.agent_model.as_deref().filter(|s| !s.is_empty()) {
             req.env
@@ -269,6 +269,21 @@ pub async fn schedule_and_spawn(
     Ok(outcome)
 }
 
+/// `FLEET_HARNESS` for a plan/chat backend. Unknown → mock (no plane LLM).
+pub fn harness_for_backend(backend: Option<&str>) -> &'static str {
+    match backend
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("grok" | "xai") => "grok",
+        Some("claude" | "anthropic") => "claude",
+        Some("ollama") => "ollama",
+        _ => "mock",
+    }
+}
+
 fn worker_url_is_loopback(url: &str) -> bool {
     agent_fleet_contracts::url_is_loopback(url)
 }
@@ -295,6 +310,16 @@ pub async fn signal_retired_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_maps_runner_clis_and_defaults_mock() {
+        assert_eq!(harness_for_backend(Some("grok")), "grok");
+        assert_eq!(harness_for_backend(Some("xai")), "grok");
+        assert_eq!(harness_for_backend(Some("claude")), "claude");
+        assert_eq!(harness_for_backend(Some("ollama")), "ollama");
+        assert_eq!(harness_for_backend(Some("off")), "mock");
+        assert_eq!(harness_for_backend(None), "mock");
+    }
 
     #[test]
     fn loopback_detects_ipv4_ipv6_and_localhost() {

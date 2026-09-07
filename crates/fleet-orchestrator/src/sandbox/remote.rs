@@ -203,4 +203,29 @@ mod tests {
         assert!(v["git_ref"].is_null());
         assert!(v["env"].get("FLEET_WORK_DIR").is_none());
     }
+
+    #[test]
+    fn payload_carries_official_cli_harness_and_persona() {
+        let host_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        for (backend, want) in [
+            (Some("grok"), "grok"),
+            (Some("xai"), "grok"),
+            (Some("claude"), "claude"),
+            (Some("ollama"), "ollama"),
+            (None, "mock"),
+        ] {
+            let mut req = sample_req();
+            req.agent_backend = backend.map(str::to_string);
+            req.persona_md = Some("# Persona: reviewer\n".into());
+            req.env
+                .insert("FLEET_HARNESS".into(), want.to_string());
+            let p = spawn_payload(&req, "http://api.example:8080", "host", 60, host_id);
+            assert_eq!(
+                p.env.get("FLEET_HARNESS").map(String::as_str),
+                Some(want),
+                "backend={backend:?} payload={p:?}"
+            );
+            assert_eq!(p.persona_md.as_deref(), Some("# Persona: reviewer\n"));
+        }
+    }
 }

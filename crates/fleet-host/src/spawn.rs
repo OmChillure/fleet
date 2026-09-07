@@ -369,6 +369,14 @@ pub async fn run_claim_with(
     if let Ok(body) = serde_json::to_vec_pretty(&task_json) {
         let _ = tokio::fs::write(session_dir.join("task.json"), body).await;
     }
+    if let Some(md) = payload
+        .persona_md
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let _ = tokio::fs::write(session_dir.join("PERSONA.md"), md).await;
+    }
 
     match runtime {
         JobRuntime::Host => run_host(cfg, payload, &session_dir).await,
@@ -693,6 +701,7 @@ mod tests {
             timeout_s: 3600,
             repo_url: None,
             git_ref: None,
+            persona_md: None,
             env: HashMap::new(),
             privileged: false,
         }

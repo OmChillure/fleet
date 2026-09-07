@@ -74,24 +74,22 @@ dx serve --package fleet-ui --port 3030
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
-   The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan` with
-   specialist `worker_profile`s, `read_team_chat` / `send_team_message`) and
-   **integration_query** (Slack, Notion, GitHub, GitLab, Jira, Linear, … — tokens stay
-   on the control plane). A normal sentence is enough: “read Slack, implement it, push
-   to GitHub, write it in Notion.” Workers can `use_integration` mid-run; plan `outputs`
+   The assistant can call **sandbox tools** (`list_agent_personas`, `launch_agent_plan`) and
+   **integration_query** (tokens stay on the control plane). Plan `outputs`
    write back when the run ends.
    Live workers
    message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
-   and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
-   (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
-   bash fences from the task spec.
+   and reviewers can `request_changes` to bounce work back. Worker models run on
+   the paired runner's official CLI (same as chat). Fleet LLM in **Settings**
+   (Ollama) or env `FLEET_AGENT_BACKEND=grok` only selects the harness. Without
+   either, sandboxes use the mock harness.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`) leased to a
    paired `fleet-host`. The API process is not a runner: tick enqueues a claim
    or leaves the task ready. Isolation is process / container / vm **on the
    host**. Guest is `fleet-driver`
-   (ACP via `FLEET_HARNESS=mock|grok`). In-cluster, `fleet-host` creates
+   (`FLEET_HARNESS=grok|claude|ollama` official CLI, or `mock` ACP). In-cluster, `fleet-host` creates
    `FleetSandbox` CRs; the operator makes pods. Finished workdirs are kept 15
    minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter
    the sandbox.
@@ -124,6 +122,7 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok, Ollama, OpenAI, Claude) + model lists |
 | `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
+| `POST` | `/api/workspaces/{id}/chat/conversations/{cid}/pause` | Stop an in-flight turn (user line already saved) |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
@@ -131,7 +130,7 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor follows connected apps and auto-launches by kind) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
-| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent) |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent). Body `{ worker_profile, reason }` swaps the persona. |
 | `GET` | `/api/workspaces/{id}/workforce` | Open goals (durable overnight) |
 | `POST` | `/api/workspaces/{id}/workforce/goals` | Set a durable goal (case-backed) |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |

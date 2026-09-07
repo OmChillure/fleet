@@ -444,6 +444,7 @@ mod tests {
             timeout_s: 600,
             repo_url: None,
             git_ref: None,
+            persona_md: None,
             env: HashMap::new(),
             privileged: false,
         }

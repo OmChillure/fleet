@@ -1,8 +1,8 @@
-//! Fleet driver: ACP client + orchestrator worker protocol.
+//! Fleet driver: guest of a paired `fleet-host`.
 //!
-//! The `fleet-driver` binary is the guest of a paired `fleet-host`
-//! (and of orchestrator tests that enable local spawn). Tests drive
-//! [`acp::run_session`] against `mock-acp-agent` (no LLM).
+//! Real models (Grok / Claude / Ollama) use the official CLI on that box —
+//! same family as chat `chat_turn`. `mock` still speaks ACP for tests.
+//! The control plane never runs the agent.
 
 /// Distinctive ASCII so fleet-host can read this file's package version.
 /// Prefix is part of the contract — do not rename.
@@ -17,6 +17,7 @@ pub fn pkg_version() -> &'static str {
 pub mod acp;
 pub mod config;
 pub mod harness;
+pub mod official_cli;
 pub mod orch;
 pub mod prompt;
 pub mod provision;

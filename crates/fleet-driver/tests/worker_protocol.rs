@@ -190,7 +190,7 @@ async fn orch_client_sends_bearer_and_maps_401_to_err() {
     let token = "session-worker-token";
     let client = OrchClient::new(format!("http://{addr}"), &project, &session, token).unwrap();
 
-    let hb = client.post_heartbeat(1, None).await;
+    let hb = client.post_heartbeat(1, None, &[]).await;
     assert!(hb.is_err(), "plane 401 must be Err: {hb:?}");
     let st = client.post_status(2, "running", None).await;
     assert!(st.is_err(), "plane 401 must be Err: {st:?}");
