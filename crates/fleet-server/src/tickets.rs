@@ -2450,4 +2450,75 @@ mod tests {
             assert!(!status_done(open), "expected open: {open:?}");
         }
     }
+
+    fn sample_inbox_ticket(workspace_id: Uuid) -> TicketInboxItem {
+        let now = Utc::now();
+        TicketInboxItem {
+            id: Uuid::new_v4(),
+            workspace_id,
+            provider: "github".into(),
+            external_key: "acme/app#1".into(),
+            title: "secret from A".into(),
+            url: None,
+            state: "open".into(),
+            summary: String::new(),
+            run_id: None,
+            last_seen_at: now,
+            created_at: now,
+        }
+    }
+
+    fn assert_inbox_cross_ws_denied(err: AppError) {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let status = err.into_response().status();
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+            "finish/monitor of another workspace's ticket must be 403/404, got {status}"
+        );
+    }
+
+    /// Knowing a ticket id from workspace A must not finish or monitor it via
+    /// workspace B. Denied before launch; the A row is not mutated.
+    #[test]
+    fn finish_or_monitor_ticket_in_another_workspace_is_403() {
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let item = sample_inbox_ticket(ws_a);
+        let ticket_id = item.id;
+        assert_ne!(ws_a, ws_b);
+        assert!(item.run_id.is_none());
+
+        // Finish: route B + inbox row from A.
+        let finish_err = require_ticket_workspace(&item, ws_b)
+            .expect_err("ticket from A must not finish via B");
+        assert_inbox_cross_ws_denied(finish_err);
+        assert!(
+            require_ticket_workspace(&item, ws_a).is_ok(),
+            "same-workspace finish must still be allowed"
+        );
+
+        // Monitor: not a member of A's workspace (B's session on A's route).
+        let monitor_err = require_workspace_role(None)
+            .expect_err("monitor on another workspace must 403");
+        assert_inbox_cross_ws_denied(monitor_err);
+        assert!(
+            require_workspace_role(Some("member".into())).is_ok(),
+            "member of the route workspace may monitor that workspace"
+        );
+
+        // Exposed id is not a cross-workspace handle: parse treats it as a key
+        // with no provider, so resolve stays scoped to the route workspace.
+        let parsed = parse_ticket_ref(&ticket_id.to_string()).unwrap();
+        assert!(
+            parsed.provider.is_none(),
+            "inbox row id must not imply a provider for finish via B"
+        );
+        assert_eq!(parsed.key, ticket_id.to_string());
+
+        // Denied path must not look like a launched finish.
+        assert!(item.run_id.is_none());
+        assert_eq!(item.workspace_id, ws_a);
+        assert_eq!(item.state, "open");
+    }
 }
