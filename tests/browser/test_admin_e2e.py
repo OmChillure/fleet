@@ -112,11 +112,11 @@ def _signup_login(page, prefix: str) -> str:
 class AdminE2E(unittest.TestCase):
     def test_non_admin_is_gated_and_admin_can_promote(self) -> None:
         _require_stack()
-        wait_dx_ready()
         pw = _require_playwright()
         with pw() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
+            wait_dx_ready(page)
             email = _signup_login(page, "admin-e2e")
             page.goto(f"{UI}/admin", wait_until="networkidle")
             page.get_by_text("Instance admin required", exact=False).wait_for(
