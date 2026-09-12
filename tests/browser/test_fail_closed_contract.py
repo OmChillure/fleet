@@ -391,6 +391,12 @@ class FailClosedContractTests(unittest.TestCase):
                 _bash_fn(text, "port_pids"),
                 _bash_fn(text, "port_is_open"),
                 'warn() { printf "%s\\n" "$*" >&2; }',
+                # choose_host_ports calls derive_local_urls → lan_ipv4 /
+                # worker_base_is_local (this-machine pair URL). Extract them
+                # or the isolated run.sh exits 127.
+                _bash_fn(text, "lan_ipv4"),
+                _bash_fn(text, "worker_base_is_local"),
+                _bash_fn(text, "derive_local_urls"),
                 _bash_fn(text, "choose_host_ports"),
             )
         )

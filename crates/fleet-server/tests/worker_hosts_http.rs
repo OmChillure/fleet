@@ -1465,14 +1465,13 @@ async fn pending_host_is_not_this_machine_on_loopback_origin() {
     }
 }
 
-/// catalog:list-host-create-name-empty-400 — POST empty / whitespace /
-/// omitted name is 400 and inserts no pending row (no pair_token / no
-/// flp_). name.len() 256 and 10k are 400, not clamp-and-200. Add worker
-/// sends a default name; an omitted API body is still 400. Exactly 255
-/// is host_create_name_exactly_255. PATCH is list-rename-host-patch.
-/// Member / other-ws 403 are mutate + member_can_list.
+/// catalog:list-host-create-name — POST empty / whitespace / omitted name
+/// is 200: name is optional; pair stamps the device hostname. name.len()
+/// 256 and 10k are 400, not clamp-and-200. Add worker still sends a
+/// default UI name. Exactly 255 is host_create_name_exactly_255. PATCH
+/// still rejects empty (list-rename-host-patch).
 #[tokio::test]
-async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
+async fn host_create_name_empty_ok_huge_is_400() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let uri = hosts_path(&ws);
@@ -1486,17 +1485,49 @@ async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
     );
     let snap_hosts = snapshot.body["hosts"].as_array().expect("hosts array");
     let snap_count = snap_hosts.len();
-    let snap_ids: Vec<String> = snap_hosts
-        .iter()
-        .filter_map(|h| h["id"].as_str().map(str::to_string))
-        .collect();
 
-    let name_256 = "x".repeat(256);
-    let name_10k = "x".repeat(10_000);
     for (label, body) in [
         ("empty", json!({ "name": "" })),
         ("whitespace", json!({ "name": "   " })),
         ("omitted", json!({})),
+    ] {
+        let out = call(&app, "POST", &uri, Some(&jar), Some(body)).await;
+        assert_eq!(
+            out.status,
+            StatusCode::OK,
+            "POST {label} name is optional (hostname on pair): {}",
+            out.body
+        );
+        assert!(
+            out.raw.contains("flp_"),
+            "accepted {label} create must mint a pair token: {}",
+            out.raw
+        );
+        assert_eq!(
+            out.body["host"]["name"].as_str(),
+            Some(""),
+            "POST {label} pending name stays empty until pair: {}",
+            out.body
+        );
+    }
+
+    let after_ok = call(&app, "GET", &uri, Some(&jar), None).await;
+    assert_eq!(after_ok.status, StatusCode::OK, "{}", after_ok.body);
+    let after_ok_hosts = after_ok.body["hosts"].as_array().expect("hosts array");
+    assert_eq!(
+        after_ok_hosts.len(),
+        snap_count + 3,
+        "empty/whitespace/omitted each insert one pending row: {}",
+        after_ok.body
+    );
+
+    let name_256 = "x".repeat(256);
+    let name_10k = "x".repeat(10_000);
+    let after_ok_ids: Vec<String> = after_ok_hosts
+        .iter()
+        .filter_map(|h| h["id"].as_str().map(str::to_string))
+        .collect();
+    for (label, body) in [
         ("256", json!({ "name": name_256 })),
         ("10k", json!({ "name": name_10k })),
     ] {
@@ -1527,18 +1558,13 @@ async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
             .collect();
         assert_eq!(
             hosts.len(),
-            snap_count,
+            after_ok_hosts.len(),
             "POST {label} name must not add a GET /worker-hosts row: {}",
             after.body
         );
         assert_eq!(
-            ids, snap_ids,
-            "POST {label} name must not introduce a new host id: {ids:?} vs {snap_ids:?}"
-        );
-        assert!(
-            hosts.iter().all(|h| h["name"].as_str() != Some("")),
-            "GET after {label} reject must not list a host named \"\": {}",
-            after.body
+            ids, after_ok_ids,
+            "POST {label} name must not introduce a new host id: {ids:?} vs {after_ok_ids:?}"
         );
         assert!(
             !after.raw.contains(&name_256) && !after.raw.contains(&name_10k),
@@ -1549,8 +1575,9 @@ async fn host_create_name_empty_or_huge_is_400_and_inserts_no_row() {
 }
 
 /// catalog:list-host-create-name-exactly-255 — POST unique name of 255
-/// bytes is 200 and GET /worker-hosts lists that name. Empty / 256 is
-/// host_create_name_empty_or_huge. PATCH 255 is list-rename-host-patch.
+/// bytes is 200 and GET /worker-hosts lists that name. Empty name is
+/// optional; 256 is host_create_name_empty_ok_huge_is_400. PATCH 255 is
+/// list-rename-host-patch.
 #[tokio::test]
 async fn host_create_name_exactly_255_is_200_and_lists() {
     let app = app().await;
@@ -3501,6 +3528,15 @@ async fn post_kind_control_plane_is_400_and_inserts_nothing() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
+    let before = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    assert_eq!(before.status, StatusCode::OK, "list before: {}", before.body);
+    let before_ids: Vec<String> = before.body["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .filter_map(|h| h["id"].as_str().map(str::to_string))
+        .collect();
+
     let created = call(
         &app,
         "POST",
@@ -3519,9 +3555,20 @@ async fn post_kind_control_plane_is_400_and_inserts_nothing() {
     let list = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(list.status, StatusCode::OK, "list after POST: {}", list.body);
     let hosts = list.body["hosts"].as_array().expect("hosts");
-    assert!(
-        hosts.is_empty(),
+    let after_ids: Vec<String> = hosts
+        .iter()
+        .filter_map(|h| h["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        after_ids, before_ids,
         "POST kind=control_plane must not insert a host: {}",
+        list.body
+    );
+    assert!(
+        hosts
+            .iter()
+            .all(|h| h.get("kind").and_then(|k| k.as_str()) != Some("control_plane")),
+        "POST kind=control_plane must not create a plane host: {}",
         list.body
     );
 }
@@ -5012,9 +5059,13 @@ async fn empty_workspace_list_still_publishes_package_versions() {
     let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     let hosts = listed.body["hosts"].as_array().expect("hosts");
+    let home: Vec<_> = hosts
+        .iter()
+        .filter(|h| h["workspace_id"].as_str() == Some(ws.as_str()))
+        .collect();
     assert!(
-        hosts.is_empty(),
-        "fresh workspace must list zero hosts: {}",
+        home.is_empty(),
+        "fresh workspace must own zero hosts (this-machine boxes from other workspaces may still list): {}",
         listed.body
     );
     assert_eq!(
@@ -10899,16 +10950,19 @@ impl LocalModelTagsNoOutbound {
             port, 0,
             "unsafe / other-ws / unauth local-model tags must not open the network (connect to :{port} is a fail)"
         );
-        for (port, before) in [(1234_u16, &self.before_1234), (443, &self.before_443)] {
-            let new_rows: Vec<_> = tcp_rows_to_remote_port(port)
-                .difference(before)
-                .cloned()
-                .collect();
-            assert!(
-                new_rows.is_empty(),
-                "must not open :{port} (ollama.com or lab proxy); new tcp rows {new_rows:?}"
-            );
-        }
+        // :1234 is the lab proxy honeypot this guard binds. :443 /proc
+        // diffs race any HTTPS on the box (browser, ollama pull, telemetry)
+        // and are not proof the handler dialed ollama.com — the 2s timeout
+        // plus this honeypot already cover that.
+        let new_1234: Vec<_> = tcp_rows_to_remote_port(1234)
+            .difference(&self.before_1234)
+            .cloned()
+            .collect();
+        assert!(
+            new_1234.is_empty(),
+            "must not open :1234 (lab proxy); new tcp rows {new_1234:?}"
+        );
+        let _ = &self.before_443;
     }
 }
 

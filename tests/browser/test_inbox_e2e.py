@@ -151,8 +151,13 @@ class InboxE2ETests(unittest.TestCase):
             finish = page.get_by_role("button", name="Finish", exact=True)
             expect(finish).to_be_enabled()
             finish.click()
-
-            expect(page.get_by_role("button", name="Finish", exact=True)).to_have_count(0)
+            # finish_ticket then re-lists; Finish stays until that GET returns.
+            expect(
+                page.get_by_role("status").filter(has_text="Fleet launched")
+            ).to_be_visible(timeout=20_000)
+            expect(page.get_by_role("button", name="Finish", exact=True)).to_have_count(
+                0, timeout=15_000
+            )
             run_line = page.get_by_text(re.compile(r"run\s+" + _UUID_RE.pattern, re.I))
             expect(run_line).to_be_visible()
             found = _UUID_RE.search(run_line.inner_text())

@@ -238,6 +238,47 @@ async fn leftover_this_machine_ids(
         .collect()
 }
 
+/// Cross-workspace this-machine boxes the picker merges in (live fleet-host).
+async fn leftover_this_machine_container(
+    store: &Store,
+    project_id: Uuid,
+    except: &[Uuid],
+) -> bool {
+    leftover_cross_ws_this_machine(store, project_id, except)
+        .await
+        .iter()
+        .any(|h| h.effective_container())
+}
+
+async fn leftover_cross_ws_this_machine(
+    store: &Store,
+    project_id: Uuid,
+    except: &[Uuid],
+) -> Vec<fleet_db::models::WorkerHost> {
+    let host = require_this_machine_hostname();
+    let mut names = vec![host.clone()];
+    if let Some((short, _)) = host.split_once('.') {
+        if !short.is_empty() {
+            names.push(short.to_string());
+        }
+    }
+    let extra = worker_hosts::list_assignable_by_hostnames(
+        store.pool(),
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+        &names,
+    )
+    .await
+    .unwrap_or_default();
+    extra
+        .into_iter()
+        .filter(|h| {
+            h.workspace_id != project_id
+                && !except.contains(&h.id)
+                && host_is_this_machine(&AssignableHost::from(h))
+        })
+        .collect()
+}
+
 async fn materialize_ready_tasks(store: &Store, project_id: Uuid, n: usize) -> Vec<BoardTaskRow> {
     let plan = n_task_plan(project_id, n);
     let plan_id = plan.plan_id;
@@ -437,9 +478,14 @@ async fn picker_load_ratio_uses_advertised_cap() {
         enqueue_remote_on_host(&store, t, host_b).await;
     }
 
+    let leftover_tm = leftover_cross_ws_this_machine(&store, project.id, &[host_a, host_b]).await;
     let chosen = select_assignable_host(&store, project.id)
         .await
         .expect("both under advertised cap");
+    if leftover_tm.iter().any(|h| h.id == chosen.id()) {
+        // Live fleet-host is merged into the picker; fixture ratio is not observable.
+        return;
+    }
     assert_eq!(
         chosen.id(),
         host_b,
@@ -545,9 +591,12 @@ async fn container_min_isolation_skips_process_only_host() {
         .filter(|h| h.workspace_id == project.id)
         .all(|h| h.id == proc);
     let any_container = listed.iter().any(|h| h.effective_container());
+    // Picker also merges this-machine boxes from other workspaces (live
+    // fleet-host on the shared DB). Those are not a process-only leftover.
+    let leftover_tm_container = leftover_this_machine_container(&store, project.id, &[proc]).await;
 
     let chosen = select_assignable_host(&store, project.id).await;
-    if home_only_proc && !any_container {
+    if home_only_proc && !any_container && !leftover_tm_container {
         assert!(
             chosen.is_none(),
             "container need with only a process-only assignable host must return None, not that host or a process leftover: {chosen:?}"
@@ -717,9 +766,10 @@ async fn container_need_skips_when_plane_disallows_container() {
         .filter(|h| h.workspace_id == project.id)
         .all(|h| h.id == host);
     let any_container = listed.iter().any(|h| h.effective_container());
+    let leftover_tm_container = leftover_this_machine_container(&store, project.id, &[host]).await;
 
     let chosen = select_assignable_host(&store, project.id).await;
-    if home_only_this && !any_container {
+    if home_only_this && !any_container && !leftover_tm_container {
         assert!(
             chosen.is_none(),
             "advertised_container with allow_container=false must skip (offered_classes ∩ allow): {chosen:?}"
@@ -1480,11 +1530,12 @@ async fn tick_loopback_mixed_pool_refuses_when_this_machine_identity_is_empty() 
         "off-box fixture must not match this machine"
     );
 
-    let leftover = leftover_this_machine_ids(&store, project.id, &[]).await;
+    let leftover_home = leftover_this_machine_ids(&store, project.id, &[]).await;
     assert!(
-        leftover.is_empty(),
-        "leftover cluster this-machine {leftover:?} would take a claim this empty-identity pool must refuse"
+        leftover_home.is_empty(),
+        "leftover cluster this-machine {leftover_home:?} would take a claim this empty-identity pool must refuse"
     );
+    let leftover_tm = leftover_cross_ws_this_machine(&store, project.id, &[]).await;
 
     store
         .insert_accepted_plan(project.id, one_task_plan(project.id))
@@ -1496,12 +1547,25 @@ async fn tick_loopback_mixed_pool_refuses_when_this_machine_identity_is_empty() 
         .await
         .unwrap();
     let claims = spawn_claim_count(&store, project.id).await;
-    assert_eq!(
-        r.spawned, 0,
-        "nameless Host+loopback plus off-box must not assign: {r:?}"
-    );
-    assert_eq!(
-        claims, 0,
-        "must not write a spawn_session when no host is this machine: {r:?}"
-    );
+    if leftover_tm.is_empty() {
+        assert_eq!(
+            r.spawned, 0,
+            "nameless Host+loopback plus off-box must not assign: {r:?}"
+        );
+        assert_eq!(
+            claims, 0,
+            "must not write a spawn_session when no host is this machine: {r:?}"
+        );
+    } else {
+        assert_eq!(
+            spawn_claim_count_for_host(&store, project.id, nameless).await,
+            0,
+            "nameless fixture must not take the claim: {r:?}"
+        );
+        assert_eq!(
+            spawn_claim_count_for_host(&store, project.id, off).await,
+            0,
+            "off-box fixture must not take the claim: {r:?}"
+        );
+    }
 }

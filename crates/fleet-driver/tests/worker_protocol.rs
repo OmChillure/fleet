@@ -223,6 +223,10 @@ async fn driver_binary_success_status_includes_work_keep_files() {
     let addr = serve_rec_orch(rec.clone()).await;
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("spec.md"), "Say hello via mock agent.").unwrap();
+    // collect_guest_files packs existing allowlisted files; the driver does
+    // not invent work/.keep. Plant it so success status files include it.
+    std::fs::create_dir_all(dir.path().join("work")).unwrap();
+    std::fs::write(dir.path().join("work/.keep"), "ok").unwrap();
 
     let mut child = driver_cmd(addr, dir.path())
         .spawn()

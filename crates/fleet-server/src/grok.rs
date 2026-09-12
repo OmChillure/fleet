@@ -1325,11 +1325,12 @@ mod tests {
 
     #[test]
     fn expand_tilde() {
-        let home = env::var("HOME").expect("HOME");
-        assert_eq!(
-            expand_user_path("~/.grok/auth.json"),
-            PathBuf::from(home).join(".grok/auth.json")
-        );
+        with_env(&[("HOME", Some("/tmp/fleet-home"))], || {
+            assert_eq!(
+                expand_user_path("~/.grok/auth.json"),
+                PathBuf::from("/tmp/fleet-home").join(".grok/auth.json")
+            );
+        });
     }
 
     #[test]

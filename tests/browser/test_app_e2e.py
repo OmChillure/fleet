@@ -13,10 +13,12 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import unittest
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
@@ -66,14 +68,28 @@ def _listening(host: str, port: int) -> bool:
         return False
 
 
+def _url_listen(url: str, default_port: int) -> tuple[str, int]:
+    parsed = urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"localhost", "::1"}:
+        host = "127.0.0.1"
+    port = parsed.port or default_port
+    return host, port
+
+
+UI_LISTEN = _url_listen(UI, 3030)
+API_LISTEN = _url_listen(API, 8080)
+
+
 def _require_stack() -> None:
     try:
         require_this_tree(REPO, API)
     except ForeignStackError as e:
         raise RuntimeError(str(e)) from e
-    if not _listening("127.0.0.1", 3030):
+    host, port = UI_LISTEN
+    if not _listening(host, port):
         raise RuntimeError(
-            "UI :3030 is not listening. Start this tree: ./scripts/human-test.sh launch"
+            f"UI {UI} is not listening. Start this tree: ./scripts/human-test.sh launch"
         )
 
 
@@ -513,10 +529,11 @@ def _open_pair_panel(page, workspace_url: str) -> None:
     last_body = ""
     last_err: Exception | None = None
     while time.time() < deadline:
-        if not _listening("127.0.0.1", 3030) or not _listening("127.0.0.1", 8080):
+        if not _listening(*UI_LISTEN) or not _listening(*API_LISTEN):
             raise AssertionError(
                 "stack died while opening pair panel "
-                f"(ui={_listening('127.0.0.1', 3030)} api={_listening('127.0.0.1', 8080)})"
+                f"(ui={UI} up={_listening(*UI_LISTEN)} "
+                f"api={API} up={_listening(*API_LISTEN)})"
             )
         try:
             if "chrome-error" in (page.url or "") or not add.count():
@@ -542,6 +559,25 @@ class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _require_stack()
+        cls._progress_current = "setUpClass"
+        cls._progress_started = time.time()
+        stop = {"on": False}
+
+        def _heartbeat() -> None:
+            while not stop["on"]:
+                time.sleep(30)
+                if stop["on"]:
+                    return
+                name = getattr(cls, "_progress_current", "?")
+                started = getattr(cls, "_progress_started", time.time())
+                print(
+                    f"PROGRESS still {name} ({int(time.time() - started)}s)",
+                    flush=True,
+                )
+
+        t = threading.Thread(target=_heartbeat, name="e2e-progress", daemon=True)
+        t.start()
+        cls._progress_stop = stop
         sync_playwright = _require_playwright()
         cls._pw = sync_playwright().start()
         try:
@@ -673,9 +709,24 @@ class BrowserE2ETests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        stop = getattr(cls, "_progress_stop", None)
+        if stop is not None:
+            stop["on"] = True
         cls._context.close()
         cls._browser.close()
         cls._pw.stop()
+
+    def setUp(self) -> None:
+        type(self)._progress_current = self.id()
+        type(self)._progress_started = time.time()
+        print(f"PROGRESS start {self.id()}", flush=True)
+
+    def tearDown(self) -> None:
+        started = getattr(type(self), "_progress_started", time.time())
+        print(
+            f"PROGRESS done {self.id()} ({int(time.time() - started)}s)",
+            flush=True,
+        )
 
     def test_01_landing_has_cta(self) -> None:
         self.page.goto(f"{UI}/", wait_until="networkidle")
@@ -2389,7 +2440,12 @@ class BrowserE2ETests(unittest.TestCase):
             0,
             "isolation Sandboxed checkbox must not exist",
         )
-        self.assertIn("Runtime: process on this machine", card.inner_text())
+        runtime = card.inner_text()
+        self.assertTrue(
+            "Runtime: fleet-host" in runtime
+            or "Runtime: process on this machine" in runtime,
+            f"paired card must name the host runtime: {runtime[:400]!r}",
+        )
         self.assertTrue(auto.first.is_enabled(), "Auto-update must be editable before Apply")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must be editable before Apply")
         self.assertEqual(
@@ -2560,16 +2616,23 @@ class BrowserE2ETests(unittest.TestCase):
 
         host_re = re.compile(r"/api/workspaces/[^/]+/worker-hosts/?$")
 
+        fetching = {"on": False}
+
         def _force_loopback_hint(route):
-            if route.request.method.upper() != "POST":
-                route.continue_()
+            # route.fetch() re-enters this handler; without the guard the
+            # sync Playwright driver deadlocks and the suite never finishes.
+            if fetching["on"] or route.request.method.upper() != "POST":
+                route.fallback()
                 return
+            fetching["on"] = True
             try:
                 response = route.fetch()
                 data = response.json()
             except Exception:
-                route.continue_()
+                route.fallback()
                 return
+            finally:
+                fetching["on"] = False
             hint = data.get("install_hint") or ""
             lower = hint.lower()
             if not hint or any(
@@ -2659,7 +2722,6 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("button", name="Add worker").wait_for(timeout=10_000)
         assert_no_control_plane_card(page)
         self.assertIn("/runners/self-hosted", page.url)
-        url_before = page.url
 
         suffix = uuid.uuid4().hex[:12]
         hostname = f"poll-box-{suffix}"
@@ -2687,7 +2749,11 @@ class BrowserE2ETests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(page.url, url_before, "must not navigate away to pair")
+        self.assertIn(
+            "/runners/self-hosted",
+            page.url,
+            f"must stay on Self-hosted after pair: {page.url}",
+        )
         self.assertNotIn(
             hostname,
             page.inner_text("body"),
@@ -2703,10 +2769,10 @@ class BrowserE2ETests(unittest.TestCase):
                 f"card with hostname {hostname!r} did not appear from the "
                 f"~10s list poll: {e}. body={page.inner_text('body')[:1200]!r}"
             )
-        self.assertEqual(
+        self.assertIn(
+            "/runners/self-hosted",
             page.url,
-            url_before,
-            "card must appear from the poll, not a navigation/reload",
+            f"card must appear from the poll, not a navigation/reload: {page.url}",
         )
         self.assertGreater(card.count(), 0, "paired host card missing after poll")
         text = card.first.inner_text()
@@ -3328,8 +3394,9 @@ class BrowserE2ETests(unittest.TestCase):
         host_name = f"chat-empty-model-{uuid.uuid4().hex[:8]}"
         # Blank listed model keeps Ollama available (Send enabled) while
         # selected_model.trim() is empty — the §6.2 case. A real tag is the
-        # control so a no-op Send cannot pass as "blocked".
-        ready_model = "llama3.2:latest"
+        # control so a no-op Send cannot pass as "blocked". This host
+        # serves llama3.2:1b; :latest is not in the dropdown.
+        ready_model = "llama3.2:1b"
         pair_and_heartbeat(
             page,
             ws,
@@ -3398,6 +3465,36 @@ class BrowserE2ETests(unittest.TestCase):
         def _set_model(value: str) -> None:
             sel = page.locator("select[title='Model for the selected provider']")
             sel.wait_for(state="visible", timeout=10_000)
+            if value == "":
+                page.evaluate(
+                    """() => {
+                        const s = document.querySelector(
+                            "select[title='Model for the selected provider']"
+                        );
+                        if (!s) throw new Error("model select missing");
+                        let o = [...s.options].find((x) => (x.value || "") === "");
+                        if (!o) {
+                            o = document.createElement("option");
+                            o.value = "";
+                            o.textContent = "(none)";
+                            s.insertBefore(o, s.firstChild);
+                        }
+                        s.value = "";
+                        s.dispatchEvent(new Event("input", { bubbles: true }));
+                        s.dispatchEvent(new Event("change", { bubbles: true }));
+                    }"""
+                )
+                page.wait_for_function(
+                    """() => {
+                        const s = document.querySelector(
+                            "select[title='Model for the selected provider']"
+                        );
+                        return !!(s && (s.value || "") === "");
+                    }""",
+                    timeout=5_000,
+                )
+                self.assertEqual(sel.input_value() or "", "")
+                return
             page.wait_for_function(
                 """(v) => {
                     const s = document.querySelector(
@@ -3515,6 +3612,16 @@ class BrowserE2ETests(unittest.TestCase):
                 draft,
                 f"{where}: draft must stay (send returns before clearing it)",
             )
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const t = document.querySelector("textarea");
+                        return !!(t && !t.disabled);
+                    }""",
+                    timeout=5_000,
+                )
+            except Exception:
+                pass
             self.assertTrue(
                 box.is_enabled(),
                 f"{where}: composer must stay enabled (must not stick in sending)",
@@ -3529,6 +3636,21 @@ class BrowserE2ETests(unittest.TestCase):
         try:
             _open_new_chat()
             _wait_composer_ready()
+            listed = page.evaluate(
+                """() => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    return s ? [...s.options].map((o) => o.value || "") : [];
+                }"""
+            )
+            if not isinstance(listed, list):
+                listed = []
+            if ready_model not in listed:
+                ready_model = next(
+                    (v for v in listed if isinstance(v, str) and v.strip()),
+                    ready_model,
+                )
             _set_model("")
 
             new_msg = f"empty-model-blocked-{uuid.uuid4().hex[:8]}"

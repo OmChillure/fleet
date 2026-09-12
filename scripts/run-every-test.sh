@@ -197,15 +197,15 @@ run_step compose-int \
 run_step invoices-opencode \
   env VERBOSE="${VERBOSE:-0}" bash -lc "cd '${LAB}' && ./scripts/run-invoices-example.sh config/job.123-invoices.opencode.json"
 run_step browser-e2e \
-  python3 "${ROOT}/tests/browser/test_app_e2e.py" -v
+  env PYTHONUNBUFFERED=1 python3 "${ROOT}/tests/browser/test_app_e2e.py" -v
 run_step browser-e2e-cases \
-  python3 -m unittest tests.browser.test_cases_e2e -v
+  env PYTHONUNBUFFERED=1 python3 -m unittest tests.browser.test_cases_e2e -v
 run_step browser-e2e-inbox \
-  python3 -m unittest tests.browser.test_inbox_e2e -v
+  env PYTHONUNBUFFERED=1 python3 -m unittest tests.browser.test_inbox_e2e -v
 run_step browser-e2e-settings-members \
-  python3 -m unittest tests.browser.test_settings_members_e2e -v
+  env PYTHONUNBUFFERED=1 python3 -m unittest tests.browser.test_settings_members_e2e -v
 run_step record-demo-core \
-  python3 "${ROOT}/tests/browser/record_demo.py" landing auth api chat
+  env PYTHONUNBUFFERED=1 python3 "${ROOT}/tests/browser/record_demo.py" landing auth api chat
 
 {
   echo

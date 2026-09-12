@@ -206,6 +206,8 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         }
                         hosts.set(list);
                         pair_result.set(None);
+                        write_runner_query(None);
+                        selected_id.set(None);
                     },
                 }
             }

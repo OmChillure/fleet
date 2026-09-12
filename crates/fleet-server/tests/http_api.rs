@@ -3938,6 +3938,27 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         .unwrap_or_else(|| panic!("host.id: {}", created.body))
         .to_string();
 
+    let before_list = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/worker-hosts"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(
+        before_list.status,
+        StatusCode::OK,
+        "hosts before ack: {}",
+        before_list.body
+    );
+    let before_ids: Vec<String> = before_list.body["hosts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("hosts array: {}", before_list.body))
+        .iter()
+        .filter_map(|h| h["id"].as_str().map(str::to_string))
+        .collect();
+
     let posted = call(
         &app,
         "POST",
@@ -3977,14 +3998,20 @@ async fn partners_disclaimer_ack_does_not_enqueue_or_create_worker_hosts() {
         "ack must not change assignable membership of the seeded id: {}",
         hosts.body
     );
-    let extra: Vec<&str> = host_list
+    let after_ids: Vec<String> = host_list
         .iter()
-        .filter_map(|h| h["id"].as_str())
-        .filter(|id| *id != seeded_id.as_str())
+        .filter_map(|h| h["id"].as_str().map(str::to_string))
         .collect();
+    // HTTP list also injects this-machine boxes from other workspaces
+    // (live fleet-host). Ack must not add or drop rows vs the pre-ack list.
+    assert_eq!(
+        after_ids, before_ids,
+        "ack must not create worker_hosts: before={before_ids:?} after={after_ids:?} {}",
+        hosts.body
+    );
     assert!(
-        extra.is_empty(),
-        "ack must not create worker_hosts; only the seeded id may be listed: extra={extra:?} {}",
+        after_ids.iter().any(|id| id == &seeded_id),
+        "seeded host {seeded_id} missing after ack: {}",
         hosts.body
     );
 
