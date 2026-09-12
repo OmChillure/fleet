@@ -96,7 +96,9 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes — host identity `3e40d4c8bce7e5c7ac5c0df56934b5460d705790` (`GET /health` `git_sha` and `/fleet-git-sha.txt`). Stamp `20260912T234147Z`.
+- Frames + webm inspected: yes — `.tmp/demos/20260912T234147Z-frames/` (56 mid-action frames) and the `.webm`.
+- Bugs found:
+  - none that block merge. Auth signup/login (`*@example.test`), workspace switch, fleet start/tick/cancel (tasks stay ready — no paired host), agents seed 8 starters, Cloud shows AWS/GCP/Azure Coming soon plus live Attach Fleet Cloud, Partners ack flips ACK REQUIRED → LIVE and leaves Lend/Borrow disabled until a host/offer is picked (Buy credits stays off).
+  - copy nit: Partners disclaimer still says “Acknowledging does not enable lending” after ack unlocks the lend UI. Not a failed action.
+  - Chat pick stays on OpenAI (no coming-soon snap-back). Send stays disabled without a runner/key; the empty-state copy tells you to set `OPENAI_API_KEY` or pick a Codex runner. No personal emails or tokens committed.
