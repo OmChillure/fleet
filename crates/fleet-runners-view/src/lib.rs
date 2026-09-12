@@ -1079,6 +1079,12 @@ pub fn widgets_locked(host: &HostPublic, busy: bool) -> bool {
     busy || (!is_control_plane(host) && settings_awaiting_ack(host))
 }
 
+/// Mutate only from the host's home workspace. Cluster / this-machine cards
+/// are visible elsewhere but PATCH is 403 home workspace.
+pub fn is_home_workspace(host: &HostPublic, workspace_id: &str) -> bool {
+    !host.workspace_id.is_empty() && host.workspace_id == workspace_id
+}
+
 /// Draft hold is the same as `holding_new_jobs` (not taking work).
 pub fn draft_holding_new_jobs(accepting: bool) -> bool {
     !accepting
@@ -2213,6 +2219,16 @@ mod tests {
         assert_eq!(display_name(&host), "Unnamed worker");
         host.hostname = Some("studio-laptop".into());
         assert_eq!(display_name(&host), "studio-laptop");
+    }
+
+    #[test]
+    fn is_home_workspace_compares_ids() {
+        let mut host = sample_host();
+        host.workspace_id = "ws-a".into();
+        assert!(is_home_workspace(&host, "ws-a"));
+        assert!(!is_home_workspace(&host, "ws-b"));
+        host.workspace_id.clear();
+        assert!(!is_home_workspace(&host, "ws-a"));
     }
 
     #[test]

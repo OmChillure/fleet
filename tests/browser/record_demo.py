@@ -1150,9 +1150,12 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
                 self.snap("pair-dismissed")
-        card = p.locator("button").filter(has_text="last seen").or_(
-            p.locator("article").filter(has_text="Waiting to pair")
-        )
+        pending_card = p.locator("button").filter(has_text="Waiting to pair")
+        if pending_card.count() == 0:
+            pending_card = p.locator("button").filter(
+                has_text=re.compile(r"\bpending\b", re.I)
+            )
+        card = pending_card.or_(p.locator("button").filter(has_text="last seen"))
         if card.count() and card.first.is_visible():
             card.first.click()
             pause(p, 800)

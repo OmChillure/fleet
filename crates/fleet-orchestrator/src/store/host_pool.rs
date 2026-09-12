@@ -321,6 +321,48 @@ pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option
     .filter(|chosen| chosen.runtime == HostRuntime::Host)
 }
 
+/// Online native host-runtime, even at job cap. Inbox finish stamps this so
+/// the ticket waits instead of 400 when every box is busy.
+pub async fn select_online_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
+    let scoped = match fleet_db::repos::worker_hosts::list_online_runners(
+        store.pool(),
+        project_id,
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
+    let extra = fleet_db::repos::worker_hosts::list_online_by_hostnames(
+        store.pool(),
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
+        &local_machine_names(),
+    )
+    .await
+    .unwrap_or_default();
+    let mut hosts: Vec<AssignableHost> = scoped.iter().map(AssignableHost::from).collect();
+    for h in extra {
+        if hosts.iter().any(|x| x.id == h.id) {
+            continue;
+        }
+        let ah = AssignableHost::from(&h);
+        if host_advertises_local_addr(&ah) {
+            hosts.push(ah);
+        }
+    }
+    let need = workspace_need(store, project_id).await;
+    hosts
+        .into_iter()
+        .find(|h| {
+            h.isolation.is_assignable() && effective_runtime_for(h, need) == Some(HostRuntime::Host)
+        })
+        .map(|host| ChosenHost {
+            host,
+            runtime: HostRuntime::Host,
+        })
+}
+
 /// Use `preferred` when that host is still assignable on this plane URL;
 /// otherwise the usual picker. Loopback URLs drop host-runtime rows that
 /// are not this machine *before* pick so a cluster/off-box winner cannot

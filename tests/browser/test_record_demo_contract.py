@@ -428,6 +428,11 @@ class RecordDemoContractTests(unittest.TestCase):
             text,
             "pending pill is a listed worker, not a blank page",
         )
+        self.assertIn(
+            'filter(has_text="Waiting to pair")',
+            text,
+            "Apply film must open the pending card, not a foreign this-machine host",
+        )
 
     def test_toast_card_does_not_eat_clicks_and_install_cmd_does_not_break_all(self):
         toast = (

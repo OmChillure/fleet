@@ -7,7 +7,8 @@ use fleet_runners_view::{
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
     identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    not_taking_reason, provider_install_command, runtime_line, settings_draft_dirty,
+    is_home_workspace, not_taking_reason, provider_install_command, runtime_line,
+    settings_draft_dirty,
     shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
     status_label, trimmed_host_name, update_now_label, update_requested, widgets_locked,
     worker_id_label, BEHAVIOR_LABEL,
@@ -640,6 +641,7 @@ fn HostDetailPanel(
     let draft_holding = draft_holding_new_jobs(d_accepting());
     let runtime = runtime_line(&host);
     let revoked = host.status == "disabled";
+    let home = is_home_workspace(&host, &workspace_id);
     let pill = status_pill_class(&host.status);
     let last_seen = last_seen_label(&host, js_sys::Date::now());
     let title = display_name(&host);
@@ -707,7 +709,7 @@ fn HostDetailPanel(
                         span { class: "text-sm font-semibold text-[var(--app-fg)]",
                             "{title}"
                         }
-                        if !revoked {
+                        if !revoked && home {
                             button {
                                 class: "inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-[var(--app-muted)] hover:border-[var(--app-border)] hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)] disabled:opacity-50",
                                 r#type: "button",
@@ -786,7 +788,12 @@ fn HostDetailPanel(
                 p { class: "mt-2 text-xs text-red-400", "{last_error}" }
             }
 
-            if !revoked {
+            if !revoked && !home {
+                p { class: "mt-3 text-xs text-[var(--app-muted)]",
+                    "Settings live in the home workspace. This card is visible because the box is on this machine."
+                }
+            }
+            if !revoked && home {
                 div { class: "mt-3 space-y-3 border-t border-[var(--app-border)] pt-3",
                     div { class: "flex flex-col gap-1",
                     span {

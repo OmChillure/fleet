@@ -769,6 +769,11 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
                 .await
         {
             llm.runner_id = Some(chosen.id());
+        } else if let Some(chosen) =
+            fleet_orchestrator::store::select_online_runner(&state.orch.store, workspace_id).await
+        {
+            // Busy but paired — stamp so inbox/cases wait instead of 400.
+            llm.runner_id = Some(chosen.id());
         }
     }
     llm

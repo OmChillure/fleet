@@ -1064,6 +1064,32 @@ pub async fn list_assignable(
     workspace_id: Uuid,
     stale_after: Duration,
 ) -> DbResult<Vec<WorkerHost>> {
+    list_assignable_filtered(pool, workspace_id, stale_after, false).await
+}
+
+/// Like [`list_assignable`] but keeps hosts that are at job cap so a finish
+/// can stamp `runner_id` and wait instead of 400.
+pub async fn list_online_runners(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    stale_after: Duration,
+) -> DbResult<Vec<WorkerHost>> {
+    list_assignable_filtered(pool, workspace_id, stale_after, true).await
+}
+
+fn filter_taking(hosts: Vec<WorkerHost>, include_at_cap: bool) -> Vec<WorkerHost> {
+    hosts
+        .into_iter()
+        .filter(|h| !holding_new_jobs(h) && (include_at_cap || !at_job_cap(h)))
+        .collect()
+}
+
+async fn list_assignable_filtered(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    stale_after: Duration,
+    include_at_cap: bool,
+) -> DbResult<Vec<WorkerHost>> {
     let cutoff = Utc::now() - stale_after;
     let q = format!(
         r#"
@@ -1088,10 +1114,7 @@ pub async fn list_assignable(
         .fetch_all(pool)
         .await
         .map_err(map_query_err)?;
-    Ok(hosts
-        .into_iter()
-        .filter(|h| !holding_new_jobs(h) && !at_job_cap(h))
-        .collect())
+    Ok(filter_taking(hosts, include_at_cap))
 }
 
 /// Same taking-jobs filters as [`list_assignable`], any workspace, matching
@@ -1134,10 +1157,48 @@ pub async fn list_assignable_by_hostnames(
         .fetch_all(pool)
         .await
         .map_err(map_query_err)?;
-    Ok(hosts
-        .into_iter()
-        .filter(|h| !holding_new_jobs(h) && !at_job_cap(h))
-        .collect())
+    Ok(filter_taking(hosts, false))
+}
+
+/// Like [`list_assignable_by_hostnames`] including hosts at job cap.
+pub async fn list_online_by_hostnames(
+    pool: &PgPool,
+    stale_after: Duration,
+    hostnames: &[String],
+) -> DbResult<Vec<WorkerHost>> {
+    let names = normalize_hostname_needles(hostnames);
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cutoff = Utc::now() - stale_after;
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE hostname IS NOT NULL
+          AND (
+            lower(trim(hostname)) = ANY($2)
+            OR lower(split_part(trim(hostname), '.', 1)) = ANY($2)
+          )
+          AND enabled
+          AND NOT paused
+          AND NOT drain
+          AND (allow_host OR allow_container)
+          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+          AND status = '{WORKER_HOST_STATUS_ONLINE}'
+          AND machine_token_hash IS NOT NULL
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at >= $1
+        ORDER BY last_seen_at DESC, id ASC
+        "#
+    );
+    let hosts = sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(cutoff)
+        .bind(&names)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)?;
+    Ok(filter_taking(hosts, true))
 }
 
 /// Home-workspace rows plus this-machine boxes that are taking jobs.
