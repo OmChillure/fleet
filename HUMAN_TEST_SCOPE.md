@@ -61,7 +61,10 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes — host stack `GET /health.git_sha` and UI `/fleet-git-sha.txt` = `a7c85b4e06d30e5ad6d7c336b95213eaf43ee1e2`. Clip `.tmp/demos/20260912T230518Z-auth-workspace-chat-fleet-sandboxes-inbox-integrations-runners.webm`. (First clip `20260912T225036Z` was discarded: dx served stale WASM with the old inbox/fleet copy.)
+- Frames + webm inspected: yes — 41 mid-action frames under `.tmp/demos/20260912T230518Z-frames/` plus the `.webm`.
+- Bugs found:
+  - `inbox`: Finish returned 400 `no paired runner taking jobs` (four recorder lines, one cause). Demo workspace has no Grok/Claude/Ollama host taking jobs; this is the existing `require_taking` gate, not a regression. Ticket row + Finish stayed visible (correct). Start monitor without a connected app toasted the connect-first copy (correct). Auto-launch checkbox is **off** and labeled **Launch open tickets on each poll (off until you turn it on)**.
+  - `fleet`: empty copy is **No runs yet. Finish an Inbox item, start a goal, or use Start 2-task run.** Start fixture 201, tick 200, cancel 200. Tasks stay ready with no assignable host (same gate).
+  - Runners: **Only me** radio; pair command + one-time `flp_` token shown once (product); hold/resume toasted `Settings sent`.
+  - Chat: composer disabled until Grok/Ollama on a selected runner (expected empty workspace). Integrations GitHub OAuth start 200. No JWT / `.env` / `auth.json` leaked.
