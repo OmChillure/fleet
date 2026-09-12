@@ -3,6 +3,11 @@
 One product surface for **where work runs**. Five execution kinds, one
 assignment path, two isolation modes.
 
+How the guest runs is a separate product split: **Run on a PC** vs
+**Run in a container**. The five kinds remain placement/ownership;
+that split is the use case. See
+[`run-on-pc-vs-container.md`](run-on-pc-vs-container.md).
+
 Self-hosted pairing, install, heartbeat, and lease stay in
 [`docs/components/worker-host/README.md`](../worker-host/README.md).
 This folder is the umbrella: kinds, isolation, nav, and routes.
@@ -77,4 +82,5 @@ job). **Workers** as a nav section collides with the per-job
 | [`docs/components/worker-host/README.md`](../worker-host/README.md) | Pair, install, heartbeat, lease, `fleet-host` |
 | [`docs/architecture/README.md`](../../architecture/README.md) | Control-plane layers and tick assignment |
 | [`docs/components/sandbox-manager/README.md`](../sandbox-manager/README.md) | Sandbox create / observe / destroy |
+| [`run-on-pc-vs-container.md`](run-on-pc-vs-container.md) | Product split: Run on a PC vs Run in a container (how the guest runs) |
 | [`docs/components/ui/README.md`](../ui/README.md) | App shell and routes |

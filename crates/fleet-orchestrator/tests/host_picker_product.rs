@@ -423,7 +423,9 @@ async fn picker_equal_load_home_workspace_beats_older_cluster() {
     seed_workspace(&store, other.id).await;
     let home = pair_host(&store, project.id, "home", true, false).await;
     let cluster = pair_host(&store, other.id, "cluster-box", true, false).await;
-    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+    sqlx::query(
+        "UPDATE worker_hosts SET labels = array['cluster'], run_mode = 'in_container' WHERE id = $1",
+    )
         .bind(cluster)
         .execute(store.pool())
         .await
@@ -691,7 +693,9 @@ async fn container_min_isolation_home_process_only_does_not_beat_cluster_contain
     seed_workspace(&store, other.id).await;
     let home_proc = pair_host(&store, project.id, "home-proc", true, false).await;
     let cluster_ctr = pair_host(&store, other.id, "cluster-ctr", false, true).await;
-    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+    sqlx::query(
+        "UPDATE worker_hosts SET labels = array['cluster'], run_mode = 'in_container' WHERE id = $1",
+    )
         .bind(cluster_ctr)
         .execute(store.pool())
         .await
@@ -925,15 +929,18 @@ async fn select_assignable_host_process_need_assigns_container_only() {
     seed_workspace(&store, project.id).await;
     let host = pair_host(&store, project.id, "ctr-only", false, true).await;
 
-    let chosen = select_assignable_host(&store, project.id)
-        .await
-        .expect("container-only host must be assignable under default process min_isolation");
-    assert_eq!(chosen.id(), host);
-    assert_eq!(
-        chosen.runtime.as_str(),
-        "container",
-        "default process need must assign Container when advertised_host is off"
+    let chosen = select_assignable_runner_preferring(
+        &store,
+        project.id,
+        None,
+        "http://example.test:8080",
+    )
+    .await;
+    assert!(
+        chosen.is_none(),
+        "on-pc picker must not assign a container-only host: {chosen:?}"
     );
+    let _ = host;
 }
 
 #[tokio::test]
@@ -1196,7 +1203,9 @@ async fn tick_must_not_assign_home_offbox_over_cluster_this_machine_on_loopback(
             panic!("cluster this-machine fixture needs HOSTNAME or /etc/hostname")
         });
     let cluster_local = pair_host(&store, other.id, &local_name, true, false).await;
-    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+    sqlx::query(
+        "UPDATE worker_hosts SET labels = array['cluster'], run_mode = 'in_container' WHERE id = $1",
+    )
         .bind(cluster_local)
         .execute(store.pool())
         .await

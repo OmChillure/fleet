@@ -3,8 +3,9 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    FleetSettingsPatch, InviteRow, MemberRow, fetch_settings, invite_member, list_invites,
-    list_members, remove_member, revoke_invite, save_settings, set_member_role,
+    FleetSettingsPatch, InviteRow, LlmKeyPublic, MemberRow, create_llm_key, fetch_settings,
+    invite_member, list_invites, list_llm_keys, list_members, remove_member, revoke_invite,
+    revoke_llm_key, save_settings, set_member_role,
 };
 use crate::components::toast::show_toast;
 use crate::pages::chat::{ChatModelInfo, fetch_chat_status};
@@ -24,6 +25,7 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut fleet_model = use_signal(String::new);
     let mut grok_env = use_signal(|| false);
     let mut min_isolation = use_signal(|| "process".to_string());
+    let mut default_run_mode = use_signal(|| "on_pc".to_string());
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
     let mut ollama_error = use_signal(|| None::<String>);
@@ -33,6 +35,10 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut my_user_id = use_signal(String::new);
     let mut invite_email = use_signal(String::new);
     let mut invite_role = use_signal(|| "member".to_string());
+    let mut llm_keys = use_signal(Vec::<LlmKeyPublic>::new);
+    let mut key_provider = use_signal(|| "grok".to_string());
+    let mut key_secret = use_signal(String::new);
+    let mut key_busy = use_signal(|| false);
 
     let ws_load = workspace_id.clone();
     use_effect(move || {
@@ -47,6 +53,9 @@ pub fn Settings(workspace_id: String) -> Element {
                     grok_env.set(s.grok_env);
                     if !s.min_isolation.trim().is_empty() {
                         min_isolation.set(s.min_isolation);
+                    }
+                    if !s.default_run_mode.trim().is_empty() {
+                        default_run_mode.set(s.default_run_mode);
                     }
                     effective.set(s.effective_backend);
                     error.set(None);
@@ -78,6 +87,9 @@ pub fn Settings(workspace_id: String) -> Element {
             if let Ok(inv) = list_invites(&ws).await {
                 invites.set(inv);
             }
+            if let Ok(keys) = list_llm_keys(&ws).await {
+                llm_keys.set(keys);
+            }
             loading.set(false);
         });
     });
@@ -93,6 +105,7 @@ pub fn Settings(workspace_id: String) -> Element {
         let llm = fleet_llm();
         let model = fleet_model();
         let iso = min_isolation();
+        let mode = default_run_mode();
         spawn(async move {
             let s = match save_settings(
                 &ws,
@@ -101,6 +114,7 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm: llm,
                     fleet_llm_model: model,
                     min_isolation: iso,
+                    default_run_mode: Some(mode),
                 },
             )
             .await
@@ -118,6 +132,9 @@ pub fn Settings(workspace_id: String) -> Element {
             fleet_model.set(s.fleet_llm_model);
             if !s.min_isolation.trim().is_empty() {
                 min_isolation.set(s.min_isolation);
+            }
+            if !s.default_run_mode.trim().is_empty() {
+                default_run_mode.set(s.default_run_mode);
             }
             grok_env.set(s.grok_env);
             effective.set(s.effective_backend);
@@ -165,7 +182,7 @@ pub fn Settings(workspace_id: String) -> Element {
                         "Isolation"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Weakest isolation a host must offer (process < container < vm). k8s is placement, not an isolation class. The control plane does not run sandboxes."
+                        "Weakest isolation a host must offer (process < container < vm). This cannot flip Run on a PC into Run in a container."
                     }
                     select {
                         class: field_class(),
@@ -174,6 +191,115 @@ pub fn Settings(workspace_id: String) -> Element {
                         option { value: "process", "Process" }
                         option { value: "container", "Container" }
                         option { value: "vm", "VM" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Where new fleet jobs run"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Default for Start run and inbox. Chat stays Run on a PC. Kind / container jobs need Run in a container."
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{default_run_mode}",
+                        onchange: move |e| default_run_mode.set(e.value()),
+                        option { value: "on_pc", "Run on a PC" }
+                        option { value: "in_container", "Run in a container" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "API keys for Run in a container"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Not your Grok/Claude desktop login. A workspace token the guest can use. The secret is stored encrypted and never shown again."
+                    }
+                    if llm_keys().is_empty() {
+                        p { class: "mt-2 text-xs text-[var(--app-muted)]", "No keys yet. Mock/Kind jobs do not need one." }
+                    } else {
+                        ul { class: "mt-2 m-0 list-none p-0 text-sm",
+                            for k in llm_keys() {
+                                li { class: "mt-1 flex items-center justify-between gap-2",
+                                    span { "{k.provider}" }
+                                    button {
+                                        class: "rounded-lg border border-[var(--app-border)] px-2 py-1 text-xs",
+                                        r#type: "button",
+                                        disabled: key_busy(),
+                                        onclick: {
+                                            let ws = workspace_id.clone();
+                                            let id = k.id.clone();
+                                            move |_| {
+                                                if key_busy() { return; }
+                                                key_busy.set(true);
+                                                let ws = ws.clone();
+                                                let id = id.clone();
+                                                spawn(async move {
+                                                    match revoke_llm_key(&ws, &id).await {
+                                                        Ok(()) => {
+                                                            if let Ok(keys) = list_llm_keys(&ws).await {
+                                                                llm_keys.set(keys);
+                                                            }
+                                                            show_toast().success("Key revoked.");
+                                                        }
+                                                        Err(e) => show_toast().error(e),
+                                                    }
+                                                    key_busy.set(false);
+                                                });
+                                            }
+                                        },
+                                        "Revoke"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "mt-3 flex flex-wrap items-end gap-2",
+                        select {
+                            class: field_class(),
+                            value: "{key_provider}",
+                            onchange: move |e| key_provider.set(e.value()),
+                            option { value: "grok", "Grok / xAI" }
+                            option { value: "claude", "Claude" }
+                        }
+                        input {
+                            class: field_class(),
+                            r#type: "password",
+                            placeholder: "API key",
+                            value: "{key_secret}",
+                            oninput: move |e| key_secret.set(e.value()),
+                        }
+                        button {
+                            class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm",
+                            r#type: "button",
+                            disabled: key_busy() || key_secret().trim().is_empty(),
+                            onclick: {
+                                let ws = workspace_id.clone();
+                                move |_| {
+                                    if key_busy() { return; }
+                                    key_busy.set(true);
+                                    let ws = ws.clone();
+                                    let provider = key_provider();
+                                    let secret = key_secret();
+                                    spawn(async move {
+                                        match create_llm_key(&ws, &provider, &secret).await {
+                                            Ok(_) => {
+                                                key_secret.set(String::new());
+                                                if let Ok(keys) = list_llm_keys(&ws).await {
+                                                    llm_keys.set(keys);
+                                                }
+                                                show_toast().success("Key saved.");
+                                            }
+                                            Err(e) => show_toast().error(e),
+                                        }
+                                        key_busy.set(false);
+                                    });
+                                }
+                            },
+                            if key_busy() { "Saving…" } else { "Save key" }
+                        }
                     }
                 }
 

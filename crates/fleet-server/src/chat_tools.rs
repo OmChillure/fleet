@@ -711,6 +711,14 @@ pub struct ChatLlmContext {
 
 /// Composer dropdown first (last chat in this workspace), then Grok/Ollama host defaults.
 pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatLlmContext {
+    composer_or_fallback_for(state, workspace_id, None).await
+}
+
+pub async fn composer_or_fallback_for(
+    state: &AppState,
+    workspace_id: Uuid,
+    actor: Option<Uuid>,
+) -> ChatLlmContext {
     let mut llm = if let Ok(conns) =
         fleet_db::repos::integrations::list_for_workspace(&state.db, workspace_id).await
     {
@@ -764,13 +772,20 @@ pub async fn composer_or_fallback(state: &AppState, workspace_id: Uuid) -> ChatL
     }
     let mut llm = llm.unwrap_or_default();
     if llm.runner_id.is_none() {
-        if let Some(chosen) =
-            fleet_orchestrator::store::select_assignable_runner(&state.orch.store, workspace_id)
-                .await
+        if let Some(chosen) = fleet_orchestrator::store::select_assignable_runner_for_actor(
+            &state.orch.store,
+            workspace_id,
+            actor,
+        )
+        .await
         {
             llm.runner_id = Some(chosen.id());
-        } else if let Some(chosen) =
-            fleet_orchestrator::store::select_online_runner(&state.orch.store, workspace_id).await
+        } else if let Some(chosen) = fleet_orchestrator::store::select_online_runner_for_actor(
+            &state.orch.store,
+            workspace_id,
+            actor,
+        )
+        .await
         {
             // Busy but paired — stamp so inbox/cases wait instead of 400.
             llm.runner_id = Some(chosen.id());
@@ -2454,6 +2469,7 @@ async fn launch_agent_task(
     require_runner_worker_llm(llm)?;
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
+    plan.policy.requested_by = Some(user_id);
     accept_and_drive_plan(
         state,
         workspace_id,
@@ -2552,6 +2568,7 @@ async fn launch_agent_plan(
             .collect();
     }
     stamp_plan_llm(&mut plan, llm);
+    plan.policy.requested_by = Some(user_id);
     if let Err(e) = validate::validate_plan(&plan) {
         return Err(AppError::bad_request(e.to_string()));
     }

@@ -3156,10 +3156,57 @@ async fn list_cluster_and_assignable_match_cluster_label_case() {
         .await
         .expect("list_assignable B");
     assert!(
-        from_b.iter().any(|h| h.id == host.id),
-        "CLUSTER host home={ws_a} must be assignable in {ws_b}: {:?}",
+        from_b.iter().all(|h| h.id != host.id),
+        "CLUSTER host home={ws_a} must not be assignable in foreign {ws_b}: {:?}",
         from_b.iter().map(|h| h.id).collect::<Vec<_>>()
     );
+    let from_a = worker_hosts::list_assignable(&pool, ws_a, Duration::seconds(30))
+        .await
+        .expect("list_assignable A");
+    assert!(
+        from_a.iter().any(|h| h.id == host.id),
+        "home workspace still lists its bootstrap host"
+    );
+}
+
+#[tokio::test]
+async fn create_pending_defaults_send_policy_owner_only() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, _token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "maya-pc", expires).await;
+    assert_eq!(host.send_policy, fleet_db::WORKER_HOST_SEND_OWNER_ONLY);
+    assert_eq!(host.created_by, Some(user_id));
+}
+
+#[tokio::test]
+async fn remove_member_drops_send_allowlist_rows() {
+    let pool = connect_and_migrate().await;
+    let (maya, ws) = seed_user_with_workspace(&pool).await;
+    let jordan = seed_user(&pool, &format!("jordan-{}@ex.test", Uuid::now_v7())).await;
+    workspaces::add_member(&pool, ws, jordan, "member", Utc::now())
+        .await
+        .expect("add jordan");
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, _token) = create_pending_with_token(&pool, ws, maya, "maya-pc", expires).await;
+    worker_hosts::set_send_policy(&pool, host.id, fleet_db::WORKER_HOST_SEND_ALLOWLIST)
+        .await
+        .expect("allowlist");
+    worker_hosts::replace_send_allowlist(&pool, host.id, &[jordan], maya)
+        .await
+        .expect("allow jordan");
+    let before = worker_hosts::list_send_allowlist(&pool, host.id)
+        .await
+        .expect("list");
+    assert_eq!(before, vec![jordan]);
+    workspaces::remove_member(&pool, ws, jordan)
+        .await
+        .expect("remove");
+    let after = worker_hosts::list_send_allowlist(&pool, host.id)
+        .await
+        .expect("list after");
+    assert!(after.is_empty(), "remove_member must drop allowlist rows");
 }
 
 /// create_pending INSERT stores mixed-case `CLUSTER` as lowercase `cluster`.

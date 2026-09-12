@@ -298,7 +298,7 @@ async fn ollama_plan_guest_harness_is_mock() {
     .await;
     assert_eq!(
         claim_env(&payload, "FLEET_HARNESS"),
-        Some("mock"),
-        "plan llm_provider=ollama is not grok; guest harness must be mock: {payload}"
+        Some("ollama"),
+        "plan llm_provider=ollama must set guest harness ollama: {payload}"
     );
 }

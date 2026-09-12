@@ -213,7 +213,16 @@ pub fn spec_from_payload(
 
     let mut cr_env = BTreeMap::new();
     for (k, v) in env {
-        if k.starts_with("FLEET_") {
+        if k.starts_with("FLEET_")
+            || matches!(
+                k.as_str(),
+                "XAI_API_KEY" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN"
+            )
+        {
+            let u = k.to_ascii_uppercase();
+            if u.contains("AUTH_JSON") || u.contains("SESSION") {
+                continue;
+            }
             cr_env.insert(k.clone(), v.clone());
         }
     }
@@ -436,6 +445,7 @@ mod tests {
             worker_token: "tok".into(),
             orchestrator_url: "http://api.agent-fleet.svc.cluster.local:8080".into(),
             runtime: JobRuntime::Container,
+            run_mode: Some("in_container".into()),
             isolation: Some("container".into()),
             task_title: "Root task".into(),
             task_spec: "Write work/plan.md".into(),

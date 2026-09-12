@@ -70,6 +70,12 @@ pub struct PlanPolicy {
     /// Prefer this self-hosted runner when assigning work.
     #[serde(default)]
     pub preferred_host_id: Option<Uuid>,
+    /// Who launched this plan (send-ACL actor). Missing → fail-closed on a PC.
+    #[serde(default)]
+    pub requested_by: Option<Uuid>,
+    /// `on_pc` | `in_container`.
+    #[serde(default = "default_plan_run_mode")]
+    pub run_mode: String,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// Extra write-backs (in addition to a reply on each task `external_ref`).
@@ -81,6 +87,10 @@ fn default_on_task_fail() -> OnTaskFailPolicy {
     OnTaskFailPolicy::FailRun
 }
 
+fn default_plan_run_mode() -> String {
+    "on_pc".into()
+}
+
 impl Default for PlanPolicy {
     fn default() -> Self {
         Self {
@@ -90,6 +100,8 @@ impl Default for PlanPolicy {
             llm_provider: None,
             llm_model: None,
             preferred_host_id: None,
+            requested_by: None,
+            run_mode: default_plan_run_mode(),
             reasoning_effort: None,
             outputs: Vec::new(),
         }

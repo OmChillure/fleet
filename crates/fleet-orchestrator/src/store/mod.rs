@@ -8,8 +8,12 @@ mod tick_ops;
 pub use host_pool::{
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
     host_at_capacity, host_is_this_machine, pick_assignable_host, pick_assignable_host_for,
-    pick_assignable_runner, select_assignable_host, select_assignable_runner,
-    select_assignable_runner_preferring, select_online_runner, workspace_has_updating_host,
+    host_matches_job, pick_assignable_runner, pr1_tick_allows, select_assignable_host,
+    select_assignable_runner, JobNeed, RunMode,
+    select_assignable_runner_for_actor, select_assignable_runner_preferring,
+    select_assignable_runner_preferring_for_actor, select_assignable_runner_preferring_for_job,
+    select_online_runner,
+    select_online_runner_for_actor, send_acl_allows, workspace_has_updating_host,
     AssignableHost, ChosenHost,
     HostRuntime, RunnerIsolation, RunnerKind, HOST_UPDATE_HOLD_SECS,
 };

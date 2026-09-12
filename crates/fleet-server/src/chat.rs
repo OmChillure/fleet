@@ -1381,6 +1381,11 @@ async fn chat_status(
     };
 
     let host = crate::worker_hosts::load_visible_host(&state, workspace_id, runner_id).await?;
+    if host.is_cluster_host() || host.created_by.is_none() {
+        return Err(AppError::bad_request(
+            "This runner is not Run on a PC",
+        ));
+    }
     if crate::runner_chat::host_is_removed(&host) {
         return Ok(Json(ChatStatusResponse {
             available: false,

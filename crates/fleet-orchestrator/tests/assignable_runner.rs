@@ -29,6 +29,12 @@ fn host(
         workspace_id: Uuid::nil(),
         hostname: None,
         addrs: vec![],
+        created_by: None,
+        send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+        send_allowlist: vec![],
+        labels: vec![],
+        run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
+        settings_acked: true,
     }
 }
 

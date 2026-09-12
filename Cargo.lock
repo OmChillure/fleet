@@ -1921,6 +1921,7 @@ dependencies = [
  "dotenvy",
  "fleet-db",
  "fleet-driver",
+ "fleet-integrations",
  "hex",
  "http-body-util",
  "reqwest",

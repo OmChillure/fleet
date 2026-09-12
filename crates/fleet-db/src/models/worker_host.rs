@@ -25,6 +25,35 @@ pub const WORKER_HOST_ISOLATION_NATIVE: &str = "native";
 /// Placeholder self-hosted sandbox. Not assignable; no k8s executor in v1.
 pub const WORKER_HOST_ISOLATION_SANDBOXED: &str = "sandboxed";
 
+/// Only the pairer (`created_by`) may send work to this PC.
+pub const WORKER_HOST_SEND_OWNER_ONLY: &str = "owner_only";
+/// Explicit user ids. Empty allowlist is treated as owner_only at assign time.
+pub const WORKER_HOST_SEND_ALLOWLIST: &str = "allowlist";
+/// Any current workspace member may send work to this shared PC.
+pub const WORKER_HOST_SEND_WORKSPACE: &str = "workspace";
+
+pub const WORKER_HOST_RUN_ON_PC: &str = "on_pc";
+pub const WORKER_HOST_RUN_IN_CONTAINER: &str = "in_container";
+
+/// `on_pc` | `in_container`. Other values are rejected.
+pub fn parse_worker_host_run_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        WORKER_HOST_RUN_ON_PC => Some(WORKER_HOST_RUN_ON_PC),
+        WORKER_HOST_RUN_IN_CONTAINER => Some(WORKER_HOST_RUN_IN_CONTAINER),
+        _ => None,
+    }
+}
+
+/// `owner_only` | `allowlist` | `workspace`. Other values are rejected.
+pub fn parse_worker_host_send_policy(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        WORKER_HOST_SEND_OWNER_ONLY => Some(WORKER_HOST_SEND_OWNER_ONLY),
+        WORKER_HOST_SEND_ALLOWLIST => Some(WORKER_HOST_SEND_ALLOWLIST),
+        WORKER_HOST_SEND_WORKSPACE => Some(WORKER_HOST_SEND_WORKSPACE),
+        _ => None,
+    }
+}
+
 /// `native` or `sandboxed`. Other values are rejected.
 pub fn parse_worker_host_isolation(raw: &str) -> Option<&'static str> {
     match raw.trim() {
@@ -113,6 +142,12 @@ pub struct WorkerHost {
     #[serde(default = "default_json_object")]
     pub runtime_reported: serde_json::Value,
     pub created_by: Option<Uuid>,
+    /// Who may send work to this PC (`owner_only` | `allowlist` | `workspace`).
+    #[serde(default = "default_send_policy")]
+    pub send_policy: String,
+    /// `on_pc` | `in_container`.
+    #[serde(default = "default_run_mode")]
+    pub run_mode: String,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -137,13 +172,18 @@ impl WorkerHost {
     /// can create FleetSandbox CRs. A paired k3d-only box must not take
     /// host-runtime spawn_session.
     pub fn accepts_v1_leases(&self) -> bool {
-        self.enabled
-            && !self.paused
-            && !self.drain
-            && self.is_native_isolation()
-            && self.status == WORKER_HOST_STATUS_ONLINE
-            && (self.effective_host()
-                || (self.is_cluster_host() && self.effective_container()))
+        if !self.enabled
+            || self.paused
+            || self.drain
+            || !self.is_native_isolation()
+            || self.status != WORKER_HOST_STATUS_ONLINE
+        {
+            return false;
+        }
+        match self.run_mode.as_str() {
+            WORKER_HOST_RUN_IN_CONTAINER => self.effective_container(),
+            _ => self.effective_host(),
+        }
     }
 
     /// Tick / lease assignment: only native isolation is v1.
@@ -251,6 +291,14 @@ pub struct WorkerHostPublic {
     pub runtime_settings: Option<serde_json::Value>,
     #[serde(default)]
     pub runtime_reported: Option<serde_json::Value>,
+    /// Who may send work here. Always present on the card.
+    #[serde(default = "default_send_policy")]
+    pub send_policy: String,
+    /// Pairer. Used with `send_policy` (only me).
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
+    #[serde(default = "default_run_mode")]
+    pub run_mode: String,
 }
 
 /// Official CLI on a runner. Never includes tokens.
@@ -306,6 +354,14 @@ fn default_auto_update() -> bool {
 
 fn default_isolation() -> String {
     WORKER_HOST_ISOLATION_NATIVE.to_string()
+}
+
+fn default_send_policy() -> String {
+    WORKER_HOST_SEND_OWNER_ONLY.to_string()
+}
+
+fn default_run_mode() -> String {
+    WORKER_HOST_RUN_ON_PC.to_string()
 }
 
 fn default_host_kind() -> String {
@@ -484,6 +540,17 @@ impl WorkerHostPublic {
                 .filter(|v| v.as_object().is_some_and(|o| !o.is_empty())),
             runtime_reported: Some(host.runtime_reported.clone())
                 .filter(|v| v.as_object().is_some_and(|o| !o.is_empty())),
+            send_policy: if parse_worker_host_send_policy(&host.send_policy).is_some() {
+                host.send_policy.clone()
+            } else {
+                WORKER_HOST_SEND_OWNER_ONLY.to_string()
+            },
+            created_by: host.created_by,
+            run_mode: if parse_worker_host_run_mode(&host.run_mode).is_some() {
+                host.run_mode.clone()
+            } else {
+                WORKER_HOST_RUN_ON_PC.to_string()
+            },
         }
     }
 
@@ -672,6 +739,8 @@ pub struct NewWorkerHost {
     pub max_concurrent: i32,
     pub max_job_timeout_s: i32,
     pub labels: Vec<String>,
+    pub send_policy: String,
+    pub run_mode: String,
 }
 
 impl NewWorkerHost {
@@ -691,6 +760,8 @@ impl NewWorkerHost {
             max_concurrent: 4,
             max_job_timeout_s: 3600,
             labels: Vec::new(),
+            send_policy: WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: WORKER_HOST_RUN_ON_PC.to_string(),
         }
     }
 }
@@ -763,6 +834,8 @@ mod public_view_tests {
             runtime_settings: serde_json::json!({}),
             runtime_reported: serde_json::json!({}),
             created_by: None,
+            send_policy: WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,
@@ -861,6 +934,24 @@ mod public_view_tests {
         );
         assert_eq!(parse_worker_host_isolation("k8s"), None);
         assert_eq!(parse_worker_host_isolation(""), None);
+    }
+
+    #[test]
+    fn parse_send_policy_wire_values() {
+        assert_eq!(
+            parse_worker_host_send_policy("owner_only"),
+            Some(WORKER_HOST_SEND_OWNER_ONLY)
+        );
+        assert_eq!(
+            parse_worker_host_send_policy("allowlist"),
+            Some(WORKER_HOST_SEND_ALLOWLIST)
+        );
+        assert_eq!(
+            parse_worker_host_send_policy("workspace"),
+            Some(WORKER_HOST_SEND_WORKSPACE)
+        );
+        assert_eq!(parse_worker_host_send_policy("shared"), None);
+        assert_eq!(parse_worker_host_send_policy("OWNER_ONLY"), None);
     }
 
     #[test]

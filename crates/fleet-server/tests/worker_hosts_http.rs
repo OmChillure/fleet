@@ -11364,3 +11364,106 @@ async fn patch_timeout_below_60_bundled_with_max_concurrent_writes_neither() {
         leftover.body
     );
 }
+
+#[tokio::test]
+async fn llm_keys_create_list_never_returns_secret() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let path = format!("/api/workspaces/{ws}/llm-keys");
+    let created = call(
+        &app,
+        "POST",
+        &path,
+        Some(&jar),
+        Some(json!({
+            "provider": "grok",
+            "secret": "sk-test-never-echo-this-value"
+        })),
+    )
+    .await;
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "create key: {}",
+        created.body
+    );
+    let hay = format!("{} {}", created.body, created.raw);
+    assert!(
+        !hay.contains("sk-test-never-echo-this-value"),
+        "create must not echo the secret: {hay}"
+    );
+    assert_eq!(created.body["key"]["provider"], "grok");
+    assert_eq!(created.body["key"]["revoked"], false);
+
+    let listed = call(&app, "GET", &path, Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "list: {}", listed.body);
+    let list_hay = format!("{} {}", listed.body, listed.raw);
+    assert!(
+        !list_hay.contains("sk-test-never-echo-this-value"),
+        "list must not include the secret: {list_hay}"
+    );
+    let keys = listed.body["keys"].as_array().expect("keys array");
+    assert_eq!(keys.len(), 1, "{}", listed.body);
+    assert_eq!(keys[0]["provider"], "grok");
+}
+
+#[tokio::test]
+async fn llm_keys_revoke_hides_key_from_list() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let path = format!("/api/workspaces/{ws}/llm-keys");
+    let created = call(
+        &app,
+        "POST",
+        &path,
+        Some(&jar),
+        Some(json!({ "provider": "claude", "secret": "claude-secret-value" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let id = created.body["key"]["id"].as_str().expect("id").to_string();
+    let revoked = call(
+        &app,
+        "POST",
+        &format!("{path}/{id}/revoke"),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::OK, "revoke: {}", revoked.body);
+    let listed = call(&app, "GET", &path, Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let keys = listed.body["keys"].as_array().expect("keys");
+    assert!(keys.is_empty(), "revoked key must leave the active list: {}", listed.body);
+}
+
+#[tokio::test]
+async fn fixture_run_mode_in_container_is_stamped() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let _ = call(&app, "GET", &format!("/api/workspaces/{ws}/fleet"), Some(&jar), None).await;
+    let fx = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/fleet/runs/fixture"),
+        Some(&jar),
+        Some(json!({ "kind": "chain", "run_mode": "in_container" })),
+    )
+    .await;
+    assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
+    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("uuid");
+    let ws_id = Uuid::parse_str(&ws).expect("ws");
+    let plan = state
+        .orch
+        .store
+        .get_plan_body(plan_id)
+        .await
+        .expect("get plan")
+        .expect("plan");
+    assert_eq!(plan.project_id, ws_id);
+    assert_eq!(
+        plan.policy.run_mode, "in_container",
+        "fixture run_mode must stamp the plan: {:?}",
+        plan.policy
+    );
+}

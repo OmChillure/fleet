@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `b6054ef8a908900e1bc2068989abece54ef738ae`
-- Tree-id: `fc8f0a9c0fbd9b28f3a1bca0e6a7a27c1011dc74`
+- Tree-id: `ace6eae53e2cba80516f1171a83084488eeadec6-5d61c022e828`
 
 ## Scenes
 
@@ -15,10 +15,16 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 - `workspace`
 - `api`
 - `chat`
+- `fleet`
+- `sandboxes`
+- `cases`
+- `inbox`
 - `integrations`
 - `settings`
 - `admin`
 - `runners`
+- `lab`
+- `k8s`
 
 ## Pause steps
 
@@ -31,8 +37,13 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 - Admin
 - Runners / Self-hosted
 - Workers
+- Kubernetes sandboxes
+- Fleet
 - Integrations
+- Sandboxes
+- Cases
 - Chat
+- Inbox
 - Sidebar
 - User menu
 - This merge request
@@ -50,12 +61,34 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-auth/tests/common.rs` | `auth`, `workspace` |
 | `crates/fleet-auth/tests/instance_admin.rs` | `auth`, `workspace` |
 | `crates/fleet-db/migrations/032_instance_admin.sql` | `admin` |
+| `crates/fleet-db/src/models/worker_host.rs` | `runners` |
 | `crates/fleet-db/src/repos/admin.rs` | `admin` |
 | `crates/fleet-db/src/repos/worker_hosts.rs` | `runners` |
+| `crates/fleet-db/src/repos/workspaces.rs` | `auth`, `workspace` |
+| `crates/fleet-host/src/client.rs` | `runners` |
+| `crates/fleet-host/src/exec_k8s.rs` | `runners`, `k8s`, `fleet` |
+| `crates/fleet-host/src/spawn.rs` | `runners` |
 | `crates/fleet-integrations/src/routes.rs` | `integrations` |
+| `crates/fleet-orchestrator/Cargo.toml` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/plan.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/spawn.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sandbox/remote.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/store/host_pool.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/store/mod.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/assignable_runner.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/guest_harness_claim.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_picker_product.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_pool_spawn.rs` | `fleet` |
+| `crates/fleet-runners-view/src/types.rs` | `runners` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_kind_smoke.py` | `lab` |
 | `crates/fleet-server/src/admin.rs` | `admin` |
+| `crates/fleet-server/src/cases.rs` | `cases` |
+| `crates/fleet-server/src/chat.rs` | `chat` |
+| `crates/fleet-server/src/chat_tools.rs` | `chat` |
+| `crates/fleet-server/src/fleet_routes.rs` | `fleet` |
 | `crates/fleet-server/src/lib.rs` | `api` |
 | `crates/fleet-server/src/providers.rs` | `chat` |
+| `crates/fleet-server/src/tickets.rs` | `inbox` |
 | `crates/fleet-server/src/worker_hosts.rs` | `runners` |
 | `crates/fleet-ui/src/components/sidebar.rs` | `shell` |
 | `crates/fleet-ui/src/main.rs` | `shell` |
@@ -63,6 +96,10 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-ui/src/pages/admin/mod.rs` | `admin` |
 | `crates/fleet-ui/src/pages/admin/page.rs` | `admin` |
 | `crates/fleet-ui/src/pages/auth/api.rs` | `auth`, `workspace` |
+| `crates/fleet-ui/src/pages/runners/self_hosted/api.rs` | `runners` |
+| `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |
+| `crates/fleet-ui/src/pages/settings/api.rs` | `settings` |
+| `crates/fleet-ui/src/pages/settings/page.rs` | `settings` |
 
 ## Film review (agent fills after recording)
 
@@ -71,7 +108,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes — `GET /health.git_sha` and UI `/fleet-git-sha.txt` = `c2f43289696282c9ed5b1443d2e732bfa0c58ff7`. Clip `.tmp/demos/20260912T200147Z-auth-shell-workspace-api-chat-integrations-settings-admin.webm`.
-- Frames + webm inspected: yes — 53 frames under `.tmp/demos/20260912T200147Z-frames/` plus the `.webm`.
-- Bugs found:
-  - none. Promote/Demote toasts fired. Inbox and OAuth lines are readable text. Control plane git sha matches the bake. No pair tokens or JWT on screen.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)

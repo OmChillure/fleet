@@ -47,6 +47,9 @@ pub struct SpawnPayload {
     pub worker_token: String,
     pub orchestrator_url: String,
     pub runtime: String,
+    /// Use case: `on_pc` | `in_container`.
+    #[serde(default)]
+    pub run_mode: String,
     /// Isolation class: process | container | vm. Not "k8s".
     #[serde(default)]
     pub isolation: String,
@@ -63,6 +66,31 @@ pub struct SpawnPayload {
     #[serde(default)]
     pub workspace_files: HashMap<String, String>,
     pub env: HashMap<String, String>,
+}
+
+fn is_vendor_guest_env(key: &str) -> bool {
+    matches!(
+        key,
+        "XAI_API_KEY" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN"
+    )
+}
+
+fn strip_denied_secret_env(env: &mut HashMap<String, String>) {
+    const DENY: &[&str] = &[
+        "GROK_SESSION",
+        "FLEET_GROK_SESSION",
+        "AUTH_JSON",
+        "FLEET_AUTH_JSON",
+        "CLAUDE_SESSION",
+        "FLEET_CLAUDE_SESSION",
+    ];
+    for k in DENY {
+        env.remove(*k);
+    }
+    env.retain(|k, _| {
+        let u = k.to_ascii_uppercase();
+        !u.contains("AUTH.JSON") && !u.contains("AUTH_JSON") && !u.ends_with("_SESSION_KEY")
+    });
 }
 
 fn isolation_for_runtime(runtime: &str) -> &'static str {
@@ -85,10 +113,11 @@ pub fn spawn_payload(
     let mut env: HashMap<String, String> = req
         .env
         .iter()
-        .filter(|(k, _)| k.starts_with("FLEET_"))
+        .filter(|(k, _)| k.starts_with("FLEET_") || is_vendor_guest_env(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     env.remove("FLEET_WORK_DIR");
+    strip_denied_secret_env(&mut env);
     env.insert("FLEET_WORKER_TOKEN".into(), req.worker_token.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
     let isolation = isolation_for_runtime(runtime);
@@ -106,6 +135,10 @@ pub fn spawn_payload(
         worker_token: req.worker_token.clone(),
         orchestrator_url: orchestrator_url.into(),
         runtime: runtime.into(),
+        run_mode: match runtime {
+            "container" | "docker" | "k8s" | "kubernetes" => "in_container".into(),
+            _ => "on_pc".into(),
+        },
         isolation: isolation.into(),
         task_title: req.task_title.clone().unwrap_or_default(),
         task_spec: req.task_spec.clone().unwrap_or_default(),
@@ -225,6 +258,7 @@ mod tests {
         assert_eq!(v["task_title"], "Do it");
         assert_eq!(v["task_spec"], "spec");
         assert_eq!(v["isolation"], "process");
+        assert_eq!(v["run_mode"], "on_pc");
         assert_eq!(p.kind, "spawn_session");
         assert_eq!(p.worker_token, "tok-plain");
         assert!(!p.env.contains_key("FLEET_WORK_DIR"));

@@ -1103,6 +1103,12 @@ class Demo:
                     self.bug(f"agent count did not persist after Save+reload (got {got!r})")
                 self.snap("reloaded-agents")
 
+        if "Where new fleet jobs run" not in p.inner_text("body"):
+            self.bug("Settings missing Where new fleet jobs run")
+        if "API keys for Run in a container" not in p.inner_text("body"):
+            self.bug("Settings missing API keys for Run in a container")
+        self.snap("run-mode-and-keys")
+
         heading = p.get_by_role("heading", name="Members", exact=True)
         if heading.count() == 0:
             raise RuntimeError("Settings page missing Members heading")
@@ -1227,6 +1233,9 @@ class Demo:
         add = p.get_by_role("button", name="Add worker")
         if add.count() == 0:
             self.bug("self-hosted missing Add worker")
+        body_before = p.inner_text("body")
+        if "Only me" not in body_before and "Who can send work" not in body_before:
+            self.bug("self-hosted missing who-can-send radios (Only me / shared PC)")
         else:
             with self.expect_http("POST", "/worker-hosts", status=("200", "201")):
                 add.first.click()
