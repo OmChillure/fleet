@@ -21,12 +21,13 @@ enum NavSection {
     Agents,
     Runners,
     Workspace,
+    Instance,
 }
 
 #[component]
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
-    let workspace_id = route.workspace_id().unwrap_or("").to_string();
+    let route_ws = route.workspace_id().unwrap_or("").to_string();
 
     // Full-width when true; collapsed rail with only the toggle when false.
     let mut sidebar_open = use_signal(|| true);
@@ -64,6 +65,7 @@ pub fn Sidebar() -> Element {
             | Route::RunnersIndex { .. }
             | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
             Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
+            Route::Admin {} => Some(NavSection::Instance),
             _ => None,
         };
         if let Some(section) = section {
@@ -92,6 +94,14 @@ pub fn Sidebar() -> Element {
     });
 
     let list_snapshot = workspaces();
+    let workspace_id = if route_ws.is_empty() {
+        list_snapshot
+            .first()
+            .map(|w| w.id.clone())
+            .unwrap_or_default()
+    } else {
+        route_ws.clone()
+    };
     let current = list_snapshot
         .iter()
         .find(|w| w.id == workspace_id)
@@ -416,6 +426,25 @@ pub fn Sidebar() -> Element {
                         label: "Settings",
                     }
                 }
+
+                if user().is_some_and(|u| u.instance_admin) {
+                    NavAccordion {
+                        title: "Instance",
+                        expanded: expanded().contains(&NavSection::Instance),
+                        on_toggle: move |_| {
+                            let mut set = expanded();
+                            if !set.remove(&NavSection::Instance) {
+                                set.insert(NavSection::Instance);
+                            }
+                            expanded.set(set);
+                        },
+                        icon: rsx! { IconMonitor {} },
+                        NavSubLink {
+                            to: Route::Admin {},
+                            label: "Overview",
+                        }
+                    }
+                }
             }
 
             UserFooter {
@@ -529,6 +558,18 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                                 },
                                 "Settings"
                             }
+                        }
+                    }
+
+                    if user.as_ref().is_some_and(|u| u.instance_admin) {
+                        button {
+                            class: "flex w-full items-center px-3 py-2 text-left text-sm text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
+                            r#type: "button",
+                            onclick: move |_| {
+                                menu_open.set(false);
+                                navigator.push(Route::Admin {});
+                            },
+                            "Instance admin"
                         }
                     }
 

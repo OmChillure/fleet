@@ -368,7 +368,7 @@ fn local_nonloopback_ips() -> Vec<String> {
     out
 }
 
-fn origin_is_loopback(headers: &HeaderMap) -> bool {
+pub(crate) fn origin_is_loopback(headers: &HeaderMap) -> bool {
     for key in [header::ORIGIN, header::REFERER] {
         let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
             continue;
@@ -422,7 +422,7 @@ fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
     host_json_for_viewer(state, host, false)
 }
 
-fn host_json_for_viewer(
+pub(crate) fn host_json_for_viewer(
     state: &AppState,
     host: &WorkerHost,
     viewer_loopback: bool,

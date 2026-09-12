@@ -13,6 +13,8 @@ pub struct AuthConfig {
     pub cookie_samesite: cookie::SameSite,
     /// When set, POST /api/auth/signup requires this shared token.
     pub signup_token: Option<String>,
+    /// Normalized emails that are always granted `users.instance_admin` on auth.
+    pub instance_admin_emails: Vec<String>,
 }
 
 impl AuthConfig {
@@ -62,8 +64,28 @@ impl AuthConfig {
             cookie_secure,
             cookie_samesite,
             signup_token,
+            instance_admin_emails: instance_admin_emails_from_env(),
         })
     }
+
+    pub fn email_is_env_instance_admin(&self, email_normalized: &str) -> bool {
+        self.instance_admin_emails
+            .iter()
+            .any(|e| e == email_normalized)
+    }
+}
+
+/// Comma-separated emails. Trimmed, lowercased, must contain `@`.
+pub fn instance_admin_emails_from_env() -> Vec<String> {
+    parse_instance_admin_emails(env::var("INSTANCE_ADMIN_EMAILS").ok().as_deref())
+}
+
+pub fn parse_instance_admin_emails(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && s.contains('@'))
+        .collect()
 }
 
 #[cfg(test)]
@@ -135,5 +157,15 @@ mod tests {
             }
         }
         assert_eq!(cfg.signup_token.as_deref(), Some("invite-abc"));
+    }
+
+    #[test]
+    fn parse_instance_admin_emails_normalizes() {
+        assert_eq!(
+            parse_instance_admin_emails(Some("  Ada@Example.TEST ,bob@x.test,,")),
+            vec!["ada@example.test".to_string(), "bob@x.test".to_string()]
+        );
+        assert!(parse_instance_admin_emails(Some("")).is_empty());
+        assert!(parse_instance_admin_emails(Some("not-an-email")).is_empty());
     }
 }

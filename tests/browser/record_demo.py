@@ -962,6 +962,111 @@ class Demo:
             if "Asana" not in p.inner_text("body"):
                 self.bug("search asana did not show Asana")
 
+    def scene_admin(self) -> None:
+        """Instance admin: counts, users, promote/demote, runners, health."""
+        import subprocess
+
+        base = self.ensure_session()
+        p = self.page
+        url = os.environ.get("DATABASE_URL", "").strip()
+        if not url:
+            envp = REPO / ".env"
+            if envp.is_file():
+                for line in envp.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("DATABASE_URL="):
+                        url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        if not url:
+            raise RuntimeError("DATABASE_URL required to promote the demo instance admin")
+        sql = (
+            "UPDATE users SET instance_admin = TRUE, updated_at = now() "
+            f"WHERE email_normalized = lower(trim('{self.email}')) RETURNING email;"
+        )
+        out = subprocess.check_output(
+            ["psql", url, "-v", "ON_ERROR_STOP=1", "-tAc", sql],
+            text=True,
+        )
+        if self.email.lower() not in out.lower():
+            raise RuntimeError(f"promote missed {self.email}: {out!r}")
+
+        p.goto(f"{UI}/admin", wait_until="domcontentloaded")
+        p.get_by_role("heading", name="Instance", exact=True).first.wait_for(
+            timeout=25_000
+        )
+        p.get_by_role("heading", name="Users", exact=True).wait_for(timeout=25_000)
+        pause(p, 800)
+        if p.locator("h1").first.inner_text().strip() != "Instance":
+            raise RuntimeError(f"admin missing Instance heading ({p.url})")
+        self.snap("loaded")
+        if p.get_by_role("heading", name="Users", exact=True).count() == 0:
+            raise RuntimeError("admin missing Users")
+        if p.get_by_text(self.email, exact=False).count() == 0:
+            self.bug(f"admin users missing signed-in {self.email}")
+
+        guest = f"demo-admin-{uuid.uuid4().hex[:8]}@example.test"
+        res = p.request.post(
+            f"{UI}/api/auth/signup",
+            data=json.dumps(
+                {
+                    "email": guest,
+                    "password": DEMO_PASSWORD,
+                    "display_name": "Demo Guest",
+                }
+            ),
+            headers={"content-type": "application/json"},
+        )
+        if res.status != 201:
+            self.bug(f"guest signup {res.status}: {res.text()[:200]}")
+        else:
+            p.reload(wait_until="networkidle")
+            pause(p, 600)
+            row = p.locator("tr").filter(has_text=guest)
+            if row.count() == 0:
+                self.bug(f"guest {guest} missing from users after reload")
+            else:
+                row.first.scroll_into_view_if_needed()
+                with self.expect_http("PATCH", "/api/admin/users/", status="200"):
+                    row.get_by_role("button", name="Promote", exact=True).click()
+                try:
+                    p.get_by_text("Promoted to instance admin.", exact=True).wait_for(
+                        timeout=10_000
+                    )
+                except Exception:
+                    self.bug("Promote produced no toast")
+                self.dismiss_toasts()
+                self.snap("promoted")
+                row = p.locator("tr").filter(has_text=guest)
+                with self.expect_http("PATCH", "/api/admin/users/", status="200"):
+                    row.get_by_role("button", name="Demote", exact=True).click()
+                try:
+                    p.get_by_text("Demoted instance admin.", exact=True).wait_for(
+                        timeout=10_000
+                    )
+                except Exception:
+                    self.bug("Demote produced no toast")
+                self.dismiss_toasts()
+                self.snap("demoted")
+
+        for heading in ("Workspaces", "Runners", "Live work", "Control plane"):
+            if p.get_by_role("heading", name=heading, exact=True).count() == 0:
+                self.bug(f"admin missing {heading} section")
+        p.get_by_role("heading", name="Runners", exact=True).first.scroll_into_view_if_needed()
+        pause(p, 400)
+        self.snap("runners")
+        p.get_by_role("heading", name="Control plane", exact=True).first.scroll_into_view_if_needed()
+        pause(p, 400)
+        self.snap("health")
+        self.note_unexpected_errors(
+            allowed=(
+                "Instance admin required",
+                "No runners registered",
+                "No staged worker packages",
+                "failed",
+                "failed_spawn",
+            )
+        )
+        _ = base
+
     def scene_settings(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -1452,6 +1557,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "inbox": Demo.scene_inbox,
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
+    "admin": Demo.scene_admin,
     "settings": Demo.scene_settings,
     "runners": Demo.scene_runners,
     "workers": Demo.scene_workers,
@@ -1479,6 +1585,7 @@ CORE = [
     "agents",
     "integrations",
     "settings",
+    "admin",
     "runners",
     "cloud",
     "partners",

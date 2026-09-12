@@ -393,6 +393,7 @@ mod tests {
                 cookie_secure: false,
                 cookie_samesite: cookie::SameSite::Lax,
                 signup_token: None,
+                instance_admin_emails: Vec::new(),
             },
         })
     }

@@ -138,6 +138,13 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
+| `GET` | `/api/admin/overview` | Instance counts (instance admin) |
+| `GET` | `/api/admin/users` | All users (instance admin) |
+| `PATCH` | `/api/admin/users/{id}` | Promote / disable (`instance_admin`, `status`) |
+| `GET` | `/api/admin/workspaces` | All workspaces |
+| `GET` | `/api/admin/runners` | All paired hosts |
+| `GET` | `/api/admin/instance` | Health, public URLs, provider flags, staged packages |
+| `GET` | `/api/admin/work` | Cross-workspace session/claim/case totals |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -156,6 +163,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/cases/{case_id}` | Case detail, observe, cancel |
 | `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
+| `/admin` | Instance admin (users, all runners, health). Not workspace-scoped |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 | `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |
 | `/{workspace_id}/runners/cloud` | Cloud runners placeholder |

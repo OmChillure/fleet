@@ -43,9 +43,30 @@ pub async fn require_user(state: &AuthState, jar: &CookieJar) -> AppResult<User>
         return Err(AppError::unauthorized("session is no longer valid"));
     }
 
-    user_repo::find_active_by_id(&state.db, user_id)
+    let user = user_repo::find_active_by_id(&state.db, user_id)
         .await?
-        .ok_or_else(|| AppError::unauthorized("user not found"))
+        .ok_or_else(|| AppError::unauthorized("user not found"))?;
+    grant_env_instance_admin(state, user).await
+}
+
+/// Grant `instance_admin` when the email is listed in `INSTANCE_ADMIN_EMAILS`.
+/// Never revokes a flag that was set in the UI or a previous grant.
+pub async fn grant_env_instance_admin(state: &AuthState, user: User) -> AppResult<User> {
+    if user.instance_admin || !state.config.email_is_env_instance_admin(&user.email_normalized) {
+        return Ok(user);
+    }
+    user_repo::set_instance_admin(&state.db, user.id, true)
+        .await?
+        .ok_or_else(|| AppError::internal("failed to grant instance admin"))
+}
+
+/// Cookie user who is an instance admin (after env grant).
+pub async fn require_instance_admin(state: &AuthState, jar: &CookieJar) -> AppResult<User> {
+    let user = require_user(state, jar).await?;
+    if !user.instance_admin {
+        return Err(AppError::forbidden("instance admin required"));
+    }
+    Ok(user)
 }
 
 fn normalize_email(email: &str) -> String {
@@ -208,6 +229,8 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
+    let user = grant_env_instance_admin(&state, user).await?;
+
     if let Err(e) =
         workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
             .await
@@ -276,6 +299,8 @@ pub async fn login(
         tracing::warn!(user_id = %user.id, email = %email_normalized, "login failed: bad password");
         return Err(AppError::unauthorized("invalid email or password"));
     }
+
+    let user = grant_env_instance_admin(&state, user).await?;
 
     let (access, refresh, sid) =
         create_session_and_tokens(&state, &user, &headers, connect).await?;
@@ -387,6 +412,8 @@ pub async fn refresh(
     if !user.is_active() {
         return Err(AppError::unauthorized("account is not active"));
     }
+
+    let user = grant_env_instance_admin(&state, user).await?;
 
     let new_session_id = Uuid::now_v7();
     let new_refresh = generate_refresh_token();

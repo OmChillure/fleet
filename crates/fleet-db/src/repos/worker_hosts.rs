@@ -20,7 +20,7 @@ pub const MACHINE_TOKEN_PREFIX: &str = "flm_";
 /// Catalog: pair tokens expire after one hour (HTTP create/rotate uses `now + PAIR_TTL`).
 pub const PAIR_TTL: Duration = Duration::hours(1);
 
-const HOST_COLS: &str = r#"
+pub(crate) const HOST_COLS: &str = r#"
     id, workspace_id, name, status, enabled, paused, drain, isolation,
     allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
     machine_token_hash, advertised_host, advertised_container, platform, hostname,

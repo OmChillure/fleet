@@ -66,6 +66,7 @@ mod tests {
             cookie_secure,
             cookie_samesite: SameSite::Lax,
             signup_token: None,
+            instance_admin_emails: Vec::new(),
         }
     }
 

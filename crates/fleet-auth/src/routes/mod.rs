@@ -3,7 +3,7 @@ mod members;
 mod personas;
 mod workspaces;
 
-pub use auth::require_user;
+pub use auth::{require_instance_admin, require_user};
 
 use axum::Router;
 use axum::extract::FromRef;

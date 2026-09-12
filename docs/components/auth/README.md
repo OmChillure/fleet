@@ -97,6 +97,7 @@ so cookies set by the API match subsequent requests.
 | `COOKIE_SECURE` | `Secure` flag on cookies |
 | `COOKIE_SAMESITE` | `Lax` (default) / `Strict` / `None` |
 | `CORS_ORIGINS` | Allowed UI origins |
+| `INSTANCE_ADMIN_EMAILS` | Comma-separated emails granted instance admin on login |
 
 Full table: [`.env.example`](../../../.env.example), [`fleet-server/README.md`](../../../crates/fleet-server/README.md).
 
@@ -111,8 +112,9 @@ Full table: [`.env.example`](../../../.env.example), [`fleet-server/README.md`](
 | List + create workspaces | Done |
 | Password hashing (argon2) | Done |
 | Workspace roles beyond owner on create | Schema ready; UI only creates as owner |
-| OAuth / SSO / invites | Not started |
+| OAuth / SSO / invites | Invites done; SSO not started |
 | Email verification | Not started |
+| Instance admin (`users.instance_admin`) | Done — `INSTANCE_ADMIN_EMAILS` + `/admin` |
 
 ---
 

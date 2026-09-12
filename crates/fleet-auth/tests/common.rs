@@ -44,6 +44,7 @@ fn test_auth_config() -> AuthConfig {
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
         signup_token: None,
+        instance_admin_emails: Vec::new(),
     }
 }
 
@@ -70,6 +71,12 @@ pub async fn app() -> axum::Router {
 pub async fn app_with_signup_token(token: &str) -> axum::Router {
     let mut config = test_auth_config();
     config.signup_token = Some(token.to_string());
+    app_with_config(config).await
+}
+
+pub async fn app_with_instance_admin_emails(emails: &[&str]) -> axum::Router {
+    let mut config = test_auth_config();
+    config.instance_admin_emails = emails.iter().map(|e| e.to_lowercase()).collect();
     app_with_config(config).await
 }
 

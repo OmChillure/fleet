@@ -11,6 +11,9 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub status: String,
+    /// Cross-workspace operator. Not the workspace membership role `admin`.
+    #[serde(default)]
+    pub instance_admin: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Optimistic concurrency token for profile updates.
@@ -29,6 +32,10 @@ pub struct UserPublic {
     pub id: Uuid,
     pub email: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub instance_admin: bool,
+    #[serde(default)]
+    pub status: String,
 }
 
 impl From<User> for UserPublic {
@@ -37,6 +44,8 @@ impl From<User> for UserPublic {
             id: u.id,
             email: u.email,
             display_name: u.display_name,
+            instance_admin: u.instance_admin,
+            status: u.status,
         }
     }
 }
@@ -47,6 +56,8 @@ impl From<&User> for UserPublic {
             id: u.id,
             email: u.email.clone(),
             display_name: u.display_name.clone(),
+            instance_admin: u.instance_admin,
+            status: u.status.clone(),
         }
     }
 }
