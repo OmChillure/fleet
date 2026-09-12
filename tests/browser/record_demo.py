@@ -1047,13 +1047,13 @@ class Demo:
                 self.dismiss_toasts()
                 self.snap("demoted")
 
-        for heading in ("Workspaces", "Runners", "Live work", "Instance"):
+        for heading in ("Workspaces", "Runners", "Live work", "Control plane"):
             if p.get_by_role("heading", name=heading, exact=True).count() == 0:
                 self.bug(f"admin missing {heading} section")
         p.get_by_role("heading", name="Runners", exact=True).first.scroll_into_view_if_needed()
         pause(p, 400)
         self.snap("runners")
-        p.get_by_role("heading", name="Instance", exact=True).nth(1).scroll_into_view_if_needed()
+        p.get_by_role("heading", name="Control plane", exact=True).first.scroll_into_view_if_needed()
         pause(p, 400)
         self.snap("health")
         self.note_unexpected_errors(

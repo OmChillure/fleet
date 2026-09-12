@@ -559,7 +559,7 @@ fn InstanceSection(instance: Value) -> Element {
     let bootstrap = json_bool(&instance, "bootstrap_pair_enabled");
     rsx! {
         section { class: "mt-8 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Instance" }
+            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Control plane" }
             p { class: "mt-2 text-sm text-[var(--app-fg)]",
                 "API {json_str(&health, \"status\")} · DB {json_str(&health, \"db\")} · git {json_str(&health, \"git_sha\")}"
             }

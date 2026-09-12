@@ -127,9 +127,7 @@ class AdminE2E(unittest.TestCase):
 
             promote_email(email)
             page.reload(wait_until="networkidle")
-            page.get_by_role("heading", name="Instance", exact=True).wait_for(
-                timeout=15_000
-            )
+            page.locator("h1").filter(has_text="Instance").wait_for(timeout=15_000)
             page.get_by_role("heading", name="Users", exact=True).wait_for()
             self.assertGreater(page.get_by_text(email, exact=False).count(), 0)
             guest = f"admin-guest-{uuid.uuid4().hex[:8]}@example.test"
