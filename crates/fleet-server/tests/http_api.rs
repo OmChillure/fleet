@@ -5735,7 +5735,7 @@ async fn inbox_finish_unknown_provider_is_400() {
 }
 
 #[tokio::test]
-async fn inbox_finish_unseen_github_key_seeds_and_returns_run_id() {
+async fn inbox_finish_unseen_github_key_is_404_without_create_flag() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let key = format!("acme-{}/app#999", Uuid::new_v4());
@@ -5746,6 +5746,34 @@ async fn inbox_finish_unseen_github_key_seeds_and_returns_run_id() {
         &inbox_path(&ws, "/finish"),
         Some(&jar),
         Some(json!({ "provider": "github", "key": key })),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::NOT_FOUND, "{}", out.body);
+    let leftover = call(&app, "GET", &inbox_path(&ws, ""), Some(&jar), None).await;
+    let tickets = leftover.body["tickets"].as_array().cloned().unwrap_or_default();
+    assert!(
+        tickets.iter().all(|t| t["key"].as_str() != Some(key.as_str())),
+        "must not stub-create: {}",
+        leftover.body
+    );
+}
+
+#[tokio::test]
+async fn inbox_finish_unseen_github_key_seeds_when_create_if_missing() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let key = format!("acme-{}/app#999", Uuid::new_v4());
+
+    let out = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, "/finish"),
+        Some(&jar),
+        Some(json!({
+            "provider": "github",
+            "key": key,
+            "create_if_missing": true
+        })),
     )
     .await;
     assert_eq!(out.status, StatusCode::OK, "{}", out.body);
@@ -5779,6 +5807,28 @@ async fn inbox_finish_unseen_github_key_seeds_and_returns_run_id() {
         Some(run_id),
         "{}",
         leftover.body
+    );
+
+    let again = call(
+        &app,
+        "POST",
+        &inbox_path(&ws, "/finish"),
+        Some(&jar),
+        Some(json!({ "provider": "github", "key": key })),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
+    assert_eq!(
+        again.body["error"].as_str(),
+        Some("ticket already launched"),
+        "{}",
+        again.body
+    );
+    assert_eq!(
+        again.body["code"].as_str(),
+        Some("already_launched"),
+        "{}",
+        again.body
     );
 }
 

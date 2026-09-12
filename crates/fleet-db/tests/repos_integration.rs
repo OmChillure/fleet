@@ -639,6 +639,41 @@ async fn ticket_reopen_after_failed_run_and_mark_done() {
 }
 
 #[tokio::test]
+async fn reopen_tickets_for_run_clears_launched_row() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    tickets::upsert_inbox(
+        &pool,
+        &tickets::UpsertInbox {
+            workspace_id,
+            provider: "jira".into(),
+            external_key: "E2E-1".into(),
+            title: "cancel me".into(),
+            url: None,
+            summary: "x".into(),
+            provider_closed: false,
+        },
+    )
+    .await
+    .expect("inbox");
+    let run = Uuid::now_v7();
+    tickets::mark_launched(&pool, workspace_id, "jira", "E2E-1", run)
+        .await
+        .expect("launch")
+        .expect("row");
+    let n = tickets::reopen_tickets_for_run(&pool, workspace_id, run)
+        .await
+        .expect("reopen by run");
+    assert_eq!(n, 1);
+    let row = tickets::find_inbox(&pool, workspace_id, "jira", "E2E-1")
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(row.state, "open");
+    assert!(row.run_id.is_none());
+}
+
+#[tokio::test]
 async fn mark_inbox_done_sets_state_done_and_keeps_run_id() {
     let pool = connect_and_migrate().await;
     let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;

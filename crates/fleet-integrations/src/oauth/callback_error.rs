@@ -86,7 +86,9 @@ impl OAuthCallbackError {
             AppError::Unauthorized(msg) => Self::invalid_state(workspace_hint, msg),
             AppError::Forbidden(_) => Self::not_a_member(workspace_hint),
             AppError::BadRequest(msg) => Self::client(workspace_hint, msg),
-            AppError::Conflict(_) => Self::nonce_reuse(workspace_hint),
+            AppError::Conflict(_) | AppError::ConflictCoded(_, _) => {
+                Self::nonce_reuse(workspace_hint)
+            }
             other => Self::other(workspace_hint, other.to_string()),
         }
     }

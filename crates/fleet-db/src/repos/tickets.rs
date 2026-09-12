@@ -404,6 +404,45 @@ pub async fn reopen_ticket(
         .map_err(map_query_err)
 }
 
+/// Cancel/fail of a run — every inbox row still `launched` on that run reopens.
+pub async fn reopen_tickets_for_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'open', run_id = NULL, last_seen_at = now()
+        WHERE workspace_id = $1
+          AND run_id = $2
+          AND state = 'launched'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}
+
+pub async fn reopen_tickets_for_run_id(pool: &PgPool, run_id: Uuid) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'open', run_id = NULL, last_seen_at = now()
+        WHERE run_id = $1
+          AND state = 'launched'
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}
+
 pub async fn mark_inbox_done(
     pool: &PgPool,
     workspace_id: Uuid,

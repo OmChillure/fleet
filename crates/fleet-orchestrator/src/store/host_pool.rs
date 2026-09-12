@@ -425,11 +425,18 @@ pub fn pick_assignable_runner(
     pick_assignable_runner_for(hosts, in_flight, IsolationClass::Process)
 }
 
-/// V1 tick: native host-runtime only. A box that only advertises
-/// container must not win `select_assignable_runner`.
-/// Cloud / Partners / public-cloud cannot be chosen.
+/// Tick assignment honors workspace `min_isolation`. Process need → OnPc;
+/// container need → InContainer. Cloud / Partners cannot be chosen.
 pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
     select_assignable_runner_for_actor(store, project_id, None).await
+}
+
+fn run_mode_for_isolation(need: IsolationClass) -> Option<RunMode> {
+    match need {
+        IsolationClass::Process => Some(RunMode::OnPc),
+        IsolationClass::Container => Some(RunMode::InContainer),
+        IsolationClass::Vm => None,
+    }
 }
 
 /// Chat / inbox taking-runner: send-ACL on (cluster is not a PC).
@@ -440,24 +447,24 @@ pub async fn select_assignable_runner_for_actor(
 ) -> Option<ChosenHost> {
     let hosts = list_assignable_hosts(store, project_id).await?;
     let need = workspace_need(store, project_id).await;
+    let run_mode = run_mode_for_isolation(need)?;
     let member = actor_is_member(store, project_id, actor).await;
-    let host_only: Vec<AssignableHost> = hosts
+    let job = JobNeed {
+        run_mode,
+        actor,
+        min_isolation: need,
+        provider: None,
+        vendor_key_ok: true,
+    };
+    let matching: Vec<AssignableHost> = hosts
         .into_iter()
-        .filter(|h| h.isolation.is_assignable())
-        .filter(|h| effective_runtime_for(h, need) == Some(HostRuntime::Host))
-        .filter(|h| send_acl_allows(h, actor, member))
+        .filter(|h| host_matches_job(h, &job, member))
         .collect();
-    if host_only.is_empty() {
+    if matching.is_empty() {
         return None;
     }
     let in_flight = count_remote_in_flight(store).await?;
-    pick_assignable_host_in(
-        &host_only,
-        &in_flight,
-        IsolationClass::Process,
-        Some(project_id),
-    )
-    .filter(|chosen| chosen.runtime == HostRuntime::Host)
+    pick_assignable_host_in(&matching, &in_flight, need, Some(project_id))
 }
 
 /// Online native host-runtime, even at job cap. Inbox finish stamps this so
@@ -501,17 +508,21 @@ pub async fn select_online_runner_for_actor(
     attach_send_allowlists(store, &mut hosts).await;
     let member = actor_is_member(store, project_id, actor).await;
     let need = workspace_need(store, project_id).await;
-    hosts
-        .into_iter()
-        .find(|h| {
-            h.isolation.is_assignable()
-                && effective_runtime_for(h, need) == Some(HostRuntime::Host)
-                && send_acl_allows(h, actor, member)
-        })
-        .map(|host| ChosenHost {
-            host,
-            runtime: HostRuntime::Host,
-        })
+    let run_mode = run_mode_for_isolation(need)?;
+    let job = JobNeed {
+        run_mode,
+        actor,
+        min_isolation: need,
+        provider: None,
+        vendor_key_ok: true,
+    };
+    hosts.into_iter().find_map(|host| {
+        if !host_matches_job(&host, &job, member) {
+            return None;
+        }
+        let runtime = runtime_for_run_mode(run_mode);
+        Some(ChosenHost { host, runtime })
+    })
 }
 
 /// Use `preferred` when that host is still assignable on this plane URL;
@@ -542,8 +553,9 @@ pub async fn select_assignable_runner_preferring_for_actor(
     actor: Option<Uuid>,
 ) -> Option<ChosenHost> {
     let need = workspace_need(store, project_id).await;
+    let run_mode = run_mode_for_isolation(need)?;
     let job = JobNeed {
-        run_mode: RunMode::OnPc,
+        run_mode,
         actor,
         min_isolation: need,
         provider: None,

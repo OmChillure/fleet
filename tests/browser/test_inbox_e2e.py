@@ -130,9 +130,9 @@ class InboxE2ETests(unittest.TestCase):
             start.click()
             expect(page.get_by_role("button", name="Stop monitor")).to_be_enabled()
 
-            # Start monitor turns auto_launch on. Turn it off so Finish is a
-            # real click, not a race with drive_inbox.
-            keep = page.locator("label").filter(has_text="Keep working open tickets")
+            # Start monitor no longer turns auto_launch on. Uncheck if a
+            # previous poll left it on so Finish is a real click.
+            keep = page.locator("label").filter(has_text="Launch open tickets")
             box = keep.locator("input[type='checkbox']")
             expect(box).to_be_visible()
             box.uncheck()

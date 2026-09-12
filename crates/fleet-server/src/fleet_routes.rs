@@ -907,6 +907,8 @@ async fn post_cancel(
             tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
             AppError::bad_request(e.to_string())
         })?;
+    let _ = fleet_db::repos::tickets::reopen_tickets_for_run(&state.db, workspace_id, run_id)
+        .await;
     Ok(Json(json!({
         "run_id": run_id,
         "cancel_requested": true,

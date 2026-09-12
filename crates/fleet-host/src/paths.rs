@@ -32,6 +32,10 @@ pub fn machine_id_path() -> PathBuf {
     config_dir().join("machine.id")
 }
 
+pub fn last_heartbeat_path() -> PathBuf {
+    config_dir().join("last_heartbeat.json")
+}
+
 /// Exclusive lock file for this config dir (`run.lock` next to `machine.id`).
 pub fn run_lock_path() -> PathBuf {
     run_lock_path_in(&config_dir())

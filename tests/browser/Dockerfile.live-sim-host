@@ -1,0 +1,16 @@
+# Cached throwaway runner: fleet-host + docker CLI + ollama.
+# Models stay on a mounted host volume (~/.ollama) — this image is bins only.
+ARG BASE=agent-fleet-api:ace6eae53e2cba80516f1171a83084488eeadec6
+FROM ${BASE}
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl docker.io zstd \
+    && curl -fsSL https://ollama.com/install.sh | sh \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v ollama \
+    && command -v docker \
+    && command -v fleet-host \
+    && command -v fleet-driver
+ENV OLLAMA_HOST=127.0.0.1:11435
+LABEL fleet.live-sim-host=1

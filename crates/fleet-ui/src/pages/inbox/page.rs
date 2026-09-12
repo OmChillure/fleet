@@ -59,7 +59,8 @@ pub fn Inbox(workspace_id: String) -> Element {
     let mut linear_teams = use_signal(String::new);
     let mut trello_boards = use_signal(String::new);
     let mut hook_url = use_signal(String::new);
-    let mut auto_launch = use_signal(|| true);
+    let mut auto_launch = use_signal(|| false);
+    let mut finish_error = use_signal(|| None::<(String, String)>);
     let mut follow_connected = use_signal(|| true);
 
     let ws_list = workspace_id.clone();
@@ -289,7 +290,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                         checked: auto_launch(),
                         onchange: move |e| auto_launch.set(e.checked()),
                     }
-                    "Keep working open tickets (on by default with Start monitor)"
+                    "Launch open tickets on each poll (off until you turn it on)"
                 }
                 button {
                     class: "mt-3 rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",
@@ -369,35 +370,50 @@ pub fn Inbox(workspace_id: String) -> Element {
                                 }
                             }
                             if t.run_id.is_none() && t.state == "open" {
-                                button {
-                                    class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
-                                    r#type: "button",
-                                    disabled: busy(),
-                                    onclick: {
-                                        let ws = workspace_id.clone();
-                                        let provider = t.provider.clone();
-                                        let key = t.key.clone();
-                                        move |_| {
-                                            if busy() { return; }
-                                            busy.set(true);
-                                            let ws = ws.clone();
-                                            let provider = provider.clone();
-                                            let key = key.clone();
-                                            spawn(async move {
-                                                match finish_ticket(&ws, &provider, &key).await {
-                                                    Ok(_) => show_toast().success("Fleet launched."),
-                                                    Err(e) => show_toast().error(e.message()),
-                                                }
-                                                if let Ok(resp) = list_inbox(&ws).await {
-                                                    rows.set(resp.tickets.clone());
-                                                    monitor.set(resp.monitor.clone());
-                                                    status_line.set(status_for(&resp));
-                                                }
-                                                busy.set(false);
-                                            });
+                                div { class: "flex min-w-0 flex-col items-end gap-1",
+                                    button {
+                                        class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
+                                        r#type: "button",
+                                        disabled: busy(),
+                                        onclick: {
+                                            let ws = workspace_id.clone();
+                                            let provider = t.provider.clone();
+                                            let key = t.key.clone();
+                                            move |_| {
+                                                if busy() { return; }
+                                                busy.set(true);
+                                                finish_error.set(None);
+                                                let ws = ws.clone();
+                                                let provider = provider.clone();
+                                                let key = key.clone();
+                                                spawn(async move {
+                                                    match finish_ticket(&ws, &provider, &key).await {
+                                                        Ok(_) => show_toast().success("Fleet launched."),
+                                                        Err(e) => {
+                                                            finish_error.set(Some((
+                                                                format!("{provider}:{key}"),
+                                                                e.message(),
+                                                            )));
+                                                        }
+                                                    }
+                                                    if let Ok(resp) = list_inbox(&ws).await {
+                                                        rows.set(resp.tickets.clone());
+                                                        monitor.set(resp.monitor.clone());
+                                                        status_line.set(status_for(&resp));
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            }
+                                        },
+                                        "Finish"
+                                    }
+                                    if let Some((id, msg)) = finish_error() {
+                                        if id == format!("{}:{}", t.provider, t.key) {
+                                            p { class: "m-0 max-w-56 text-right text-[11px] text-red-400",
+                                                "{msg}"
+                                            }
                                         }
-                                    },
-                                    "Finish"
+                                    }
                                 }
                             }
                         }

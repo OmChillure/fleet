@@ -60,12 +60,31 @@ const CONTROL_PLANE_URL_ENV: &str = "FLEET_CONTROL_PLANE_URL";
 const PAIR_TOKEN_ENV: &str = "FLEET_PAIR_TOKEN";
 const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
-pub async fn pair(url: &str, token: &str) -> Result<()> {
+pub async fn pair(url: &str, token: &str, force: bool) -> Result<()> {
     let mut cfg = LocalConfig::load_or_default()?;
+    refuse_url_switch(&cfg, url, force)?;
     let client = HostClient::for_pair(url, &cfg)?;
     let resp = client.pair(&cfg, token.trim()).await?;
     persist_pair(&mut cfg, url, &resp)?;
     start_run_after_pair();
+    Ok(())
+}
+
+fn refuse_url_switch(cfg: &LocalConfig, url: &str, force: bool) -> Result<()> {
+    let Some(existing) = cfg.control_plane_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let have_token = crate::config::read_machine_token()?.is_some();
+    if !have_token {
+        return Ok(());
+    }
+    let old = normalize_url(existing);
+    let new = normalize_url(url);
+    if old != new && !force {
+        bail!(
+            "already paired to {old}; pass --force to pair {new} (this rotates the machine token)"
+        );
+    }
     Ok(())
 }
 
@@ -157,7 +176,41 @@ pub fn status() -> Result<()> {
         }
     );
     println!("config:         {}", crate::paths::config_path().display());
+    if let Some((ok, detail)) = read_last_heartbeat() {
+        println!(
+            "last_heartbeat: {} {}",
+            if ok { "ok" } else { "error" },
+            detail
+        );
+    } else {
+        println!("last_heartbeat: (none)");
+    }
     Ok(())
+}
+
+fn last_heartbeat_path() -> std::path::PathBuf {
+    crate::paths::last_heartbeat_path()
+}
+
+fn record_last_heartbeat(ok: bool, detail: &str) {
+    let body = serde_json::json!({
+        "ok": ok,
+        "detail": detail.chars().take(240).collect::<String>(),
+        "at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = std::fs::write(last_heartbeat_path(), body.to_string());
+}
+
+fn read_last_heartbeat() -> Option<(bool, String)> {
+    let raw = std::fs::read_to_string(last_heartbeat_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let ok = v.get("ok")?.as_bool()?;
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((ok, detail))
 }
 
 pub fn unpair() -> Result<()> {
@@ -330,6 +383,7 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                 let n = jobs.lock().await.len() as u32;
                 match client.heartbeat(&cfg, n, None, update_state.is_updating(), take_install_ack()).await {
                     Ok(resp) => {
+                        record_last_heartbeat(true, "ok");
                         let mut eff = effective.lock().await;
                         if resp.effective.max_concurrent > 0 {
                             *eff = resp.effective;
@@ -423,6 +477,7 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                         }
                     }
                     Err(e) => {
+                        record_last_heartbeat(false, &e.to_string());
                         if is_machine_auth_err(&e) {
                             match reclaim_machine_token(&mut cfg, &url).await {
                                 Ok(c) => client = c,
@@ -641,7 +696,7 @@ pub fn print_usage() {
 fleet-host — paired worker host
 
 Usage:
-  fleet-host pair --url URL --token TOKEN
+  fleet-host pair --url URL --token TOKEN [--force]
   fleet-host run
   fleet-host update
   fleet-host status
@@ -693,6 +748,46 @@ mod tests {
             cfg.control_plane_url.as_deref(),
             Some("http://api.agent-fleet.svc.cluster.local:8080")
         );
+    }
+
+    #[test]
+    fn persist_pair_keeps_extra_env() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        cfg.extra_env
+            .insert("FLEET_HARNESS".into(), "ollama".into());
+        persist_pair(
+            &mut cfg,
+            "https://agentfleet.studio",
+            &pair_resp("https://agentfleet.studio"),
+        )
+        .unwrap();
+        let loaded = LocalConfig::load_or_default().unwrap();
+        assert_eq!(
+            loaded.extra_env.get("FLEET_HARNESS").map(String::as_str),
+            Some("ollama")
+        );
+    }
+
+    #[test]
+    fn refuse_url_switch_without_force() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        crate::config::write_machine_token("flm_existing").unwrap();
+        let mut cfg = LocalConfig::defaults();
+        cfg.control_plane_url = Some("https://agentfleet.studio".into());
+        let err = refuse_url_switch(&cfg, "http://192.168.1.1:18280", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--force"), "{err}");
+        refuse_url_switch(&cfg, "http://192.168.1.1:18280", true).unwrap();
     }
 
     #[test]
