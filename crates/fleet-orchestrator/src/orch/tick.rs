@@ -113,6 +113,10 @@ impl TickRunner {
         &self.data_dir
     }
 
+    pub fn integrations(&self) -> crate::sandbox::io::IntegrationHandle {
+        self.integrations.clone()
+    }
+
     /// Stop one live sandbox (UI / cookie kill). Signals the paired host,
     /// frees the claim, and cancels the board task.
     pub async fn kill_session(

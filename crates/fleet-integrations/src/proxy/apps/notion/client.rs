@@ -15,6 +15,20 @@ pub(crate) fn req_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{key} is required"))
 }
 
+pub(crate) fn notion_api_origin() -> String {
+    #[cfg(test)]
+    if let Some(base) = TEST_NOTION_API_BASE.with(|c| c.borrow().clone()) {
+        return base;
+    }
+    "https://api.notion.com".into()
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_NOTION_API_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn headers(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
     req.header("Authorization", format!("Bearer {token}"))
         .header("Notion-Version", NOTION_VERSION)
@@ -151,13 +165,72 @@ mod tests {
     }
 
     #[test]
-    fn write_text_accepts_children_strings_and_text() {
-        let a = json!({ "text": "hello" });
-        assert_eq!(write_text_from_args(&a).as_deref(), Some("hello"));
-        let b = json!({ "children": ["a", "b"] });
-        assert_eq!(write_text_from_args(&b).as_deref(), Some("a\n\nb"));
-        let c = json!({ "children": Value::Null });
-        assert!(write_text_from_args(&c).is_none());
+    fn write_text_from_args_reads_text() {
+        let args = json!({ "text": "hello" });
+        assert_eq!(write_text_from_args(&args).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn write_text_from_args_joins_children_strings() {
+        let args = json!({ "children": ["a", "b"] });
+        assert_eq!(write_text_from_args(&args).as_deref(), Some("a\n\nb"));
+    }
+
+    #[test]
+    fn write_text_from_args_null_children_is_none() {
+        let args = json!({ "children": Value::Null });
+        assert!(write_text_from_args(&args).is_none());
+    }
+
+    #[test]
+    fn write_text_from_args_accepts_content_body_message_summary() {
+        assert_eq!(
+            write_text_from_args(&json!({ "content": "hello" })).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            write_text_from_args(&json!({ "body": "hello" })).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            write_text_from_args(&json!({ "message": "hello" })).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            write_text_from_args(&json!({ "summary": "hello" })).as_deref(),
+            Some("hello")
+        );
+        assert!(write_text_from_args(&json!({ "content": "   " })).is_none());
+        assert!(write_text_from_args(&json!({ "body": "   " })).is_none());
+        assert!(write_text_from_args(&json!({ "message": "   " })).is_none());
+        assert!(write_text_from_args(&json!({ "summary": "   " })).is_none());
+        assert!(write_text_from_args(&json!({})).is_none());
+    }
+
+    #[test]
+    fn write_text_from_args_children_string_or_object_items() {
+        let as_string = json!({ "children": "hello" });
+        assert_eq!(write_text_from_args(&as_string).as_deref(), Some("hello"));
+        let objects = json!({ "children": [{ "text": "a" }, { "content": "b" }] });
+        assert_eq!(write_text_from_args(&objects).as_deref(), Some("a\n\nb"));
+        let block = json!({
+            "children": [{
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{ "plain_text": "from a block" }]
+                }
+            }]
+        });
+        assert_eq!(
+            write_text_from_args(&block).as_deref(),
+            Some("from a block")
+        );
+    }
+
+    #[test]
+    fn write_text_from_args_named_key_wins_over_children() {
+        let args = json!({ "text": "hello", "children": ["ignored"] });
+        assert_eq!(write_text_from_args(&args).as_deref(), Some("hello"));
     }
 }
 

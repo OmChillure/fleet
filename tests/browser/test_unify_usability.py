@@ -28,6 +28,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
+    click_add_worker,
     create_host,
     goto_self_hosted,
     heartbeat,
@@ -376,7 +377,7 @@ def run_drive(out: Path) -> dict[str, Any]:
         wait_dx_ready(page)
         add = page.get_by_role("button", name="Add worker")
         if add.count():
-            add.first.click()
+            click_add_worker(page)
             page.wait_for_timeout(800)
         journal.step(
             page,

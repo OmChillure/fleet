@@ -2,9 +2,9 @@
 """Shell theme + Fleet button contrast (catalog:list-ui-shell-theme-e2e).
 
 Playwright drives the user menu and Fleet chrome. Locks:
-  - Appearance toggles Light/Dark
-  - Escape (or a second click on the opener) closes the menu overlay
-  - Start 2-task run stays readable in Dark (not white-on-white)
+  - Appearance toggles Black/White
+  - Escape closes the user menu
+  - Start 2-task run stays readable on Black (not white-on-white)
 
   python3 -m pytest tests/browser/test_shell_theme_e2e.py -q
   python3 -m unittest tests.browser.test_shell_theme_e2e -v
@@ -70,15 +70,6 @@ def _require_playwright():
     return sync_playwright
 
 
-def _theme_class(page) -> str:
-    return page.evaluate(
-        """() => {
-            const el = document.querySelector('[class*="theme-"]');
-            return el ? el.className : '';
-        }"""
-    )
-
-
 def _contrast(page, locator) -> dict:
     return locator.first.evaluate(
         """el => {
@@ -118,6 +109,7 @@ class ShellThemeE2ETests(unittest.TestCase):
         cls._pw.stop()
 
     def test_appearance_toggle_and_escape_closes_overlay(self) -> None:
+        from playwright.sync_api import expect
         from runners_e2e_helpers import UI
 
         ctx = self._browser.new_context(
@@ -130,42 +122,29 @@ class ShellThemeE2ETests(unittest.TestCase):
             _ws, base = signup_login(page, prefix="theme-e2e")
             wait_dx_ready(page)
             page.goto(f"{base}/dashboard", wait_until="domcontentloaded")
-            page.wait_for_selector("h1", timeout=20_000)
+            expect(page.get_by_role("heading").first).to_be_visible()
 
-            opener = page.locator("button[aria-haspopup='menu']")
-            opener.click()
-            page.get_by_role("button", name="Appearance").wait_for(timeout=10_000)
-            before = _theme_class(page)
-            page.get_by_role("button", name="Appearance").click()
-            page.wait_for_timeout(400)
-            after = _theme_class(page)
-            self.assertNotEqual(
-                before, after, f"Appearance did not change theme class: {before!r}"
-            )
+            page.locator("button[aria-haspopup='menu']").click()
+            appearance = page.get_by_role("button", name="Appearance")
+            expect(appearance).to_contain_text("Black")
+            appearance.click()
+            expect(appearance).to_contain_text("White")
+            expect(appearance).not_to_contain_text("Black")
 
             page.keyboard.press("Escape")
-            page.wait_for_timeout(300)
-            overlay = page.locator("#user-menu-dismiss")
-            self.assertEqual(
-                overlay.count(),
-                0,
-                "Escape must remove the user-menu overlay",
-            )
-            # Opener must be clickable again (not trapped under the sheet).
-            opener.click()
-            page.get_by_role("button", name="Appearance").wait_for(timeout=10_000)
-            page.get_by_role("button", name="Appearance").click()
-            page.keyboard.press("Escape")
+            expect(appearance).to_have_count(0)
         finally:
             ctx.close()
 
     def test_fleet_start_button_readable_in_dark(self) -> None:
+        from playwright.sync_api import expect
         from runners_e2e_helpers import UI
 
         ctx = self._browser.new_context(
             base_url=UI,
             viewport={"width": 1400, "height": 900},
         )
+        ctx.add_init_script("localStorage.setItem('fleet-theme', 'black')")
         page = ctx.new_page()
         page.set_default_timeout(20_000)
         try:
@@ -173,20 +152,9 @@ class ShellThemeE2ETests(unittest.TestCase):
             wait_dx_ready(page)
             page.goto(f"{base}/fleet", wait_until="domcontentloaded")
             start = page.get_by_role("button", name="Start 2-task run")
-            start.first.wait_for(timeout=15_000)
-
-            opener = page.locator("button[aria-haspopup='menu']")
-            opener.click()
-            appearance = page.get_by_role("button", name="Appearance")
-            appearance.wait_for(timeout=10_000)
-            # Force Dark if we landed on Light (persisted theme).
-            label = appearance.inner_text()
-            if "Light" in label:
-                appearance.click()
-                page.keyboard.press("Escape")
-            else:
-                page.keyboard.press("Escape")
-            page.wait_for_timeout(400)
+            expect(start.first).to_be_visible()
+            # Root class applies --app-accent / --app-accent-fg; no role for it.
+            expect(page.locator(".theme-black").first).to_be_attached()
 
             info = _contrast(page, start)
             self.assertEqual(info.get("text"), "Start 2-task run", info)

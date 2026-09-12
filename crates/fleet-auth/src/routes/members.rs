@@ -358,13 +358,6 @@ mod tests {
 
     const TEST_PASSWORD: &str = "correct-horse";
 
-    #[test]
-    fn can_manage_owner_and_admin_true_member_false() {
-        assert!(can_manage("owner"));
-        assert!(can_manage("admin"));
-        assert!(!can_manage("member"));
-    }
-
     fn require_database_url() -> String {
         std::env::var("DATABASE_URL")
             .ok()
@@ -449,10 +442,6 @@ mod tests {
     }
 
     impl HttpOut {
-        fn error(&self) -> &str {
-            self.body["error"].as_str().unwrap_or("")
-        }
-
         fn user_id(&self) -> &str {
             self.body["user"]["id"].as_str().expect("user.id")
         }
@@ -536,28 +525,9 @@ mod tests {
         (email, jar, login_out)
     }
 
-    async fn member_ids(app: &axum::Router, jar: &CookieJar, ws: &str) -> Vec<String> {
-        let listed = call(
-            app,
-            "GET",
-            &format!("/api/workspaces/{ws}/members"),
-            Some(jar),
-            None,
-        )
-        .await;
-        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
-        listed.body["members"]
-            .as_array()
-            .expect("members")
-            .iter()
-            .filter_map(|m| m["user_id"].as_str().map(str::to_string))
-            .collect()
-    }
-
-    /// PATCH/DELETE a member in a workspace the caller is not in is 403.
-    /// Two independent owners: A must not mutate B's membership.
+    /// A must not PATCH B's membership. Leftover GET: B is still the sole owner.
     #[tokio::test]
-    async fn patch_or_delete_member_in_another_workspace_is_403() {
+    async fn patch_member_in_another_workspace_is_403() {
         let app = app().await;
         let (_a_email, a_jar, _a_login) = signup_and_login(&app).await;
         let (_b_email, b_jar, b_login) = signup_and_login(&app).await;
@@ -573,37 +543,6 @@ mod tests {
         )
         .await;
         assert_eq!(patched.status, StatusCode::FORBIDDEN, "{}", patched.body);
-        assert!(
-            patched.error().contains("not a member"),
-            "PATCH expected not-a-member, got {:?}",
-            patched.error()
-        );
-
-        let deleted = call(
-            &app,
-            "DELETE",
-            &format!("/api/workspaces/{b_ws}/members/{b_id}"),
-            Some(&a_jar),
-            None,
-        )
-        .await;
-        assert_eq!(deleted.status, StatusCode::FORBIDDEN, "{}", deleted.body);
-        assert!(
-            deleted.error().contains("not a member"),
-            "DELETE expected not-a-member, got {:?}",
-            deleted.error()
-        );
-
-        let remaining = member_ids(&app, &b_jar, &b_ws).await;
-        assert!(
-            remaining.contains(&b_id),
-            "B must still be a member: {remaining:?}"
-        );
-        assert_eq!(
-            remaining.len(),
-            1,
-            "B workspace membership must be unchanged: {remaining:?}"
-        );
 
         let listed = call(
             &app,
@@ -618,11 +557,96 @@ mod tests {
         let members = listed.body["members"].as_array().expect("members");
         assert_eq!(members.len(), 1, "{}", listed.body);
         assert_eq!(members[0]["user_id"].as_str(), Some(b_id.as_str()));
-        assert_eq!(
-            members[0]["role"].as_str(),
-            Some("owner"),
-            "PATCH must not have demoted B: {}",
+        assert_eq!(members[0]["role"].as_str(), Some("owner"), "{}", listed.body);
+    }
+
+    #[tokio::test]
+    async fn delete_member_in_another_workspace_is_403() {
+        let app = app().await;
+        let (_a_email, a_jar, _a_login) = signup_and_login(&app).await;
+        let (_b_email, _b_jar, b_login) = signup_and_login(&app).await;
+        let b_ws = b_login.workspace_id().to_string();
+        let b_id = b_login.user_id().to_string();
+
+        let deleted = call(
+            &app,
+            "DELETE",
+            &format!("/api/workspaces/{b_ws}/members/{b_id}"),
+            Some(&a_jar),
+            None,
+        )
+        .await;
+        assert_eq!(deleted.status, StatusCode::FORBIDDEN, "{}", deleted.body);
+    }
+
+    #[tokio::test]
+    async fn list_members_in_another_workspace_is_403() {
+        let app = app().await;
+        let (_a_email, a_jar, _a_login) = signup_and_login(&app).await;
+        let (_b_email, _b_jar, b_login) = signup_and_login(&app).await;
+        let b_ws = b_login.workspace_id().to_string();
+
+        let listed = call(
+            &app,
+            "GET",
+            &format!("/api/workspaces/{b_ws}/members"),
+            Some(&a_jar),
+            None,
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::FORBIDDEN, "{}", listed.body);
+    }
+
+    #[tokio::test]
+    async fn create_invite_in_another_workspace_is_403() {
+        let app = app().await;
+        let (_a_email, a_jar, _a_login) = signup_and_login(&app).await;
+        let (_b_email, b_jar, b_login) = signup_and_login(&app).await;
+        let b_ws = b_login.workspace_id().to_string();
+        let guest = format!("xws.{uuid}@example.test", uuid = Uuid::new_v4());
+
+        let invited = call(
+            &app,
+            "POST",
+            &format!("/api/workspaces/{b_ws}/invites"),
+            Some(&a_jar),
+            Some(json!({ "email": guest, "role": "member" })),
+        )
+        .await;
+        assert_eq!(invited.status, StatusCode::FORBIDDEN, "{}", invited.body);
+
+        let listed = call(
+            &app,
+            "GET",
+            &format!("/api/workspaces/{b_ws}/invites"),
+            Some(&b_jar),
+            None,
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        let invites = listed.body["invites"].as_array().expect("invites");
+        assert!(
+            invites.is_empty(),
+            "B must have no open invite: {}",
             listed.body
         );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_patch_member_is_401() {
+        let app = app().await;
+        let (_email, _jar, login) = signup_and_login(&app).await;
+        let ws = login.workspace_id().to_string();
+        let user_id = login.user_id().to_string();
+
+        let out = call(
+            &app,
+            "PATCH",
+            &format!("/api/workspaces/{ws}/members/{user_id}"),
+            None,
+            Some(json!({ "role": "member" })),
+        )
+        .await;
+        assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
     }
 }

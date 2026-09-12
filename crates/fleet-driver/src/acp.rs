@@ -950,17 +950,80 @@ mod tests {
     }
 
     #[test]
-    fn known_fail_and_success_stops() {
-        assert!(session_succeeded(Some("end_turn")));
-        assert!(session_succeeded(Some("done")));
+    fn session_succeeded_none_empty_end_turn_done_and_unknown() {
         assert!(session_succeeded(None));
         assert!(session_succeeded(Some("")));
+        assert!(session_succeeded(Some("end_turn")));
+        assert!(session_succeeded(Some("done")));
         assert!(session_succeeded(Some("max_tokens")));
+        assert!(!is_blocked_stop("end_turn"));
+    }
+
+    #[test]
+    fn session_succeeded_false_for_cancelled_timeout_error_refusal() {
         assert!(!session_succeeded(Some("cancelled")));
         assert!(!session_succeeded(Some("timeout")));
         assert!(!session_succeeded(Some("error")));
         assert!(!session_succeeded(Some("refusal")));
+    }
+
+    #[test]
+    fn refusal_stop_is_failed_not_blocked() {
+        assert!(!session_succeeded(Some("refusal")));
         assert!(!is_blocked_stop("refusal"));
-        assert!(!is_blocked_stop("end_turn"));
+    }
+
+    #[test]
+    fn session_succeeded_canceled_us_spelling_is_fail() {
+        assert!(!session_succeeded(Some("canceled")));
+    }
+
+    #[test]
+    fn session_succeeded_trims_and_lowercases_fail_tokens() {
+        assert!(!session_succeeded(Some(" Cancelled ")));
+        assert!(!session_succeeded(Some("TIMEOUT")));
+    }
+
+    #[test]
+    fn session_succeeded_unknown_error_substring_stays_success() {
+        assert!(session_succeeded(Some("session_error")));
+    }
+
+    #[test]
+    fn permission_allow_result_selects_allow_once() {
+        let msg = json!({
+            "params": {
+                "options": [
+                    { "optionId": "allow-once" },
+                    { "optionId": "reject" }
+                ]
+            }
+        });
+        let got = permission_allow_result(&msg);
+        assert_eq!(
+            got.pointer("/outcome/outcome").and_then(|v| v.as_str()),
+            Some("selected")
+        );
+        assert_eq!(
+            got.pointer("/outcome/optionId").and_then(|v| v.as_str()),
+            Some("allow-once")
+        );
+    }
+
+    #[test]
+    fn permission_allow_result_skips_reject_for_allow() {
+        let msg = json!({
+            "params": {
+                "options": [
+                    { "optionId": "reject" },
+                    { "optionId": "allow-once" }
+                ]
+            }
+        });
+        let got = permission_allow_result(&msg);
+        assert_eq!(
+            got.pointer("/outcome/optionId").and_then(|v| v.as_str()),
+            Some("allow-once")
+        );
     }
 }

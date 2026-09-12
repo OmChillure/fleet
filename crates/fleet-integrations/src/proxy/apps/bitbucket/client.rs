@@ -161,15 +161,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repo_from_owner_repo_or_full_name() {
+    fn require_repo_accepts_workspace_and_repo() {
         assert_eq!(
-            require_repo(&json!({ "workspace": "acme", "repo": "app" })).unwrap(),
-            ("acme".into(), "app".into())
+            require_repo(&json!({ "workspace": "acme", "repo": "app" })),
+            Ok(("acme".into(), "app".into())),
+            "workspace+repo"
         );
+    }
+
+    #[test]
+    fn require_repo_accepts_repo_as_owner_slash_name() {
         assert_eq!(
-            require_repo(&json!({ "repo": "acme/app" })).unwrap(),
-            ("acme".into(), "app".into())
+            require_repo(&json!({ "repo": "acme/app" })),
+            Ok(("acme".into(), "app".into())),
+            "repo=owner/name fallback"
         );
-        assert!(require_repo(&json!({})).is_err());
+    }
+
+    #[test]
+    fn require_repo_rejects_empty_args() {
+        assert_eq!(
+            require_repo(&json!({})),
+            Err("workspace + repo (or owner/repo) is required".into()),
+            "empty args"
+        );
+    }
+
+    #[test]
+    fn require_repo_accepts_full_name() {
+        assert_eq!(
+            require_repo(&json!({ "full_name": "acme/app" })),
+            Ok(("acme".into(), "app".into())),
+            "full_name=acme/app"
+        );
+    }
+
+    #[test]
+    fn require_repo_accepts_owner_and_repo_slug() {
+        assert_eq!(
+            require_repo(&json!({ "owner": "acme", "repo_slug": "app" })),
+            Ok(("acme".into(), "app".into())),
+            "owner+repo_slug"
+        );
+    }
+
+    #[test]
+    fn require_repo_slash_in_repo_wins_over_workspace() {
+        assert_eq!(
+            require_repo(&json!({ "workspace": "ignored", "repo": "acme/app" })),
+            Ok(("acme".into(), "app".into())),
+            "slash-in-repo wins over workspace"
+        );
     }
 }

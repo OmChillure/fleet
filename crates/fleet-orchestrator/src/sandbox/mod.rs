@@ -11,7 +11,7 @@ pub mod team;
 pub mod team_chat;
 mod worker_script;
 
-pub use worker_script::{extract_bash_blocks, materialize_workspace, write_spec_md_if_absent};
+pub use worker_script::{extract_bash_blocks, materialize_workspace};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ pub struct SpawnRequest {
     pub persona_md: Option<String>,
     /// Resolved worker LLM: `grok` (env) or `ollama` (settings). None = bash worker.
     pub agent_backend: Option<String>,
-    /// Model id for the worker LLM (e.g. grok-4.5, llama3.2).
+    /// Model id for the worker LLM (runner CLI / Ollama tag).
     pub agent_model: Option<String>,
     /// Control-plane integration proxy (tokens never enter the sandbox).
     pub io: io::IntegrationHandle,
@@ -103,17 +103,70 @@ mod tests {
     }
 
     #[test]
-    fn fleet_env_keys() {
+    fn fleet_worker_env_injects_normative_fleet_keys_and_aliases() {
         let session = Uuid::new_v4();
         let project = Uuid::new_v4();
         let req = sample_req(session, project);
         let env = fleet_worker_env(&req, "http://127.0.0.1:8080");
         assert_eq!(env.get("FLEET_SESSION_ID").unwrap(), &session.to_string());
         assert_eq!(env.get("FLEET_PROJECT_ID").unwrap(), &project.to_string());
+        assert_eq!(env.get("FLEET_RUN_ID").unwrap(), &req.run_id.to_string());
+        assert_eq!(
+            env.get("FLEET_BOARD_TASK_ID").unwrap(),
+            &req.board_task_id.to_string()
+        );
+        assert_eq!(
+            env.get("FLEET_TASK_ID").unwrap(),
+            &req.board_task_id.to_string()
+        );
+        assert_ne!(env.get("FLEET_TASK_ID").unwrap(), "t1");
+        assert_eq!(env.get("FLEET_PLAN_TASK_ID").unwrap(), "t1");
         assert_eq!(env.get("FLEET_WORKER_TOKEN").unwrap(), "tok");
+        assert_eq!(env.get("FLEET_WORKER_PROFILE").unwrap(), "coding");
         assert_eq!(
             env.get("FLEET_ORCHESTRATOR_URL").unwrap(),
             "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            env.get("FLEET_API_BASE").unwrap(),
+            env.get("FLEET_ORCHESTRATOR_URL").unwrap()
+        );
+        assert_eq!(env.get("FLEET_WORK_DIR").unwrap(), "/tmp/fleet-test");
+    }
+
+    #[test]
+    fn fleet_worker_env_sets_run_board_plan_profile_and_work_dir() {
+        let req = sample_req(Uuid::new_v4(), Uuid::new_v4());
+        let env = fleet_worker_env(&req, "http://127.0.0.1:8080");
+        assert_eq!(env.get("FLEET_RUN_ID").unwrap(), &req.run_id.to_string());
+        assert_eq!(
+            env.get("FLEET_BOARD_TASK_ID").unwrap(),
+            &req.board_task_id.to_string()
+        );
+        assert_eq!(env.get("FLEET_PLAN_TASK_ID").unwrap(), "t1");
+        assert_eq!(env.get("FLEET_WORKER_PROFILE").unwrap(), "coding");
+        assert_eq!(env.get("FLEET_WORK_DIR").unwrap(), "/tmp/fleet-test");
+    }
+
+    #[test]
+    fn fleet_worker_env_task_id_aliases_board_not_plan() {
+        let req = sample_req(Uuid::new_v4(), Uuid::new_v4());
+        let env = fleet_worker_env(&req, "http://127.0.0.1:8080");
+        assert_eq!(
+            env.get("FLEET_TASK_ID").unwrap(),
+            &req.board_task_id.to_string()
+        );
+        assert_ne!(env.get("FLEET_TASK_ID").unwrap(), "t1");
+    }
+
+    #[test]
+    fn fleet_worker_env_api_base_aliases_orchestrator_url() {
+        let req = sample_req(Uuid::new_v4(), Uuid::new_v4());
+        let env = fleet_worker_env(&req, "http://127.0.0.1:8080");
+        assert_eq!(env.get("FLEET_API_BASE").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(
+            env.get("FLEET_API_BASE").unwrap(),
+            env.get("FLEET_ORCHESTRATOR_URL").unwrap()
         );
     }
 }

@@ -2,7 +2,8 @@
 
 Where a test belongs, now and when you add one. How to **run** tests is
 [`testing.md`](./testing.md). Humans and MR videos are
-[`human-testing.md`](./human-testing.md).
+[`human-testing.md`](./human-testing.md). What makes a test good enough
+to merge: [`qa-rulebook.md`](./qa-rulebook.md).
 
 ## Rule
 

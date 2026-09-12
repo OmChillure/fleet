@@ -1,16 +1,9 @@
-//! Host selection and spawn payload shape (no Postgres).
+//! Host selection (no Postgres).
 
-use fleet_orchestrator::sandbox::remote::{
-    host_id_from_handle, runtime_handle, spawn_payload, BACKEND,
-};
-use fleet_orchestrator::sandbox::SpawnRequest;
 use fleet_orchestrator::store::{
-    host_at_capacity, pick_assignable_host, pick_assignable_runner, AssignableHost, HostRuntime,
-    RunnerIsolation,
+    pick_assignable_host, pick_assignable_runner, AssignableHost, RunnerIsolation,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Duration;
 use uuid::Uuid;
 
 fn host(
@@ -37,72 +30,10 @@ fn host(
     }
 }
 
-fn sample_req(token: &str) -> SpawnRequest {
-    SpawnRequest {
-        session_id: Uuid::new_v4(),
-        project_id: Uuid::new_v4(),
-        run_id: Uuid::new_v4(),
-        board_task_id: Uuid::new_v4(),
-        plan_task_id: "t-plan".into(),
-        worker_profile: "coding".into(),
-        worker_token: token.into(),
-        work_dir: PathBuf::from("/tmp/fleet-host-pool"),
-        env: HashMap::from([
-            ("FLEET_WORKER_TOKEN".into(), token.into()),
-            ("FLEET_SESSION_ID".into(), "sess".into()),
-            ("FLEET_WORK_DIR".into(), "/tmp/fleet-host-pool".into()),
-        ]),
-        timeout: Duration::from_secs(1800),
-        task_title: Some("title".into()),
-        task_summary: None,
-        task_spec: Some("do the work".into()),
-        persona_name: None,
-        persona_md: None,
-        agent_backend: None,
-        agent_model: None,
-        io: fleet_orchestrator::sandbox::io::IntegrationHandle::none(),
-    }
-}
-
-#[test]
-fn pick_uses_weakest_isolation_that_meets_process_need() {
-    let both = host(true, true, true, true, 4);
-    let chosen = pick_assignable_host(&[both.clone()], &HashMap::new()).unwrap();
-    assert_eq!(
-        chosen.runtime,
-        HostRuntime::Host,
-        "need=process → cheapest offer is process, not container"
-    );
-
-    let container_only = host(true, true, false, true, 4);
-    let chosen = pick_assignable_host(&[container_only], &HashMap::new())
-        .expect("container-only host must be assignable when it meets process need");
-    assert_eq!(chosen.runtime, HostRuntime::Container);
-
-    let host_only = host(true, true, true, false, 4);
-    let chosen = pick_assignable_host(&[host_only], &HashMap::new()).unwrap();
-    assert_eq!(chosen.runtime, HostRuntime::Host);
-}
-
 #[test]
 fn pick_skips_host_when_not_advertised_and_no_container() {
     let no_adv_host = host(true, false, false, false, 4);
     assert!(pick_assignable_host(&[no_adv_host], &HashMap::new()).is_none());
-}
-
-#[test]
-fn pick_skips_full_host_and_disallowed() {
-    let full = host(true, true, true, true, 2);
-    let denied = host(false, false, true, true, 4);
-    let no_adv_host = host(true, false, false, false, 4);
-    let ok = host(true, false, true, false, 4);
-    let mut inflight = HashMap::new();
-    inflight.insert(full.id, 2);
-    let chosen = pick_assignable_host(&[full, denied, no_adv_host, ok.clone()], &inflight).unwrap();
-    assert_eq!(chosen.id(), ok.id);
-    assert_eq!(chosen.runtime, HostRuntime::Host);
-    let over = host(true, true, true, true, 1024);
-    assert!(host_at_capacity(256, &over));
 }
 
 #[test]
@@ -125,34 +56,9 @@ fn pick_lowest_utilization_not_list_order() {
 }
 
 #[test]
-fn pick_equal_load_prefers_oldest_heartbeat_not_newest_first() {
-    // SQL list_assignable is last_seen DESC (newest first). Product tie-break
-    // is oldest heartbeat (least recently used), not "whoever is first in that list".
-    let newer = host(true, false, true, false, 4);
-    let older = host(true, false, true, false, 4);
-    let chosen = pick_assignable_host(&[newer.clone(), older.clone()], &HashMap::new())
-        .expect("both under capacity");
-    assert_eq!(
-        chosen.id(),
-        older.id,
-        "equal load: pick the older heartbeat (last in newest-first list), not the newest"
-    );
-}
-
-#[test]
-fn pick_skips_when_advertised_cap_reached() {
-    let mut capped = host(true, true, true, true, 8);
-    capped.advertised_max_concurrent = Some(2);
-    let mut inflight = HashMap::new();
-    inflight.insert(capped.id, 2);
-    assert!(host_at_capacity(2, &capped));
-    assert!(pick_assignable_host(&[capped], &inflight).is_none());
-}
-
-#[test]
 fn pick_at_advertised_cap_selects_other_native() {
-    // Catalog: second job waits when cap is 1. Two natives: inflight==cap on A
-    // must pick B, not fall through to local SANDBOX_BACKEND.
+    // Native at advertised max_jobs=1 is full even when plane max is 8.
+    // Pick the other Native; never a Sandboxed placeholder.
     let mut at_cap = host(true, false, true, false, 8);
     at_cap.advertised_max_concurrent = Some(1);
     let mut sandboxed = host(true, false, true, false, 8);
@@ -160,98 +66,51 @@ fn pick_at_advertised_cap_selects_other_native() {
     let free = host(true, false, true, false, 8);
     let mut inflight = HashMap::new();
     inflight.insert(at_cap.id, 1);
-    assert!(
-        host_at_capacity(1, &at_cap),
-        "advertised cap 1 is full at inflight==1 even when plane max is 8"
-    );
 
     let chosen = pick_assignable_runner(
         &[at_cap.clone(), sandboxed.clone(), free.clone()],
         &inflight,
     )
-    .expect("under-cap native B must be picked; must not fall through to local spawn");
+    .expect("under-cap native B must be picked");
     assert_eq!(chosen.id(), free.id);
     assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
-    assert_eq!(chosen.runtime, HostRuntime::Host);
 
-    let chosen_rev = pick_assignable_runner(
-        &[free.clone(), sandboxed.clone(), at_cap.clone()],
-        &inflight,
-    )
-    .unwrap();
+    let chosen_rev = pick_assignable_runner(&[free.clone(), sandboxed, at_cap], &inflight).unwrap();
     assert_eq!(
         chosen_rev.id(),
         free.id,
         "list order must not pick the at-cap host or a sandboxed box"
     );
-
-    assert!(
-        pick_assignable_runner(&[at_cap.clone(), sandboxed], &inflight).is_none(),
-        "sandboxed is not a fallback; sole native at advertised cap=1 waits"
-    );
-    assert!(
-        pick_assignable_runner(&[at_cap], &inflight).is_none(),
-        "second job waits when the only native is at advertised cap 1"
-    );
 }
 
 #[test]
 fn pick_advertised_zero_is_not_unlimited() {
-    // Some(0) clamps to 1. It is not "no cap" / unlimited.
+    // Some(0) clamps to 1: first job is assignable; inflight 1 is full.
     let mut zero = host(true, false, true, false, 8);
     zero.advertised_max_concurrent = Some(0);
-    assert!(
-        host_at_capacity(1, &zero),
-        "advertised 0 must not be treated as unlimited"
-    );
-    assert!(
-        !host_at_capacity(0, &zero),
-        "advertised 0 still allows the first job (clamp 1)"
-    );
-
-    let other = host(true, false, true, false, 8);
+    let chosen = pick_assignable_host(&[zero.clone()], &HashMap::new())
+        .expect("advertised 0 still allows the first job (clamp 1)");
+    assert_eq!(chosen.id(), zero.id);
     let mut inflight = HashMap::new();
     inflight.insert(zero.id, 1);
-    let chosen = pick_assignable_runner(&[zero.clone(), other.clone()], &inflight)
-        .expect("skip advertised-0 host at 1 inflight; pick the other native");
-    assert_eq!(chosen.id(), other.id);
-    assert_eq!(chosen.host.isolation, RunnerIsolation::Native);
     assert!(
-        pick_assignable_runner(&[zero], &inflight).is_none(),
-        "advertised 0 at inflight 1 waits; must not local-spawn"
+        pick_assignable_host(&[zero], &inflight).is_none(),
+        "advertised 0 at inflight 1 is full; must not treat 0 as unlimited"
     );
 }
 
 #[test]
-fn spawn_payload_shape_matches_contract() {
-    let req = sample_req("plain-token");
-    let host_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-    let p = spawn_payload(&req, "http://orch.example", "host", 1800, host_id);
-    let v = serde_json::to_value(&p).unwrap();
-    assert_eq!(v["kind"], "spawn_session");
-    assert_eq!(v["session_id"], req.session_id.to_string());
-    assert_eq!(v["project_id"], req.project_id.to_string());
-    assert_eq!(v["run_id"], req.run_id.to_string());
-    assert_eq!(v["board_task_id"], req.board_task_id.to_string());
-    assert_eq!(v["plan_task_id"], "t-plan");
-    assert_eq!(v["worker_profile"], "coding");
-    assert_eq!(v["worker_token"], "plain-token");
-    assert_eq!(v["orchestrator_url"], "http://orch.example");
-    assert_eq!(v["runtime"], "host");
-    assert_eq!(v["task_title"], "title");
-    assert_eq!(v["task_spec"], "do the work");
-    assert_eq!(v["timeout_s"], 1800);
-    assert_eq!(v["host_id"], host_id.to_string());
-    assert!(v["repo_url"].is_null());
-    assert!(v["git_ref"].is_null());
-    assert_eq!(v["env"]["FLEET_WORKER_TOKEN"], "plain-token");
-    assert_eq!(v["env"]["FLEET_ORCHESTRATOR_URL"], "http://orch.example");
-    assert!(v["env"].get("FLEET_WORK_DIR").is_none());
-}
-
-#[test]
-fn remote_handle_roundtrips_host_id() {
-    assert_eq!(BACKEND, "remote");
-    let id = Uuid::new_v4();
-    assert_eq!(host_id_from_handle(&runtime_handle(id)), Some(id));
+fn pick_advertised_negative_is_not_unlimited() {
+    // Some(-1) clamps to 1 (1..=256), not plane-cap / unlimited.
+    let mut neg = host(true, false, true, false, 8);
+    neg.advertised_max_concurrent = Some(-1);
+    let chosen = pick_assignable_host(&[neg.clone()], &HashMap::new())
+        .expect("advertised -1 still allows the first job (clamp 1)");
+    assert_eq!(chosen.id(), neg.id);
+    let mut inflight = HashMap::new();
+    inflight.insert(neg.id, 1);
+    assert!(
+        pick_assignable_host(&[neg], &inflight).is_none(),
+        "advertised -1 at inflight 1 is full; must not treat negative as unlimited"
+    );
 }

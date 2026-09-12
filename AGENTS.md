@@ -51,6 +51,7 @@ second install guide and do not pass flags on the command line.
 
 How they are organized and run: `docs/testing.md`.
 Where to put new tests: `docs/testing-standardization.md`.
+Whether a test is good enough to merge: `docs/qa-rulebook.md`.
 
 Before you commit: check whether the install script needs updating (new deps,
 flags, OS/kind/lab behavior) and whether any tests must be added. No

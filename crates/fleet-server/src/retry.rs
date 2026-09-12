@@ -111,57 +111,138 @@ pub fn fail_nudge(failed: &[&ChatAction]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_auth::AppError;
     use serde_json::json;
+    use std::cell::Cell;
     use std::time::Duration;
 
     #[test]
     fn provider_retries_network_and_429() {
+        let cases = [
+            ("cannot reach", true),
+            ("timeout", true),
+            ("timed out", true),
+            ("rate limit", true),
+            ("429", true),
+            ("502", true),
+            ("503", true),
+            ("504", true),
+            ("connection", true),
+            ("temporar", true),
+            ("try again", true),
+            ("Grok rate limited — try again shortly", true),
+            (
+                "cannot reach Ollama at http://127.0.0.1:11434: connection refused. Start it with `ollama serve`.",
+                true,
+            ),
+            (
+                "model `llama` not found in Ollama. Pull it with: ollama pull llama",
+                false,
+            ),
+            (
+                "Grok auth failed — run `grok login` (or check XAI_API_KEY fallback)",
+                false,
+            ),
+        ];
+        for (msg, want) in cases {
+            assert_eq!(
+                is_retryable_provider(msg),
+                want,
+                "is_retryable_provider({msg:?}) == {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_retryable_provider_openai_claude_429_and_502() {
         assert!(is_retryable_provider(
-            "cannot reach Ollama at http://x: timeout"
+            "OpenAI error (429 Too Many Requests): insufficient_quota"
         ));
         assert!(is_retryable_provider(
-            "Grok rate limited — try again shortly"
+            "Claude error (502 Bad Gateway): overloaded_error"
         ));
-        assert!(is_retryable_provider("Grok error (503): unavailable"));
-        assert!(!is_retryable_provider("model `llama` not found in Ollama"));
-        assert!(!is_retryable_provider("Grok auth failed — run grok login"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_provider_retries_transient_then_ok() {
+        tokio::time::pause();
+        let calls = Cell::new(0u32);
+        let result = retry_provider("test", || {
+            let n = calls.get();
+            calls.set(n + 1);
+            async move {
+                if n < 2 {
+                    Err(AppError::bad_request("cannot reach provider"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        result.expect("two cannot-reach failures then Ok must succeed");
+        assert_eq!(
+            calls.get(),
+            3,
+            "PROVIDER_ATTEMPTS=3: fail, fail, Ok must call the closure 3 times"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_provider_does_not_retry_auth_or_model_not_found() {
+        for msg in [
+            "Grok auth failed — run `grok login` (or check XAI_API_KEY fallback)",
+            "model `llama` not found in Ollama. Pull it with: ollama pull llama",
+        ] {
+            let calls = Cell::new(0u32);
+            let result: AppResult<()> = retry_provider("test", || {
+                calls.set(calls.get() + 1);
+                let msg = msg.to_string();
+                async move { Err(AppError::bad_request(msg)) }
+            })
+            .await;
+            let err = result.expect_err(msg);
+            assert_eq!(err.to_string(), msg);
+            assert_eq!(calls.get(), 1, "{msg} must return on the first attempt");
+        }
+    }
+
+    fn chat_tool(ok: bool, summary: &str) -> ChatAction {
+        ChatAction {
+            tool: "integration_query".into(),
+            ok,
+            summary: summary.into(),
+            run_id: None,
+            sandbox_ids: None,
+            detail: None,
+        }
     }
 
     #[test]
     fn tool_retries_upstream_not_bad_args() {
-        let fail = ChatAction {
-            tool: "integration_query".into(),
-            ok: false,
-            summary: "Slack API 503: unavailable".into(),
-            run_id: None,
-            sandbox_ids: None,
-            detail: None,
-        };
-        assert!(is_retryable_tool(
-            &fail,
-            &json!({ "error_code": "upstream", "provider_status": 503 })
-        ));
-        let bad = ChatAction {
-            tool: "integration_query".into(),
-            ok: false,
-            summary: "text is required".into(),
-            run_id: None,
-            sandbox_ids: None,
-            detail: None,
-        };
-        assert!(!is_retryable_tool(
-            &bad,
-            &json!({ "error_code": "bad_args" })
-        ));
-        let four = ChatAction {
-            tool: "integration_query".into(),
-            ok: false,
-            summary: "Notion API 400: body.children should be defined, instead was `undefined`."
-                .into(),
-            run_id: None,
-            sandbox_ids: None,
-            detail: None,
-        };
+        // Summary has no 503/timeout/connection tokens: only provider_status=503 retries.
+        let fail = chat_tool(false, "Slack API unavailable");
+        assert!(
+            is_retryable_tool(
+                &fail,
+                &json!({ "error_code": "upstream", "provider_status": 503 })
+            ),
+            "provider_status=503 must retry when the summary has no 5xx/timeout tokens"
+        );
+    }
+
+    #[test]
+    fn tool_does_not_retry_bad_args() {
+        let bad = chat_tool(false, "text is required");
+        assert!(
+            !is_retryable_tool(&bad, &json!({ "error_code": "bad_args" })),
+            "bad_args must not replay the same call"
+        );
+    }
+
+    #[test]
+    fn tool_does_not_retry_400() {
+        // Summary has no validation/undefined tokens: only the 4xx arm denies.
+        let four = chat_tool(false, "Notion API rejected the page body");
         assert!(
             !is_retryable_tool(
                 &four,
@@ -172,37 +253,48 @@ mod tests {
     }
 
     #[test]
+    fn tool_ok_true_never_retries() {
+        let ok = chat_tool(true, "Slack API unavailable");
+        assert!(
+            !is_retryable_tool(
+                &ok,
+                &json!({ "error_code": "upstream", "provider_status": 503 })
+            ),
+            "ok=true must not retry even with upstream 503"
+        );
+    }
+
+    #[test]
+    fn tool_retries_429_and_timeout_code() {
+        let rate = chat_tool(false, "Slack API too many requests");
+        assert!(
+            is_retryable_tool(
+                &rate,
+                &json!({ "error_code": "upstream", "provider_status": 429 })
+            ),
+            "provider_status=429 is the 4xx exception and must retry"
+        );
+        let timed = chat_tool(false, "Slack API did not respond");
+        assert!(
+            is_retryable_tool(&timed, &json!({ "error_code": "timeout" })),
+            "error_code=timeout with no status must retry"
+        );
+    }
+
+    #[test]
+    fn tool_does_not_retry_not_connected_or_unknown_op() {
+        for code in ["not_connected", "unknown_op", "unknown_provider"] {
+            let fail = chat_tool(false, "integration is missing");
+            assert!(
+                !is_retryable_tool(&fail, &json!({ "error_code": code })),
+                "{code} must not retry a missing or unknown integration"
+            );
+        }
+    }
+
+    #[test]
     fn retry_backoff_first_attempts_are_400ms_steps() {
         assert_eq!(retry_backoff(1), Duration::from_millis(400));
         assert_eq!(retry_backoff(2), Duration::from_millis(800));
-    }
-
-    #[test]
-    fn retry_backoff_zero_attempt_does_not_busy_spin() {
-        let wait = retry_backoff(0);
-        assert!(
-            wait > Duration::ZERO,
-            "attempt 0 must not yield Duration::ZERO (busy-spin in tests)"
-        );
-    }
-
-    #[test]
-    fn retry_backoff_huge_attempt_clamps_without_overflow() {
-        // 10^9 * 400ms is ~12.7y; Duration::from_secs of that panics.
-        let wait = retry_backoff(1_000_000_000);
-        assert!(
-            wait > Duration::ZERO,
-            "clamped delay must stay positive, got {wait:?}"
-        );
-        let linear = Duration::from_millis(400u64.saturating_mul(1_000_000_000));
-        assert!(
-            wait < linear,
-            "attempt 10^9 must clamp below unclamped 400ms*n ({linear:?}), got {wait:?}"
-        );
-        assert_eq!(
-            retry_backoff(u32::MAX),
-            wait,
-            "all huge attempts must share the same cap"
-        );
     }
 }

@@ -52,7 +52,7 @@ pub fn Agents(workspace_id: String) -> Element {
                 if let Some(b) = backend() {
                     "LLM backend: {b}."
                 } else {
-                    "Pick Fleet LLM in Settings (Ollama), or set FLEET_AGENT_BACKEND=grok on the host."
+                    "Pick Grok / Claude / Ollama on a paired runner in Chat. Settings Ollama is only a fallback."
                 }
             }
             if !source().is_empty() {

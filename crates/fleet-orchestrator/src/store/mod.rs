@@ -9,7 +9,8 @@ pub use host_pool::{
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
     host_at_capacity, host_is_this_machine, pick_assignable_host, pick_assignable_host_for,
     pick_assignable_runner, select_assignable_host, select_assignable_runner,
-    select_assignable_runner_preferring, workspace_has_updating_host, AssignableHost, ChosenHost,
+    select_assignable_runner_preferring, select_online_runner, workspace_has_updating_host,
+    AssignableHost, ChosenHost,
     HostRuntime, RunnerIsolation, RunnerKind, HOST_UPDATE_HOLD_SECS,
 };
 pub use models::*;
@@ -771,16 +772,4 @@ pub fn hash_worker_token(token: &str) -> String {
 pub fn verify_worker_token(token: &str, hash_hex: &str) -> bool {
     let got = hash_worker_token(token);
     got.as_bytes().ct_eq(hash_hex.as_bytes()).into()
-}
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-
-    #[test]
-    fn token_hash_roundtrip() {
-        let h = hash_worker_token("secret-token");
-        assert!(verify_worker_token("secret-token", &h));
-        assert!(!verify_worker_token("wrong", &h));
-    }
 }

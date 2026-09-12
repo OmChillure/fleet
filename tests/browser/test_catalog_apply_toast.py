@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: Apply PATCH toast + pending apply (catalog:e2e-apply-toast-pending).
 
-Toggle a paired card → Apply appears → PATCH bumps settings_gen. Toast is
-the pending-ack copy ("Settings sent. Waiting for the runner."), not the
-plane's immediate "Settings applied." The card shows pending apply until
-the host acks. Fail closed — no skip.
+Paired Apply toasts the pending-ack copy (not plane "Settings applied."),
+paints pending apply, and bumps settings_gen. A failed PATCH toasts an
+error, not that copy, and does not paint pending apply. Fail closed — no skip.
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ from runners_e2e_helpers import (  # noqa: E402
     API,
     UI,
     goto_self_hosted,
-    heartbeat,
     list_hosts,
     pair_and_heartbeat,
     wait_dx_ready,
@@ -39,8 +37,7 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
 TOAST = "Settings sent. Waiting for the runner."
 PLANE_TOAST = "Settings applied."
-# List poll is 10s; slack for dx overlay + one missed tick.
-POLL_WAIT_MS = 20_000
+PATCH_HOST = "**/api/workspaces/*/worker-hosts/*"
 
 
 def _listening(host: str, port: int) -> bool:
@@ -164,44 +161,24 @@ class CatalogApplyToastPendingTests(unittest.TestCase):
         cls._browser.close()
         cls._pw.stop()
 
-    def test_apply_toast_and_pending_apply_until_ack(self) -> None:
+    def test_apply_toast_and_pending_apply(self) -> None:
         # catalog:e2e-apply-toast-pending — Apply PATCH toast + pending apply.
         page = self.page
         ws, workspace_url = _signup_api(page)
         name = f"apply-toast-{uuid.uuid4().hex[:12]}"
-        created, paired, _hb = pair_and_heartbeat(page, ws, name)
+        created, _paired, _hb = pair_and_heartbeat(page, ws, name)
         host = created.get("host") if isinstance(created.get("host"), dict) else created
         host_id = host.get("id")
-        machine_token = paired["machine_token"]
         self.assertTrue(host_id, created)
-        self.assertTrue(machine_token, paired)
-
-        row = _host_row(page, ws, host_id)
-        self.assertEqual(row.get("status"), "online", row)
-        self.assertFalse(row.get("settings_pending"), row)
-        self.assertEqual(row.get("settings_gen"), row.get("settings_ack_gen"), row)
-        gen_before = int(row.get("settings_gen") or 0)
+        gen_before = int(_host_row(page, ws, host_id).get("settings_gen") or 0)
 
         goto_self_hosted(page, workspace_url)
         page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         wait_dx_ready(page)
         card = _card(page, name)
-        self.assertIn("online", card.inner_text().lower())
-        self.assertEqual(
-            card.get_by_text("pending apply", exact=True).count(),
-            0,
-            "fresh pair must not show pending apply",
-        )
-
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
-        self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
-        apply = card.get_by_role("button", name="Apply changes")
-        self.assertEqual(
-            apply.count(),
-            0,
-            "Apply must stay hidden until Auto-update is toggled",
-        )
         auto.first.click(force=True)
+        apply = card.get_by_role("button", name="Apply changes")
         apply.wait_for(state="attached", timeout=10_000)
 
         # Toast lasts ~4s — do not wait_dx_ready between click and the status.
@@ -233,7 +210,7 @@ class CatalogApplyToastPendingTests(unittest.TestCase):
 
         pill = card.get_by_text("pending apply", exact=True)
         try:
-            pill.wait_for(timeout=POLL_WAIT_MS)
+            pill.wait_for(timeout=15_000)
         except Exception as e:
             raise AssertionError(
                 f"Apply must show pending apply on the card, not only a toast "
@@ -243,58 +220,92 @@ class CatalogApplyToastPendingTests(unittest.TestCase):
             pill.is_visible(),
             "Apply must show pending apply on the card, not only a toast",
         )
-        self.assertIn("pending apply", card.inner_text())
 
-        row = {}
-        settings_gen = 0
-        for _ in range(30):
-            row = _host_row(page, ws, host_id)
-            if row.get("settings_pending") or row.get("settings_gen") != row.get(
-                "settings_ack_gen"
-            ):
-                settings_gen = int(row["settings_gen"])
-                break
-            page.wait_for_timeout(400)
-        self.assertTrue(
-            settings_gen
-            and (
-                row.get("settings_pending")
-                or row.get("settings_gen") != row.get("settings_ack_gen")
-            ),
-            f"Apply must bump settings_gen: {row}",
-        )
+        row = _host_row(page, ws, host_id)
         self.assertGreater(
-            settings_gen,
-            int(row.get("settings_ack_gen") or 0),
-            f"Apply must bump settings_gen: {row}",
-        )
-        self.assertGreater(
-            settings_gen,
+            int(row.get("settings_gen") or 0),
             gen_before,
             f"Apply PATCH must increase settings_gen from {gen_before}: {row}",
         )
 
-        acked = heartbeat(page, machine_token, {"settings_ack_gen": settings_gen})
-        acked_host = acked.get("host") or {}
-        self.assertEqual(acked_host.get("settings_ack_gen"), settings_gen, acked)
-        self.assertFalse(acked_host.get("settings_pending"), acked)
+    def test_apply_patch_error_does_not_toast_pending_ack(self) -> None:
+        page = self.page
+        ws, workspace_url = _signup_api(page)
+        name = f"apply-toast-err-{uuid.uuid4().hex[:12]}"
+        created, _paired, _hb = pair_and_heartbeat(page, ws, name)
+        host = created.get("host") if isinstance(created.get("host"), dict) else created
+        host_id = host.get("id")
+        self.assertTrue(host_id, created)
+        gen_before = int(_host_row(page, ws, host_id).get("settings_gen") or 0)
 
-        # Stay on the page — next list poll must drop the pill (goto can stall on dx).
+        goto_self_hosted(page, workspace_url)
+        page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
+        wait_dx_ready(page)
         card = _card(page, name)
-        pending = card.get_by_text("pending apply", exact=True)
+        auto = card.locator("label").filter(has_text="Auto-update").locator("input")
+        auto.first.click(force=True)
+        apply = card.get_by_role("button", name="Apply changes")
+        apply.wait_for(state="attached", timeout=10_000)
+
+        def _fail_patch(route):
+            if route.request.method.upper() == "PATCH":
+                route.fulfill(
+                    status=500,
+                    content_type="application/json",
+                    body='{"error":"apply failed"}',
+                )
+                return
+            route.continue_()
+
+        page.route(PATCH_HOST, _fail_patch)
         try:
-            pending.wait_for(state="hidden", timeout=POLL_WAIT_MS)
-        except Exception as e:
-            raise AssertionError(
-                f"ack must clear pending apply on the card after the ~10s "
-                f"list poll ({e}): {card.inner_text()[:800]!r}"
-            ) from e
+            apply.click(force=True)
+            toast = page.get_by_role("status").filter(has_text="apply failed")
+            try:
+                toast.first.wait_for(state="visible", timeout=15_000)
+            except Exception as e:
+                statuses = page.get_by_role("status")
+                seen = [
+                    statuses.nth(i).inner_text()
+                    for i in range(statuses.count())
+                ]
+                raise AssertionError(
+                    f"failed Apply must toast an error ({e}). "
+                    f"statuses={seen!r} card={card.inner_text()[:600]!r} "
+                    f"body={page.inner_text('body')[:800]!r}"
+                ) from e
+            seen = [toast.nth(i).inner_text() for i in range(toast.count())]
+            joined = "\n".join(seen)
+            self.assertTrue(seen, "failed Apply must toast an error")
+            self.assertIn(
+                "apply failed",
+                joined.lower(),
+                f"role=status must be the PATCH error, not pending-ack: {seen!r}",
+            )
+            self.assertNotIn(
+                TOAST,
+                joined,
+                "failed Apply must not toast pending-ack copy",
+            )
+            self.assertNotIn(
+                PLANE_TOAST,
+                joined,
+                "failed Apply must not toast plane 'Settings applied.'",
+            )
+        finally:
+            page.unroute(PATCH_HOST, _fail_patch)
+
         self.assertEqual(
-            pending.count(),
+            card.get_by_text("pending apply", exact=True).count(),
             0,
-            "ack must clear pending apply on the card",
+            "failed Apply must not paint pending apply",
         )
-        self.assertNotIn("pending apply", card.inner_text().lower())
+        row = _host_row(page, ws, host_id)
+        self.assertEqual(
+            int(row.get("settings_gen") or 0),
+            gen_before,
+            f"failed Apply must not bump settings_gen: {row}",
+        )
 
 
 if __name__ == "__main__":

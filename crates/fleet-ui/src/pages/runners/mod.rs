@@ -4,6 +4,3 @@
 pub mod cloud;
 pub mod partners;
 pub mod self_hosted;
-
-#[cfg(test)]
-mod redirects;

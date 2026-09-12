@@ -1638,12 +1638,36 @@ Hardware	: BCM2835
 
     #[test]
     fn proc_stat_delta_is_used_over_total() {
-        let first = parse_proc_stat_cpu("cpu  100 0 50 850 0 0 0 0 0 0\ncpu0 100 0 50 850\n")
-            .expect("first");
-        let second = parse_proc_stat_cpu("cpu  200 0 100 1700 0 0 0 0 0 0\n").expect("second");
-        // idle 850→1700 (850), total 1000→2000 (1000) → 15% used
-        assert_eq!(cpu_used_pct_from_delta(first, second), Some(15));
+        // 90% used since boot; next 100 ticks are 10% used so interval ≠ lifetime.
+        let first = parse_proc_stat_cpu("cpu  90 0 0 10 0 0 0 0 0 0\n").expect("first");
+        let second = parse_proc_stat_cpu("cpu  100 0 0 100 0 0 0 0 0 0\n").expect("second");
+        // idle 10→100 (90), total 100→200 (100) → 10% used (not boot 90% or 50%)
+        assert_eq!(cpu_used_pct_from_delta(first, second), Some(10));
         assert_eq!(cpu_used_pct_from_delta(first, first), None);
+    }
+
+    #[test]
+    fn parse_proc_stat_cpu_none_without_aggregate_cpu_line() {
+        assert_eq!(
+            parse_proc_stat_cpu("cpu0 100 0 50 850\ncpu1 100 0 50 850\nintr 123 0 1\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_proc_stat_cpu_excludes_guest_from_total() {
+        let a = parse_proc_stat_cpu("cpu  90 0 0 10 0 0 0 0 0 0\n").unwrap();
+        let b = parse_proc_stat_cpu("cpu  100 0 0 100 0 0 0 0 50 50\n").unwrap();
+        // guest* already in user/nice; summing past 8 would be 55% not 10%
+        assert_eq!(cpu_used_pct_from_delta(a, b), Some(10));
+    }
+
+    #[test]
+    fn cpu_used_pct_from_delta_counts_steal_as_used() {
+        let a = parse_proc_stat_cpu("cpu  0 0 0 100 0 0 0 0 0 0\n").unwrap();
+        let b = parse_proc_stat_cpu("cpu  0 0 0 100 0 0 0 100 0 0\n").unwrap();
+        // idle unchanged; steal +100 is in take(8) → Some(100); drop steal → total_d 0
+        assert_eq!(cpu_used_pct_from_delta(a, b), Some(100));
     }
 
     #[test]
@@ -1745,26 +1769,6 @@ Memory Device
     }
 
     #[test]
-    fn lspci_recognizes_intel_iris_xe() {
-        let text = "\
-00:02.0 VGA compatible controller [0300]: Intel Corporation TigerLake-LP GT2 [Iris Xe Graphics] [8086:9a49] (rev 01)
-";
-        let gpus = parse_lspci_gpus(text);
-        assert_eq!(gpus.len(), 1);
-        assert_eq!(tidy_gpu_name(&gpus[0].name), "Intel Iris Xe Graphics");
-    }
-
-    #[test]
-    fn lspci_recognizes_intel_uhd() {
-        let text = "\
-00:02.0 VGA compatible controller [0300]: Intel Corporation CometLake-U GT2 [UHD Graphics] [8086:9b41] (rev 02)
-";
-        let gpus = parse_lspci_gpus(text);
-        assert_eq!(gpus.len(), 1);
-        assert_eq!(tidy_gpu_name(&gpus[0].name), "Intel UHD Graphics");
-    }
-
-    #[test]
     fn infers_x1_comet_lake_uhd() {
         assert_eq!(
             infer_igpu_from_cpu("Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz").as_deref(),
@@ -1773,11 +1777,15 @@ Memory Device
     }
 
     #[test]
-    fn infers_old_and_new_intel_igpu() {
+    fn infers_ivy_bridge_hd_4000() {
         assert_eq!(
             infer_igpu_from_cpu("Intel Core i5-3320M").as_deref(),
             Some("Intel HD Graphics 4000")
         );
+    }
+
+    #[test]
+    fn infers_core_ultra_arc() {
         assert_eq!(
             infer_igpu_from_cpu("Intel(R) Core(TM) Ultra 7 155H").as_deref(),
             Some("Intel Arc Graphics")
@@ -1785,20 +1793,57 @@ Memory Device
     }
 
     #[test]
-    fn wmic_parses_intel_uhd() {
-        let gpus = parse_wmic_gpus(
-            "Name=Intel(R) UHD Graphics\r\nAdapterRAM=1073741824\r\n\r\nName=Microsoft Basic Render Driver\r\nAdapterRAM=0\r\n",
+    fn infers_tiger_lake_iris_xe() {
+        assert_eq!(
+            infer_igpu_from_cpu("11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz").as_deref(),
+            Some("Intel Iris Xe")
         );
-        assert_eq!(gpus.len(), 1);
-        assert_eq!(tidy_gpu_name(&gpus[0].name), "Intel UHD Graphics");
     }
 
     #[test]
-    fn macos_memory_and_display_parsers() {
+    fn infers_ice_lake_g7_iris_plus() {
+        assert_eq!(
+            infer_igpu_from_cpu("Intel Core i7-1065G7").as_deref(),
+            Some("Intel Iris Plus")
+        );
+    }
+
+    #[test]
+    fn discrete_xeon_has_no_igpu() {
+        assert_eq!(
+            infer_igpu_from_cpu("Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_macos_memory_reads_speed_and_ddr4() {
         let mem = parse_macos_memory("      Speed: 3200 MHz\n      Type: DDR4\n").unwrap();
         assert_eq!(mem.0, Some(3200));
         assert_eq!(mem.1.as_deref(), Some("DDR4"));
+    }
 
+    #[test]
+    fn parse_macos_memory_takes_min_speed_across_dimms() {
+        let mem = parse_macos_memory(
+            "      Speed: 3200 MHz\n      Speed: 2666 MHz\n      Type: DDR4\n",
+        )
+        .unwrap();
+        assert_eq!(mem.0, Some(2666));
+        assert_eq!(mem.1.as_deref(), Some("DDR4"));
+    }
+
+    #[test]
+    fn parse_macos_memory_accepts_lpddr_and_none_when_empty() {
+        let mem = parse_macos_memory("      Type: LPDDR5\n      Speed: 6400 MHz\n").unwrap();
+        assert_eq!(mem.0, Some(6400));
+        assert_eq!(mem.1.as_deref(), Some("LPDDR5"));
+        assert!(parse_macos_memory("").is_none());
+        assert!(parse_macos_memory("      Type: Unknown\n").is_none());
+    }
+
+    #[test]
+    fn parse_macos_displays_reads_chipset_and_vram_total_gb() {
         let gpus =
             parse_macos_displays("      Chipset Model: Apple M1\n      VRAM (Total): 8 GB\n");
         assert_eq!(gpus.len(), 1);
@@ -1807,103 +1852,108 @@ Memory Device
     }
 
     #[test]
-    fn wmic_memory_and_gpu_parsers() {
-        let mem = parse_wmic_memory("Speed=3200\r\nSMBIOSMemoryType=26\r\nSpeed=3200\r\n").unwrap();
+    fn parse_macos_displays_reads_vram_dynamic_max() {
+        let gpus = parse_macos_displays(
+            "      Chipset Model: Apple M1\n      VRAM (Dynamic, Max): 8 GB\n",
+        );
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Apple M1");
+        assert_eq!(gpus[0].vram_bytes, Some(8 * 1_073_741_824));
+    }
+
+    #[test]
+    fn wmic_memory_reads_speed_and_ddr4() {
+        let mem = parse_wmic_memory("Speed=3200\r\nSMBIOSMemoryType=26\r\n").unwrap();
         assert_eq!(mem.0, Some(3200));
         assert_eq!(mem.1.as_deref(), Some("DDR4"));
+    }
 
-        let gpus = parse_wmic_gpus(
-            "Name=AMD Radeon(TM) Graphics\r\nAdapterRAM=536870912\r\n\r\nName=Microsoft Basic Render Driver\r\nAdapterRAM=0\r\n",
+    #[test]
+    fn wmic_memory_uses_min_stick_speed() {
+        let mem =
+            parse_wmic_memory("Speed=3200\r\nSpeed=2666\r\nSMBIOSMemoryType=26\r\n").unwrap();
+        assert_eq!(mem.0, Some(2666));
+        assert_eq!(mem.1.as_deref(), Some("DDR4"));
+    }
+
+    #[test]
+    fn wmic_memory_unknown_smbios_code_omits_type() {
+        assert_eq!(
+            parse_wmic_memory("Speed=3200\r\nSMBIOSMemoryType=0\r\n"),
+            Some((Some(3200), None))
         );
+    }
+
+    #[test]
+    fn wmic_gpus_reads_amd_radeon_adapter_ram() {
+        let gpus = parse_wmic_gpus("Name=AMD Radeon(TM) Graphics\r\nAdapterRAM=536870912\r\n");
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "AMD Radeon(TM) Graphics");
         assert_eq!(gpus[0].vram_bytes, Some(536870912));
     }
 
-    fn heartbeat_gpu_list(gpus: &[Gpu]) -> Vec<Value> {
-        gpus.iter()
-            .filter(|g| !g.name.trim().is_empty())
-            .map(gpu_json)
-            .collect()
-    }
-
     #[test]
-    fn heartbeat_gpu_list_drops_empty_names_keeps_igpu() {
-        let listed = [
-            Gpu {
-                name: String::new(),
-                vram_bytes: Some(8 * 1024 * 1024 * 1024),
-                used_pct: Some(50),
-            },
-            Gpu {
-                name: "   ".into(),
-                vram_bytes: Some(4 * 1024 * 1024 * 1024),
-                used_pct: None,
-            },
-            Gpu {
-                name: "Intel UHD Graphics".into(),
-                vram_bytes: None,
-                used_pct: Some(4),
-            },
-        ];
-        let json_gpus = heartbeat_gpu_list(&listed);
-        assert_eq!(json_gpus.len(), 1);
-        assert_eq!(json_gpus[0]["name"], "Intel UHD Graphics");
-        assert_eq!(json_gpus[0]["used_pct"], 4);
-        assert!(json_gpus[0].get("vram_bytes").is_none());
+    fn wmic_gpus_adapter_ram_u32_max_omits_vram() {
+        let gpus = parse_wmic_gpus("Name=AMD Radeon\r\nAdapterRAM=4294967295\r\n");
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "AMD Radeon");
+        assert_eq!(gpus[0].vram_bytes, None);
     }
 
     #[test]
     fn gpu_json_normalize_does_not_invent_vram() {
-        let named = Gpu {
-            name: tidy_gpu_name("Intel(R) UHD Graphics"),
-            vram_bytes: None,
-            used_pct: None,
-        };
-        assert_eq!(named.name, "Intel UHD Graphics");
-        let v = gpu_json(&named);
-        assert_eq!(v["name"], "Intel UHD Graphics");
-        assert!(v.get("vram_bytes").is_none());
-        assert!(v.get("used_pct").is_none());
+        let cases = [
+            (None, None),
+            (Some(0), None),
+            (Some(10_737_418_240u64), Some(10_737_418_240u64)),
+        ];
+        for (vram_bytes, want) in cases {
+            let v = gpu_json(&Gpu {
+                name: "Intel UHD Graphics".into(),
+                vram_bytes,
+                used_pct: None,
+            });
+            assert_eq!(
+                v.get("vram_bytes"),
+                want.map(Value::from).as_ref(),
+                "vram_bytes={vram_bytes:?}"
+            );
+            assert!(
+                v.get("used_pct").is_none(),
+                "used_pct omitted when None; vram_bytes={vram_bytes:?}"
+            );
+        }
+    }
 
-        let zeroed = Gpu {
-            name: tidy_gpu_name("Iris Xe Graphics"),
-            vram_bytes: Some(0),
-            used_pct: None,
-        };
-        assert_eq!(zeroed.name, "Intel Iris Xe Graphics");
-        let v = gpu_json(&zeroed);
-        assert_eq!(v["name"], "Intel Iris Xe Graphics");
-        assert!(v.get("vram_bytes").is_none());
-
-        let inferred = infer_igpu_from_cpu("Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz")
-            .expect("catalog Intel iGPU");
+    #[test]
+    fn gpu_json_includes_positive_vram_and_used_pct() {
         let v = gpu_json(&Gpu {
-            name: inferred,
+            name: "NVIDIA GeForce RTX 3080".into(),
+            vram_bytes: Some(10_737_418_240),
+            used_pct: Some(40),
+        });
+        assert_eq!(v["vram_bytes"], 10_737_418_240_u64);
+        assert_eq!(v["used_pct"], 40);
+    }
+
+    #[test]
+    fn gpu_json_emits_used_pct_zero() {
+        let v = gpu_json(&Gpu {
+            name: "Intel UHD Graphics".into(),
+            vram_bytes: None,
+            used_pct: Some(0),
+        });
+        assert_eq!(v["used_pct"], 0);
+    }
+
+    #[test]
+    fn gpu_json_trims_name() {
+        let v = gpu_json(&Gpu {
+            name: "  Intel UHD Graphics  ".into(),
             vram_bytes: None,
             used_pct: None,
         });
         assert_eq!(v["name"], "Intel UHD Graphics");
-        assert!(v.get("vram_bytes").is_none());
-    }
-
-    #[test]
-    fn nvidia_smi_csv_drops_empty_gpu_names_keeps_igpu() {
-        let text = "\
-, 8192
-   , 1024
-Intel UHD Graphics
-NVIDIA GeForce RTX 3080, 10240
-Intel Iris Xe Graphics, 0
-";
-        let gpus = parse_nvidia_smi_csv(text);
-        assert_eq!(gpus.len(), 3);
-        assert_eq!(gpus[0].name, "Intel UHD Graphics");
-        assert_eq!(gpus[0].vram_bytes, None);
-        assert_eq!(gpus[1].name, "NVIDIA GeForce RTX 3080");
-        assert_eq!(gpus[1].vram_bytes, Some(10240 * 1024 * 1024));
-        assert_eq!(gpus[2].name, "Intel Iris Xe Graphics");
-        assert_eq!(gpus[2].vram_bytes, None);
     }
 
     #[test]
@@ -1943,20 +1993,47 @@ Intel Iris Xe Graphics, 0
     #[test]
     fn heartbeat_hardware_has_cores() {
         let v = heartbeat_hardware();
-        assert!(v.get("cpu_cores").and_then(|c| c.as_u64()).unwrap_or(0) >= 1);
-        assert!(v.get("os").and_then(|o| o.as_str()).is_some());
-        // New keys are omitted (not null) when the box cannot read them.
-        if let Some(model) = v.get("cpu_model") {
-            assert!(model.as_str().map(|s| !s.is_empty()).unwrap_or(false));
-        }
-        if let Some(pct) = v.get("cpu_used_pct") {
-            let n = pct.as_u64().expect("cpu_used_pct u8");
-            assert!(n <= 100);
-        }
-        // Second sample may include cpu_used_pct (delta). Must not panic.
-        let v2 = heartbeat_hardware();
-        if let Some(pct) = v2.get("cpu_used_pct") {
-            assert!(pct.as_u64().unwrap() <= 100);
-        }
+        let want = std::thread::available_parallelism()
+            .expect("logical CPUs")
+            .get() as u32;
+        assert_eq!(v.get("cpu_cores"), Some(&json!(want)));
+    }
+
+    #[test]
+    fn os_line_includes_consts_os_and_arch() {
+        let v = heartbeat_hardware();
+        let os = v.get("os").and_then(Value::as_str).expect("os string");
+        assert!(!os.is_empty());
+        assert!(os.contains(std::env::consts::OS), "os={os}");
+        assert!(os.contains(std::env::consts::ARCH), "os={os}");
+    }
+
+    #[test]
+    fn heartbeat_hardware_always_includes_mem_snapshot_keys() {
+        let v = heartbeat_hardware();
+        assert!(v.get("mem_total_bytes").is_some());
+        assert!(v.get("mem_used_pct").is_some());
+    }
+
+    #[test]
+    fn heartbeat_hardware_disk_keys_are_paired() {
+        let v = heartbeat_hardware();
+        let total = v.get("disk_total_bytes");
+        let free = v.get("disk_free_bytes");
+        assert_eq!(
+            total.is_some(),
+            free.is_some(),
+            "disk_total_bytes and disk_free_bytes must appear together"
+        );
+        assert_eq!(
+            total.is_some(),
+            total.and_then(Value::as_u64).is_some(),
+            "disk_total_bytes is u64 when present, never null"
+        );
+        assert_eq!(
+            free.is_some(),
+            free.and_then(Value::as_u64).is_some(),
+            "disk_free_bytes is u64 when present, never null"
+        );
     }
 }

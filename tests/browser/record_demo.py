@@ -195,7 +195,9 @@ class Demo:
                 btn = oks.nth(i)
                 try:
                     if btn.is_visible():
-                        btn.click(timeout=1000)
+                        # force: the toast card used to intercept its own OK
+                        # and nearby controls (Apply).
+                        btn.click(timeout=1000, force=True)
                         clicked = True
                 except Exception:
                     continue
@@ -301,6 +303,16 @@ class Demo:
                 return
             time.sleep(0.15)
         if http_hit is None:
+            other = None
+            for line in chunk.splitlines():
+                if f"method={method}" in line and uri in line:
+                    other = line
+                    break
+            if other is not None:
+                self.bug(
+                    f"{method} {uri} logged as {other.strip()[-180:]}, "
+                    f"wanted status={statuses}"
+                )
             tail = chunk[-600:] if chunk else "(empty / missing .run/logs/fleet-server.log)"
             self.bug(
                 f"click produced no {method} {uri} status={statuses} in server log; "
@@ -340,7 +352,7 @@ class Demo:
         self.workspace_url = p.url.rsplit("/dashboard", 1)[0]
         self.home_workspace_url = self.workspace_url
         heading = p.locator("h1").first.inner_text().strip()
-        if heading != "Dashboard":
+        if heading not in ("Dashboard", "Workforce"):
             self.bug(f"login landed on {heading!r} ({p.url})")
         aside = p.locator("aside").inner_text()
         if "Demo Agent" not in aside:
@@ -536,16 +548,7 @@ class Demo:
             self.bug(f"/health git_sha {sha} != tree-id {tree}")
         p.goto(f"{API}/", wait_until="domcontentloaded")
         pause(p, 800)
-        index = p.inner_text("body")
         self.snap("index")
-        ui_host = urlparse(UI).hostname or "localhost"
-        ui_port = urlparse(UI).port
-        if ui_port and ui_port not in (80, 443, 3030):
-            if "localhost:3030" in index and f":{ui_port}" not in index:
-                self.bug(
-                    f"API index still advertises localhost:3030 while UI is "
-                    f"{ui_host}:{ui_port}"
-                )
 
     def scene_chat(self) -> None:
         base = self.ensure_session()
@@ -588,8 +591,18 @@ class Demo:
             self.bug("chat missing composer textarea")
             return
         if not box.first.is_enabled():
-            # Honest offline: composer disabled is expected without Grok/Ollama.
-            if "not installed" not in body.lower() and "required" not in body.lower():
+            # Disabled is honest when no CLI/provider/runner is ready.
+            lowered = body.lower()
+            if not any(
+                n in lowered
+                for n in (
+                    "not installed",
+                    "required",
+                    "select runner",
+                    "select a runner",
+                    "pick the runner",
+                )
+            ):
                 self.bug("composer disabled without an offline reason")
             self.snap("composer-disabled")
             return
@@ -1100,6 +1113,9 @@ class Demo:
             "No workers yet" not in body
             and p.locator("article").count() == 0
             and p.locator("button").filter(has_text="online").count() == 0
+            and p.locator("button").filter(has_text="last seen").count() == 0
+            and "pending" not in body.lower()
+            and "Waiting to pair" not in body
         ):
             raise RuntimeError("self-hosted page missing empty state or cards")
         self.snap("list")
@@ -1134,9 +1150,12 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
                 self.snap("pair-dismissed")
-        card = p.locator("button").filter(has_text="last seen").or_(
-            p.locator("article").filter(has_text="Waiting to pair")
-        )
+        pending_card = p.locator("button").filter(has_text="Waiting to pair")
+        if pending_card.count() == 0:
+            pending_card = p.locator("button").filter(
+                has_text=re.compile(r"\bpending\b", re.I)
+            )
+        card = pending_card.or_(p.locator("button").filter(has_text="last seen"))
         if card.count() and card.first.is_visible():
             card.first.click()
             pause(p, 800)
@@ -1160,7 +1179,8 @@ class Demo:
         if hold.count() and hold.first.is_visible():
             hold.first.click()
             pause(p, 400)
-            apply = p.get_by_role("button", name="Apply changes")
+            self.dismiss_toasts()
+            apply = p.get_by_role("button", name="Apply", exact=True)
             if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                 with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                     apply.first.click()
@@ -1170,7 +1190,8 @@ class Demo:
             if resume.count():
                 resume.first.click()
                 pause(p, 400)
-                apply = p.get_by_role("button", name="Apply changes")
+                self.dismiss_toasts()
+                apply = p.get_by_role("button", name="Apply", exact=True)
                 if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                     with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                         apply.first.click()

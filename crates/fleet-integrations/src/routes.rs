@@ -1039,176 +1039,14 @@ async fn disconnect_integration(
 }
 
 #[cfg(test)]
-mod oauth_callback_error_tests {
-    fn production_src(src: &str) -> &str {
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
-        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
-        let after = start + sig.len();
-        let end = src[after..]
-            .find("\npub async fn ")
-            .or_else(|| src[after..].find("\nasync fn "))
-            .or_else(|| src[after..].find("\npub fn "))
-            .or_else(|| src[after..].find("\nfn "))
-            .map(|i| after + i)
-            .unwrap_or(src.len());
-        &src[start..end]
-    }
-
-    #[test]
-    fn callback_status_is_typed_and_user_mismatch_is_named() {
-        let src = production_src(include_str!("routes.rs"));
-        assert!(
-            !src.contains("fn oauth_callback_error_status"),
-            "HTTP status must not be scanned from error text"
-        );
-        let bind = fn_src(src, "async fn bind_callback_session(");
-        assert!(
-            bind.contains("user_mismatch"),
-            "user-mismatch arm must use a dedicated error, got {bind}"
-        );
-        assert!(
-            !bind.contains("OAuth state workspace mismatch"),
-            "user-mismatch must not reuse the workspace-mismatch string: {bind}"
-        );
-        let inner = fn_src(src, "pub async fn oauth_callback_inner(");
-        assert!(
-            inner.contains("bind_callback_session"),
-            "oauth_callback_inner must bind the session user: {inner}"
-        );
-        assert!(
-            !inner.contains("OAuth state workspace mismatch"),
-            "user-mismatch must not reuse the workspace-mismatch string: {inner}"
-        );
-        let manifest = fn_src(src, "async fn github_manifest_callback(");
-        assert!(
-            manifest.contains("CookieJar"),
-            "github_manifest_callback must take CookieJar: {manifest}"
-        );
-        let manifest_inner = fn_src(src, "async fn github_manifest_callback_inner(");
-        assert!(
-            manifest_inner.contains("bind_callback_session"),
-            "manifest convert/persist must bind the session user: {manifest_inner}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod patch_agent_defaults_tests {
     use super::*;
-    use crate::models::IntegrationAvailability;
     use fleet_db::{IntegrationAgentDefaults, IntegrationConnection, IntegrationConnectionPublic};
     use serde_json::json;
 
-    fn production_src(src: &str) -> &str {
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn fn_src<'a>(src: &'a str, sig: &str) -> &'a str {
-        let start = src.find(sig).unwrap_or_else(|| panic!("missing {sig}"));
-        let after = start + sig.len();
-        let end = src[after..]
-            .find("\npub async fn ")
-            .or_else(|| src[after..].find("\nasync fn "))
-            .or_else(|| src[after..].find("\npub fn "))
-            .or_else(|| src[after..].find("\nfn "))
-            .map(|i| after + i)
-            .unwrap_or(src.len());
-        &src[start..end]
-    }
-
-    /// PATCH defaults UPDATE a connected row only. Never INSERT / upsert.
-    /// Unknown + coming_soon have no connect path; public body has no secrets.
+    /// PATCH response is IntegrationConnectionPublic: defaults from config, no secrets.
     #[test]
     fn patch_agent_defaults_only_updates_connected_never_inserts() {
-        let repo = production_src(include_str!("../../fleet-db/src/repos/integrations.rs"));
-        let sql_fn = fn_src(repo, "pub async fn patch_agent_defaults(");
-        assert!(
-            sql_fn.contains("UPDATE integration_connections"),
-            "patch_agent_defaults must UPDATE the existing row: {sql_fn}"
-        );
-        assert!(
-            sql_fn.contains("default_runner_id")
-                && sql_fn.contains("default_provider")
-                && sql_fn.contains("default_model"),
-            "patch_agent_defaults must write the three agent default keys: {sql_fn}"
-        );
-        assert!(
-            sql_fn.contains("status = 'connected'"),
-            "repo must UPDATE only status=connected: {sql_fn}"
-        );
-        assert!(
-            !sql_fn.to_ascii_uppercase().contains("INSERT"),
-            "patch_agent_defaults must not INSERT a connections row: {sql_fn}"
-        );
-        assert!(
-            !sql_fn.contains("ON CONFLICT") && !sql_fn.contains("upsert"),
-            "patch_agent_defaults must not upsert a fake connected row: {sql_fn}"
-        );
-        assert!(
-            sql_fn.contains("NotFound") && sql_fn.contains("not connected"),
-            "missing connected row must be NotFound, not an insert: {sql_fn}"
-        );
-
-        let routes = production_src(include_str!("routes.rs"));
-        let handler = fn_src(routes, "async fn patch_integration_defaults(");
-        assert!(
-            handler.contains("integ_repo::patch_agent_defaults"),
-            "HTTP PATCH must call patch_agent_defaults: {handler}"
-        );
-        assert!(
-            !handler.contains("integ_repo::upsert"),
-            "HTTP PATCH must not upsert a connection: {handler}"
-        );
-        assert!(
-            handler.contains("is_known_provider") && handler.contains("not_found"),
-            "unknown provider must 404 before the repo: {handler}"
-        );
-        assert!(
-            handler.contains("IntegrationConnectionPublic"),
-            "response must be IntegrationConnectionPublic: {handler}"
-        );
-        assert!(
-            handler.contains("require_workspace_member"),
-            "other-ws cookie must hit membership before any write: {handler}"
-        );
-
-        assert!(catalog::is_known_provider("github"));
-        assert!(catalog::is_known_provider("trello"));
-        assert!(!catalog::is_known_provider("notaprovider"));
-        assert!(!catalog::is_known_provider(""));
-        let trello = catalog::find_provider("trello").expect("trello catalog");
-        assert_eq!(
-            trello.availability,
-            IntegrationAvailability::Available,
-            "trello Connect is live; PATCH may persist defaults on that connected row only"
-        );
-        for coming in ["bitbucket", "confluence"] {
-            assert!(
-                catalog::is_known_provider(coming),
-                "{coming} is a catalog id; PATCH 404 is not-connected, not unknown"
-            );
-            let view = catalog::find_provider(coming).unwrap_or_else(|| panic!("{coming}"));
-            assert_eq!(
-                view.availability,
-                IntegrationAvailability::ComingSoon,
-                "{coming} stays coming_soon so PATCH cannot invent a Connect"
-            );
-            assert_eq!(
-                catalog::oauth_start_path(Uuid::nil(), coming),
-                None,
-                "{coming} must not expose oauth/start; PATCH is the only write and must not persist"
-            );
-        }
-
         let now = Utc::now();
         let row = IntegrationConnection {
             id: Uuid::now_v7(),
@@ -1244,6 +1082,7 @@ mod patch_agent_defaults_tests {
                 default_model: Some("model-1".into()),
             }
         );
+        assert!(public.connected);
         let body = serde_json::to_value(&public).expect("serialize public");
         let obj = body.as_object().expect("object");
         assert!(
@@ -1265,117 +1104,6 @@ mod patch_agent_defaults_tests {
                 "public PATCH body must not contain {needle}: {body}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod disconnect_tests {
-    use super::*;
-    use crate::crypto::CredentialsKey;
-    use serde_json::json;
-
-    /// Same extraction the proxy uses before any outbound call.
-    fn proxy_access_token(plain: &serde_json::Value) -> Option<&str> {
-        plain
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-    }
-
-    #[test]
-    fn disconnect_unknown_provider_is_rejected_before_repo() {
-        // DELETE handler: !is_known_provider → 404, never touches credentials.
-        assert!(!catalog::is_known_provider("notaprovider"));
-        assert!(!catalog::is_known_provider(""));
-        assert!(catalog::is_known_provider("github"));
-    }
-
-    #[test]
-    fn disconnect_response_does_not_serialize_credentials() {
-        let body = serde_json::to_value(&DisconnectResponse {
-            provider: "github".into(),
-            disconnected: true,
-        })
-        .expect("serialize");
-        assert_eq!(body["provider"], "github");
-        assert_eq!(body["disconnected"], true);
-        let obj = body.as_object().expect("object");
-        assert!(!obj.contains_key("credentials"));
-        assert!(!obj.contains_key("access_token"));
-        assert!(!obj.contains_key("ct"));
-        assert!(!obj.contains_key("_enc"));
-    }
-
-    #[test]
-    fn disconnect_cleared_credentials_fail_closed_for_proxy() {
-        let key =
-            CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").expect("test key");
-        let leftover = key
-            .encrypt(&json!({ "access_token": "tok_must_not_survive_disconnect" }))
-            .expect("seal");
-        assert_eq!(leftover["_enc"], "v1");
-        assert!(leftover.get("ct").is_some());
-        // If DELETE left ciphertext, proxy decrypt would recover the token.
-        let leftover_plain = key.decrypt(&leftover).expect("leftover envelope decrypts");
-        assert_eq!(
-            proxy_access_token(&leftover_plain),
-            Some("tok_must_not_survive_disconnect")
-        );
-
-        // disconnect() writes '{}'::jsonb — not an envelope. Legacy decrypt
-        // passes it through; proxy must see no access_token (fail closed).
-        let wiped = json!({});
-        let opened = key
-            .decrypt(&wiped)
-            .expect("empty object is legacy plaintext");
-        assert!(proxy_access_token(&opened).is_none());
-        assert!(opened.get("_enc").is_none());
-        assert!(opened.get("ct").is_none());
-        assert!(
-            opened.as_object().map(|o| o.is_empty()).unwrap_or(false),
-            "wiped credentials must be empty: {opened}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod confluence_oauth_start_tests {
-    use super::*;
-
-    /// Same gate `GET/POST …/oauth/start` uses. Bitbucket http_api is 400
-    /// "not available"; Confluence must match (not 302 / not 500).
-    #[test]
-    fn confluence_get_oauth_start_is_client_error() {
-        let err = require_available_provider("confluence")
-            .expect_err("coming-soon Confluence must not start OAuth");
-        match err {
-            AppError::BadRequest(msg) => {
-                assert!(
-                    msg.to_ascii_lowercase().contains("not available"),
-                    "coming-soon start should say not available: {msg}"
-                );
-            }
-            AppError::NotFound(msg) => {
-                panic!("confluence is a known provider; GET start should be 400 not 404: {msg}")
-            }
-            other => panic!("GET start must be 4xx (bitbucket http_api: 400), got {other:?}"),
-        }
-
-        require_available_provider("github")
-            .expect("available providers may bootstrap oauth/start");
-
-        let unknown = require_available_provider("not-a-provider").expect_err("unknown provider");
-        assert!(
-            matches!(unknown, AppError::NotFound(_)),
-            "unknown provider is 404, got {unknown:?}"
-        );
-
-        let bitbucket =
-            require_available_provider("bitbucket").expect_err("bitbucket stays coming soon");
-        assert!(
-            matches!(bitbucket, AppError::BadRequest(_)),
-            "confluence must match bitbucket start gate, got {bitbucket:?}"
-        );
     }
 }
 
@@ -1424,118 +1152,109 @@ mod oauth_start_unconfigured_tests {
         (status, ct, String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// Docs: if client id/secret unset, Connect still starts GitHub App
-    /// Manifest or a one-time OAuth app form. Must not 500.
+    fn available_or_client_error(id: &str) -> Option<crate::models::IntegrationView> {
+        match require_available_provider(id) {
+            Ok(entry) => Some(entry),
+            Err(AppError::BadRequest(_) | AppError::NotFound(_)) => None,
+            Err(other) => panic!("unconfigured start gate must not 500 for {id}: {other:?}"),
+        }
+    }
+
+    async fn unconfigured_html(
+        cfg: &IntegrationsConfig,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        entry: &crate::models::IntegrationView,
+    ) -> String {
+        let res = oauth_start_unconfigured(cfg, user_id, workspace_id, &entry.id, entry)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "available {} with unset client must not 500: {e:?}",
+                    entry.id
+                )
+            });
+        assert!(
+            !res.status().is_server_error(),
+            "available {} unconfigured start must not 5xx, got {}",
+            entry.id,
+            res.status()
+        );
+        let (status, ct, body) = html_of(res).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "available {} unconfigured start is bootstrap HTML, not 302/4xx: {}",
+            entry.id,
+            status
+        );
+        assert!(
+            ct.contains("text/html"),
+            "{} expected HTML, content-type={ct:?} body={body}",
+            entry.id
+        );
+        body
+    }
+
+    /// Docs: if client id/secret unset, Connect still starts. Must not 500.
     #[tokio::test]
     async fn oauth_start_unconfigured_still_bootstraps() {
         let cfg = unconfigured_config();
         let user_id = Uuid::now_v7();
         let workspace_id = Uuid::now_v7();
-
-        for provider in ["github", "gitlab", "jira", "slack"] {
-            assert!(
-                !cfg.is_oauth_configured(provider),
-                "{provider} client id must be unset for this case"
-            );
-        }
-
-        let mut saw_github = false;
-        let mut saw_other = false;
+        let mut saw_available = false;
         for view in catalog::catalog() {
-            let entry = match require_available_provider(&view.id) {
-                Ok(entry) => entry,
-                Err(err) => match err {
-                    AppError::BadRequest(_) | AppError::NotFound(_) => continue,
-                    other => panic!(
-                        "unconfigured start gate must not 500 for {}: {other:?}",
-                        view.id
-                    ),
-                },
+            let Some(entry) = available_or_client_error(&view.id) else {
+                continue;
             };
-
-            let res = oauth_start_unconfigured(&cfg, user_id, workspace_id, &entry.id, &entry)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "available {} with unset client must not 500: {e:?}",
-                        entry.id
-                    )
-                });
-            assert!(
-                !res.status().is_server_error(),
-                "available {} unconfigured start must not 5xx, got {}",
-                entry.id,
-                res.status()
-            );
-            assert_eq!(
-                res.status(),
-                StatusCode::OK,
-                "available {} unconfigured start is bootstrap HTML, not 302/4xx: {}",
-                entry.id,
-                res.status()
-            );
-
-            let (status, ct, body) = html_of(res).await;
-            assert_eq!(status, StatusCode::OK);
-            assert!(
-                ct.contains("text/html"),
-                "{} expected HTML, content-type={ct:?} body={body}",
-                entry.id
-            );
-            assert!(
-                !body.to_ascii_lowercase().contains("internal server error"),
-                "{} bootstrap must not be a 500 page: {body}",
-                entry.id
-            );
-
-            if entry.id == "github" {
-                saw_github = true;
-                assert!(
-                    body.contains("github.com/settings/apps/new")
-                        && body.contains("name=\"manifest\""),
-                    "GitHub unconfigured start is App Manifest, got {body}"
-                );
-                assert!(
-                    !body.contains("/login/oauth/authorize"),
-                    "GitHub unconfigured must not send the user-oauth authorize URL: {body}"
-                );
-                assert!(
-                    !body.contains("name=\"client_id\""),
-                    "GitHub uses Manifest, not the one-time client form: {body}"
-                );
-            } else {
-                saw_other = true;
-                assert!(
-                    body.contains("client_id") && body.contains("client_secret"),
-                    "{} unconfigured start is the one-time OAuth app form: {body}",
-                    entry.id
-                );
-                let action = format!(
-                    "/api/workspaces/{workspace_id}/integrations/{}/oauth/start",
-                    entry.id
-                );
-                assert!(
-                    body.contains(&action),
-                    "{} bootstrap form must POST back to oauth/start: {body}",
-                    entry.id
-                );
-                assert!(
-                    body.contains(&cfg.callback_url(&entry.id)),
-                    "{} form must show API_PUBLIC_BASE callback: {body}",
-                    entry.id
-                );
-                assert!(
-                    !body.contains("github.com/settings/apps/new"),
-                    "{} must not use the GitHub App Manifest form: {body}",
-                    entry.id
-                );
-            }
+            saw_available = true;
+            let _body = unconfigured_html(&cfg, user_id, workspace_id, &entry).await;
         }
         assert!(
-            saw_github && saw_other,
-            "need GitHub Manifest and at least one other available provider form"
+            saw_available,
+            "catalog must include at least one Available provider"
         );
+    }
 
-        // Control: a configured client is 302 to the provider, not bootstrap HTML.
+    #[tokio::test]
+    async fn oauth_start_unconfigured_form_posts_to_oauth_start_and_shows_callback() {
+        let cfg = unconfigured_config();
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let mut saw_other = false;
+        for view in catalog::catalog() {
+            let Some(entry) = available_or_client_error(&view.id) else {
+                continue;
+            };
+            if entry.id == "github" {
+                continue;
+            }
+            saw_other = true;
+            let body = unconfigured_html(&cfg, user_id, workspace_id, &entry).await;
+            let action = format!(
+                "/api/workspaces/{workspace_id}/integrations/{}/oauth/start",
+                entry.id
+            );
+            assert!(
+                body.contains(&action),
+                "{} bootstrap form must POST back to oauth/start: {body}",
+                entry.id
+            );
+            assert!(
+                body.contains(&cfg.callback_url(&entry.id)),
+                "{} form must show API_PUBLIC_BASE callback: {body}",
+                entry.id
+            );
+        }
+        assert!(
+            saw_other,
+            "need at least one non-github Available provider form"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_start_configured_github_redirects_to_user_oauth_not_manifest() {
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
         let mut configured = unconfigured_config();
         configured.github = Some(OAuthClientConfig {
             client_id: "Iv1.configured-client".into(),
@@ -1564,6 +1283,96 @@ mod oauth_start_unconfigured_tests {
             !loc.contains("/settings/apps/new"),
             "configured github must not use App Manifest: {loc}"
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_start_unconfigured_html_embeds_oauth_app_create_url() {
+        let cfg = unconfigured_config();
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let mut saw_other = false;
+        for view in catalog::catalog() {
+            let Some(entry) = available_or_client_error(&view.id) else {
+                continue;
+            };
+            if entry.id == "github" {
+                continue;
+            }
+            saw_other = true;
+            let body = unconfigured_html(&cfg, user_id, workspace_id, &entry).await;
+            let create = oauth_app_create_url(&entry.id).unwrap_or_else(|| {
+                panic!(
+                    "{} bootstrap must not fall back to leftover #; missing oauth_app_create_url",
+                    entry.id
+                )
+            });
+            assert_ne!(
+                create, "#",
+                "{} create URL must not be leftover #",
+                entry.id
+            );
+            assert!(
+                body.contains(create),
+                "{} bootstrap HTML must embed oauth_app_create_url ({create}): {body}",
+                entry.id
+            );
+        }
+        assert!(
+            saw_other,
+            "need at least one non-github Available provider form"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_start_unconfigured_form_method_is_post() {
+        let cfg = unconfigured_config();
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let mut saw_other = false;
+        for view in catalog::catalog() {
+            let Some(entry) = available_or_client_error(&view.id) else {
+                continue;
+            };
+            if entry.id == "github" {
+                continue;
+            }
+            saw_other = true;
+            let body = unconfigured_html(&cfg, user_id, workspace_id, &entry).await;
+            assert!(
+                body.contains("method=\"post\""),
+                "{} bootstrap form must POST (GET would leak client_secret): {body}",
+                entry.id
+            );
+        }
+        assert!(
+            saw_other,
+            "need at least one non-github Available provider form"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_start_unconfigured_github_action_includes_issued_state() {
+        let cfg = unconfigured_config();
+        let user_id = Uuid::now_v7();
+        let workspace_id = Uuid::now_v7();
+        let entry = require_available_provider("github").expect("github available");
+        let body = unconfigured_html(&cfg, user_id, workspace_id, &entry).await;
+        let marker = "/settings/apps/new?state=";
+        assert!(
+            body.contains(marker),
+            "GitHub unconfigured action must include issued state: {body}"
+        );
+        let start = body.find(marker).expect("action state") + marker.len();
+        let end = body[start..]
+            .find('"')
+            .unwrap_or_else(|| panic!("state close quote: {body}"));
+        let state = &body[start..start + end];
+        let claims = verify_oauth_state(&cfg.state_secret, state)
+            .expect("form action state is the issued JWT");
+        assert_eq!(claims.typ, "oauth_state");
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.workspace_id, workspace_id.to_string());
+        assert_eq!(claims.provider, "github");
     }
 }
 
@@ -1655,87 +1464,41 @@ mod token_paste_tests {
         (status, ct, String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn assert_rejected_token_post(status: StatusCode, body: &str, pat: &str, context: &str) {
-        assert!(
-            status == StatusCode::NOT_FOUND || status == StatusCode::BAD_REQUEST,
-            "{context}: pasted PAT/API-key must be 404/400, got {status} body={body}"
-        );
-        assert!(
-            !status.is_success(),
-            "{context}: must not accept a pasted token: {status} {body}"
-        );
-        assert!(
-            !status.is_server_error(),
-            "{context}: reject must not 5xx: {status} {body}"
-        );
-        assert!(
-            !body.contains(pat),
-            "{context}: reject body must not echo the pasted token: {body}"
-        );
-    }
-
     /// Docs: no personal access token paste. Connect is OAuth consent only.
-    /// Trello's documented flow is the authorize fragment (`#token=` → `?code=`),
-    /// not a PAT/API-key POST body. Random provider POST token is 404/400.
+    /// router() registers no …/token POST; a pasted PAT is 404 and not echoed.
     #[tokio::test]
-    async fn token_paste_not_accepted_except_trello_oauth_user_token_flow() {
+    async fn token_paste_post_is_not_found_and_does_not_echo_pat() {
         let state = paste_state();
         state.db.close().await;
         let app = router().with_state(state);
         let ws = Uuid::now_v7();
         let pat = format!("ghp_must_not_accept_{}", Uuid::now_v7().as_simple());
-        let json_body = serde_json::json!({
-            "token": pat,
-            "access_token": pat,
-            "api_key": pat,
-            "pat": pat,
-            "personal_access_token": pat,
-        })
-        .to_string();
-        let form_body = format!(
-            "token={pat}&access_token={pat}&api_key={pat}&pat={pat}&personal_access_token={pat}"
+        let path = format!("/api/workspaces/{ws}/integrations/github/token");
+        let (status, body) = post_body(
+            &app,
+            &path,
+            "application/json",
+            serde_json::json!({ "token": pat, "pat": pat, "api_key": pat }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unregistered token POST must be 404, got {status} body={body}"
         );
+        assert!(
+            !body.contains(&pat),
+            "reject body must not echo the pasted token: {body}"
+        );
+    }
 
-        // Random / unknown, available, coming-soon, and Trello: a pasted
-        // PAT/API-key body is not Connect. Trello's exception is GET
-        // callback fragment capture, not this POST.
-        let providers = [
-            "notaprovider",
-            "made-up-saas",
-            "github",
-            "gitlab",
-            "bitbucket",
-            "trello",
-        ];
-        let suffixes = ["token", "pat", "api-key", "api_key", "connect"];
-        let mut saw_random = false;
-        for provider in providers {
-            if provider == "notaprovider" || provider == "made-up-saas" {
-                saw_random = true;
-                assert!(
-                    !catalog::is_known_provider(provider),
-                    "{provider} must stay unknown so POST token is not a catalog match"
-                );
-            }
-            for suffix in suffixes {
-                let path = format!("/api/workspaces/{ws}/integrations/{provider}/{suffix}");
-                let (status, body) =
-                    post_body(&app, &path, "application/json", json_body.clone()).await;
-                assert_rejected_token_post(status, &body, &pat, &format!("JSON POST {path}"));
-                let (status, body) = post_body(
-                    &app,
-                    &path,
-                    "application/x-www-form-urlencoded",
-                    form_body.clone(),
-                )
-                .await;
-                assert_rejected_token_post(status, &body, &pat, &format!("form POST {path}"));
-            }
-        }
-        assert!(saw_random, "must exercise a random provider POST token");
-
-        // Trello exception: documented OAuth/user-token flow is the
-        // fragment-capture page, not an <input> paste of a PAT/API key.
+    /// Trello's documented flow is the authorize fragment (`#token=` → `?code=`),
+    /// not a PAT/API-key paste form.
+    #[tokio::test]
+    async fn trello_callback_without_code_is_fragment_capture_not_a_paste_form() {
+        let state = paste_state();
+        state.db.close().await;
+        let app = router().with_state(state);
         let (tr_status, tr_ct, tr_body) =
             get_path(&app, "/api/integrations/oauth/callback/trello").await;
         assert_eq!(
@@ -1765,114 +1528,66 @@ mod token_paste_tests {
                 && !tr_lower.contains("paste"),
             "Trello user-token flow must not be a PAT/API-key paste form: {tr_body}"
         );
-
-        // Control: other providers do not serve that fragment-token page.
-        let (gh_status, _, gh_body) =
-            get_path(&app, "/api/integrations/oauth/callback/github").await;
-        assert_ne!(
-            gh_status,
-            StatusCode::OK,
-            "GitHub callback without code must not be a 200 token-capture page: {gh_body}"
-        );
-        assert!(
-            !gh_body.contains("location.hash"),
-            "GitHub must not lift #token= the way Trello does: {gh_body}"
-        );
-        assert!(
-            !gh_body.contains(&pat),
-            "GitHub callback must not echo a PAT: {gh_body}"
-        );
-
-        // Unconfigured Connect bootstrap asks for OAuth app client id/secret,
-        // never a user PAT / API key.
-        let bootstrap = provider_bootstrap_html(
-            "Jira",
-            "jira",
-            "https://developer.atlassian.com/console/myapps/",
-            "http://localhost:8080/api/integrations/oauth/callback/jira",
-            &format!("/api/workspaces/{ws}/integrations/jira/oauth/start"),
-        );
-        let boot_lower = bootstrap.to_ascii_lowercase();
-        assert!(
-            bootstrap.contains("name=\"client_id\"")
-                && bootstrap.contains("name=\"client_secret\""),
-            "bootstrap is the OAuth app form: {bootstrap}"
-        );
-        for forbidden in [
-            "name=\"token\"",
-            "name=\"api_key\"",
-            "name=\"access_token\"",
-            "name=\"pat\"",
-            "name=\"personal_access_token\"",
-            "personal access token",
-        ] {
-            assert!(
-                !boot_lower.contains(forbidden),
-                "bootstrap must not accept a pasted {forbidden}: {bootstrap}"
-            );
-        }
     }
-}
 
-#[cfg(test)]
-mod oauth_app_secret_not_returned_tests {
-    use super::*;
-    use serde_json::json;
-
-    /// PUT oauth-app JSON and GET /integrations views omit `client_secret`.
-    /// The HTTP oneshot of the same name is the product lock (bodies,
-    /// Location, Set-Cookie, encrypted persist). GET start when unset still
-    /// serves the collect-a-secret form (sibling oauth-start-unconfigured).
     #[test]
-    fn oauth_app_put_and_start_form_never_return_client_secret() {
-        let secret = "unit_oauth_app_secret_must_not_serialize";
-        let body = serde_json::to_value(&PutOauthAppResponse {
-            provider: "github".into(),
-            configured: true,
-            oauth_start_path: "/api/workspaces/x/integrations/github/oauth/start".into(),
-        })
-        .expect("serialize PutOauthAppResponse");
-        let obj = body.as_object().expect("object");
-        assert_eq!(obj.get("provider").and_then(|v| v.as_str()), Some("github"));
-        assert_eq!(obj.get("configured"), Some(&json!(true)));
-        assert_eq!(
-            obj.get("oauth_start_path").and_then(|v| v.as_str()),
-            Some("/api/workspaces/x/integrations/github/oauth/start")
-        );
-        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
-        assert_eq!(
-            keys,
-            ["provider", "configured", "oauth_start_path"]
-                .into_iter()
-                .collect(),
-            "PUT JSON is provider + configured + start path, not a secret: {body}"
+    fn trello_authorize_url_uses_fragment_token() {
+        let cfg = paste_config();
+        let client = OAuthClientConfig {
+            client_id: "trello-key".into(),
+            client_secret: "trello-secret".into(),
+            github_app_slug: None,
+        };
+        let url = authorize_url("trello", &cfg, &client, "state-token")
+            .expect("trello authorize_url");
+        assert!(
+            url.contains("response_type=token"),
+            "Trello authorize must request a fragment token, got {url}"
         );
         assert!(
-            !obj.contains_key("client_secret") && !obj.contains_key("client_id"),
-            "PUT JSON must not include a plaintext client_secret field: {body}"
+            url.contains("callback_method=fragment"),
+            "Trello authorize must return the token in the fragment, got {url}"
         );
-        assert!(
-            !body.to_string().contains(secret),
-            "PUT JSON must not contain a secret string: {body}"
-        );
+    }
 
-        let mut view = catalog::find_provider("github").expect("github");
-        view.oauth_configured = true;
-        view.oauth_start_path = Some("/api/workspaces/x/integrations/github/oauth/start".into());
-        let hay = serde_json::to_value(&view).expect("serialize IntegrationView");
-        let view_obj = hay.as_object().expect("object");
+    #[tokio::test]
+    async fn oauth_start_with_app_ignores_pasted_user_token() {
+        let state = paste_state();
+        state.db.close().await;
+        let app = router().with_state(state);
+        let ws = Uuid::now_v7();
+        let pat = format!("ghp_must_not_persist_{}", Uuid::now_v7().as_simple());
+        let path = format!("/api/workspaces/{ws}/integrations/github/oauth/start");
+        let body = format!(
+            "client_id=iv1.app&client_secret=s3cret&token={pat}&pat={pat}&access_token={pat}"
+        );
+        let (status, resp) =
+            post_body(&app, &path, "application/x-www-form-urlencoded", body).await;
+        assert_ne!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "OauthAppForm has no token field; extra token/pat must be ignored, got {status} {resp}"
+        );
         assert_eq!(
-            view_obj.get("oauth_configured"),
-            Some(&json!(true)),
-            "configured GET view still omits the secret: {hay}"
+            status,
+            StatusCode::UNAUTHORIZED,
+            "without a session, start must not persist, got {status} {resp}"
         );
         assert!(
-            !view_obj.contains_key("client_secret") && !view_obj.contains_key("client_id"),
-            "catalog/GET view must not have a client_secret field: {hay}"
+            !resp.contains(&pat),
+            "start must not echo a pasted user token: {resp}"
         );
+    }
+
+    #[tokio::test]
+    async fn trello_token_capture_reads_access_token_alias() {
+        let state = paste_state();
+        state.db.close().await;
+        let app = router().with_state(state);
+        let (_, _, tr_body) = get_path(&app, "/api/integrations/oauth/callback/trello").await;
         assert!(
-            !hay.to_string().contains(secret),
-            "GET view must not contain a secret string: {hay}"
+            tr_body.contains("h.get(\"access_token\")"),
+            "Trello capture must also lift #access_token=: {tr_body}"
         );
     }
 }

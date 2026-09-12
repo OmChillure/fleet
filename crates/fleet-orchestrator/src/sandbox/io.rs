@@ -281,9 +281,78 @@ mod tests {
             "pr up",
         )
         .unwrap();
+        assert_eq!(io.provider, "github");
+        assert_eq!(io.operation, "add_comment");
         assert_eq!(io.args["owner"], "acme");
         assert_eq!(io.args["repo"], "app");
         assert_eq!(io.args["number"], 12);
+        assert_eq!(io.args["body"], "pr up");
+    }
+
+    #[test]
+    fn github_malformed_or_empty_key_returns_none() {
+        for key in ["", "acme/app", "acme#12", "/app#12", "acme/#12", "acme/app#x"] {
+            assert_eq!(
+                default_output_for_ref(
+                    &ExternalRef {
+                        provider: "github".into(),
+                        key: key.into(),
+                    },
+                    "pr up",
+                ),
+                None,
+                "github key {key:?} should not map to a write-back",
+            );
+        }
+    }
+
+    #[test]
+    fn gitlab_comment_maps_project_iid_and_body() {
+        let io = default_output_for_ref(
+            &ExternalRef {
+                provider: "gitlab".into(),
+                key: "group/app#9".into(),
+            },
+            "pr up",
+        )
+        .unwrap();
+        assert_eq!(io.provider, "gitlab");
+        assert_eq!(io.operation, "add_comment");
+        assert_eq!(io.args["project"], "group/app");
+        assert_eq!(io.args["iid"], 9);
+        assert_eq!(io.args["body"], "pr up");
+    }
+
+    #[test]
+    fn ticket_providers_default_to_add_comment() {
+        let cases = [
+            ("jira", "WEB-1", "add_comment", "key", "WEB-1", "body"),
+            ("linear", "ENG-9", "add_comment", "issue_id", "ENG-9", "body"),
+            ("trello", "card-1", "add_comment", "card_id", "card-1", "text"),
+            ("asana", "task-1", "add_comment", "task_id", "task-1", "text"),
+            (
+                "teams",
+                "chat:thread",
+                "send_chat_message",
+                "chat_id",
+                "chat",
+                "text",
+            ),
+        ];
+        for (provider, key, operation, id_field, id_value, text_field) in cases {
+            let io = default_output_for_ref(
+                &ExternalRef {
+                    provider: provider.into(),
+                    key: key.into(),
+                },
+                "pr up",
+            )
+            .unwrap();
+            assert_eq!(io.provider, provider);
+            assert_eq!(io.operation, operation);
+            assert_eq!(io.args[id_field], id_value);
+            assert_eq!(io.args[text_field], "pr up");
+        }
     }
 
     #[test]

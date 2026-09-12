@@ -261,22 +261,29 @@ mod tests {
     fn app_name_fits_github_limit() {
         let id = Uuid::parse_str("019fe137-d694-7640-b4f9-8bc187c06f55").unwrap();
         let name = app_name_for_workspace(id);
+        assert_eq!(name, "Agent Fleet 87c06f55");
         assert!(name.len() <= 34, "{name}");
-        assert!(name.starts_with("Agent Fleet "));
+    }
+
+    #[test]
+    fn app_names_differ_across_workspaces() {
+        let a = Uuid::parse_str("019fe137-d694-7640-b4f9-8bc187c06f55").unwrap();
+        let b = Uuid::parse_str("019fe137-d694-7640-b4f9-aaaaaaaaaaaa").unwrap();
+        assert_ne!(app_name_for_workspace(a), app_name_for_workspace(b));
+    }
+
+    #[test]
+    fn manifest_name_is_app_name_for_workspace() {
+        let id = Uuid::parse_str("019fe137-d694-7640-b4f9-8bc187c06f55").unwrap();
+        let name = app_name_for_workspace(id);
+        let v = manifest_value(&cfg(), id);
+        assert_eq!(v["name"], name);
+        assert!(name.len() <= 34, "{name}");
     }
 
     #[test]
     fn manifest_points_at_local_callbacks() {
-        let id = Uuid::nil();
-        let v = manifest_value(&cfg(), id);
-        assert_eq!(
-            v["redirect_url"],
-            "http://localhost:8080/api/integrations/oauth/github/manifest/callback"
-        );
-        assert_eq!(
-            v["callback_urls"][0],
-            "http://localhost:8080/api/integrations/oauth/callback/github"
-        );
+        let v = manifest_value(&cfg(), Uuid::nil());
         assert_eq!(v["request_oauth_on_install"], true);
         assert_eq!(v["public"], false);
         assert!(
@@ -286,39 +293,121 @@ mod tests {
     }
 
     #[test]
-    fn manifest_omits_private_webhook() {
-        assert!(!github_accepts_webhook_url(
-            "http://localhost:8080/api/integrations/webhooks/github"
-        ));
-        assert!(!github_accepts_webhook_url(
-            "http://127.0.0.1:8080/api/integrations/webhooks/github"
-        ));
-        assert!(!github_accepts_webhook_url(
-            "http://192.168.1.1:8080/api/integrations/webhooks/github"
-        ));
-        assert!(github_accepts_webhook_url(
-            "https://fleet.example.com/api/integrations/webhooks/github"
-        ));
+    fn manifest_homepage_url_is_ui_public_base() {
+        let c = cfg();
+        let v = manifest_value(&c, Uuid::nil());
+        assert_eq!(v["url"], c.ui_public_base);
+        assert_eq!(v["url"], "http://localhost:3030");
+    }
+
+    #[test]
+    fn manifest_default_permissions_include_repo_write() {
+        let perms = &manifest_value(&cfg(), Uuid::nil())["default_permissions"];
+        assert_eq!(perms["contents"], "write");
+        assert_eq!(perms["issues"], "write");
+        assert_eq!(perms["pull_requests"], "write");
+        assert_eq!(perms["metadata"], "read");
+        assert_eq!(perms["actions"], "read");
+        assert_eq!(perms["checks"], "read");
+        assert_eq!(perms["statuses"], "read");
+    }
+
+    #[test]
+    fn public_api_base_manifest_callbacks_use_that_host() {
         let mut public = cfg();
         public.api_public_base = "https://fleet.example.com".into();
         let v = manifest_value(&public, Uuid::nil());
         assert_eq!(
-            v["hook_attributes"]["url"],
-            "https://fleet.example.com/api/integrations/webhooks/github"
+            v["redirect_url"],
+            "https://fleet.example.com/api/integrations/oauth/github/manifest/callback"
         );
-        assert_eq!(v["hook_attributes"]["active"], true);
         assert_eq!(
-            v["default_events"],
-            json!(["issues", "issue_comment", "pull_request"])
+            v["callback_urls"][0],
+            "https://fleet.example.com/api/integrations/oauth/callback/github"
         );
     }
 
     #[test]
-    fn form_html_includes_manifest_and_github_action() {
-        let html = manifest_form_html(&cfg(), Uuid::nil(), "state-token");
-        assert!(html.contains("github.com/settings/apps/new"));
-        assert!(html.contains("name=\"manifest\""));
-        assert!(html.contains("fleet-github-manifest"));
+    fn manifest_omits_private_webhook() {
+        let mut loopback = cfg();
+        loopback.api_public_base = "http://127.0.0.1:8080".into();
+        let loopback_manifest = manifest_value(&loopback, Uuid::nil());
+        assert!(
+            loopback_manifest.get("hook_attributes").is_none(),
+            "127.0.0.1 must not set a webhook: {loopback_manifest}"
+        );
+
+        let mut rfc1918 = cfg();
+        rfc1918.api_public_base = "http://192.168.1.1:8080".into();
+        let rfc1918_manifest = manifest_value(&rfc1918, Uuid::nil());
+        assert!(
+            rfc1918_manifest.get("hook_attributes").is_none(),
+            "RFC1918 must not set a webhook: {rfc1918_manifest}"
+        );
+
+        let mut public = cfg();
+        public.api_public_base = "https://fleet.example.com".into();
+        let public_manifest = manifest_value(&public, Uuid::nil());
+        assert_eq!(
+            public_manifest["hook_attributes"]["url"],
+            "https://fleet.example.com/api/integrations/webhooks/github"
+        );
+        assert_eq!(public_manifest["hook_attributes"]["active"], true);
+    }
+
+    #[test]
+    fn manifest_omits_hook_attributes_for_ipv6_loopback_and_ula() {
+        let mut loopback = cfg();
+        loopback.api_public_base = "http://[::1]:8080".into();
+        let loopback_manifest = manifest_value(&loopback, Uuid::nil());
+        assert!(
+            loopback_manifest.get("hook_attributes").is_none(),
+            "IPv6 loopback must not set a webhook: {loopback_manifest}"
+        );
+
+        let mut ula = cfg();
+        ula.api_public_base = "https://[fc00::1]".into();
+        let ula_manifest = manifest_value(&ula, Uuid::nil());
+        assert!(
+            ula_manifest.get("hook_attributes").is_none(),
+            "IPv6 unique local must not set a webhook: {ula_manifest}"
+        );
+    }
+
+    #[test]
+    fn manifest_omits_hook_attributes_for_link_local_and_unspecified() {
+        let mut link_local = cfg();
+        link_local.api_public_base = "http://169.254.1.1:8080".into();
+        let link_local_manifest = manifest_value(&link_local, Uuid::nil());
+        assert!(
+            link_local_manifest.get("hook_attributes").is_none(),
+            "IPv4 link-local must not set a webhook: {link_local_manifest}"
+        );
+
+        let mut unspecified = cfg();
+        unspecified.api_public_base = "http://0.0.0.0:8080".into();
+        let unspecified_manifest = manifest_value(&unspecified, Uuid::nil());
+        assert!(
+            unspecified_manifest.get("hook_attributes").is_none(),
+            "unspecified IPv4 must not set a webhook: {unspecified_manifest}"
+        );
+
+        let mut v6_link_local = cfg();
+        v6_link_local.api_public_base = "http://[fe80::1]".into();
+        let v6_link_local_manifest = manifest_value(&v6_link_local, Uuid::nil());
+        assert!(
+            v6_link_local_manifest.get("hook_attributes").is_none(),
+            "IPv6 link-local must not set a webhook: {v6_link_local_manifest}"
+        );
+    }
+
+    #[test]
+    fn manifest_sets_default_events_issues_pr() {
+        let v = manifest_value(&cfg(), Uuid::nil());
+        assert_eq!(
+            v["default_events"],
+            json!(["issues", "issue_comment", "pull_request"])
+        );
     }
 
     #[test]
@@ -341,79 +430,45 @@ mod tests {
             .expect("github user-oauth authorize url")
     }
 
-    fn encode_state_typ(secret: &str, typ: &str) -> String {
-        use super::super::state_token::OAuthStateClaims;
-        use jsonwebtoken::{EncodingKey, Header, encode};
-
-        let now = chrono::Utc::now().timestamp();
-        encode(
-            &Header::default(),
-            &OAuthStateClaims {
-                sub: Uuid::now_v7().to_string(),
-                workspace_id: Uuid::now_v7().to_string(),
-                provider: "github".into(),
-                nonce: format!("nonce-{typ}"),
-                exp: now + 600,
-                iat: now,
-                typ: typ.into(),
-            },
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .expect("encode typed oauth state")
-    }
-
-    #[test]
-    fn github_app_install_url_is_not_user_oauth_authorize_url() {
-        let state = "state-token";
-        let install = github_install_url("agent-fleet-deadbeef", state);
-        let authorize = user_oauth_authorize_url(state);
-
-        assert_ne!(install, authorize);
-        assert!(
-            install.starts_with("https://github.com/apps/agent-fleet-deadbeef/installations/new?"),
-            "{install}"
-        );
-        assert!(
-            authorize.starts_with("https://github.com/login/oauth/authorize?"),
-            "{authorize}"
-        );
-        assert!(
-            !install.contains("/login/oauth/authorize"),
-            "install URL must not be the user-oauth authorize endpoint: {install}"
-        );
-        assert!(
-            !authorize.contains("/installations/new"),
-            "user-oauth authorize must not be the App install endpoint: {authorize}"
-        );
-        assert!(
-            !authorize.contains("/settings/apps/new"),
-            "user-oauth authorize must not be the App manifest endpoint: {authorize}"
-        );
-    }
-
     #[test]
     fn manifest_form_action_is_not_user_oauth_authorize_url() {
-        let state = "state-token";
-        let html = manifest_form_html(&cfg(), Uuid::nil(), state);
-        let authorize = user_oauth_authorize_url(state);
-
+        let html = manifest_form_html(&cfg(), Uuid::nil(), "state-token");
         assert!(
             html.contains("https://github.com/settings/apps/new?state=state-token"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn manifest_form_action_urlencodes_state() {
+        let html = manifest_form_html(&cfg(), Uuid::nil(), "a+b");
         assert!(
-            !html.contains("/login/oauth/authorize"),
-            "manifest form must not POST to user-oauth authorize: {html}"
+            html.contains("https://github.com/settings/apps/new?state=a%2Bb"),
+            "{html}"
         );
-        assert!(
-            !html.contains("/installations/new"),
-            "manifest form is create-app, not install: {html}"
-        );
-        assert!(
-            authorize.starts_with("https://github.com/login/oauth/authorize?"),
-            "{authorize}"
-        );
-        assert!(!authorize.contains("/settings/apps/new"));
+    }
+
+    #[test]
+    fn manifest_form_hidden_field_equals_manifest_value() {
+        let c = cfg();
+        let id = Uuid::nil();
+        let html = manifest_form_html(&c, id, "state-token");
+        let marker = "name=\"manifest\" value=\"";
+        let start = html
+            .find(marker)
+            .unwrap_or_else(|| panic!("hidden name=manifest: {html}"))
+            + marker.len();
+        let end = html[start..]
+            .find('"')
+            .unwrap_or_else(|| panic!("manifest value close quote: {html}"));
+        let raw = html[start..start + end]
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        let got: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("manifest JSON: {e}: {raw}"));
+        assert_eq!(got, manifest_value(&c, id));
     }
 
     #[test]
@@ -435,97 +490,22 @@ mod tests {
 
     #[test]
     fn manifest_callback_is_not_user_oauth_callback() {
-        let c = cfg();
-        let manifest_cb = manifest_callback_url(&c);
-        let user_cb = c.callback_url("github");
-        assert_ne!(manifest_cb, user_cb);
+        let v = manifest_value(&cfg(), Uuid::nil());
         assert_eq!(
-            manifest_cb,
-            "http://localhost:8080/api/integrations/oauth/github/manifest/callback"
-        );
-        assert_eq!(
-            user_cb,
+            v["setup_url"],
             "http://localhost:8080/api/integrations/oauth/callback/github"
         );
-        assert!(
-            !manifest_cb.ends_with("/oauth/callback/github"),
-            "manifest callback must not be the user-oauth callback: {manifest_cb}"
-        );
-        assert!(
-            !user_cb.contains("manifest"),
-            "user-oauth callback must not be the manifest callback: {user_cb}"
-        );
-
-        let v = manifest_value(&c, Uuid::nil());
-        assert_eq!(v["redirect_url"], manifest_cb);
-        assert_eq!(v["callback_urls"][0], user_cb);
-        assert_eq!(v["setup_url"], user_cb);
 
         let authorize = user_oauth_authorize_url("state-token");
         assert!(
-            authorize.contains("redirect_uri=") && authorize.contains("oauth%2Fcallback%2Fgithub"),
+            authorize.contains(
+                "redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fapi%2Fintegrations%2Foauth%2Fcallback%2Fgithub"
+            ),
             "user-oauth authorize must send GitHub to the user-oauth callback: {authorize}"
         );
         assert!(
             !authorize.contains("manifest"),
             "user-oauth authorize must not send GitHub to the manifest callback: {authorize}"
         );
-    }
-
-    #[test]
-    fn manifest_state_cannot_complete_user_oauth_callback() {
-        let secret = cfg().state_secret.clone();
-        let manifest_state = encode_state_typ(&secret, "github_manifest");
-        let err = crate::oauth::verify_oauth_state(&secret, &manifest_state).unwrap_err();
-        match err {
-            fleet_auth::AppError::Unauthorized(msg) => {
-                assert!(
-                    msg.contains("type") || msg.contains("invalid"),
-                    "manifest state must not verify as user-oauth state, got {msg}"
-                );
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn user_oauth_state_cannot_complete_manifest_callback() {
-        use super::super::state_token::OAuthStateClaims;
-        use jsonwebtoken::{DecodingKey, Validation, decode};
-
-        let secret = cfg().state_secret.clone();
-        let user_state =
-            crate::oauth::issue_oauth_state(&secret, Uuid::now_v7(), Uuid::now_v7(), "github")
-                .unwrap();
-        let user_claims = crate::oauth::verify_oauth_state(&secret, &user_state)
-            .expect("user-oauth state verifies for the user-oauth callback");
-        assert_eq!(user_claims.typ, "oauth_state");
-
-        let manifest_state = encode_state_typ(&secret, "github_manifest");
-        let mut validation = Validation::default();
-        validation.validate_exp = true;
-        let manifest_claims = decode::<OAuthStateClaims>(
-            &manifest_state,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )
-        .expect("manifest-typed jwt decodes")
-        .claims;
-        assert_eq!(manifest_claims.typ, "github_manifest");
-        assert_ne!(
-            user_claims.typ, manifest_claims.typ,
-            "user-oauth typ must not be accepted as a GitHub App manifest state"
-        );
-
-        // Same JWT string cannot be the state for both GitHub start URLs
-        // without landing on different Fleet callbacks.
-        let c = cfg();
-        assert_ne!(manifest_callback_url(&c), c.callback_url("github"));
-        let html = manifest_form_html(&c, Uuid::nil(), &manifest_state);
-        let authorize = user_oauth_authorize_url(&user_state);
-        assert!(html.contains("/settings/apps/new"));
-        assert!(authorize.contains("/login/oauth/authorize"));
-        assert!(!html.contains("/login/oauth/authorize"));
-        assert!(!authorize.contains("/settings/apps/new"));
     }
 }

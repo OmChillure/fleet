@@ -7,10 +7,12 @@ use crate::config::{ContainerBackend, LocalConfig};
 
 /// Detect `linux-x86_64`, `darwin-arm64`, … Never panics.
 pub fn detect_platform() -> String {
-    let os = uname_s();
-    let arch = uname_m();
+    map_uname(&uname_s(), &uname_m(), is_musl())
+}
 
-    let sys = match os.as_str() {
+/// Map uname `-s`/`-m` plus musl to the install-worker / staged-dist id.
+fn map_uname(os: &str, arch: &str, musl: bool) -> String {
+    let sys = match os {
         s if s.eq_ignore_ascii_case("linux") => "linux",
         s if s.eq_ignore_ascii_case("darwin") => "darwin",
         s if s.eq_ignore_ascii_case("freebsd") => "freebsd",
@@ -21,7 +23,7 @@ pub fn detect_platform() -> String {
         other => other,
     };
 
-    let cpu = match arch.as_str() {
+    let cpu = match arch {
         "x86_64" | "amd64" | "x64" => "x86_64",
         "aarch64" | "arm64" => "aarch64",
         "armv7l" | "armv7" | "armhf" | "arm" => "armv7",
@@ -34,7 +36,7 @@ pub fn detect_platform() -> String {
     // WSL2 reuses Linux IDs (microsoft in uname -r).
     match sys {
         "linux" => {
-            if is_musl() {
+            if musl {
                 match cpu {
                     "x86_64" => "linux-x86_64-musl".into(),
                     "aarch64" => "linux-aarch64-musl".into(),
@@ -238,18 +240,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_detect_does_not_panic() {
-        let id = detect_platform();
-        assert!(!id.is_empty(), "platform id must be non-empty");
-        assert!(!id.contains('\n'), "platform id must be a single token");
-        // Known families from the install-worker detector.
-        let ok = id.starts_with("linux-")
-            || id.starts_with("darwin-")
-            || id.starts_with("windows-")
-            || id.starts_with("freebsd-")
-            || id.starts_with("openbsd-")
-            || id.starts_with("netbsd-");
-        assert!(ok, "unexpected platform id {id}");
-        let _ = hostname();
+    fn map_uname_matches_install_worker_ids() {
+        let cases = [
+            ("Linux", "x86_64", false, "linux-x86_64"),
+            ("linux", "amd64", true, "linux-x86_64-musl"),
+            ("Darwin", "arm64", false, "darwin-arm64"),
+            ("FreeBSD", "amd64", false, "freebsd-amd64"),
+            ("MINGW64", "x86_64", false, "windows-x86_64"),
+        ];
+        for (os, arch, musl, want) in cases {
+            assert_eq!(
+                map_uname(os, arch, musl),
+                want,
+                "map_uname({os}, {arch}, {musl})"
+            );
+        }
+    }
+
+    #[test]
+    fn map_uname_macos_and_aarch64_are_darwin_arm64() {
+        assert_eq!(map_uname("macos", "arm64", false), "darwin-arm64");
+        assert_eq!(map_uname("Darwin", "aarch64", false), "darwin-arm64");
+    }
+
+    #[test]
+    fn hostname_is_non_empty_single_token() {
+        let host = hostname();
+        assert!(!host.is_empty(), "hostname must be non-empty");
+        assert!(!host.contains('\n'), "hostname must be a single token");
     }
 }

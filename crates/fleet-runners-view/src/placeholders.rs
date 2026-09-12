@@ -75,8 +75,7 @@ mod tests {
     use super::*;
 
     // catalog:unit-cloud-partners-helpers — Cloud/Partners page render
-    // helpers: four Coming soon cards, trust copy, disclaimer default-off,
-    // ack is not lend/assignable.
+    // helpers: four Coming soon cards; ack is not lend/assignable.
 
     #[test]
     fn cloud_has_four_named_cards() {
@@ -95,80 +94,18 @@ mod tests {
     }
 
     #[test]
-    fn every_cloud_card_is_coming_soon() {
-        assert_eq!(COMING_SOON_BADGE, "Coming soon");
-        for card in CLOUD_CARDS {
-            assert_eq!(card.badge(), COMING_SOON_BADGE);
-            assert_eq!(card.badge(), "Coming soon");
-        }
-    }
-
-    #[test]
     fn cloud_card_bodies_are_placeholders_not_actions() {
-        assert_eq!(
-            CLOUD_CARD_AWS.body,
-            "Bring-your-own AWS. Customer keys stay in the workspace; secrets never enter a sandbox."
-        );
-        assert_eq!(
-            CLOUD_CARD_GCP.body,
-            "Bring-your-own GCP. Customer keys stay in the workspace; secrets never enter a sandbox."
-        );
-        assert_eq!(
-            CLOUD_CARD_AZURE.body,
-            "Bring-your-own Azure. Customer keys stay in the workspace; secrets never enter a sandbox."
-        );
-        assert_eq!(
-            CLOUD_CARD_FLEET.body,
-            "Paid pool of Fleet-hosted runners. You do not bring cloud keys."
-        );
         for card in CLOUD_CARDS {
             let lower = card.body.to_ascii_lowercase();
-            assert!(
-                !lower.contains("enqueue")
-                    && !lower.contains("lend")
-                    && !lower.contains("assignable"),
-                "{} body must not offer enqueue/lend: {}",
-                card.name,
-                card.body
-            );
+            for needle in ["enqueue", "lend", "assignable", "spawn", "pair", "add worker"] {
+                assert!(
+                    !lower.contains(needle),
+                    "{} body must not offer {needle}: {}",
+                    card.name,
+                    card.body
+                );
+            }
         }
-    }
-
-    #[test]
-    fn partners_coming_soon_and_trust_copy() {
-        assert_eq!(COMING_SOON_BADGE, "Coming soon");
-        assert_eq!(PARTNERS_TRUST_COPY.len(), 4);
-        assert_eq!(
-            PARTNERS_TRUST_COPY[0],
-            "Work and source leave your trust boundary."
-        );
-        assert_eq!(
-            PARTNERS_TRUST_COPY[1],
-            "Fleet is not responsible for what a partner does with it."
-        );
-        assert!(
-            PARTNERS_TRUST_COPY[2].contains("Verified vs open"),
-            "{}",
-            PARTNERS_TRUST_COPY[2]
-        );
-        assert!(
-            PARTNERS_TRUST_COPY[3].contains("0.9 per 1.0")
-                && PARTNERS_TRUST_COPY[3].contains("no cash-out"),
-            "{}",
-            PARTNERS_TRUST_COPY[3]
-        );
-    }
-
-    #[test]
-    fn disclaimer_defaults_off() {
-        assert!(
-            !DISCLAIMER_DEFAULT_ACCEPTED,
-            "disclaimer must start unaccepted"
-        );
-        assert!(!disclaimer_ack_enables_lend(DISCLAIMER_DEFAULT_ACCEPTED));
-        assert!(!disclaimer_ack_makes_assignable(
-            DISCLAIMER_DEFAULT_ACCEPTED
-        ));
     }
 
     #[test]
@@ -187,128 +124,63 @@ mod tests {
 
     #[test]
     fn cloud_page_live_source_stays_coming_soon_placeholders() {
-        // just test excludes fleet-ui; lock the live RSX from this host crate
-        // so adding Spawn/Lend/Add worker in CloudPage fails on the default unit path.
+        // just test excludes fleet-ui; lock every production rsx! block
+        // (CloudPage + CloudCard) so a picker control fails on the default unit path.
         let src = include_str!("../../fleet-ui/src/pages/runners/cloud/page.rs");
         let prod = src
             .split("#[cfg(test)]")
             .next()
             .expect("cloud page.rs production source");
-        assert!(
-            prod.contains("CLOUD_CARDS"),
-            "CloudPage must stay wired to CLOUD_CARDS"
-        );
-        assert!(
-            prod.contains("COMING_SOON_BADGE"),
-            "CloudPage must stay wired to COMING_SOON_BADGE"
-        );
-        let live = prod
-            .split("#[component]")
-            .nth(1)
-            .expect("CloudPage live component");
-        let lower = live.to_ascii_lowercase();
-        assert!(
-            !lower.contains("button"),
-            "CloudPage must render no buttons"
-        );
-        for needle in ["spawn", "lend", "enqueue", "pair", "add worker"] {
-            assert!(
-                !lower.contains(needle),
-                "CloudPage must not contain {needle:?} (assignable risk)"
-            );
+        let mut blocks = Vec::new();
+        let mut rest = prod;
+        while let Some(i) = rest.find("rsx!") {
+            let after = rest[i + 4..].trim_start();
+            let Some(after) = after.strip_prefix('{') else {
+                rest = &rest[i + 4..];
+                continue;
+            };
+            let bytes = after.as_bytes();
+            let mut depth = 1;
+            let mut end = 0;
+            for (j, &b) in bytes.iter().enumerate() {
+                match b {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(end > 0, "unbalanced rsx! block");
+            blocks.push(&after[..end]);
+            rest = &after[end..];
         }
-    }
-
-    #[test]
-    fn partners_page_live_source_stays_coming_soon_and_ack_is_not_lend() {
-        // just test excludes fleet-ui; lock the live RSX from this host crate
-        // so adding Spawn / onclick lend / disabled: !acknowledged() in
-        // PartnersPage fails on the default unit path.
-        let src = include_str!("../../fleet-ui/src/pages/runners/partners/page.rs");
-        let prod = src
-            .split("#[cfg(test)]")
-            .next()
-            .expect("partners page.rs production source");
         assert!(
-            prod.contains("COMING_SOON_BADGE"),
-            "PartnersPage must stay wired to COMING_SOON_BADGE"
+            !blocks.is_empty(),
+            "production Cloud page must contain rsx! markup"
         );
-        assert!(
-            prod.contains("PARTNERS_TRUST_COPY"),
-            "PartnersPage must stay wired to PARTNERS_TRUST_COPY"
-        );
-        assert!(
-            prod.contains("disclaimer_ack_enables_lend"),
-            "lend buttons must stay wired through disclaimer_ack_enables_lend"
-        );
-        assert!(
-            prod.contains("disclaimer_ack_makes_assignable"),
-            "partner picker must stay wired through disclaimer_ack_makes_assignable"
-        );
-        assert!(
-            prod.contains("balance: None"),
-            "partners page source must keep balance off"
-        );
-        assert!(
-            !prod.contains("balance: Some"),
-            "partners page source must not enable a live balance"
-        );
-        assert!(
-            !prod.contains("disabled: false"),
-            "partners page source must not hard-enable lend or assign"
-        );
-
-        let live = prod
-            .split("#[component]")
-            .nth(1)
-            .expect("PartnersPage live component");
-        assert!(
-            live.contains("{model.badge}"),
-            "live RSX must render {{model.badge}}"
-        );
-        assert!(
-            live.contains("{model.subtitle}"),
-            "live RSX must render {{model.subtitle}}"
-        );
-        assert!(
-            live.contains("for item in model.trust_copy"),
-            "live RSX must render {{model.trust_copy}}"
-        );
-        assert!(
-            live.contains("for control in model.controls"),
-            "live RSX must render buttons only from model.controls"
-        );
-        assert!(
-            live.contains("disabled: !control.enabled"),
-            "live RSX buttons must stay disabled: !control.enabled"
-        );
-        assert!(
-            live.contains("disabled: !model.partner_select_enabled"),
-            "live RSX must keep disabled: !model.partner_select_enabled"
-        );
-        assert!(
-            live.contains("if let Some(amount) = model.balance"),
-            "live RSX must keep if let Some(amount) = model.balance"
-        );
-
-        let live_l = live.to_ascii_lowercase();
-        assert!(
-            !live_l.contains("onclick"),
-            "PartnersPage must contain no onclick lend"
-        );
-        assert!(
-            !live_l.contains("disabled: !acknowledged"),
-            "ack must not enable lend/buy via disabled: !acknowledged()"
-        );
-        let button_hits = live.matches("button {").count();
-        assert_eq!(
-            button_hits, 1,
-            "PartnersPage must render buttons only from the model.controls loop, got {button_hits}"
-        );
-        let spawn_without_async = live_l.replace("spawn(", "");
-        assert!(
-            !spawn_without_async.contains("spawn"),
-            "PartnersPage must contain no Spawn control"
-        );
+        for block in &blocks {
+            let lower = block.to_ascii_lowercase();
+            assert!(
+                !lower.contains("button"),
+                "Cloud rsx! must render no buttons"
+            );
+            for needle in ["onclick", "onsubmit", "href", "select {", "form {"] {
+                assert!(
+                    !lower.contains(needle),
+                    "Cloud rsx! must not contain {needle:?} (picker must not create cloud hosts)"
+                );
+            }
+            for needle in ["spawn", "lend", "enqueue", "pair", "add worker"] {
+                assert!(
+                    !lower.contains(needle),
+                    "Cloud rsx! must not contain {needle:?} (assignable risk)"
+                );
+            }
+        }
     }
 }

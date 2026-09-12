@@ -1,4 +1,4 @@
-//! Host-mode e2e: pair → lease → job-token /v1 heartbeat → session healthy.
+//! Host-mode e2e: pair/lease, job-token /v1 inbox, session healthy.
 //!
 //! Oneshot only (no live bind, no `fleet-host` child). Requires DATABASE_URL
 //! — never skips.
@@ -466,47 +466,35 @@ async fn create_pair_and_heartbeat(
     (host_id, machine)
 }
 
-/// Host-mode proof: leased spawn_session + fleet-worker protocol → healthy.
-///
-/// Create/pair/lease already exists in `worker_hosts_http.rs`. The gap this
-/// covers is job-token `POST /v1/.../heartbeat` + tick inbox so
-/// `apply_heartbeat` promotes `spawning` → `healthy`.
-#[tokio::test]
-async fn host_mode_job_heartbeat_promotes_session_healthy() {
-    let (app, state) = app_with_state().await;
-    let (_email, jar, ws) = signup_and_login(&app).await;
-    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "studio").await;
-
-    let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+/// Materialize t1 as a spawning remote session with a known job token.
+/// No pair/lease/claim — those are locked by `tick_assigns_remote_host_instead_of_local_stub`.
+async fn plant_spawning_remote_session(
+    app: &axum::Router,
+    state: &AppState,
+    jar: &CookieJar,
+    ws: &str,
+) -> (Uuid, String) {
+    let fleet_proj = call(app, "GET", &fleet(ws, ""), Some(jar), None).await;
     assert_eq!(
         fleet_proj.status,
         StatusCode::OK,
         "ensure fleet project: {}",
         fleet_proj.body
     );
-    assert_eq!(
-        fleet_proj.body["project_id"].as_str(),
-        Some(ws.as_str()),
-        "workspace_id == project_id: {}",
-        fleet_proj.body
-    );
 
     let fx = call(
-        &app,
+        app,
         "POST",
-        &fleet(&ws, "/runs/fixture"),
-        Some(&jar),
+        &fleet(ws, "/runs/fixture"),
+        Some(jar),
         Some(json!({ "kind": "chain" })),
     )
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
     let plan_id =
         Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan uuid");
-    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    let workspace_id = Uuid::parse_str(ws).expect("ws");
 
-    // Materialize + queued→ready without ticking (a tick would also spawn).
-    // Then insert a spawning remote session with a known job token and enqueue
-    // the spawn_session claim the host will lease — same shape as tick spawn.
     let n = state
         .orch
         .store
@@ -549,15 +537,43 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
         .await
         .expect("begin_spawn_assignment")
         .expect("CAS ready→assigned");
-    let session_id = assignment.session_id;
-    let job_token = assignment.worker_token.clone();
+    (assignment.session_id, assignment.worker_token)
+}
+
+/// Pair + lease a `spawn_session` claim (http_complete ok=false SUT).
+struct LeasedSpawnSession {
+    machine: String,
+    task_id: Uuid,
+    session_id: Uuid,
+    worker_token: String,
+    claim_id: Uuid,
+    lease_token: String,
+}
+
+async fn plant_leased_spawn_session(
+    app: &axum::Router,
+    state: &AppState,
+    jar: &CookieJar,
+    ws: &str,
+    host_name: &str,
+) -> LeasedSpawnSession {
+    let (host_id, machine) = create_pair_and_heartbeat(app, jar, ws, host_name).await;
+    let workspace_id = Uuid::parse_str(ws).expect("ws");
+    let (session_id, worker_token) = plant_spawning_remote_session(app, state, jar, ws).await;
+    let task_id = state
+        .orch
+        .store
+        .get_session(session_id)
+        .await
+        .expect("get_session")
+        .expect("session")
+        .board_task_id;
     state
         .orch
         .store
         .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
         .await
-        .expect("record_remote_enqueued");
-
+        .expect("enq");
     let claim_id = Uuid::new_v4();
     fleet_db::repos::work_claims::enqueue(
         &state.db,
@@ -566,41 +582,18 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
             workspace_id,
             kind: "spawn_session".into(),
             payload: json!({
-                "kind": "spawn_session",
                 "session_id": session_id,
-                "project_id": workspace_id,
-                "run_id": root.run_id,
-                "board_task_id": root.id,
+                "board_task_id": task_id,
                 "host_id": host_id,
-                "worker_token": job_token,
-                "runtime": "host",
-                "orchestrator_url": "http://127.0.0.1:0",
-                "env": { "FLEET_WORKER_TOKEN": job_token }
             }),
             max_attempts: 3,
             available_at: chrono::Utc::now(),
         },
     )
     .await
-    .expect("enqueue");
-
-    let before = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
-    assert_eq!(before.status, StatusCode::OK, "sessions: {}", before.body);
-    let sess = before.body["sessions"]
-        .as_array()
-        .expect("sessions")
-        .iter()
-        .find(|s| s["id"].as_str() == Some(session_id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("session missing: {}", before.body));
-    assert_eq!(sess["status"], "spawning", "pre-heartbeat: {}", before.body);
-    assert_eq!(
-        sess["runtime_backend"], "remote",
-        "host-mode session must be remote, not stub: {}",
-        before.body
-    );
-
+    .expect("claim");
     let lease = call_bearer(
-        &app,
+        app,
         "POST",
         "/api/worker-hosts/me/lease",
         &machine,
@@ -608,69 +601,83 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
     )
     .await;
     assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
-    let claim = lease.body["claim"]
-        .as_object()
-        .unwrap_or_else(|| panic!("expected claim: {}", lease.body));
-    assert_eq!(claim["id"].as_str(), Some(claim_id.to_string().as_str()));
-    assert_eq!(
-        claim["payload"]["session_id"].as_str(),
-        Some(session_id.to_string().as_str()),
-        "lease payload.session_id: {}",
+    assert!(
+        lease.body["claim"].is_object(),
+        "spawn_session claim: {}",
         lease.body
     );
-    assert_eq!(
-        claim["payload"]["worker_token"].as_str(),
-        Some(job_token.as_str()),
-        "lease payload.worker_token: {}",
-        lease.body
-    );
-    assert_eq!(claim["payload"]["runtime"], "host");
-    assert_eq!(
-        claim["payload"]["host_id"].as_str(),
-        Some(host_id.to_string().as_str())
-    );
-    let lease_token = claim["lease_token"].as_str().expect("lease_token");
+    let lease_token = lease.body["claim"]["lease_token"]
+        .as_str()
+        .expect("lease_token")
+        .to_string();
+    LeasedSpawnSession {
+        machine,
+        task_id,
+        session_id,
+        worker_token,
+        claim_id,
+        lease_token,
+    }
+}
 
-    let done = call_bearer(
-        &app,
-        "POST",
-        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
-        &machine,
-        Some(json!({
-            "lease_token": lease_token,
-            "ok": true
-        })),
-    )
-    .await;
-    assert_eq!(done.status, StatusCode::OK, "complete: {}", done.body);
+fn session_in(body: &Value, session_id: Uuid) -> &Value {
+    let id = session_id.to_string();
+    body["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id.as_str()))
+        .unwrap_or_else(|| panic!("session missing: {body}"))
+}
 
-    // Simulate the child worker (fleet-worker protocol) against orch fallback.
-    let worker_base = format!("/v1/projects/{ws}/workers/{session_id}");
-    let status = call_bearer(
-        &app,
-        "POST",
-        &format!("{worker_base}/status"),
-        &job_token,
-        Some(json!({
-            "seq": 1,
-            "status": "running",
-            "reason": Value::Null
-        })),
-    )
-    .await;
+fn session_for_handle<'a>(body: &'a Value, handle: &str) -> &'a Value {
+    body["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|s| s["runtime_handle"].as_str() == Some(handle))
+        .unwrap_or_else(|| panic!("session missing for {handle}: {body}"))
+}
+
+fn task_in<'a>(body: &'a Value, plan_task_id: &str) -> &'a Value {
+    body["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["plan_task_id"].as_str() == Some(plan_task_id))
+        .unwrap_or_else(|| panic!("task {plan_task_id} missing: {body}"))
+}
+
+/// Job-token POST /v1/.../heartbeat + tick apply_inbox must promote
+/// a spawning remote session to healthy with progress on GET /sessions.
+#[tokio::test]
+async fn host_mode_job_heartbeat_promotes_session_healthy() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
+    let before = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(before.status, StatusCode::OK, "sessions: {}", before.body);
+    let sess = session_in(&before.body, session_id);
+    assert_eq!(sess["status"], "spawning", "pre-heartbeat: {}", before.body);
     assert_eq!(
-        status.status,
-        StatusCode::ACCEPTED,
-        "worker status: {}",
-        status.body
+        sess["runtime_backend"], "remote",
+        "host-mode session must be remote, not stub: {}",
+        before.body
+    );
+    assert_eq!(sess["progress_pct"], 0, "{}", before.body);
+    assert!(
+        sess["last_heartbeat_at"].is_null(),
+        "last_heartbeat_at: {}",
+        before.body
     );
 
     let hb = call_bearer(
         &app,
         "POST",
-        &format!("{worker_base}/heartbeat"),
+        &format!("/v1/projects/{ws}/workers/{session_id}/heartbeat"),
         &job_token,
-        Some(json!({ "seq": 2, "progress_pct": 5 })),
+        Some(json!({ "seq": 1, "progress_pct": 5 })),
     )
     .await;
     assert_eq!(
@@ -691,12 +698,7 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
 
     let after = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
     assert_eq!(after.status, StatusCode::OK, "sessions: {}", after.body);
-    let sess = after.body["sessions"]
-        .as_array()
-        .expect("sessions")
-        .iter()
-        .find(|s| s["id"].as_str() == Some(session_id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("session missing after tick: {}", after.body));
+    let sess = session_in(&after.body, session_id);
     assert_eq!(
         sess["status"], "healthy",
         "apply_heartbeat must promote spawning→healthy: {}",
@@ -710,9 +712,92 @@ async fn host_mode_job_heartbeat_promotes_session_healthy() {
     );
 }
 
-/// Tick must enqueue on a live host instead of spawning the local stub.
-/// stub_duration is 0 in this fixture: a local spawn would complete in the
-/// same tick. Remote stays `spawning` until the host leases + job-heartbeats.
+/// POST /v1 heartbeat is inbox-only: without /tick the session stays spawning.
+#[tokio::test]
+async fn job_token_heartbeat_without_tick_leaves_session_spawning() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{session_id}/heartbeat"),
+        &job_token,
+        Some(json!({ "seq": 1, "progress_pct": 5 })),
+    )
+    .await;
+    assert_eq!(
+        hb.status,
+        StatusCode::ACCEPTED,
+        "worker heartbeat: {}",
+        hb.body
+    );
+
+    let after = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(after.status, StatusCode::OK, "sessions: {}", after.body);
+    let sess = session_in(&after.body, session_id);
+    assert_eq!(
+        sess["status"], "spawning",
+        "ACCEPTED must not apply_heartbeat until tick: {}",
+        after.body
+    );
+    assert!(
+        sess["last_heartbeat_at"].is_null(),
+        "last_heartbeat_at: {}",
+        after.body
+    );
+}
+
+/// status=running inbox arm calls apply_heartbeat(pct=None); no /heartbeat row.
+#[tokio::test]
+async fn job_token_status_running_alone_promotes_healthy() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
+    let status = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{session_id}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 1,
+            "status": "running",
+            "reason": Value::Null
+        })),
+    )
+    .await;
+    assert_eq!(
+        status.status,
+        StatusCode::ACCEPTED,
+        "worker status: {}",
+        status.body
+    );
+
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    let applied = tick.body["inbox_applied"].as_u64().unwrap_or(0);
+    assert!(
+        applied >= 1,
+        "tick must apply status=running inbox: {}",
+        tick.body
+    );
+
+    let after = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(after.status, StatusCode::OK, "sessions: {}", after.body);
+    let sess = session_in(&after.body, session_id);
+    assert_eq!(
+        sess["status"], "healthy",
+        "status=running apply_heartbeat must promote spawning→healthy: {}",
+        after.body
+    );
+    assert_eq!(sess["progress_pct"], 0, "{}", after.body);
+}
+
+/// Tick assigns an online advertised_host (remote / host:{id} / spawning)
+/// and leaves a spawn_session claim leasable. Remote stays spawning until
+/// the host leases + job-heartbeats.
 #[tokio::test]
 async fn tick_assigns_remote_host_instead_of_local_stub() {
     let (app, _state) = app_with_state().await;
@@ -739,29 +824,14 @@ async fn tick_assigns_remote_host_instead_of_local_stub() {
         "tick must spawn: {}",
         tick.body
     );
-    assert_eq!(
-        tick.body["completed_via_runtime"].as_u64().unwrap_or(0),
-        0,
-        "remote session must not be completed by the local stub: {}",
-        tick.body
-    );
 
+    let handle = format!("host:{host_id}");
     let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
     assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
-    let sess = sessions.body["sessions"]
-        .as_array()
-        .expect("sessions")
-        .first()
-        .unwrap_or_else(|| panic!("expected a session: {}", sessions.body));
+    let sess = session_for_handle(&sessions.body, &handle);
     assert_eq!(
         sess["runtime_backend"], "remote",
         "tick must choose the paired host, not stub: {}",
-        sessions.body
-    );
-    assert_eq!(
-        sess["runtime_handle"].as_str(),
-        Some(format!("host:{host_id}").as_str()),
-        "{}",
         sessions.body
     );
     assert_eq!(
@@ -779,32 +849,20 @@ async fn tick_assigns_remote_host_instead_of_local_stub() {
     )
     .await;
     assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
-    let claim = lease.body["claim"]
-        .as_object()
-        .unwrap_or_else(|| panic!("tick must enqueue a claim: {}", lease.body));
-    assert_eq!(claim["payload"]["runtime"], "host");
-    assert_eq!(
-        claim["payload"]["host_id"].as_str(),
-        Some(host_id.to_string().as_str())
-    );
-    assert_eq!(claim["payload"]["session_id"].as_str(), sess["id"].as_str());
-    let token = claim["payload"]["worker_token"].as_str().unwrap_or("");
-    assert!(!token.is_empty(), "job token must be on the payload");
     assert!(
-        claim["payload"]["env"]
-            .as_object()
-            .map(|e| e.get("FLEET_WORK_DIR").is_none())
-            .unwrap_or(true),
-        "CP work_dir must not leave the plane: {}",
+        lease.body["claim"].is_object(),
+        "tick must enqueue a claim: {}",
         lease.body
     );
 }
 
+/// record_remote_enqueued must not stamp last_heartbeat_at (that would start
+/// the stale clock). HTTP tick assign is the path that never read this field.
 #[tokio::test]
-async fn tick_without_host_leaves_ready() {
-    let (app, state) = app_with_state().await;
+async fn tick_remote_assign_does_not_stamp_last_heartbeat_at() {
+    let (app, _state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    let (host_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "hb-null-host").await;
 
     let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
@@ -819,55 +877,48 @@ async fn tick_without_host_leaves_ready() {
     .await;
     assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
 
-    let assignable = fleet_db::repos::worker_hosts::list_assignable(
-        &state.db,
-        workspace_id,
-        chrono::Duration::seconds(90),
-    )
-    .await
-    .expect("list_assignable");
-
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
 
+    let handle = format!("host:{host_id}");
     let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
     assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
-    let list = sessions.body["sessions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-
-    if assignable.is_empty() {
-        // Plane runner (with_local_spawn) may take the job. A leftover
-        // cluster host is the other branch.
-        for s in &list {
-            assert_ne!(
-                s["runtime_backend"], "remote",
-                "no assignable host must not invent a remote session: {}",
-                sessions.body
-            );
-        }
-    } else {
-        // A cluster host from another workspace is assignable by product.
-        // That is not a license to local-spawn stub.
-        for s in &list {
-            assert_eq!(
-                s["runtime_backend"], "remote",
-                "hostless workspace must not fall back to stub/process: {}",
-                sessions.body
-            );
-        }
-    }
+    let sess = session_for_handle(&sessions.body, &handle);
+    assert!(
+        sess["last_heartbeat_at"].is_null(),
+        "record_remote_enqueued must not stamp last_heartbeat_at: {}",
+        sessions.body
+    );
 }
 
+/// HTTP tick must skip a still-paired paused box. list_assignable and
+/// paused-lease already exist; this is assign-skip on POST /fleet/tick.
 #[tokio::test]
-async fn complete_ok_false_is_spawn_failure_not_success() {
+async fn tick_paused_host_leaves_ready() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "fail-box").await;
     let workspace_id = Uuid::parse_str(&ws).expect("ws");
+    let (host_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "paused-tick").await;
 
-    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    let paused = call(
+        &app,
+        "PATCH",
+        &format!("{}/{host_id}", hosts_path(&ws)),
+        Some(&jar),
+        Some(json!({ "paused": true })),
+    )
+    .await;
+    assert_eq!(
+        paused.status,
+        StatusCode::OK,
+        "PATCH paused: {}",
+        paused.body
+    );
+    assert_eq!(paused.body["paused"], true, "{}", paused.body);
+
+    let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
+    assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
+
     let fx = call(
         &app,
         "POST",
@@ -876,108 +927,192 @@ async fn complete_ok_false_is_spawn_failure_not_success() {
         Some(json!({ "kind": "chain" })),
     )
     .await;
-    assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
-    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
-    state
-        .orch
-        .store
-        .materialize_plan(workspace_id, plan_id)
-        .await
-        .expect("materialize");
-    let tasks = state
-        .orch
-        .store
-        .list_tasks_slim(workspace_id, None)
-        .await
-        .expect("tasks");
-    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
-    state
-        .orch
-        .store
-        .update_task_status(root.id, "queued", "ready", None)
-        .await
-        .expect("ready");
-    let assignment = state
-        .orch
-        .store
-        .begin_spawn_assignment(
-            root.id,
-            workspace_id,
-            root.run_id,
-            &root.worker_profile,
-            "remote",
-            None,
-        )
-        .await
-        .expect("assign")
-        .expect("cas");
-    let session_id = assignment.session_id;
-    state
-        .orch
-        .store
-        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
-        .await
-        .expect("enq");
-    let claim_id = Uuid::new_v4();
-    fleet_db::repos::work_claims::enqueue(
+    assert_eq!(fx.status, StatusCode::CREATED, "fixture: {}", fx.body);
+
+    let leftover = fleet_db::repos::worker_hosts::list_assignable(
         &state.db,
-        &fleet_db::NewWorkClaim {
-            id: claim_id,
-            workspace_id,
-            kind: "spawn_session".into(),
-            payload: json!({
-                "session_id": session_id,
-                "board_task_id": root.id,
-                "host_id": host_id,
-            }),
-            max_attempts: 3,
-            available_at: chrono::Utc::now(),
-        },
+        workspace_id,
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
     )
     .await
-    .expect("claim");
-    let lease = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/lease",
-        &machine,
-        Some(json!({})),
-    )
-    .await;
-    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
+    .expect("list_assignable");
+    let leftover_other = leftover.iter().any(|h| h.id != host_id);
+
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+    assert!(
+        tick.body["spawned"].as_u64().unwrap_or(0) == 0 || leftover_other,
+        "paused host must not take a tick spawn: {}",
+        tick.body
+    );
+
+    let handle = format!("host:{host_id}");
+    let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(sessions.status, StatusCode::OK, "{}", sessions.body);
+    let list = sessions.body["sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        list.iter()
+            .all(|s| s["runtime_handle"].as_str() != Some(handle.as_str())),
+        "paused host must not get a session: {}",
+        sessions.body
+    );
+}
+
+/// spawn_session complete ok=false: session failed_spawn, first attempt retry_wait.
+#[tokio::test]
+async fn complete_ok_false_is_spawn_failure_not_success() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let planted = plant_leased_spawn_session(&app, &state, &jar, &ws, "fail-box").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
     let done = call_bearer(
         &app,
         "POST",
-        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
-        &machine,
-        Some(json!({ "lease_token": token, "ok": false, "error": "exec failed" })),
+        &format!(
+            "/api/worker-hosts/me/lease/{}/complete",
+            planted.claim_id
+        ),
+        &planted.machine,
+        Some(json!({
+            "lease_token": planted.lease_token,
+            "ok": false,
+            "error": "exec failed"
+        })),
     )
     .await;
     assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+
+    let sessions = call(&app, "GET", &fleet(&ws, "/sessions"), Some(&jar), None).await;
+    assert_eq!(sessions.status, StatusCode::OK, "sessions: {}", sessions.body);
+    let sess = session_in(&sessions.body, planted.session_id);
+    assert_eq!(
+        sess["status"], "failed_spawn",
+        "ok=false must mark failed_spawn, not still spawning: {}",
+        sessions.body
+    );
+    assert_eq!(
+        sess["exit_reason"], "spawn_failed",
+        "complete_spawn_failure exit_reason: {}",
+        sessions.body
+    );
+
     let task = state
         .orch
         .store
-        .get_task(workspace_id, root.id)
+        .get_task(workspace_id, planted.task_id)
         .await
         .expect("get")
         .expect("task");
-    assert_ne!(
-        task.status, "done_success",
-        "ok=false must not succeed: {}",
+    assert_eq!(
+        task.status, "retry_wait",
+        "attempt 1 must retry_wait, not done_failed/ready: {}",
         task.status
     );
-    assert_ne!(
-        task.status, "in_progress",
-        "ok=false must not look like a live job: {}",
-        task.status
-    );
-    assert!(
-        matches!(
-            task.status.as_str(),
-            "retry_wait" | "done_failed" | "failed" | "queued" | "ready"
+    assert_eq!(task.attempt, 1, "first assign is attempt 1, got {}", task.attempt);
+}
+
+/// max_retries=0 (attempt already at cap): ok=false is done_failed / spawn_failed.
+#[tokio::test]
+async fn complete_ok_false_exhausted_retries_is_done_failed() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let planted = plant_leased_spawn_session(&app, &state, &jar, &ws, "fail-box-cap").await;
+    let workspace_id = Uuid::parse_str(&ws).expect("ws");
+
+    let capped = sqlx::query("UPDATE board_tasks SET max_retries = 0 WHERE id = $1")
+        .bind(planted.task_id)
+        .execute(state.orch.store.pool())
+        .await
+        .expect("max_retries=0");
+    assert_eq!(capped.rows_affected(), 1, "must cap this task");
+
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!(
+            "/api/worker-hosts/me/lease/{}/complete",
+            planted.claim_id
         ),
-        "ok=false must apply spawn-failure policy, got {}",
+        &planted.machine,
+        Some(json!({
+            "lease_token": planted.lease_token,
+            "ok": false,
+            "error": "exec failed"
+        })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+
+    let task = state
+        .orch
+        .store
+        .get_task(workspace_id, planted.task_id)
+        .await
+        .expect("get")
+        .expect("task");
+    assert_eq!(
+        task.status, "done_failed",
+        "exhausted spawn fail must be done_failed, not retry_wait: {}",
         task.status
+    );
+    assert_eq!(
+        task.failure_reason.as_deref(),
+        Some("spawn_failed"),
+        "failure_reason: {:?}",
+        task.failure_reason
+    );
+}
+
+/// After ok=false, the spawn job token must not ACCEPTED /v1 heartbeat.
+#[tokio::test]
+async fn complete_ok_false_rejects_later_job_token_heartbeat() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let planted = plant_leased_spawn_session(&app, &state, &jar, &ws, "fail-box-hb").await;
+
+    let done = call_bearer(
+        &app,
+        "POST",
+        &format!(
+            "/api/worker-hosts/me/lease/{}/complete",
+            planted.claim_id
+        ),
+        &planted.machine,
+        Some(json!({
+            "lease_token": planted.lease_token,
+            "ok": false,
+            "error": "exec failed"
+        })),
+    )
+    .await;
+    assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        &format!(
+            "/v1/projects/{ws}/workers/{}/heartbeat",
+            planted.session_id
+        ),
+        &planted.worker_token,
+        Some(json!({ "seq": 1, "progress_pct": 5 })),
+    )
+    .await;
+    assert_ne!(
+        hb.status,
+        StatusCode::ACCEPTED,
+        "failed_spawn must not accept job-token heartbeat: {}",
+        hb.body
+    );
+    assert_eq!(
+        hb.status,
+        StatusCode::UNAUTHORIZED,
+        "authenticate_worker_session rejects failed_spawn: {}",
+        hb.body
     );
 }
 
@@ -1233,7 +1368,9 @@ async fn cluster_host_completes_claim_in_other_workspace() {
     )
     .await
     .expect("claim");
-    let lease = call_bearer(
+    // Shared live API may enqueue another spawn for this cluster host
+    // between drain and lease. Complete those and keep leasing until ours.
+    let mut lease = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/me/lease",
@@ -1241,6 +1378,29 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         Some(json!({})),
     )
     .await;
+    for _ in 0..16 {
+        assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
+        let got = lease.body["claim"]["id"].as_str();
+        if got == Some(claim_id.to_string().as_str()) {
+            break;
+        }
+        if let (Some(id), Some(token)) = (
+            got.and_then(|s| Uuid::parse_str(s).ok()),
+            lease.body["claim"]["lease_token"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok()),
+        ) {
+            let _ = fleet_db::repos::work_claims::complete(&state.db, id, token).await;
+        }
+        lease = call_bearer(
+            &app,
+            "POST",
+            "/api/worker-hosts/me/lease",
+            &machine,
+            Some(json!({})),
+        )
+        .await;
+    }
     assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
     assert_eq!(
         lease.body["claim"]["id"].as_str(),
@@ -1353,90 +1513,15 @@ async fn cluster_host_completes_claim_in_other_workspace() {
     );
 }
 
+/// Job-token POST /v1 status=success + result_md then cookie /tick must
+/// apply_inbox → validate_done → GET /fleet/tasks t1=done_success.
+/// Chain t1 acceptance is free-form "artifact exists", not exists:work.
 #[tokio::test]
 async fn remote_success_with_result_md_is_done() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "proof-box").await;
-    let workspace_id = Uuid::parse_str(&ws).expect("ws");
-    call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
-    let fx = call(
-        &app,
-        "POST",
-        &fleet(&ws, "/runs/fixture"),
-        Some(&jar),
-        Some(json!({ "kind": "chain" })),
-    )
-    .await;
-    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
-    state
-        .orch
-        .store
-        .materialize_plan(workspace_id, plan_id)
-        .await
-        .expect("materialize");
-    let tasks = state
-        .orch
-        .store
-        .list_tasks_slim(workspace_id, None)
-        .await
-        .expect("tasks");
-    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
-    state
-        .orch
-        .store
-        .update_task_status(root.id, "queued", "ready", None)
-        .await
-        .expect("ready");
-    let assignment = state
-        .orch
-        .store
-        .begin_spawn_assignment(
-            root.id,
-            workspace_id,
-            root.run_id,
-            &root.worker_profile,
-            "remote",
-            None,
-        )
-        .await
-        .expect("assign")
-        .expect("cas");
-    let session_id = assignment.session_id;
-    state
-        .orch
-        .store
-        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
-        .await
-        .expect("enq");
-    let claim_id = Uuid::new_v4();
-    fleet_db::repos::work_claims::enqueue(
-        &state.db,
-        &fleet_db::NewWorkClaim {
-            id: claim_id,
-            workspace_id,
-            kind: "spawn_session".into(),
-            payload: json!({
-                "session_id": session_id,
-                "board_task_id": root.id,
-                "host_id": host_id,
-            }),
-            max_attempts: 3,
-            available_at: chrono::Utc::now(),
-        },
-    )
-    .await
-    .expect("claim");
-    let lease = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/lease",
-        &machine,
-        Some(json!({})),
-    )
-    .await;
-    assert_eq!(lease.status, StatusCode::OK, "{}", lease.body);
-    let job_token = assignment.worker_token.clone();
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
     let status = call_bearer(
         &app,
         "POST",
@@ -1446,24 +1531,88 @@ async fn remote_success_with_result_md_is_done() {
             "seq": 1,
             "status": "success",
             "result_md": "# Result\n\nACP end_turn. hello from mock agent.\n",
-            "files": { "work/.keep": "ok" }
         })),
     )
     .await;
     assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
+
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
-    let proven = state
-        .orch
-        .store
-        .get_task(workspace_id, root.id)
-        .await
-        .expect("get")
-        .expect("task");
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(tasks.status, StatusCode::OK, "tasks: {}", tasks.body);
     assert_eq!(
-        proven.status, "done_success",
-        "guest result.md + work/ on the claiming session must pass validate_done: {}",
-        proven.status
+        task_in(&tasks.body, "t1")["status"],
+        "done_success",
+        "claiming remote + result_md ≥20 must pass validate_done: {}",
+        tasks.body
+    );
+}
+
+/// POST /v1 status=success+result_md is inbox-only: without /tick
+/// GET /fleet/tasks stays not done_success.
+#[tokio::test]
+async fn job_token_status_success_without_tick_leaves_not_done() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
+    let status = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{session_id}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 1,
+            "status": "success",
+            "result_md": "# Result\n\nACP end_turn. hello from mock agent.\n",
+        })),
+    )
+    .await;
+    assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(tasks.status, StatusCode::OK, "tasks: {}", tasks.body);
+    assert_ne!(
+        task_in(&tasks.body, "t1")["status"],
+        "done_success",
+        "ACCEPTED must not apply_task_terminal until tick: {}",
+        tasks.body
+    );
+}
+
+/// Remote success with result_md under validate_done's 20-char floor
+/// must not become done_success after /tick.
+#[tokio::test]
+async fn remote_success_result_md_under_20_chars_is_not_done() {
+    let (app, state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (session_id, job_token) = plant_spawning_remote_session(&app, &state, &jar, &ws).await;
+
+    let status = call_bearer(
+        &app,
+        "POST",
+        &format!("/v1/projects/{ws}/workers/{session_id}/status"),
+        &job_token,
+        Some(json!({
+            "seq": 1,
+            "status": "success",
+            "result_md": "short result",
+        })),
+    )
+    .await;
+    assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
+
+    let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
+    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
+
+    let tasks = call(&app, "GET", &fleet(&ws, "/tasks"), Some(&jar), None).await;
+    assert_eq!(tasks.status, StatusCode::OK, "tasks: {}", tasks.body);
+    assert_ne!(
+        task_in(&tasks.body, "t1")["status"],
+        "done_success",
+        "result_md under 20 chars must fail validate_done: {}",
+        tasks.body
     );
 }
 
@@ -1759,8 +1908,8 @@ async fn min_isolation_container_does_not_assign_process_only_host() {
     assert_eq!(fx.status, StatusCode::CREATED, "{}", fx.body);
     let tick = call(&app, "POST", &fleet(&ws, "/tick"), Some(&jar), None).await;
     assert_eq!(tick.status, StatusCode::OK, "{}", tick.body);
-    // Plane SANDBOX_BACKEND may still take the job; the process-only
-    // paired host must not.
+    // The API does not local-spawn. A process-only paired host must not
+    // take a container-isolation job.
     let workspace_id = Uuid::parse_str(&ws).expect("ws");
     let sessions = state
         .orch

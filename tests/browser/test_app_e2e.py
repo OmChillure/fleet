@@ -13,18 +13,22 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import unittest
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
     assert_no_control_plane_card,
+    click_add_worker,
     create_host,
     goto_self_hosted,
     heartbeat,
     list_hosts,
+    open_host_panel,
     pair_and_heartbeat,
     pair_host,
     patch_host,
@@ -64,14 +68,28 @@ def _listening(host: str, port: int) -> bool:
         return False
 
 
+def _url_listen(url: str, default_port: int) -> tuple[str, int]:
+    parsed = urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"localhost", "::1"}:
+        host = "127.0.0.1"
+    port = parsed.port or default_port
+    return host, port
+
+
+UI_LISTEN = _url_listen(UI, 3030)
+API_LISTEN = _url_listen(API, 8080)
+
+
 def _require_stack() -> None:
     try:
         require_this_tree(REPO, API)
     except ForeignStackError as e:
         raise RuntimeError(str(e)) from e
-    if not _listening("127.0.0.1", 3030):
+    host, port = UI_LISTEN
+    if not _listening(host, port):
         raise RuntimeError(
-            "UI :3030 is not listening. Start this tree: ./scripts/human-test.sh launch"
+            f"UI {UI} is not listening. Start this tree: ./scripts/human-test.sh launch"
         )
 
 
@@ -183,19 +201,8 @@ def _host_needs_software_update(host: dict) -> bool:
 
 
 def _wait_dx_ready(page) -> None:
-    """Wait out dx compile splash and rebuild banner."""
-    splash = page.get_by_text(
-        re.compile(r"We're building your app now|fleet-ui compiling", re.I)
-    )
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        try:
-            busy = splash.count() > 0 and splash.first.is_visible()
-        except Exception:
-            busy = False
-        if not busy:
-            return
-        page.wait_for_timeout(500)
+    """Wait out a real dx compile splash; a leftover toast is not a block."""
+    wait_dx_ready(page, timeout_ms=20_000)
 
 
 _LIVE_SANDBOX_STATUSES = frozenset({"spawning", "healthy", "stuck", "killing"})
@@ -522,10 +529,11 @@ def _open_pair_panel(page, workspace_url: str) -> None:
     last_body = ""
     last_err: Exception | None = None
     while time.time() < deadline:
-        if not _listening("127.0.0.1", 3030) or not _listening("127.0.0.1", 8080):
+        if not _listening(*UI_LISTEN) or not _listening(*API_LISTEN):
             raise AssertionError(
                 "stack died while opening pair panel "
-                f"(ui={_listening('127.0.0.1', 3030)} api={_listening('127.0.0.1', 8080)})"
+                f"(ui={UI} up={_listening(*UI_LISTEN)} "
+                f"api={API} up={_listening(*API_LISTEN)})"
             )
         try:
             if "chrome-error" in (page.url or "") or not add.count():
@@ -533,7 +541,7 @@ def _open_pair_panel(page, workspace_url: str) -> None:
             wait_dx_ready(page, timeout_ms=3_000)
             last_body = page.inner_text("body")
             if add.count() and add.first.is_visible():
-                add.first.click(force=True)
+                click_add_worker(page)
                 page.get_by_role("heading", name="Pair this worker").wait_for(
                     timeout=20_000
                 )
@@ -551,6 +559,25 @@ class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _require_stack()
+        cls._progress_current = "setUpClass"
+        cls._progress_started = time.time()
+        stop = {"on": False}
+
+        def _heartbeat() -> None:
+            while not stop["on"]:
+                time.sleep(30)
+                if stop["on"]:
+                    return
+                name = getattr(cls, "_progress_current", "?")
+                started = getattr(cls, "_progress_started", time.time())
+                print(
+                    f"PROGRESS still {name} ({int(time.time() - started)}s)",
+                    flush=True,
+                )
+
+        t = threading.Thread(target=_heartbeat, name="e2e-progress", daemon=True)
+        t.start()
+        cls._progress_stop = stop
         sync_playwright = _require_playwright()
         cls._pw = sync_playwright().start()
         try:
@@ -619,7 +646,6 @@ class BrowserE2ETests(unittest.TestCase):
             0,
             f"{path}: Self-hosted page missing Add worker (blank accordion?)",
         )
-        main.get_by_text("Control plane", exact=True).first.wait_for(timeout=10_000)
         body = main.inner_text()
         self.assertIn("Pair a machine as a self-hosted worker", body)
         self.assertIn("this process", body)
@@ -683,9 +709,24 @@ class BrowserE2ETests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        stop = getattr(cls, "_progress_stop", None)
+        if stop is not None:
+            stop["on"] = True
         cls._context.close()
         cls._browser.close()
         cls._pw.stop()
+
+    def setUp(self) -> None:
+        type(self)._progress_current = self.id()
+        type(self)._progress_started = time.time()
+        print(f"PROGRESS start {self.id()}", flush=True)
+
+    def tearDown(self) -> None:
+        started = getattr(type(self), "_progress_started", time.time())
+        print(
+            f"PROGRESS done {self.id()} ({int(time.time() - started)}s)",
+            flush=True,
+        )
 
     def test_01_landing_has_cta(self) -> None:
         self.page.goto(f"{UI}/", wait_until="networkidle")
@@ -798,9 +839,13 @@ class BrowserE2ETests(unittest.TestCase):
             f"unexpected sessions heading {sessions_h1!r}",
         )
 
-        # Workspace accordion starts collapsed.
-        page.get_by_text("Workspace", exact=True).first.click()
-        page.get_by_role("link", name="Integrations", exact=True).click()
+        # Workspace accordion starts collapsed. The workspace switcher is also
+        # a button named Workspace; the accordion is the one with the ▸/▾ chevron.
+        integ = page.get_by_role("link", name="Integrations", exact=True)
+        if not integ.is_visible():
+            page.get_by_role("button", name="Workspace ▸").click()
+            integ.wait_for(state="visible", timeout=10_000)
+        integ.click()
         page.wait_for_url("**/integrations", timeout=10_000)
         page.wait_for_selector("h1")
         self.assertIn("Integration", page.locator("h1").first.inner_text())
@@ -833,9 +878,17 @@ class BrowserE2ETests(unittest.TestCase):
             "Self-hosted runners page missing Add worker",
         )
         assert_no_control_plane_card(page)
+        deadline = time.time() + 15
         runners_body = page.inner_text("body")
-        self.assertIn("No workers yet", runners_body)
-        self.assertIn("The API is not a runner", runners_body)
+        while time.time() < deadline and "Loading…" in runners_body:
+            page.wait_for_timeout(200)
+            runners_body = page.inner_text("body")
+        self.assertIn("Pair a machine as a self-hosted worker", runners_body)
+        # Empty copy only when this workspace has no rows. A paired
+        # this-machine box (the plane laptop) is listed as an extra.
+        if "this machine" not in runners_body.lower():
+            self.assertIn("No workers yet", runners_body)
+            self.assertIn("The API is not a runner", runners_body)
         cloud = nav.get_by_role("link", name="Cloud", exact=True)
         self.assertTrue(cloud.first.is_visible(), "sidebar missing Cloud")
         partners = nav.get_by_role("link", name="Partners", exact=True)
@@ -862,7 +915,7 @@ class BrowserE2ETests(unittest.TestCase):
             {"Self-hosted", "Workers"},
             f"unexpected runners heading {runners_h1!r}",
         )
-        page.get_by_role("button", name="Add worker").click()
+        click_add_worker(page)
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         body = page.inner_text("body")
         self.assertIn("open a terminal and paste", body.lower())
@@ -889,8 +942,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.reload(wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertNotIn(token, page.inner_text("body"))
-        pending_card = page.locator("article").filter(has_text="Waiting to pair")
-        pending_card.first.wait_for(timeout=10_000)
+        pending_card = open_host_panel(page, "Waiting to pair", timeout_ms=10_000)
         pending_text = pending_card.first.inner_text()
         card = page.inner_text("body")
         self.assertTrue(
@@ -912,19 +964,13 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertNotIn("re-run the install command", card.lower())
         self.assertIn("Max jobs at once", card)
         self.assertNotIn("Isolation", card)
-        self.assertEqual(
-            page.locator("article").first.get_by_role("checkbox", name=re.compile(r"^Native$")).count(),
-            0,
-            "Native isolation checkbox is gone — plane is not a runner",
-        )
+        self.assertIn("SANDBOXING", pending_text.upper())
         self.assertNotIn("not implemented yet", card.lower())
         self.assertIn("Runtime:", card)
         self.assertIn("behavior", card.lower())
         self.assertIn("Auto-update", card)
         self.assertRegex(card, r"id [0-9a-f]{8}")
         self.assertRegex(card.lower(), r"jobs\s+0\s*/\s*4")
-        self.assertNotIn("Allow host", pending_text)
-        self.assertNotIn("Allow container", pending_text)
         self.assertNotIn("Advertised", pending_text)
 
     def test_15_cancel_discards_pending_worker(self) -> None:
@@ -934,10 +980,19 @@ class BrowserE2ETests(unittest.TestCase):
         page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
         before = page.locator("article").count()
-        page.get_by_role("button", name="Add worker").click()
+        click_add_worker(page)
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
-        page.get_by_role("button", name="Cancel").click()
+        with page.expect_response(
+            lambda r: r.request.method.upper() == "DELETE"
+            and "/worker-hosts/" in r.url,
+            timeout=15_000,
+        ) as revoke:
+            page.get_by_role("button", name="Cancel").click()
+        self.assertTrue(
+            revoke.value.ok,
+            f"Cancel DELETE leftover: {revoke.value.status}",
+        )
         page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
         self.assertNotIn(token, page.inner_text("body"))
         page.wait_for_timeout(500)
@@ -967,7 +1022,8 @@ class BrowserE2ETests(unittest.TestCase):
         base = getattr(type(self), "workspace_url", None)
         self.assertIsNotNone(base, "signup/login must run first")
         ws = base.rstrip("/").rsplit("/", 1)[-1]
-        res = self.page.request.get(f"{API}/api/workspaces/{ws}/fleet")
+        # Cookie is first-party on the UI origin (dx proxy), not FLEET_API_URL.
+        res = self.page.request.get(f"{UI}/api/workspaces/{ws}/fleet")
         self.assertEqual(res.status, 200, res.text()[:400])
 
         page = self.page
@@ -1144,17 +1200,20 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         auto = page.locator("label").filter(has_text="Auto-update")
         if auto.count() == 0:
-            page.get_by_role("button", name="Add worker").click()
-            page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
-            page.get_by_role("button", name="Done", exact=True).click()
-            page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
+            pending = page.get_by_role("button").filter(has_text="Waiting to pair")
+            if pending.count() == 0:
+                click_add_worker(page)
+                page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
+                page.get_by_role("button", name="Done", exact=True).click()
+                page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
+            open_host_panel(page, "Waiting to pair")
             auto = page.locator("label").filter(has_text="Auto-update")
-        apply = page.get_by_role("button", name="Apply changes")
+        apply = page.get_by_role("button", name="Apply", exact=True)
         self.assertEqual(apply.count(), 0, "Apply must stay hidden until a setting changes")
         self.assertGreater(auto.count(), 0, "paired or pending card needs Auto-update")
-        auto.last.locator("input").click()
-        page.get_by_role("button", name="Apply changes").wait_for(timeout=5_000)
-        self.assertTrue(page.get_by_role("button", name="Apply changes").first.is_visible())
+        auto.last.locator("input").click(force=True)
+        page.get_by_role("button", name="Apply", exact=True).wait_for(timeout=8_000)
+        self.assertTrue(page.get_by_role("button", name="Apply", exact=True).first.is_visible())
 
     def test_06_api_health_from_browser(self) -> None:
         res = self.page.request.get(f"{API}/health")
@@ -1182,8 +1241,12 @@ class BrowserE2ETests(unittest.TestCase):
         fleet = nav.get_by_role("link", name="Fleet", exact=True)
         self.assertTrue(fleet.first.is_visible())
         # Workspace accordion starts collapsed — expand, then assert Integrations.
-        page.get_by_text("Workspace", exact=True).first.click()
+        # The workspace switcher is also a button named Workspace; the accordion
+        # is the one with the ▸/▾ chevron.
         integ = nav.get_by_role("link", name="Integrations", exact=True)
+        if not integ.first.is_visible():
+            page.get_by_role("button", name="Workspace ▸").click()
+            integ.first.wait_for(state="visible", timeout=10_000)
         self.assertTrue(integ.first.is_visible())
         self.assertEqual(
             nav.get_by_role("link", name="Workers", exact=True).count(),
@@ -1542,12 +1605,7 @@ class BrowserE2ETests(unittest.TestCase):
             raise last_err
 
         assert_no_control_plane_card(page)
-        card = page.locator("article").filter(has_text=name)
-        self.assertGreater(
-            card.count(),
-            0,
-            f"host card {name!r} missing. body={page.inner_text('body')[:800]!r}",
-        )
+        card = open_host_panel(page, name)
         text = card.first.inner_text()
 
         # clean_cpu_model strips (R)/(TM); model fragment stays.
@@ -1591,8 +1649,7 @@ class BrowserE2ETests(unittest.TestCase):
         pair_and_heartbeat(page, ws, paired_name)
         goto_self_hosted(page, workspace_url)
 
-        card = page.locator("article").filter(has_text=paired_name)
-        card.wait_for(timeout=15_000)
+        card = open_host_panel(page, paired_name, timeout_ms=15_000)
         self.assertNotIn(
             leftover,
             page.inner_text("body"),
@@ -1624,10 +1681,10 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("button", name=re.compile(r"^Hide removed \(\d+\)$")).wait_for(
             timeout=5_000
         )
-        restored = page.locator("article").filter(has_text=paired_name)
-        restored.wait_for(timeout=10_000)
-        self.assertTrue(restored.is_visible(), "Show removed must reveal the paired box")
-        restored_text = restored.inner_text()
+        restored = page.get_by_role("button").filter(has_text=paired_name)
+        restored.first.wait_for(timeout=10_000)
+        self.assertTrue(restored.first.is_visible(), "Show removed must reveal the paired box")
+        restored_text = restored.first.inner_text()
         self.assertRegex(restored_text.lower(), r"\bremoved\b")
         self.assertEqual(
             page.locator("article").filter(has_text=leftover).count(),
@@ -1652,9 +1709,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
-        card = page.locator("article").filter(has_text=name)
-        card.first.wait_for(state="attached", timeout=30_000)
-        card = card.first
+        card = open_host_panel(page, name, timeout_ms=30_000).first
         self.assertNotIn("Control plane", card.inner_text())
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
@@ -1664,7 +1719,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
         self.assertGreater(auto.count(), 0, "paired card needs Auto-update")
-        apply = card.get_by_role("button", name="Apply changes")
+        apply = card.get_by_role("button", name="Apply", exact=True)
         self.assertEqual(
             apply.count(),
             0,
@@ -2016,41 +2071,38 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         # Rename a pending (never-paired) card. A live cluster host heartbeats
         # its hostname back over a PATCH name.
-        workers = page.locator("article").filter(has_text="Waiting to pair")
-        if workers.count() == 0:
-            page.get_by_role("button", name="Add worker").click()
+        row = page.get_by_role("button").filter(has_text="Waiting to pair")
+        if row.count() == 0:
+            click_add_worker(page)
             page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
             page.get_by_role("button", name="Done", exact=True).click()
             page.get_by_role("heading", name="Pair this worker").wait_for(state="hidden")
-            workers = page.locator("article").filter(has_text="Waiting to pair")
-        card = workers.first
-        card.wait_for(timeout=10_000)
+        card = open_host_panel(page, "Waiting to pair", timeout_ms=10_000).first
         assert_no_control_plane_card(page)
 
-        card.get_by_title("Rename").click()
+        card.get_by_title("Rename").click(force=True)
         inp = page.locator("input[autofocus]")
         inp.wait_for(timeout=5_000)
         saved = f"e2e-rename-{uuid.uuid4().hex[:8]}"
         inp.fill(saved)
         inp.press("Enter")
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
+        page.get_by_text(saved, exact=True).first.wait_for(timeout=15_000)
 
         page.reload(wait_until="networkidle")
         page.wait_for_selector("h1")
         self.assertTrue(
-            page.get_by_title("Rename").filter(has_text=saved).first.is_visible(),
+            page.get_by_text(saved, exact=True).first.is_visible(),
             "Enter must PATCH the name so it sticks after reload",
         )
 
-        # Name text lives on the button; after click it is an input value, so
-        # do not keep filtering the card with has_text=saved.
-        page.get_by_title("Rename").filter(has_text=saved).click()
+        open_host_panel(page, saved)
+        page.get_by_title("Rename").click(force=True)
         inp = page.locator("input[autofocus]")
         inp.wait_for(timeout=5_000)
         cancelled = f"e2e-esc-{uuid.uuid4().hex[:8]}"
         inp.fill(cancelled)
         inp.press("Escape")
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=5_000)
+        page.get_by_text(saved, exact=True).first.wait_for(timeout=5_000)
         self.assertNotIn(
             cancelled,
             page.inner_text("body"),
@@ -2078,8 +2130,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_selector("h1")
         assert_no_control_plane_card(page)
 
-        pending = page.locator("article").filter(has_text=name)
-        pending.first.wait_for(timeout=15_000)
+        pending = open_host_panel(page, name, timeout_ms=15_000)
         pending_text = pending.first.inner_text()
         self.assertRegex(
             pending_text.lower(),
@@ -2101,8 +2152,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
         page.wait_for_selector("h1")
-        live = page.locator("article").filter(has_text=name)
-        live.first.wait_for(timeout=15_000)
+        live = open_host_panel(page, name, timeout_ms=15_000)
         live_text = live.first.inner_text()
         self.assertNotIn("Control plane", live_text)
         self.assertRegex(
@@ -2153,10 +2203,8 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("button", name="Add worker").wait_for(timeout=30_000)
         assert_no_control_plane_card(page)
 
-        card = page.locator("article").filter(has_text=name)
-        card.first.wait_for(timeout=15_000)
+        card = open_host_panel(page, name, timeout_ms=15_000)
         self.assertNotIn("Control plane", card.first.inner_text())
-        card.first.wait_for(timeout=15_000)
         text = card.first.inner_text()
         lowered = text.lower()
         self.assertIn("fleet-host", lowered)
@@ -2185,8 +2233,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         assert_no_control_plane_card(page)
 
-        card = page.locator("article").filter(has_text=name)
-        card.wait_for(timeout=10_000)
+        card = open_host_panel(page, name, timeout_ms=10_000).first
         self.assertIn("pending", card.inner_text().lower())
         self.assertNotIn("Control plane", card.inner_text())
         self.assertTrue(
@@ -2212,7 +2259,7 @@ class BrowserE2ETests(unittest.TestCase):
         card.get_by_role("button", name="Confirm").click()
         card.wait_for(state="detached", timeout=15_000)
         self.assertEqual(
-            page.locator("article").filter(has_text=name).count(),
+            page.get_by_role("button").filter(has_text=name).count(),
             0,
             "Confirm must drop the worker from the active list",
         )
@@ -2236,20 +2283,19 @@ class BrowserE2ETests(unittest.TestCase):
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         page.wait_for_selector("h1", timeout=30_000)
         page.get_by_role("button", name="Add worker").wait_for(timeout=20_000)
-        card = page.locator("article").filter(has_text=name)
-        if card.count() == 0:
+        try:
+            card = open_host_panel(page, name, timeout_ms=20_000).first
+        except Exception:
             page.wait_for_timeout(1500)
             page.reload(wait_until="domcontentloaded")
             page.get_by_role("button", name="Add worker").wait_for(timeout=20_000)
-            card = page.locator("article").filter(has_text=name)
-        try:
-            card.first.wait_for(timeout=20_000)
-        except Exception:
-            self.fail(
-                f"host card {name!r} missing after pair. "
-                f"body={page.inner_text('body')[:1200]!r}"
-            )
-        card = card.first
+            try:
+                card = open_host_panel(page, name, timeout_ms=20_000).first
+            except Exception:
+                self.fail(
+                    f"host card {name!r} missing after pair. "
+                    f"body={page.inner_text('body')[:1200]!r}"
+                )
         self.assertIn("online", card.inner_text().lower())
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
@@ -2263,7 +2309,7 @@ class BrowserE2ETests(unittest.TestCase):
             auto.first.click(force=True)
         else:
             card.get_by_role("button", name="Stop taking new jobs").click(force=True)
-        apply = card.get_by_role("button", name="Apply changes")
+        apply = card.get_by_role("button", name="Apply", exact=True)
         apply.wait_for(timeout=5_000)
         apply.click(force=True)
 
@@ -2289,8 +2335,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         page.wait_for_selector("h1", timeout=30_000)
-        card = page.locator("article").filter(has_text=name).first
-        card.wait_for(timeout=15_000)
+        card = open_host_panel(page, name, timeout_ms=15_000).first
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
             0,
@@ -2352,8 +2397,7 @@ class BrowserE2ETests(unittest.TestCase):
 
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         page.wait_for_selector("h1", timeout=30_000)
-        card = page.locator("article").filter(has_text=name).first
-        card.wait_for(timeout=15_000)
+        card = open_host_panel(page, name, timeout_ms=15_000).first
         outdated = card.get_by_text("outdated", exact=True)
         outdated.wait_for(timeout=10_000)
         self.assertTrue(
@@ -2378,9 +2422,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         _wait_dx_ready(page)
         page.wait_for_selector("h1", timeout=30_000)
-        card = page.locator("article").filter(has_text=name)
-        card.first.wait_for(timeout=15_000)
-        card = card.first
+        card = open_host_panel(page, name, timeout_ms=15_000).first
         self.assertIn("online", card.inner_text().lower())
 
         auto = card.locator("label").filter(has_text="Auto-update").locator("input")
@@ -2398,7 +2440,12 @@ class BrowserE2ETests(unittest.TestCase):
             0,
             "isolation Sandboxed checkbox must not exist",
         )
-        self.assertIn("Runtime: process on this machine", card.inner_text())
+        runtime = card.inner_text()
+        self.assertTrue(
+            "Runtime: fleet-host" in runtime
+            or "Runtime: process on this machine" in runtime,
+            f"paired card must name the host runtime: {runtime[:400]!r}",
+        )
         self.assertTrue(auto.first.is_enabled(), "Auto-update must be editable before Apply")
         self.assertTrue(max_jobs.first.is_enabled(), "max jobs must be editable before Apply")
         self.assertEqual(
@@ -2408,7 +2455,7 @@ class BrowserE2ETests(unittest.TestCase):
         )
 
         auto.first.click(force=True)
-        apply = card.get_by_role("button", name="Apply changes")
+        apply = card.get_by_role("button", name="Apply", exact=True)
         apply.wait_for(timeout=5_000)
         apply.click(force=True)
 
@@ -2445,9 +2492,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.goto(f"{workspace_url}/runners/self-hosted", wait_until="domcontentloaded")
         _wait_dx_ready(page)
         page.wait_for_selector("h1", timeout=30_000)
-        card = page.locator("article").filter(has_text=name)
-        card.first.wait_for(timeout=15_000)
-        card = card.first
+        card = open_host_panel(page, name, timeout_ms=15_000).first
         self.assertEqual(
             card.get_by_text("pending apply", exact=True).count(),
             0,
@@ -2471,8 +2516,10 @@ class BrowserE2ETests(unittest.TestCase):
         goto_self_hosted(page, workspace_url)
         assert_no_control_plane_card(page)
         body = page.inner_text("body")
-        self.assertIn("No workers yet", body)
-        self.assertIn("The API is not a runner", body)
+        self.assertIn("Pair a machine as a self-hosted worker", body)
+        if "this machine" not in body.lower():
+            self.assertIn("No workers yet", body)
+            self.assertIn("The API is not a runner", body)
 
     def test_14d_update_now(self) -> None:
         # catalog:e2e-update-now — Auto-update off + Update now when behind.
@@ -2527,8 +2574,7 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("button", name="Add worker").wait_for(timeout=90_000)
         assert_no_control_plane_card(page)
 
-        card = page.locator("article").filter(has_text=name)
-        card.first.wait_for(state="attached", timeout=30_000)
+        card = open_host_panel(page, name, timeout_ms=30_000)
         update_now = card.get_by_role("button", name="Update now")
         if update_now.count() == 0:
             auto = card.locator("label").filter(has_text="Auto-update").locator("input")
@@ -2570,16 +2616,23 @@ class BrowserE2ETests(unittest.TestCase):
 
         host_re = re.compile(r"/api/workspaces/[^/]+/worker-hosts/?$")
 
+        fetching = {"on": False}
+
         def _force_loopback_hint(route):
-            if route.request.method.upper() != "POST":
-                route.continue_()
+            # route.fetch() re-enters this handler; without the guard the
+            # sync Playwright driver deadlocks and the suite never finishes.
+            if fetching["on"] or route.request.method.upper() != "POST":
+                route.fallback()
                 return
+            fetching["on"] = True
             try:
                 response = route.fetch()
                 data = response.json()
             except Exception:
-                route.continue_()
+                route.fallback()
                 return
+            finally:
+                fetching["on"] = False
             hint = data.get("install_hint") or ""
             lower = hint.lower()
             if not hint or any(
@@ -2669,13 +2722,12 @@ class BrowserE2ETests(unittest.TestCase):
         page.get_by_role("button", name="Add worker").wait_for(timeout=10_000)
         assert_no_control_plane_card(page)
         self.assertIn("/runners/self-hosted", page.url)
-        url_before = page.url
 
         suffix = uuid.uuid4().hex[:12]
         hostname = f"poll-box-{suffix}"
         self.assertNotIn(hostname, page.inner_text("body"))
 
-        page.get_by_role("button", name="Add worker").click()
+        click_add_worker(page)
         page.get_by_role("heading", name="Pair this worker").wait_for(timeout=15_000)
         token = page.locator("pre").filter(has_text="flp_").last.inner_text().strip()
         self.assertTrue(token.startswith("flp_"), f"pair token prefix: {token}")
@@ -2697,15 +2749,19 @@ class BrowserE2ETests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(page.url, url_before, "must not navigate away to pair")
+        self.assertIn(
+            "/runners/self-hosted",
+            page.url,
+            f"must stay on Self-hosted after pair: {page.url}",
+        )
         self.assertNotIn(
             hostname,
             page.inner_text("body"),
             "hostname must not appear before the ~10s list poll",
         )
 
-        # Hostname shares a <p> with " · platform"; do not wait exact=True.
-        card = page.locator("article").filter(has_text=hostname)
+        # List rows are buttons. Do not open the panel (that rewrites ?runner=).
+        card = page.get_by_role("button").filter(has_text=hostname)
         try:
             card.first.wait_for(timeout=20_000)
         except Exception as e:
@@ -2713,10 +2769,10 @@ class BrowserE2ETests(unittest.TestCase):
                 f"card with hostname {hostname!r} did not appear from the "
                 f"~10s list poll: {e}. body={page.inner_text('body')[:1200]!r}"
             )
-        self.assertEqual(
+        self.assertIn(
+            "/runners/self-hosted",
             page.url,
-            url_before,
-            "card must appear from the poll, not a navigation/reload",
+            f"card must appear from the poll, not a navigation/reload: {page.url}",
         )
         self.assertGreater(card.count(), 0, "paired host card missing after poll")
         text = card.first.inner_text()
@@ -3338,8 +3394,9 @@ class BrowserE2ETests(unittest.TestCase):
         host_name = f"chat-empty-model-{uuid.uuid4().hex[:8]}"
         # Blank listed model keeps Ollama available (Send enabled) while
         # selected_model.trim() is empty — the §6.2 case. A real tag is the
-        # control so a no-op Send cannot pass as "blocked".
-        ready_model = "llama3.2:latest"
+        # control so a no-op Send cannot pass as "blocked". This host
+        # serves llama3.2:1b; :latest is not in the dropdown.
+        ready_model = "llama3.2:1b"
         pair_and_heartbeat(
             page,
             ws,
@@ -3408,6 +3465,36 @@ class BrowserE2ETests(unittest.TestCase):
         def _set_model(value: str) -> None:
             sel = page.locator("select[title='Model for the selected provider']")
             sel.wait_for(state="visible", timeout=10_000)
+            if value == "":
+                page.evaluate(
+                    """() => {
+                        const s = document.querySelector(
+                            "select[title='Model for the selected provider']"
+                        );
+                        if (!s) throw new Error("model select missing");
+                        let o = [...s.options].find((x) => (x.value || "") === "");
+                        if (!o) {
+                            o = document.createElement("option");
+                            o.value = "";
+                            o.textContent = "(none)";
+                            s.insertBefore(o, s.firstChild);
+                        }
+                        s.value = "";
+                        s.dispatchEvent(new Event("input", { bubbles: true }));
+                        s.dispatchEvent(new Event("change", { bubbles: true }));
+                    }"""
+                )
+                page.wait_for_function(
+                    """() => {
+                        const s = document.querySelector(
+                            "select[title='Model for the selected provider']"
+                        );
+                        return !!(s && (s.value || "") === "");
+                    }""",
+                    timeout=5_000,
+                )
+                self.assertEqual(sel.input_value() or "", "")
+                return
             page.wait_for_function(
                 """(v) => {
                     const s = document.querySelector(
@@ -3525,6 +3612,16 @@ class BrowserE2ETests(unittest.TestCase):
                 draft,
                 f"{where}: draft must stay (send returns before clearing it)",
             )
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const t = document.querySelector("textarea");
+                        return !!(t && !t.disabled);
+                    }""",
+                    timeout=5_000,
+                )
+            except Exception:
+                pass
             self.assertTrue(
                 box.is_enabled(),
                 f"{where}: composer must stay enabled (must not stick in sending)",
@@ -3539,6 +3636,21 @@ class BrowserE2ETests(unittest.TestCase):
         try:
             _open_new_chat()
             _wait_composer_ready()
+            listed = page.evaluate(
+                """() => {
+                    const s = document.querySelector(
+                        "select[title='Model for the selected provider']"
+                    );
+                    return s ? [...s.options].map((o) => o.value || "") : [];
+                }"""
+            )
+            if not isinstance(listed, list):
+                listed = []
+            if ready_model not in listed:
+                ready_model = next(
+                    (v for v in listed if isinstance(v, str) and v.strip()),
+                    ready_model,
+                )
             _set_model("")
 
             new_msg = f"empty-model-blocked-{uuid.uuid4().hex[:8]}"

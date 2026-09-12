@@ -1,6 +1,6 @@
-//! Live Slack / Notion / GitHub through `integration_query` and Grok tools.
+//! Live Notion / GitHub through `integration_query`.
 //!
-//! `#[ignore]` — needs the plane DB, encrypted tokens, and `grok login`.
+//! `#[ignore]` — needs the plane DB and encrypted tokens.
 //!
 //!   FLEET_LIVE_INTEGRATIONS=1 cargo test -p fleet-server --test integrations_live -- --ignored --nocapture
 
@@ -14,7 +14,7 @@ use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::chat_tools::{ChatLlmContext, execute_tool};
 use fleet_server::work_io::ControlPlaneIo;
 use fleet_server::{AppState, ServerConfig};
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
 const DEFAULT_WS: &str = "01a03929-e0ad-7dd3-9835-71c9c4f5df01";
@@ -28,7 +28,7 @@ fn require_live() {
     );
 }
 
-async fn live_state() -> (AppState, Uuid, Uuid) {
+async fn live_state_requiring(need: &[&str]) -> (AppState, Uuid, Uuid) {
     require_live();
     let config = ServerConfig::from_env().expect("ServerConfig::from_env");
     let db = connect_and_migrate_with(
@@ -57,8 +57,8 @@ async fn live_state() -> (AppState, Uuid, Uuid) {
         .map(|r| r.provider.as_str())
         .collect();
     assert!(
-        connected.contains(&"slack") && connected.contains(&"notion"),
-        "workspace {ws} missing slack/notion: {connected:?}"
+        need.iter().all(|p| connected.contains(p)),
+        "workspace {ws} missing {need:?}: {connected:?}"
     );
     let user = rows
         .iter()
@@ -119,88 +119,56 @@ fn llm() -> ChatLlmContext {
     }
 }
 
-async fn tool(state: &AppState, ws: Uuid, user: Uuid, name: &str, args: Value) -> Value {
-    let (content, action) = execute_tool(state, ws, user, name, &args, &llm()).await;
-    assert!(action.ok, "{name} failed: {} {}", action.summary, content);
-    content
-}
-
-#[tokio::test]
-#[ignore = "live OAuth tokens"]
-async fn t1_list_and_get_connected_apps() {
-    let (state, ws, user) = live_state().await;
-    let listed = tool(
-        &state,
-        ws,
-        user,
-        "list_integrations",
-        json!({ "connected_only": true }),
-    )
-    .await;
-    let blob = listed.to_string();
-    assert!(blob.contains("slack"), "{listed}");
-    assert!(blob.contains("notion"), "{listed}");
-
-    for provider in ["slack", "notion"] {
-        let got = tool(
-            &state,
-            ws,
-            user,
-            "get_integration",
-            json!({ "provider": provider }),
-        )
-        .await;
-        assert!(
-            got.get("connected").and_then(|v| v.as_bool()) == Some(true)
-                || got.to_string().contains("connected"),
-            "{provider}: {got}"
-        );
-        println!("T1 {provider} get_integration ok");
-    }
-}
-
-#[tokio::test]
-#[ignore = "live OAuth tokens"]
-async fn t2_slack_list_channels_and_users() {
-    let (state, ws, user) = live_state().await;
-    for op in ["list_channels", "list_users"] {
-        let out = tool(
-            &state,
-            ws,
-            user,
-            "integration_query",
-            json!({ "provider": "slack", "operation": op, "args": {} }),
-        )
-        .await;
-        assert_eq!(out["ok"], true, "{op}: {out}");
-        println!("T2 slack {op} ok summary={}", out["summary"]);
-    }
-}
-
 #[tokio::test]
 #[ignore = "live OAuth tokens"]
 async fn t3_notion_search() {
-    let (state, ws, user) = live_state().await;
-    let out = tool(
+    let (state, ws, user) = live_state_requiring(&["notion"]).await;
+    let (out, action) = execute_tool(
         &state,
         ws,
         user,
         "integration_query",
-        json!({
+        &json!({
             "provider": "notion",
             "operation": "search",
             "args": { "query": "" }
         }),
+        &llm(),
     )
     .await;
+    assert!(action.ok, "notion search failed: {} {out}", action.summary);
     assert_eq!(out["ok"], true, "notion search: {out}");
-    println!("T3 notion search ok summary={}", out["summary"]);
+    assert_eq!(out["provider"], "notion", "provider: {out}");
+    assert_eq!(out["operation"], "search", "operation: {out}");
+    let items = out["data"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.items: {out}"));
+    let count = out["data"]["count"].as_u64().unwrap_or(0);
+    assert!(
+        count >= 1 && !items.is_empty(),
+        "notion search must map at least one item (empty is fail-closed): {out}"
+    );
+    assert_eq!(count as usize, items.len(), "count must match items: {out}");
+    let item = &items[0];
+    assert!(
+        item.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        "items[0].id: {out}"
+    );
+    assert!(
+        item.get("object").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        "items[0].object: {out}"
+    );
+    assert!(
+        item.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some(),
+        "items[0].url: {out}"
+    );
+    assert!(item.get("title").is_some(), "items[0].title: {out}");
 }
 
 #[tokio::test]
 #[ignore = "live OAuth tokens"]
 async fn t4_github_list_repos() {
-    let (state, ws, user) = live_state().await;
+    let (state, ws, user) = live_state_requiring(&["github"]).await;
     let (out, action) = execute_tool(
         &state,
         ws,
@@ -214,86 +182,29 @@ async fn t4_github_list_repos() {
         &llm(),
     )
     .await;
-    if action.ok && out["ok"] == true {
-        println!("T4 github list_repos ok summary={}", out["summary"]);
-        return;
-    }
-    let blob = out.to_string().to_lowercase();
     assert!(
-        blob.contains("401")
-            || blob.contains("credential")
-            || blob.contains("not_connected")
-            || blob.contains("not connected"),
-        "github failed for an unexpected reason: {out}"
+        action.ok,
+        "github list_repos failed (token_expired/not_connected is fail-closed): {} {out}",
+        action.summary
     );
-    println!(
-        "T4 github token is dead ({}) — reconnect GitHub",
-        out["summary"]
-    );
-}
-
-#[tokio::test]
-#[ignore = "live OAuth tokens"]
-async fn t5_jira_not_connected() {
-    let (state, ws, user) = live_state().await;
-    let (content, action) = execute_tool(
-        &state,
-        ws,
-        user,
-        "integration_query",
-        &json!({
-            "provider": "jira",
-            "operation": "list_issues",
-            "args": {}
-        }),
-        &llm(),
-    )
-    .await;
+    assert_eq!(out["ok"], true, "github list_repos: {out}");
+    assert_eq!(out["provider"], "github", "provider: {out}");
+    assert_eq!(out["operation"], "list_repos", "operation: {out}");
+    let items = out["data"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("data.items: {out}"));
+    let count = out["data"]["count"].as_u64().unwrap_or(0);
     assert!(
-        !action.ok || content["ok"] == false,
-        "jira should not be connected: {content}"
+        count >= 1 && !items.is_empty(),
+        "github list_repos must map at least one item (empty is fail-closed): {out}"
     );
-    let blob = format!("{action:?}{content}");
+    assert_eq!(count as usize, items.len(), "count must match items: {out}");
     assert!(
-        blob.to_lowercase().contains("not_connected")
-            || blob.to_lowercase().contains("not connected")
-            || blob.to_lowercase().contains("jira"),
-        "{blob}"
-    );
-    println!("T5 jira not_connected ok");
-}
-
-#[tokio::test]
-#[ignore = "live Grok + OAuth tokens"]
-async fn l1_grok_chat_calls_slack_integration_query() {
-    let (state, ws, user) = live_state().await;
-    let model = fleet_server::grok::default_model();
-    assert!(
-        !model.is_empty(),
-        "grok models empty — run grok login on this box"
-    );
-    let (used, text, actions) = fleet_server::grok::chat_with_tools(
-        &state,
-        ws,
-        user,
-        &state.grok,
-        &model,
-        &[(
-            "user".into(),
-            "List my Slack channels using the Slack integration. Do not guess.".into(),
-        )],
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("grok chat_with_tools");
-    println!("L1 model={used} actions={} text={}", actions.len(), text);
-    let queried = actions.iter().any(|a| {
-        a.tool == "integration_query" && a.ok && format!("{a:?}").to_lowercase().contains("slack")
-    });
-    assert!(
-        queried,
-        "expected a successful slack integration_query; actions={actions:?} text={text}"
+        items[0]
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some(),
+        "items[0].full_name (poll_github reads this): {out}"
     );
 }

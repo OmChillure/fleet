@@ -300,7 +300,7 @@ pub async fn run_session(
             command: cmd_line,
             model: model.map(|s| s.to_string()),
             agent_info: None,
-            error: Some(e.to_string()),
+            error: Some(format!("{e:#}")),
             stderr_tail: stderr_buf.lock().await.clone(),
         },
     };
@@ -669,23 +669,35 @@ mod tests {
     }
 
     #[test]
-    fn chunk_text_agent_message() {
-        let u = json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "hello" }
-        });
-        assert_eq!(chunk_text(&u).as_deref(), Some("hello"));
+    fn format_session_update_omits_user_message_chunk() {
+        assert!(
+            format_session_update(&json!({
+                "sessionUpdate": "user_message_chunk",
+                "content": { "text": "x" }
+            }))
+            .is_none()
+        );
     }
 
     #[test]
-    fn chunk_text_skips_user_and_empty() {
+    fn format_session_update_empty_agent_message_is_none() {
         assert!(
-            chunk_text(&json!({"sessionUpdate":"user_message_chunk","content":{"text":"x"}}))
-                .is_none()
+            format_session_update(&json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "text": "" }
+            }))
+            .is_none()
         );
-        assert!(
-            chunk_text(&json!({"sessionUpdate":"agent_message_chunk","content":{"text":""}}))
-                .is_none()
+    }
+
+    #[test]
+    fn format_session_update_empty_thought_chunk_is_none() {
+        assert_eq!(
+            format_session_update(&json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "text": "" }
+            })),
+            None
         );
     }
 
@@ -697,15 +709,49 @@ mod tests {
             "status": "pending",
             "toolCallId": "tc1",
         });
-        let s = format_session_update(&tool).unwrap();
-        assert!(s.contains("list_dir"), "{s}");
-        assert!(s.contains("[tool_call]"), "{s}");
+        assert_eq!(
+            format_session_update(&tool).as_deref(),
+            Some("[tool_call] list_dir (pending) id=tc1\n")
+        );
+    }
 
-        let msg = json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "working" }
+    #[test]
+    fn format_thought_chunk_is_prefixed() {
+        let thought = json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "text": "hello" }
         });
-        assert_eq!(format_session_update(&msg).as_deref(), Some("working"));
+        assert_eq!(
+            format_session_update(&thought).as_deref(),
+            Some("[thought] hello")
+        );
+    }
+
+    #[test]
+    fn format_session_update_drops_plan_and_mode() {
+        assert!(
+            format_session_update(&json!({"sessionUpdate": "available_commands_update"}))
+                .is_none()
+        );
+        assert!(
+            format_session_update(&json!({"sessionUpdate": "current_mode_update"})).is_none()
+        );
+        assert!(format_session_update(&json!({"sessionUpdate": "plan"})).is_none());
+        assert!(format_session_update(&json!({})).is_none());
+    }
+
+    #[test]
+    fn format_tool_call_update_includes_status_and_id() {
+        let update = json!({
+            "sessionUpdate": "tool_call_update",
+            "title": "list_dir",
+            "status": "completed",
+            "toolCallId": "tc1",
+        });
+        let s = format_session_update(&update).unwrap();
+        assert!(s.contains("[tool_call_update]"), "{s}");
+        assert!(s.contains("(completed)"), "{s}");
+        assert!(s.contains("id=tc1"), "{s}");
     }
 
     #[test]
@@ -725,8 +771,7 @@ mod tests {
         assert_eq!(pick_auth_method(&init), None);
     }
 
-    #[tokio::test]
-    async fn run_session_against_mock_agent() {
+    fn mock_acp_harness() -> HarnessSpec {
         let mock =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp_agent.py");
         assert!(
@@ -735,13 +780,18 @@ mod tests {
             mock.display()
         );
         which::which("python3").expect("python3 required for ACP mock session test");
-        let harness = HarnessSpec {
+        HarnessSpec {
             name: "custom".into(),
             command: "python3".into(),
             args: vec![mock.display().to_string()],
             model_via: "config_option".into(),
             model_config_id: "model".into(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn run_session_completed_turn_does_not_cancel() {
+        let harness = mock_acp_harness();
         let cwd = std::env::temp_dir().join(format!("fleet-acp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let methods_log = cwd.join("methods.log");
@@ -768,40 +818,152 @@ mod tests {
         assert!(out.ok, "stderr={}", out.stderr_tail);
         assert_eq!(out.session_id.as_deref(), Some("sess-mock-1"));
         assert!(
-            out.transcript.to_lowercase().contains("hello") || !out.transcript.is_empty(),
+            out.transcript.contains("hello from mock agent"),
+            "transcript={}",
+            out.transcript
+        );
+        assert!(
+            out.transcript.contains("list_dir"),
             "transcript={}",
             out.transcript
         );
         assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
+        for method in [
+            "initialize",
+            "authenticate",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+        ] {
+            assert!(
+                methods.lines().any(|l| l.trim() == method),
+                "expected {method} in {methods:?}"
+            );
+        }
         assert!(
             !methods.lines().any(|l| l.trim() == "session/cancel"),
             "driver must not send session/cancel after prompt returns; methods={methods:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_session_timeout_on_silent_prompt() {
+        let harness = mock_acp_harness();
+        let cwd = std::env::temp_dir().join(format!("fleet-acp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let methods_log = cwd.join("methods.log");
+        let mut env = HashMap::new();
+        env.insert(
+            "FLEET_ACP_METHODS_LOG".into(),
+            methods_log.display().to_string(),
+        );
+        env.insert("FLEET_ACP_PROMPT_MODE".into(), "silent".into());
+        let out = run_session(
+            &harness,
+            &cwd,
+            Some("mock-strong"),
+            "Say hi",
+            env,
+            false,
+            &["*".into()],
+            1,
+            &[],
+        )
+        .await
+        .expect("acp session");
+        let _ = std::fs::remove_dir_all(&cwd);
         assert!(
-            methods.lines().any(|l| l.trim() == "session/prompt"),
-            "expected session/prompt in {methods:?}"
+            !out.ok,
+            "silent prompt must not be ok; stderr={}",
+            out.stderr_tail
+        );
+        let err = out.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("timeout"),
+            "expected timeout in error={err:?} stderr={}",
+            out.stderr_tail
         );
     }
 
-    #[test]
-    fn permission_default_deny() {
-        assert!(!permission_allowed(false, &[], "bash npm test"));
+    #[tokio::test]
+    async fn run_session_blocked_stop_is_not_ok() {
+        let harness = mock_acp_harness();
+        let cwd = std::env::temp_dir().join(format!("fleet-acp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let methods_log = cwd.join("methods.log");
+        let mut env = HashMap::new();
+        env.insert(
+            "FLEET_ACP_METHODS_LOG".into(),
+            methods_log.display().to_string(),
+        );
+        env.insert("FLEET_ACP_PROMPT_MODE".into(), "blocked".into());
+        let out = run_session(
+            &harness,
+            &cwd,
+            Some("mock-strong"),
+            "Say hi",
+            env,
+            false,
+            &["*".into()],
+            30,
+            &[],
+        )
+        .await
+        .expect("acp session");
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            out.transcript.contains("hello from mock agent"),
+            "blocked stop still streams transcript; transcript={}",
+            out.transcript
+        );
+        assert_eq!(out.stop_reason.as_deref(), Some("blocked"));
+        assert!(
+            !out.ok,
+            "blocked stop must not be ok; transcript={}",
+            out.transcript
+        );
     }
 
-    #[test]
-    fn permission_star_and_substring() {
-        assert!(permission_allowed(false, &["*".into()], "anything"));
-        assert!(permission_allowed(
+    #[tokio::test]
+    async fn run_session_does_not_forward_handshake_secret() {
+        let harness = mock_acp_harness();
+        let cwd = std::env::temp_dir().join(format!("fleet-acp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let methods_log = cwd.join("methods.log");
+        let env_dump = cwd.join("child.env");
+        let mut env = HashMap::new();
+        env.insert(
+            "FLEET_ACP_METHODS_LOG".into(),
+            methods_log.display().to_string(),
+        );
+        env.insert("FLEET_ACP_ENV_DUMP".into(), env_dump.display().to_string());
+        env.insert(
+            "FLEET_HANDSHAKE_SECRET".into(),
+            "must-not-reach-acp-child".into(),
+        );
+        let _out = run_session(
+            &harness,
+            &cwd,
+            Some("mock-strong"),
+            "Say hi",
+            env,
             false,
-            &["fleet-wsexec".into(), "read".into()],
-            "tool fleet-wsexec django_check"
-        ));
-        assert!(!permission_allowed(
-            false,
-            &["read".into()],
-            "tool fleet-wsexec django_check"
-        ));
-        assert!(permission_allowed(true, &[], "denied otherwise"));
+            &["*".into()],
+            30,
+            &[],
+        )
+        .await
+        .expect("acp session");
+        let dump = std::fs::read_to_string(&env_dump).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            dump.contains("has_handshake_secret=0"),
+            "child must not inherit FLEET_HANDSHAKE_SECRET; dump={dump:?}"
+        );
+        assert!(
+            !dump.contains("must-not-reach-acp-child"),
+            "env_map handshake secret leaked; dump={dump:?}"
+        );
     }
 
     #[test]

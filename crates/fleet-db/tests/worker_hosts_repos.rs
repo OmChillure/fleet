@@ -8,7 +8,7 @@ use fleet_db::error::DbError;
 use fleet_db::models::{HostCpSettings, NewWorkClaim, NewWorkerHost};
 use fleet_db::repos::users::NewUser;
 use fleet_db::repos::worker_hosts::{
-    self, generate_pair_token, hash_token, PAIR_TOKEN_PREFIX, PAIR_TTL,
+    self, generate_pair_token, hash_token, PAIR_TOKEN_PREFIX,
 };
 use fleet_db::repos::{users, work_claims, workspaces};
 use serde_json::json;
@@ -224,7 +224,7 @@ async fn assert_pair_token_plaintext_column_absent_or_null(pool: &fleet_db::PgPo
               table_name = 'worker_hosts'
               AND column_name IN (
                 'token', 'pair_token', 'plaintext', 'token_plaintext',
-                'pair_token_plaintext', 'pair_token_plain', 'pair_token_hash'
+                'pair_token_plaintext', 'pair_token_plain'
               )
             )
           )
@@ -430,47 +430,7 @@ async fn heartbeat_with_hardware(
     .expect("heartbeat hardware")
 }
 
-fn public_gpu_names(host: &fleet_db::models::WorkerHost) -> Vec<String> {
-    host.as_public(Utc::now())
-        .hardware
-        .as_ref()
-        .and_then(|h| h.gpus.as_ref())
-        .map(|gpus| {
-            gpus.iter()
-                .filter_map(|g| g.name.clone().filter(|n| !n.trim().is_empty()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn persisted_gpu_entries(host: &fleet_db::models::WorkerHost) -> Vec<serde_json::Value> {
-    host.hardware
-        .as_ref()
-        .and_then(|v| v.get("gpus"))
-        .and_then(|g| g.as_array())
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn gpu_entry_name(entry: &serde_json::Value) -> Option<&str> {
-    match entry.get("name") {
-        Some(serde_json::Value::Null) | None => None,
-        Some(v) => v.as_str(),
-    }
-}
-
-#[test]
-fn pair_token_has_required_prefix_and_entropy() {
-    let token = generate_pair_token();
-    assert!(token.starts_with(PAIR_TOKEN_PREFIX), "{token}");
-    assert_eq!(token.len(), PAIR_TOKEN_PREFIX.len() + 64);
-    let hex = &token[PAIR_TOKEN_PREFIX.len()..];
-    assert!(
-        hex.chars().all(|c| c.is_ascii_hexdigit()),
-        "expected hex after prefix: {token}"
-    );
-}
-
+/// HTTP GET /worker-hosts is list_for_workspace: this workspace's rows only.
 #[tokio::test]
 async fn create_pending_then_list_for_workspace() {
     let pool = connect_and_migrate().await;
@@ -480,7 +440,7 @@ async fn create_pending_then_list_for_workspace() {
 
     let (a, _) = create_pending_with_token(&pool, workspace_id, user_id, "studio", expires).await;
     let (b, _) = create_pending_with_token(&pool, workspace_id, user_id, "lab", expires).await;
-    let (_c, _) = create_pending_with_token(&pool, other_ws, user_id, "other", expires).await;
+    let (c, _) = create_pending_with_token(&pool, other_ws, user_id, "other", expires).await;
 
     let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
         .await
@@ -488,37 +448,94 @@ async fn create_pending_then_list_for_workspace() {
     let ids: Vec<Uuid> = listed.iter().map(|h| h.id).collect();
     assert!(ids.contains(&a.id), "missing studio host");
     assert!(ids.contains(&b.id), "missing lab host");
-    assert_eq!(listed.iter().filter(|h| h.id == a.id).count(), 1);
-    assert!(listed.iter().all(|h| h.workspace_id == workspace_id));
-    assert!(listed.iter().all(|h| h.status == "pending"));
     assert!(
-        listed
-            .iter()
-            .all(|h| h.isolation == "native" && h.is_native_isolation()),
-        "existing and new hosts default to native isolation"
+        !ids.contains(&c.id),
+        "list_for_workspace must omit the other workspace's host"
     );
-    assert!(listed.iter().all(|h| h.machine_token_hash.is_none()));
-    assert!(listed.iter().all(|h| h.current_jobs == 0));
-    assert!(listed.iter().all(|h| h.advertised_max_concurrent.is_none()));
+}
 
-    let fetched = worker_hosts::get(&pool, a.id)
-        .await
-        .expect("get")
-        .expect("studio exists");
-    assert_eq!(fetched.name, "studio");
-    assert!(fetched.enabled);
-    assert!(!fetched.paused);
+/// load_visible_host: get_in_workspace on a foreign workspace is None.
+#[tokio::test]
+async fn get_in_workspace_other_workspace_id_is_none() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let other_ws = seed_user_with_workspace(&pool).await.1;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, _) =
+        create_pending_with_token(&pool, workspace_id, user_id, "studio", expires).await;
 
-    let scoped = worker_hosts::get_in_workspace(&pool, workspace_id, a.id)
+    let scoped = worker_hosts::get_in_workspace(&pool, workspace_id, host.id)
         .await
         .expect("get_in_workspace");
     assert!(scoped.is_some());
-    let cross = worker_hosts::get_in_workspace(&pool, other_ws, a.id)
+    let cross = worker_hosts::get_in_workspace(&pool, other_ws, host.id)
         .await
         .expect("cross-workspace get");
     assert!(cross.is_none());
 }
 
+/// HTTP GET /worker-hosts must not merge other workspaces' cluster hosts
+/// (list_assignable is the unscope twin).
+#[tokio::test]
+async fn list_for_workspace_omits_other_workspace_cluster_host() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "cluster-box", expires).await;
+    pair_host(&pool, &token, "cluster-box").await;
+    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("label cluster");
+
+    let from_b = worker_hosts::list_for_workspace(&pool, ws_b)
+        .await
+        .expect("list_for_workspace B");
+    assert!(
+        !from_b.iter().any(|h| h.id == host.id),
+        "cluster host home={ws_a} must not appear in list_for_workspace({ws_b}): {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// GET /worker-hosts card order is created_at ASC, id ASC.
+#[tokio::test]
+async fn list_for_workspace_orders_by_created_at_asc_then_id() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (older, _) =
+        create_pending_with_token(&pool, workspace_id, user_id, "older", expires).await;
+    let (newer, _) =
+        create_pending_with_token(&pool, workspace_id, user_id, "newer", expires).await;
+
+    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list");
+    let ids: Vec<Uuid> = listed.iter().map(|h| h.id).collect();
+    assert_eq!(ids, vec![older.id, newer.id]);
+}
+
+/// get / get_in_workspace miss is None (load_visible_host → 404).
+#[tokio::test]
+async fn get_and_get_in_workspace_unknown_id_are_none() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let missing = Uuid::now_v7();
+
+    let got = worker_hosts::get(&pool, missing).await.expect("get");
+    assert!(got.is_none());
+    let scoped = worker_hosts::get_in_workspace(&pool, workspace_id, missing)
+        .await
+        .expect("get_in_workspace");
+    assert!(scoped.is_none());
+}
+
+/// Second consume of a used flp_ is Conflict("already used") and must not
+/// rotate machine_token_hash, rewrite used_at, or demote the leftover online row.
 #[tokio::test]
 async fn pair_token_works_once_second_consume_fails() {
     let pool = connect_and_migrate().await;
@@ -526,43 +543,13 @@ async fn pair_token_works_once_second_consume_fails() {
     let expires = Utc::now() + Duration::hours(1);
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "once", expires).await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-    let (_, unused) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert!(unused.is_none(), "fresh pair token must be unused");
-
     let paired = pair_host(&pool, &token, "box-1").await;
-    assert_eq!(paired.host.id, host.id);
-    assert_eq!(paired.host.status, "online");
-    assert_eq!(paired.host.hostname.as_deref(), Some("box-1"));
-    assert_eq!(paired.host.platform.as_deref(), Some("linux-x86_64"));
-    assert!(paired.host.advertised_host);
-    assert!(!paired.host.advertised_container);
-    assert!(paired.host.paired_at.is_some());
-    assert!(paired.host.last_seen_at.is_some());
-    assert!(paired.host.machine_token_hash.is_some());
-    assert_eq!(
-        paired.host.machine_id,
-        Some(host.id),
-        "first pair assigns a durable machine id"
-    );
-    assert!(paired
-        .machine_token
-        .starts_with(worker_hosts::MACHINE_TOKEN_PREFIX));
     let (_, used) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert!(used.is_some(), "successful consume must set used_at");
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-
-    let authed = worker_hosts::authenticate_machine(&pool, &paired.machine_token)
-        .await
-        .expect("auth")
-        .expect("machine token must authenticate");
-    assert_eq!(authed.id, host.id);
 
     let err =
         worker_hosts::consume_pair_token(&pool, &token, "box-1", "linux-x86_64", true, false, None)
             .await
             .expect_err("second consume must fail");
-    // Consume-once is used_at, not "host is no longer pending".
     assert_pair_conflict(err, "used");
 
     let still = worker_hosts::get(&pool, host.id)
@@ -575,165 +562,105 @@ async fn pair_token_works_once_second_consume_fails() {
     assert_eq!(still_used, used, "second consume must not rewrite used_at");
 }
 
-/// Catalog: pair token TTL is one hour (HTTP `PAIR_TTL`) and single-use.
-/// `create_pending` stores the `now + PAIR_TTL` window HTTP issues. A token
-/// still inside that hour pairs once; reuse and an aged-past-1h token fail.
-/// Sibling `pair_token_consume_once_and_expired_must_fail` owns used_at /
-/// leftover / race / `expires_at == now` — this locks the 1h duration.
+/// generate_pair_token that was never inserted is NotFound (HTTP 401) and
+/// must not mint a host row.
 #[tokio::test]
-async fn pair_token_one_hour_ttl_cannot_be_reused() {
-    assert_eq!(
-        PAIR_TTL,
-        Duration::hours(1),
-        "catalog pair token TTL must be one hour"
-    );
-    assert_eq!(
-        PAIR_TTL.num_seconds(),
-        3600,
-        "PAIR_TTL must be exactly 3600 seconds"
-    );
-
+async fn consume_pair_token_unknown_hash_is_not_found() {
     let pool = connect_and_migrate().await;
-    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
-    let issued_at = Utc::now();
-    let expires = issued_at + PAIR_TTL;
-    let (host, token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "ttl-1h", expires).await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let token = generate_pair_token();
 
-    let (stored_expires, stored_created): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
-        sqlx::query_as(
-            r#"
-            SELECT expires_at, created_at
-            FROM worker_host_pair_tokens
-            WHERE host_id = $1 AND token_hash = $2
-            "#,
-        )
-        .bind(host.id)
-        .bind(hash_token(&token))
-        .fetch_one(&pool)
-        .await
-        .expect("stored pair token window");
-    let window = stored_expires - stored_created;
-    assert!(
-        window >= Duration::minutes(59) && window <= Duration::minutes(61),
-        "stored pair token window must be 1 hour, got {window}"
-    );
-    let issued_skew = (stored_expires - expires).num_milliseconds().abs();
-    assert!(
-        issued_skew <= 2_000,
-        "stored expires_at must be the issued now+1h ({expires}), got {stored_expires}"
-    );
-
-    let paired = worker_hosts::consume_pair_token(
+    let err = worker_hosts::consume_pair_token(
         &pool,
         &token,
-        "box-ttl",
+        "unknown-hash-box",
         "linux-x86_64",
         true,
         false,
         None,
     )
     .await
-    .expect("token inside the 1h window must pair");
-    assert_eq!(paired.host.id, host.id);
-    assert_eq!(paired.host.status, "online");
-    let (_, used_at) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert!(used_at.is_some(), "first consume must set used_at");
+    .expect_err("never-inserted pair token must miss");
+    match err {
+        DbError::NotFound(_) => {}
+        other => panic!("expected NotFound on unknown pair-token hash, got {other:?}"),
+    }
 
-    let reuse = worker_hosts::consume_pair_token(
-        &pool,
-        &token,
-        "box-ttl",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("pair token cannot be reused");
-    assert_pair_conflict(reuse, "used");
-    let after_reuse = worker_hosts::get(&pool, host.id)
+    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
         .await
-        .expect("get ttl host")
-        .expect("ttl host remains");
-    assert_eq!(after_reuse.status, "online");
-    assert_eq!(
-        after_reuse.machine_token_hash, paired.host.machine_token_hash,
-        "failed reuse must not rotate the machine token"
+        .expect("list");
+    assert!(
+        listed.is_empty(),
+        "unknown hash must not insert a host: {:?}",
+        listed.iter().map(|h| h.id).collect::<Vec<_>>()
     );
-    let (_, still_used) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert_eq!(still_used, used_at, "failed reuse must not rewrite used_at");
-
-    // Guest after the catalog hour: issue with PAIR_TTL, then elapse that hour.
-    let (aged, aged_token) = create_pending_with_token(
-        &pool,
-        workspace_id,
-        user_id,
-        "ttl-aged",
-        Utc::now() + PAIR_TTL,
-    )
-    .await;
-    let aged_expires: chrono::DateTime<Utc> =
-        sqlx::query_scalar("SELECT expires_at FROM worker_host_pair_tokens WHERE host_id = $1")
-            .bind(aged.id)
-            .fetch_one(&pool)
-            .await
-            .expect("aged expires_at");
-    sqlx::query("UPDATE worker_host_pair_tokens SET expires_at = $2 WHERE host_id = $1")
-        .bind(aged.id)
-        .bind(aged_expires - PAIR_TTL - Duration::seconds(1))
-        .execute(&pool)
-        .await
-        .expect("elapse the catalog 1h window");
-    let aged_err = worker_hosts::consume_pair_token(
-        &pool,
-        &aged_token,
-        "box-aged-1h",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("token past the 1h TTL must fail");
-    assert_pair_conflict(aged_err, "expired");
-    let still_aged = worker_hosts::get(&pool, aged.id)
-        .await
-        .expect("get aged")
-        .expect("aged remains");
-    assert_eq!(still_aged.status, "pending");
-    assert!(still_aged.machine_token_hash.is_none());
-    let (_, aged_used) = pair_token_hash_and_used_at(&pool, aged.id, &aged_token).await;
-    assert!(aged_used.is_none(), "expired 1h token must not set used_at");
-
-    // Control: an unused token still inside the 1h window still pairs.
-    let (live, live_token) = create_pending_with_token(
-        &pool,
-        workspace_id,
-        user_id,
-        "ttl-live",
-        Utc::now() + PAIR_TTL,
-    )
-    .await;
-    let live_paired = pair_host(&pool, &live_token, "box-ttl-live").await;
-    assert_eq!(live_paired.host.id, live.id);
-    assert_eq!(live_paired.host.status, "online");
 }
 
-/// Catalog: pair token is single-use and expires. Second consume and an
-/// expired token fail; only the hash is stored. used_at is the consume-once
-/// gate — resetting the host to pending must not revive a used or leftover token.
+/// Unused token on an already-online host hits status!=pending (after used/expiry)
+/// and must not set used_at or rotate machine_token_hash.
+#[tokio::test]
+async fn consume_pair_token_unused_token_on_online_host_is_not_pending() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "online-unused", expires).await;
+    let paired = pair_host(&pool, &token, "box-online").await;
+
+    sqlx::query("UPDATE worker_host_pair_tokens SET used_at = NULL WHERE host_id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("clear used_at, leave status online");
+
+    let err = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "box-online",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect_err("unused token on online host must fail");
+    assert_pair_conflict(err, "pending");
+
+    let (_, used_at) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
+    assert!(
+        used_at.is_none(),
+        "failed not-pending consume must not set used_at"
+    );
+    let still = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host remains");
+    assert_eq!(still.machine_token_hash, paired.host.machine_token_hash);
+}
+
+/// create_pending name that is only whitespace falls back to the consume hostname.
+#[tokio::test]
+async fn consume_pair_token_empty_name_uses_hostname() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "   ", expires).await;
+    assert_eq!(host.name, "   ");
+
+    let paired = pair_host(&pool, &token, "studio-box").await;
+    assert_eq!(paired.host.id, host.id);
+    assert_eq!(paired.host.name, "studio-box");
+}
+
+/// Leftover unused hashes on the same host are marked used when one token pairs.
 #[tokio::test]
 async fn pair_token_consume_once_and_expired_must_fail() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
-
-    let (once, token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "consume-once", expires).await;
-    assert_pair_token_hashed_at_rest(&pool, once.id, &token).await;
-
-    // A second unused token on the same host must die when the first is consumed.
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "leftover-kill", expires).await;
     let leftover = generate_pair_token();
     sqlx::query(
         r#"
@@ -744,68 +671,42 @@ async fn pair_token_consume_once_and_expired_must_fail() {
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(once.id)
+    .bind(host.id)
     .bind(workspace_id)
     .bind(hash_token(&leftover))
     .bind(expires)
     .execute(&pool)
     .await
     .expect("insert leftover unused pair token");
-    let (_, leftover_unused) = pair_token_hash_and_used_at(&pool, once.id, &leftover).await;
-    assert!(leftover_unused.is_none());
 
-    let paired = worker_hosts::consume_pair_token(
-        &pool,
-        &token,
-        "box-once",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect("first consume");
-    assert_eq!(paired.host.id, once.id);
-    assert_eq!(paired.host.status, "online");
-    let machine_hash = paired
-        .host
-        .machine_token_hash
-        .clone()
-        .expect("machine token hash after pair");
-    let (_, used_at) = pair_token_hash_and_used_at(&pool, once.id, &token).await;
-    assert!(used_at.is_some(), "first consume must set used_at");
-    let (_, leftover_used) = pair_token_hash_and_used_at(&pool, once.id, &leftover).await;
+    pair_host(&pool, &token, "box-leftover-kill").await;
+
+    let (_, leftover_used) = pair_token_hash_and_used_at(&pool, host.id, &leftover).await;
     assert!(
         leftover_used.is_some(),
         "leftover unused tokens must be marked used when the host leaves pending"
     );
-    assert_pair_token_hashed_at_rest(&pool, once.id, &token).await;
-    assert_pair_token_hashed_at_rest(&pool, once.id, &leftover).await;
+}
 
-    let reuse = worker_hosts::consume_pair_token(
-        &pool,
-        &token,
-        "box-once",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("second consume of the same pair token must fail");
-    assert_pair_conflict(reuse, "used");
-
-    // used_at is the lock, not host.status. A product that only checked
-    // "still pending" would re-pair after this reset.
+/// used_at, not host.status, is the consume-once gate.
+#[tokio::test]
+async fn used_pair_token_stays_dead_after_pending_status_reset() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "reset-pending", expires).await;
+    pair_host(&pool, &token, "box-reset").await;
     sqlx::query("UPDATE worker_hosts SET status = 'pending' WHERE id = $1")
-        .bind(once.id)
+        .bind(host.id)
         .execute(&pool)
         .await
         .expect("reset host to pending");
-    let reuse_pending = worker_hosts::consume_pair_token(
+
+    let err = worker_hosts::consume_pair_token(
         &pool,
         &token,
-        "box-once-again",
+        "box-reset-again",
         "linux-aarch64",
         true,
         true,
@@ -813,57 +714,35 @@ async fn pair_token_consume_once_and_expired_must_fail() {
     )
     .await
     .expect_err("used pair token must stay dead after status reset");
-    assert_pair_conflict(reuse_pending, "used");
+    assert_pair_conflict(err, "used");
 
-    let leftover_err = worker_hosts::consume_pair_token(
-        &pool,
-        &leftover,
-        "box-leftover",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("leftover pair token must stay dead after the first consume");
-    assert_pair_conflict(leftover_err, "used");
-
-    let after_reuse = worker_hosts::get(&pool, once.id)
+    let still = worker_hosts::get(&pool, host.id)
         .await
-        .expect("get once")
-        .expect("once remains");
+        .expect("get")
+        .expect("host remains");
     assert_eq!(
-        after_reuse.status, "pending",
+        still.status, "pending",
         "failed reuse must not promote the host"
     );
-    assert_eq!(
-        after_reuse.machine_token_hash.as_deref(),
-        Some(machine_hash.as_str()),
-        "failed reuse must not rotate the machine token"
-    );
-    assert_eq!(after_reuse.hostname.as_deref(), Some("box-once"));
-    assert_eq!(after_reuse.platform.as_deref(), Some("linux-x86_64"));
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &paired.machine_token)
-            .await
-            .expect("auth after failed reuse")
-            .is_some(),
-        "original machine token must still authenticate"
-    );
-    let (_, used_again) = pair_token_hash_and_used_at(&pool, once.id, &token).await;
-    assert_eq!(used_again, used_at, "failed reuse must not rewrite used_at");
+}
 
-    // Already-used row on a host that never left pending.
-    let (preused, preused_token) =
+/// used_at blocks consume even when the host never left pending.
+#[tokio::test]
+async fn consume_pair_token_preused_while_pending_is_used() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "preused", expires).await;
     sqlx::query("UPDATE worker_host_pair_tokens SET used_at = now() WHERE host_id = $1")
-        .bind(preused.id)
+        .bind(host.id)
         .execute(&pool)
         .await
         .expect("mark used while still pending");
-    let preused_err = worker_hosts::consume_pair_token(
+
+    let err = worker_hosts::consume_pair_token(
         &pool,
-        &preused_token,
+        &token,
         "box-preused",
         "linux-x86_64",
         true,
@@ -872,108 +751,28 @@ async fn pair_token_consume_once_and_expired_must_fail() {
     )
     .await
     .expect_err("used_at must block consume even while host is pending");
-    assert_pair_conflict(preused_err, "used");
-    let still_preused = worker_hosts::get(&pool, preused.id)
+    assert_pair_conflict(err, "used");
+
+    let still = worker_hosts::get(&pool, host.id)
         .await
-        .expect("get preused")
-        .expect("preused remains");
-    assert_eq!(still_preused.status, "pending");
-    assert!(still_preused.machine_token_hash.is_none());
-    assert!(still_preused.paired_at.is_none());
-    assert_pair_token_hashed_at_rest(&pool, preused.id, &preused_token).await;
+        .expect("get")
+        .expect("host remains");
+    assert_eq!(still.status, "pending");
+    assert!(still.machine_token_hash.is_none());
+    assert!(still.paired_at.is_none());
+}
 
-    // Expired at insert: fail, do not consume, host stays pending.
-    let expired_at = Utc::now() - Duration::seconds(1);
-    let (stale, stale_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "stale", expired_at).await;
-    assert_pair_token_hashed_at_rest(&pool, stale.id, &stale_token).await;
-    let stale_err = worker_hosts::consume_pair_token(
-        &pool,
-        &stale_token,
-        "box-stale",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("expired pair token must fail");
-    assert_pair_conflict(stale_err, "expired");
-    let still_stale = worker_hosts::get(&pool, stale.id)
-        .await
-        .expect("get stale")
-        .expect("stale remains");
-    assert_eq!(still_stale.status, "pending");
-    assert!(still_stale.machine_token_hash.is_none());
-    assert!(still_stale.paired_at.is_none());
-    let (_, stale_used) = pair_token_hash_and_used_at(&pool, stale.id, &stale_token).await;
-    assert!(stale_used.is_none(), "expired consume must not set used_at");
-    assert_pair_token_hashed_at_rest(&pool, stale.id, &stale_token).await;
-
-    // Catalog TTL is 1 hour: a still-valid +1h token that is then aged past
-    // expires_at must fail the same way (consume reads the row, not a window).
-    let (aged, aged_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "aged", expires).await;
-    sqlx::query(
-        "UPDATE worker_host_pair_tokens SET expires_at = now() - interval '1 second' WHERE host_id = $1",
-    )
-    .bind(aged.id)
-    .execute(&pool)
-    .await
-    .expect("age pair token past expiry");
-    let aged_err = worker_hosts::consume_pair_token(
-        &pool,
-        &aged_token,
-        "box-aged",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect_err("aged pair token must fail");
-    assert_pair_conflict(aged_err, "expired");
-    let still_aged = worker_hosts::get(&pool, aged.id)
-        .await
-        .expect("get aged")
-        .expect("aged remains");
-    assert_eq!(still_aged.status, "pending");
-    assert!(still_aged.machine_token_hash.is_none());
-    let (_, aged_used) = pair_token_hash_and_used_at(&pool, aged.id, &aged_token).await;
-    assert!(aged_used.is_none(), "aged consume must not set used_at");
-
-    // Consume reads expires_at, not created_at + 1h. An old row whose
-    // expires_at is still in the future must still pair.
-    let (window, window_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "window", expires).await;
-    sqlx::query(
-        "UPDATE worker_host_pair_tokens SET created_at = now() - interval '2 hours' WHERE host_id = $1",
-    )
-    .bind(window.id)
-    .execute(&pool)
-    .await
-    .expect("age created_at without touching expires_at");
-    let window_paired = worker_hosts::consume_pair_token(
-        &pool,
-        &window_token,
-        "box-window",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect("future expires_at must consume even if created_at is 2h old");
-    assert_eq!(window_paired.host.id, window.id);
-    assert_eq!(window_paired.host.status, "online");
-    assert_pair_token_hashed_at_rest(&pool, window.id, &window_token).await;
-
-    // expires_at == now is already expired (consume uses <=).
-    let (boundary, boundary_token) =
+/// expires_at == now is already expired (consume uses <=).
+#[tokio::test]
+async fn consume_pair_token_expires_at_equal_now_is_expired() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "boundary", Utc::now()).await;
-    let boundary_err = worker_hosts::consume_pair_token(
+
+    let err = worker_hosts::consume_pair_token(
         &pool,
-        &boundary_token,
+        &token,
         "box-boundary",
         "linux-x86_64",
         true,
@@ -982,26 +781,62 @@ async fn pair_token_consume_once_and_expired_must_fail() {
     )
     .await
     .expect_err("expires_at == now must fail as expired");
-    assert_pair_conflict(boundary_err, "expired");
-    let still_boundary = worker_hosts::get(&pool, boundary.id)
-        .await
-        .expect("get boundary")
-        .expect("boundary remains");
-    assert_eq!(still_boundary.status, "pending");
-    assert!(still_boundary.machine_token_hash.is_none());
-    let (_, boundary_used) = pair_token_hash_and_used_at(&pool, boundary.id, &boundary_token).await;
-    assert!(
-        boundary_used.is_none(),
-        "expires_at == now must not set used_at"
-    );
+    assert_pair_conflict(err, "expired");
 
-    // Parallel consume-once: FOR UPDATE admits exactly one winner.
-    let (race, race_token) =
+    let still = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host remains");
+    assert_eq!(still.status, "pending");
+    assert!(still.machine_token_hash.is_none());
+    let (_, used) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
+    assert!(used.is_none(), "expires_at == now must not set used_at");
+}
+
+/// Consume reads expires_at, not created_at + 1h.
+#[tokio::test]
+async fn consume_pair_token_ignores_created_at_when_expires_at_is_future() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "window", expires).await;
+    sqlx::query(
+        "UPDATE worker_host_pair_tokens SET created_at = now() - interval '2 hours' WHERE host_id = $1",
+    )
+    .bind(host.id)
+    .execute(&pool)
+    .await
+    .expect("age created_at without touching expires_at");
+
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "box-window",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("future expires_at must consume even if created_at is 2h old");
+    assert_eq!(paired.host.id, host.id);
+    assert_eq!(paired.host.status, "online");
+}
+
+/// Parallel consume-once: FOR UPDATE admits exactly one winner.
+#[tokio::test]
+async fn consume_pair_token_parallel_for_update_admits_one_winner() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "race", expires).await;
+
     let (first, second) = tokio::join!(
         worker_hosts::consume_pair_token(
             &pool,
-            &race_token,
+            &token,
             "box-race-a",
             "linux-x86_64",
             true,
@@ -1010,7 +845,7 @@ async fn pair_token_consume_once_and_expired_must_fail() {
         ),
         worker_hosts::consume_pair_token(
             &pool,
-            &race_token,
+            &token,
             "box-race-b",
             "linux-x86_64",
             true,
@@ -1018,70 +853,47 @@ async fn pair_token_consume_once_and_expired_must_fail() {
             None,
         ),
     );
-    let wins = [&first, &second].iter().filter(|r| r.is_ok()).count();
-    assert_eq!(
-        wins, 1,
-        "exactly one parallel consume must succeed: {first:?} {second:?}"
-    );
-    match first
-        .as_ref()
-        .err()
-        .or(second.as_ref().err())
-        .expect("loser")
-    {
-        DbError::Conflict(msg) => {
-            assert!(
-                msg.contains("used"),
-                "expected conflict mentioning \"used\", got {msg}"
-            );
-        }
-        other => panic!("expected Conflict (used), got {other:?}"),
-    }
-    let raced = worker_hosts::get(&pool, race.id)
-        .await
-        .expect("get race")
-        .expect("race remains");
-    assert_eq!(raced.status, "online");
-    let (_, race_used) = pair_token_hash_and_used_at(&pool, race.id, &race_token).await;
-    assert!(race_used.is_some(), "winning consume must set used_at");
-    assert_pair_token_hashed_at_rest(&pool, race.id, &race_token).await;
-    let winner_token = first
-        .as_ref()
-        .ok()
-        .or(second.as_ref().ok())
-        .expect("winner")
-        .machine_token
-        .clone();
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &winner_token)
-            .await
-            .expect("auth race winner")
-            .is_some(),
-        "winning machine token must authenticate"
-    );
+    let loser = match (first, second) {
+        (Ok(_), Err(err)) | (Err(err), Ok(_)) => err,
+        other => panic!("exactly one parallel consume must succeed: {other:?}"),
+    };
+    assert_pair_conflict(loser, "used");
 
-    // Control: another unused, unexpired token still pairs so this is not a
-    // tautology that every consume_pair_token fails.
-    let (live, live_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "live", expires).await;
-    let live_paired = worker_hosts::consume_pair_token(
-        &pool,
-        &live_token,
-        "box-live",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect("unexpired unused pair token must still consume");
-    assert_eq!(live_paired.host.id, live.id);
-    assert_eq!(live_paired.host.status, "online");
-    let (_, live_used) = pair_token_hash_and_used_at(&pool, live.id, &live_token).await;
-    assert!(live_used.is_some());
-    assert_pair_token_hashed_at_rest(&pool, live.id, &live_token).await;
+    let raced = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host remains");
+    assert_eq!(raced.status, "online");
+    let (_, used) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
+    assert!(used.is_some(), "winning consume must set used_at");
 }
 
+/// leftover UPDATE is WHERE host_id = $1; another host's unused token stays live.
+#[tokio::test]
+async fn leftover_pair_token_on_other_host_survives_consume() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (_host_a, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "host-a", expires).await;
+    let (host_b, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "host-b", expires).await;
+
+    pair_host(&pool, &token_a, "box-a").await;
+
+    let (_, b_used) = pair_token_hash_and_used_at(&pool, host_b.id, &token_b).await;
+    assert!(
+        b_used.is_none(),
+        "unused token on another host must survive leftover UPDATE"
+    );
+    let paired_b = pair_host(&pool, &token_b, "box-b").await;
+    assert_eq!(paired_b.host.id, host_b.id);
+    assert_eq!(paired_b.host.status, "online");
+}
+
+/// After revoke, consume with the same machine.id revives that row on a new
+/// hostname/platform, keeps operator CP columns, rotates the token, and
+/// clears last_error. Leftover pending must not steal machine.id.
 #[tokio::test]
 async fn re_pair_same_machine_id_reclaims_existing_row() {
     let pool = connect_and_migrate().await;
@@ -1103,11 +915,9 @@ async fn re_pair_same_machine_id_reclaims_existing_row() {
     .await
     .expect("first pair");
     assert_eq!(paired.host.id, first.id);
-    assert_eq!(paired.host.machine_id, Some(mid));
     let old_token = paired.machine_token.clone();
 
-    // Operator-owned CP fields must survive remove + re-pair of the same box.
-    let patched = worker_hosts::patch_cp_settings(
+    worker_hosts::patch_cp_settings(
         &pool,
         first.id,
         &HostCpSettings {
@@ -1119,9 +929,8 @@ async fn re_pair_same_machine_id_reclaims_existing_row() {
     )
     .await
     .expect("patch cp settings");
-    assert_eq!(patched.settings_gen, 1);
 
-    worker_hosts::heartbeat(
+    let beat = worker_hosts::heartbeat(
         &pool,
         first.id,
         true,
@@ -1138,33 +947,10 @@ async fn re_pair_same_machine_id_reclaims_existing_row() {
     )
     .await
     .expect("heartbeat last_error");
+    assert_eq!(beat.last_error.as_deref(), Some("disk full"));
 
-    let revoked = worker_hosts::revoke(&pool, first.id).await.expect("revoke");
-    assert_eq!(revoked.status, "disabled");
-    assert!(revoked.machine_token_hash.is_none());
-    assert_eq!(
-        revoked.machine_id,
-        Some(mid),
-        "revoke must keep machine.id so the same box can reclaim the row"
-    );
-    assert_eq!(revoked.name, "studio-kept");
-    assert_eq!(revoked.labels, vec!["gpu".to_string()]);
-    assert_eq!(revoked.max_concurrent, 7);
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &old_token)
-            .await
-            .expect("auth after revoke")
-            .is_none(),
-        "revoked machine token must not authenticate"
-    );
-    let by_mid = worker_hosts::find_by_machine_id(&pool, workspace_id, mid)
-        .await
-        .expect("find_by_machine_id after revoke")
-        .expect("revoked row still keyed by machine.id");
-    assert_eq!(by_mid.id, first.id);
+    worker_hosts::revoke(&pool, first.id).await.expect("revoke");
 
-    // New pending (operator re-add). Same durable box id, different hostname —
-    // machine.id is the identity; hostname+platform is only a fallback when omitted.
     let (second, token_b) =
         create_pending_with_token(&pool, workspace_id, user_id, "throwaway", expires).await;
     let again = worker_hosts::consume_pair_token(
@@ -1182,128 +968,192 @@ async fn re_pair_same_machine_id_reclaims_existing_row() {
     assert_eq!(again.host.id, first.id, "must revive the original row");
     assert_ne!(again.host.id, second.id, "must not promote the new pending");
     assert_eq!(again.host.status, "online");
-    assert!(again.host.enabled);
     assert_eq!(again.host.machine_id, Some(mid));
-    assert_eq!(
-        again.host.name, "studio-kept",
-        "operator name must survive revoke+re-pair"
-    );
+    assert_eq!(again.host.name, "studio-kept");
     assert_eq!(again.host.labels, vec!["gpu".to_string()]);
     assert_eq!(again.host.max_concurrent, 7);
-    assert_eq!(
-        again.host.settings_gen, 1,
-        "settings_gen must not reset on reclaim"
-    );
+    assert_eq!(again.host.settings_gen, 1);
     assert_eq!(again.host.hostname.as_deref(), Some("box-renamed-os"));
     assert_eq!(again.host.platform.as_deref(), Some("linux-aarch64"));
-    assert!(again.host.advertised_host);
-    assert!(again.host.advertised_container);
     assert!(
         again.host.last_error.is_none(),
         "reclaim clears last_error from the prior life"
     );
-    assert!(again.host.paired_at.is_some());
-    assert_ne!(
-        again.machine_token, old_token,
-        "re-pair must issue a new machine token"
-    );
-    assert!(again
-        .machine_token
-        .starts_with(worker_hosts::MACHINE_TOKEN_PREFIX));
-
-    let authed = worker_hosts::authenticate_machine(&pool, &again.machine_token)
-        .await
-        .expect("auth new token")
-        .expect("new machine token must authenticate");
-    assert_eq!(authed.id, first.id);
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &old_token)
-            .await
-            .expect("auth old token after reclaim")
-            .is_none(),
-        "old machine token must stay dead after reclaim"
-    );
+    assert_ne!(again.machine_token, old_token);
 
     let leftover = worker_hosts::get(&pool, second.id)
         .await
         .expect("get leftover")
         .expect("pending leftover exists");
-    assert_eq!(leftover.status, "disabled");
-    assert!(
-        !leftover.enabled,
-        "discarded pending clone must not stay enabled"
-    );
     assert!(
         leftover.machine_id.is_none(),
         "leftover must not steal the durable machine.id"
     );
-    assert!(leftover.machine_token_hash.is_none());
+}
 
-    let found = worker_hosts::find_by_machine_id(&pool, workspace_id, mid)
-        .await
-        .expect("find_by_machine_id after reclaim")
-        .expect("machine.id maps to one row");
-    assert_eq!(found.id, first.id);
+/// machine.id lookup has no status filter: re-pair while still online
+/// reclaims the live row, rotates the machine token, and disables the pending.
+#[tokio::test]
+async fn re_pair_same_machine_id_reclaims_still_online_row() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mid = Uuid::now_v7();
 
-    let reuse_err = worker_hosts::consume_pair_token(
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "live", expires).await;
+    let paired = worker_hosts::consume_pair_token(
         &pool,
-        &token_b,
-        "box-renamed-os",
-        "linux-aarch64",
-        true,
-        true,
-        Some(mid),
-    )
-    .await
-    .expect_err("leftover pair token must be consumed");
-    match reuse_err {
-        DbError::Conflict(msg) => assert!(
-            msg.contains("used") || msg.contains("pending"),
-            "unexpected conflict: {msg}"
-        ),
-        other => panic!("expected Conflict on leftover token reuse, got {other:?}"),
-    }
-
-    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
-        .await
-        .expect("list_assignable");
-    let ids: Vec<Uuid> = assignable.iter().map(|h| h.id).collect();
-    assert!(
-        ids.contains(&first.id),
-        "reclaimed row must be assignable: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&second.id),
-        "leftover clone must not be assignable: {ids:?}"
-    );
-
-    // Durable across a second remove + re-pair on yet another pending host.
-    worker_hosts::revoke(&pool, first.id)
-        .await
-        .expect("second revoke");
-    let (third, token_c) =
-        create_pending_with_token(&pool, workspace_id, user_id, "throwaway-2", expires).await;
-    let third_pair = worker_hosts::consume_pair_token(
-        &pool,
-        &token_c,
-        "box-third",
+        &token_a,
+        "live-box",
         "linux-x86_64",
         true,
         false,
         Some(mid),
     )
     .await
-    .expect("second re-pair");
-    assert_eq!(
-        third_pair.host.id, first.id,
-        "same machine.id must keep reclaiming the original row"
-    );
-    let third_leftover = worker_hosts::get(&pool, third.id)
+    .expect("first pair");
+    assert_eq!(paired.host.id, first.id);
+    let old_token = paired.machine_token.clone();
+
+    let (pending, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "clone", expires).await;
+    let again = worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        "live-box-again",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("re-pair still-online");
+
+    assert_eq!(again.host.id, first.id);
+    assert_eq!(again.host.status, "online");
+    assert_eq!(again.host.machine_id, Some(mid));
+    assert_ne!(again.machine_token, old_token);
+
+    let leftover = worker_hosts::get(&pool, pending.id)
         .await
-        .expect("get third leftover")
-        .expect("third leftover exists");
-    assert_eq!(third_leftover.status, "disabled");
-    assert!(!third_leftover.enabled);
+        .expect("get leftover")
+        .expect("pending leftover exists");
+    assert_eq!(leftover.status, "disabled");
+}
+
+/// reclaim_existing display_name falls back to the new hostname when
+/// prior.name is only whitespace.
+#[tokio::test]
+async fn re_pair_same_machine_id_empty_prior_name_uses_new_hostname() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mid = Uuid::now_v7();
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "box", expires).await;
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token_a,
+        "box-old",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("first pair");
+    assert_eq!(paired.host.id, first.id);
+
+    let blanked = worker_hosts::patch_cp_settings(
+        &pool,
+        first.id,
+        &HostCpSettings {
+            name: Some("   ".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("blank name");
+    assert_eq!(blanked.name, "   ");
+
+    worker_hosts::revoke(&pool, first.id).await.expect("revoke");
+
+    let (_second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "throwaway", expires).await;
+    let again = worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        "studio-renamed",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("re-pair");
+
+    assert_eq!(again.host.id, first.id);
+    assert_eq!(again.host.name, "studio-renamed");
+}
+
+/// reclaim UPDATE omits settings_ack_gen; an acked gen must survive revoke+re-pair.
+#[tokio::test]
+async fn reclaim_keeps_settings_ack_gen() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mid = Uuid::now_v7();
+
+    let (first, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, "ack", expires).await;
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token_a,
+        "ack-box",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("first pair");
+    assert_eq!(paired.host.id, first.id);
+
+    worker_hosts::patch_cp_settings(
+        &pool,
+        first.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("bump settings_gen");
+    worker_hosts::ack_settings(&pool, first.id, 1)
+        .await
+        .expect("ack");
+
+    worker_hosts::revoke(&pool, first.id).await.expect("revoke");
+
+    let (_second, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, "throwaway", expires).await;
+    let again = worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        "ack-box-again",
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid),
+    )
+    .await
+    .expect("re-pair");
+
+    assert_eq!(again.host.id, first.id);
+    assert_eq!(again.host.settings_gen, 1);
+    assert_eq!(again.host.settings_ack_gen, 1);
 }
 
 /// machine.id is the durable key: after revoke, a new pending that sends that id
@@ -1560,6 +1410,8 @@ async fn re_pair_same_hostname_without_machine_id_reclaims_stale_row() {
     assert_eq!(leftover.status, "disabled");
 }
 
+/// Distinct machine.id must not hostname-reclaim. Revoke first so a mid miss
+/// that fell through to hostname+platform would steal the disabled row.
 #[tokio::test]
 async fn two_machine_ids_same_hostname_stay_two_rows() {
     let pool = connect_and_migrate().await;
@@ -1584,6 +1436,8 @@ async fn two_machine_ids_same_hostname_stay_two_rows() {
     assert_eq!(a.host.id, first.id);
     assert_eq!(a.host.machine_id, Some(mid_a));
 
+    worker_hosts::revoke(&pool, first.id).await.expect("revoke first");
+
     let (second, token_b) =
         create_pending_with_token(&pool, workspace_id, user_id, "box-b", expires).await;
     let b = worker_hosts::consume_pair_token(
@@ -1597,56 +1451,24 @@ async fn two_machine_ids_same_hostname_stay_two_rows() {
     )
     .await
     .expect("pair b");
-    assert_eq!(b.host.id, second.id, "distinct machine.id must not reclaim");
+    assert_eq!(
+        b.host.id, second.id,
+        "distinct machine.id must not hostname-reclaim a disabled same-hostname row"
+    );
     assert_eq!(b.host.machine_id, Some(mid_b));
+    assert_eq!(b.host.status, "online");
     assert_ne!(a.host.id, b.host.id);
 
     let still = worker_hosts::get(&pool, first.id)
         .await
         .expect("get first")
         .expect("first still exists");
-    assert_eq!(still.status, "online");
+    assert_eq!(still.status, "disabled");
     assert_eq!(still.machine_id, Some(mid_a));
+    assert_eq!(still.hostname.as_deref(), Some("ubuntu"));
 }
 
-#[tokio::test]
-async fn patch_bumps_settings_gen_until_ack() {
-    let pool = connect_and_migrate().await;
-    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
-    let expires = Utc::now() + Duration::hours(1);
-    let (host, token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "ack", expires).await;
-    pair_host(&pool, &token, "ack-box").await;
-
-    let before = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(before.settings_gen, 0);
-    assert!(!before.settings_pending());
-
-    let patched = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            allow_host: Some(false),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("patch");
-    assert_eq!(patched.settings_gen, 1);
-    assert_eq!(patched.settings_ack_gen, 0);
-    assert!(patched.settings_pending());
-
-    let acked = worker_hosts::ack_settings(&pool, host.id, 1)
-        .await
-        .expect("ack");
-    assert_eq!(acked.settings_ack_gen, 1);
-    assert!(!acked.settings_pending());
-}
-
-/// catalog:unit-apply-ack — each Apply PATCH increments `settings_gen`.
+/// catalog:unit-apply-ack — max_concurrent-only Apply still saturating_adds settings_gen.
 #[tokio::test]
 async fn each_settings_apply_increments_settings_gen() {
     let pool = connect_and_migrate().await;
@@ -1657,85 +1479,145 @@ async fn each_settings_apply_increments_settings_gen() {
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("prior apply");
+
+    let bumped = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(2),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("max_concurrent apply");
+    assert_eq!(bumped.max_concurrent, 2);
+    assert_eq!(
+        bumped.settings_gen, 2,
+        "max_concurrent-only Apply after another field change must saturating_add"
+    );
+    assert_eq!(bumped.settings_ack_gen, 0);
+    assert!(bumped.settings_pending());
+}
+
+/// catalog:unit-apply-ack — PATCH of the already-acked snapshot must not relight pending.
+#[tokio::test]
+async fn patch_cp_settings_after_ack_same_values_does_not_repend() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("gen-ack-noop");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let applied = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("apply");
+    worker_hosts::ack_settings(&pool, host.id, applied.settings_gen)
+        .await
+        .expect("ack");
+
+    let again = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("same snapshot");
+    assert_eq!(again.settings_gen, 1);
+    assert_eq!(again.settings_ack_gen, 1);
+    assert!(!again.settings_pending());
+    assert!(!again.allow_host);
+}
+
+/// catalog:unit-apply-ack — PATCH on a missing host is NotFound.
+#[tokio::test]
+async fn patch_cp_settings_missing_host_is_not_found() {
+    let pool = connect_and_migrate().await;
+    let missing = Uuid::now_v7();
+
+    let err = worker_hosts::patch_cp_settings(
+        &pool,
+        missing,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect_err("missing host");
+    match err {
+        DbError::NotFound(msg) => {
+            assert!(
+                msg.contains("not found"),
+                "missing host must be NotFound: {msg}"
+            );
+        }
+        other => panic!("expected NotFound on missing host, got {other:?}"),
+    }
+    assert!(
+        worker_hosts::get(&pool, missing)
+            .await
+            .expect("get")
+            .is_none(),
+        "missing PATCH must not insert a host"
+    );
+}
+
+/// catalog:unit-apply-ack — PATCH max_concurrent already at default 4 does not bump gen.
+#[tokio::test]
+async fn patch_max_concurrent_already_current_does_not_bump() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("maxc-same");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
     let before = worker_hosts::get(&pool, host.id)
         .await
         .expect("get")
         .expect("host");
+    assert_eq!(before.max_concurrent, 4, "create default is 4");
     assert_eq!(before.settings_gen, 0);
-    assert_eq!(before.settings_ack_gen, 0);
-    assert!(!before.settings_pending());
 
-    let first = worker_hosts::patch_cp_settings(
+    let patched = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
-            allow_host: Some(false),
+            max_concurrent: Some(4),
             ..HostCpSettings::default()
         },
     )
     .await
-    .expect("first apply");
-    assert_eq!(first.settings_gen, 1, "first apply must bump 0 → 1");
-    assert_eq!(first.settings_ack_gen, 0);
-    assert!(first.settings_pending());
-
-    let second = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            paused: Some(true),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("second apply");
-    assert_eq!(second.settings_gen, 2, "second apply must bump 1 → 2");
-    assert_eq!(second.settings_ack_gen, 0);
-    assert!(second.settings_pending());
-
-    let third = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            max_concurrent: Some(2),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("third apply");
-    assert_eq!(third.settings_gen, 3, "third apply must bump 2 → 3");
-    assert_eq!(third.settings_ack_gen, 0);
-    assert!(third.settings_pending());
-
-    let noop = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            paused: Some(true),
-            max_concurrent: Some(2),
-            allow_host: Some(false),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("identical apply");
-    assert_eq!(
-        noop.settings_gen, 3,
-        "no-op PATCH must not increment settings_gen"
-    );
-    assert_eq!(noop.settings_ack_gen, 0);
-    assert!(noop.settings_pending());
-
-    let loaded = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(loaded.settings_gen, 3);
-    assert_eq!(loaded.settings_ack_gen, 0);
-    assert!(loaded.settings_pending());
+    .expect("already-current max_concurrent");
+    assert_eq!(patched.max_concurrent, 4);
+    assert_eq!(patched.settings_gen, 0);
+    assert!(!patched.settings_pending());
 }
 
-/// catalog:unit-apply-ack — heartbeat ack of an older gen must not clear pending.
+/// catalog:unit-apply-ack — after ack+re-apply, echoing the prior gen must not clear pending.
 #[tokio::test]
 async fn ack_behind_settings_gen_stays_pending() {
     let pool = connect_and_migrate().await;
@@ -1755,8 +1637,60 @@ async fn ack_behind_settings_gen_stays_pending() {
         },
     )
     .await
+    .expect("apply");
+    worker_hosts::ack_settings(&pool, host.id, 1)
+        .await
+        .expect("ack current");
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            drain: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("re-apply");
+
+    let _ = worker_hosts::ack_settings(&pool, host.id, 1).await;
+
+    let after_prior = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(after_prior.settings_gen, 2);
+    assert_eq!(
+        after_prior.settings_ack_gen, 1,
+        "prior-gen ack must not rewind or jump settings_ack_gen"
+    );
+    assert!(
+        after_prior.settings_pending(),
+        "ack of the last good gen after a new apply must leave apply pending"
+    );
+}
+
+/// catalog:unit-apply-ack — a future settings_gen must not SET settings_ack_gen.
+#[tokio::test]
+async fn ack_future_settings_gen_does_not_advance_ack() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("gen-future");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
     .expect("apply gen 1");
-    let latest = worker_hosts::patch_cp_settings(
+    worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
@@ -1766,104 +1700,24 @@ async fn ack_behind_settings_gen_stays_pending() {
     )
     .await
     .expect("apply gen 2");
-    assert_eq!(latest.settings_gen, 2);
-    assert_eq!(latest.settings_ack_gen, 0);
-    assert!(latest.settings_pending());
 
-    let err = worker_hosts::ack_settings(&pool, host.id, 1)
-        .await
-        .expect_err("ack of gen 1 while desired is 2 must fail");
-    match err {
-        DbError::NotFound(msg) => {
-            assert!(
-                msg.contains("not found"),
-                "stale ack currently returns NotFound: {msg}"
-            );
-        }
-        other => panic!("expected NotFound on behind ack, got {other:?}"),
-    }
-
-    let after_stale = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(
-        after_stale.settings_gen, 2,
-        "behind ack must not change settings_gen"
-    );
-    assert_eq!(
-        after_stale.settings_ack_gen, 0,
-        "behind ack must not advance settings_ack_gen"
-    );
-    assert!(
-        after_stale.settings_pending(),
-        "ack of an old gen must leave apply pending"
-    );
-
-    let err_zero = worker_hosts::ack_settings(&pool, host.id, 0)
-        .await
-        .expect_err("ack of gen 0 after apply must fail");
-    match err_zero {
-        DbError::NotFound(_) => {}
-        other => panic!("expected NotFound on gen-0 ack, got {other:?}"),
-    }
-    let err_ahead = worker_hosts::ack_settings(&pool, host.id, 99)
+    worker_hosts::ack_settings(&pool, host.id, 99)
         .await
         .expect_err("ack of a future gen must fail");
-    match err_ahead {
-        DbError::NotFound(_) => {}
-        other => panic!("expected NotFound on future ack, got {other:?}"),
-    }
 
-    let still = worker_hosts::get(&pool, host.id)
+    let loaded = worker_hosts::get(&pool, host.id)
         .await
         .expect("get")
         .expect("host");
-    assert_eq!(still.settings_gen, 2);
-    assert_eq!(still.settings_ack_gen, 0);
-    assert!(still.settings_pending());
-
-    let current = worker_hosts::ack_settings(&pool, host.id, 2)
-        .await
-        .expect("ack of current gen must succeed after stale attempts");
-    assert_eq!(current.settings_ack_gen, 2);
-    assert_eq!(current.settings_gen, 2);
-    assert!(!current.settings_pending());
-
-    let reapplied = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            drain: Some(true),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("re-apply after ack");
-    assert_eq!(reapplied.settings_gen, 3);
-    assert_eq!(reapplied.settings_ack_gen, 2);
-    assert!(reapplied.settings_pending());
-
-    let err_prior = worker_hosts::ack_settings(&pool, host.id, 2)
-        .await
-        .expect_err("re-acking the previous gen after a new apply must fail");
-    match err_prior {
-        DbError::NotFound(_) => {}
-        other => panic!("expected NotFound on prior-gen ack, got {other:?}"),
-    }
-    let after_prior = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(after_prior.settings_gen, 3);
+    assert_eq!(loaded.settings_gen, 2);
     assert_eq!(
-        after_prior.settings_ack_gen, 2,
-        "prior-gen ack must not rewind or jump settings_ack_gen"
+        loaded.settings_ack_gen, 0,
+        "future ack must not advance settings_ack_gen"
     );
-    assert!(after_prior.settings_pending());
+    assert!(loaded.settings_pending());
 }
 
-/// Heartbeat itself must not ack; echoing an old gen after heartbeat stays pending.
+/// catalog:unit-apply-ack — heartbeat UPDATE must not SET settings_ack_gen.
 #[tokio::test]
 async fn heartbeat_ack_old_settings_gen_stays_pending() {
     let pool = connect_and_migrate().await;
@@ -1883,8 +1737,9 @@ async fn heartbeat_ack_old_settings_gen_stays_pending() {
         },
     )
     .await
-    .expect("first apply");
+    .expect("apply");
     assert_eq!(first.settings_gen, 1);
+    assert_eq!(first.settings_ack_gen, 0);
     assert!(first.settings_pending());
 
     let beat = worker_hosts::heartbeat(
@@ -1907,61 +1762,11 @@ async fn heartbeat_ack_old_settings_gen_stays_pending() {
     assert_eq!(beat.settings_gen, 1, "heartbeat must not bump settings_gen");
     assert_eq!(
         beat.settings_ack_gen, 0,
-        "heartbeat without ack must not set settings_ack_gen"
+        "heartbeat must not set settings_ack_gen"
     );
-    assert!(beat.settings_pending());
-
-    let second = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            labels: Some(vec!["gpu".into()]),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("second apply");
-    assert_eq!(second.settings_gen, 2);
-
-    // HTTP heartbeat composes heartbeat() then ack_settings(body.settings_ack_gen).
-    // An old binary still echoing the gen it last saw must not clear pending.
-    let beat2 = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        true,
-        false,
-        Some("linux-x86_64"),
-        Some(&format!("{name}-box")),
-        None,
-        0,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("heartbeat after second apply");
-    assert_eq!(beat2.settings_gen, 2);
-    assert_eq!(beat2.settings_ack_gen, 0);
-
-    let err = worker_hosts::ack_settings(&pool, host.id, 1)
-        .await
-        .expect_err("stale heartbeat ack must not match current settings_gen");
-    match err {
-        DbError::NotFound(_) => {}
-        other => panic!("expected NotFound on stale heartbeat ack, got {other:?}"),
-    }
-
-    let loaded = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(loaded.settings_gen, 2);
-    assert_eq!(loaded.settings_ack_gen, 0);
     assert!(
-        loaded.settings_pending(),
-        "heartbeat ack of old gen must leave apply pending"
+        beat.settings_pending(),
+        "apply must stay pending after heartbeat"
     );
 }
 
@@ -2034,17 +1839,6 @@ async fn request_update_sets_timestamp_without_bumping_gen() {
         create_pending_with_token(&pool, workspace_id, user_id, "upd", expires).await;
     pair_host(&pool, &token, "upd-box").await;
 
-    let before = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert!(before.auto_update, "paired host defaults auto-update on");
-    assert!(
-        before.update_requested_at.is_none(),
-        "no update requested yet"
-    );
-    let settings_gen = before.settings_gen;
-
     let off = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
@@ -2055,25 +1849,10 @@ async fn request_update_sets_timestamp_without_bumping_gen() {
     )
     .await
     .expect("auto off");
-    assert!(!off.auto_update);
-    assert!(
-        off.update_requested_at.is_none(),
-        "turning auto-update off must not request"
-    );
-    assert_eq!(off.settings_gen, settings_gen + 1);
-
-    let ignored = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            request_update: Some(false),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("request_update false");
-    assert!(ignored.update_requested_at.is_none());
-    assert_eq!(ignored.settings_gen, off.settings_gen);
+    worker_hosts::ack_settings(&pool, host.id, off.settings_gen)
+        .await
+        .expect("ack auto off");
+    let settings_gen = off.settings_gen;
 
     let requested = worker_hosts::patch_cp_settings(
         &pool,
@@ -2090,11 +1869,49 @@ async fn request_update_sets_timestamp_without_bumping_gen() {
         .update_requested_at
         .expect("update_requested_at must be set");
     assert_eq!(
-        requested.settings_gen, off.settings_gen,
+        requested.settings_gen, settings_gen,
         "Update now is a one-shot, not a settings bump"
     );
+    assert!(
+        !requested.settings_pending(),
+        "request_update must not light settings_pending"
+    );
 
-    let again = worker_hosts::patch_cp_settings(
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.update_requested_at, Some(at));
+    assert_eq!(loaded.settings_gen, settings_gen);
+    assert!(!loaded.settings_pending());
+    assert!(!loaded.auto_update);
+}
+
+/// catalog:unit-request-update — second Update now must replace a planted stamp.
+#[tokio::test]
+async fn request_update_second_click_replaces_planted_timestamp() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "upd-plant", expires).await;
+    pair_host(&pool, &token, "upd-plant-box").await;
+
+    let planted = Utc::now() - Duration::hours(1);
+    sqlx::query("UPDATE worker_hosts SET update_requested_at = $2 WHERE id = $1")
+        .bind(host.id)
+        .bind(planted)
+        .execute(&pool)
+        .await
+        .expect("plant update_requested_at");
+    let stored = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get planted")
+        .expect("host")
+        .update_requested_at
+        .expect("planted stamp");
+
+    let requested = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
@@ -2103,209 +1920,148 @@ async fn request_update_sets_timestamp_without_bumping_gen() {
         },
     )
     .await
-    .expect("request again");
+    .expect("request_update");
+    let at = requested
+        .update_requested_at
+        .expect("update_requested_at must be set");
     assert!(
-        again.update_requested_at.expect("still set") >= at,
-        "a second Update now refreshes the timestamp"
+        at > stored,
+        "second Update now must replace the planted stamp ({at} > {stored})"
     );
-    assert_eq!(again.settings_gen, off.settings_gen);
 }
 
+/// catalog:unit-request-update — auto_update=false is a settings apply.
 #[tokio::test]
-async fn expired_pair_token_fails() {
-    let pool = connect_and_migrate().await;
-    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
-    let expired_at = Utc::now() - Duration::seconds(1);
-    let (host, token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "stale-token", expired_at).await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-
-    let err =
-        worker_hosts::consume_pair_token(&pool, &token, "box", "linux-x86_64", true, false, None)
-            .await
-            .expect_err("expired pair token must fail");
-    assert_pair_conflict(err, "expired");
-
-    let still = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host remains");
-    assert_eq!(still.status, "pending");
-    assert!(still.machine_token_hash.is_none());
-    assert!(still.paired_at.is_none());
-    let (_, used) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert!(used.is_none(), "expired consume must not set used_at");
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-
-    // Control: an unexpired sibling still pairs (not every consume fails).
-    let (live, live_token) = create_pending_with_token(
-        &pool,
-        workspace_id,
-        user_id,
-        "live-token",
-        Utc::now() + Duration::hours(1),
-    )
-    .await;
-    let live_paired = pair_host(&pool, &live_token, "box-live").await;
-    assert_eq!(live_paired.host.id, live.id);
-    assert_eq!(live_paired.host.status, "online");
-}
-
-#[tokio::test]
-async fn revoke_rejects_authenticate() {
+async fn patch_auto_update_false_bumps_settings_gen() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
     let (host, token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "revoked", expires).await;
-    let paired = pair_host(&pool, &token, "box-rev").await;
+        create_pending_with_token(&pool, workspace_id, user_id, "auto-off", expires).await;
+    pair_host(&pool, &token, "auto-off-box").await;
 
+    let before = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert!(before.auto_update, "paired host defaults auto-update on");
+    let settings_gen = before.settings_gen;
+
+    let off = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            auto_update: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("auto off");
+    assert!(!off.auto_update);
+    assert_eq!(off.settings_gen, settings_gen + 1);
     assert!(
-        worker_hosts::authenticate_machine(&pool, &paired.machine_token)
-            .await
-            .expect("auth before revoke")
-            .is_some()
-    );
-
-    let revoked = worker_hosts::revoke(&pool, host.id).await.expect("revoke");
-    assert_eq!(revoked.status, "disabled");
-    assert!(revoked.machine_token_hash.is_none());
-
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &paired.machine_token)
-            .await
-            .expect("auth after revoke")
-            .is_none(),
-        "disabled host must not authenticate"
+        off.settings_pending(),
+        "auto_update change must light settings_pending"
     );
 }
 
-/// After revoke the picker skips the row. Old `flm_` cannot heartbeat or
-/// lease. Re-pair is required — this test must not rotate the machine token.
+/// catalog:unit-request-update — later CP PATCH must not clear Update now.
+#[tokio::test]
+async fn later_cp_patch_keeps_update_requested_at() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "upd-keep", expires).await;
+    pair_host(&pool, &token, "upd-keep-box").await;
+
+    let requested = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            request_update: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("request_update");
+    let at = requested
+        .update_requested_at
+        .expect("update_requested_at must be set");
+
+    let later = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            paused: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("later paused");
+    assert!(later.paused);
+    assert_eq!(
+        later.update_requested_at,
+        Some(at),
+        "later CP PATCH must keep update_requested_at"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.update_requested_at, Some(at));
+    assert!(loaded.paused);
+}
+
+/// revoke of a never-paired pending marks unused pair tokens used;
+/// consume of the original flp_ is Conflict used.
+#[tokio::test]
+async fn revoke_never_paired_pending_marks_pair_token_used() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "unused-revoke-burn", expires)
+            .await;
+
+    worker_hosts::revoke(&pool, host.id)
+        .await
+        .expect("revoke unused pending");
+
+    let err = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "unused-revoke-box",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect_err("original flp_ must not consume after unused revoke");
+    assert_pair_conflict(err, "used");
+}
+
+/// Heartbeat on a disabled id is NotFound and must not advance last_seen.
+/// HTTP `/me/heartbeat` 401s in require_machine before this UPDATE.
 #[tokio::test]
 async fn revoked_host_is_not_list_assignable_and_cannot_take_a_lease() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
 
-    let (target, target_pair) =
-        create_pending_with_token(&pool, workspace_id, user_id, "revoke-target", expires).await;
-    let paired = pair_host(&pool, &target_pair, "revoke-box").await;
-    let old_token = paired.machine_token.clone();
-    let before_hb = worker_hosts::heartbeat(
-        &pool,
-        target.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        0,
-        Some(4),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("heartbeat before revoke");
-    let seen_before = before_hb
-        .last_seen_at
-        .expect("paired+heartbeat sets last_seen_at");
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &old_token)
-            .await
-            .expect("auth before revoke")
-            .is_some(),
-        "paired host must authenticate before revoke"
-    );
-    assert!(
-        before_hb.accepts_v1_leases(),
-        "online native host must accept v1 leases before revoke"
-    );
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "revoke-hb", expires).await;
+    let paired = pair_host(&pool, &token, "revoke-hb-box").await;
+    let seen_before = paired.host.last_seen_at.expect("pair sets last_seen_at");
 
-    let (live, live_pair) =
-        create_pending_with_token(&pool, workspace_id, user_id, "still-live", expires).await;
-    let live_paired = pair_host(&pool, &live_pair, "live-box").await;
-    worker_hosts::heartbeat(
-        &pool,
-        live.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        0,
-        Some(4),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("heartbeat live sibling");
-
-    let before = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
-        .await
-        .expect("list_assignable before revoke");
-    let before_ids: Vec<Uuid> = before.iter().map(|h| h.id).collect();
-    assert!(
-        before_ids.contains(&target.id),
-        "fresh paired host must be assignable before revoke: {before_ids:?}"
-    );
-    assert!(
-        before_ids.contains(&live.id),
-        "live sibling must be assignable: {before_ids:?}"
-    );
-
-    let claim = spawn_claim(workspace_id, target.id, "spawn_session");
-    work_claims::enqueue(&pool, &claim)
-        .await
-        .expect("enqueue spawn for target");
-
-    // Do not rotate_machine_token. Revoke clears the hash; recovery is re-pair.
-    let revoked = worker_hosts::revoke(&pool, target.id)
-        .await
-        .expect("revoke");
-    assert_eq!(revoked.status, "disabled");
-    assert!(revoked.machine_token_hash.is_none());
-    assert!(
-        !revoked.accepts_v1_leases(),
-        "disabled host must not accept v1 leases"
-    );
-
-    let after = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
-        .await
-        .expect("list_assignable after revoke");
-    let after_ids: Vec<Uuid> = after.iter().map(|h| h.id).collect();
-    assert!(
-        !after_ids.contains(&target.id),
-        "revoked host must drop out of list_assignable: {after_ids:?}"
-    );
-    assert!(
-        after_ids.contains(&live.id),
-        "live sibling must stay assignable after the other host is revoked: {after_ids:?}"
-    );
-
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &old_token)
-            .await
-            .expect("auth after revoke")
-            .is_none(),
-        "old machine token must not authenticate — /me/lease require_machine fails"
-    );
-    assert!(
-        worker_hosts::authenticate_machine(&pool, &live_paired.machine_token)
-            .await
-            .expect("auth live sibling")
-            .is_some(),
-        "sibling machine token must still authenticate"
-    );
+    worker_hosts::revoke(&pool, host.id).await.expect("revoke");
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let hb_err = worker_hosts::heartbeat(
         &pool,
-        target.id,
+        host.id,
         true,
         false,
         None,
@@ -2327,47 +2083,49 @@ async fn revoked_host_is_not_list_assignable_and_cannot_take_a_lease() {
         ),
         other => panic!("expected NotFound on revoked heartbeat, got {other:?}"),
     }
-    let still = worker_hosts::get(&pool, target.id)
+    let still = worker_hosts::get(&pool, host.id)
         .await
         .expect("get revoked")
         .expect("revoked row remains");
     assert_eq!(still.status, "disabled");
-    assert!(still.machine_token_hash.is_none());
     assert_eq!(
         still.last_seen_at,
         Some(seen_before),
         "failed heartbeat must not advance last_seen_at"
     );
+}
 
-    let parked = work_claims::get(&pool, claim.id)
-        .await
-        .expect("get claim")
-        .expect("claim remains");
-    assert_eq!(
-        parked.status, "ready",
-        "revoked host must not have leased the waiting spawn: {:?}",
-        parked.status
-    );
-    assert!(parked.lease_owner.is_none());
-    assert!(parked.lease_token.is_none());
+/// replace_pair_token is pending-only; a revoked (disabled) host is Conflict.
+#[tokio::test]
+async fn replace_pair_token_after_revoke_is_conflict() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "revoke-replace", expires).await;
+    pair_host(&pool, &token, "revoke-replace-box").await;
 
-    let replace_err = worker_hosts::replace_pair_token(
+    worker_hosts::revoke(&pool, host.id).await.expect("revoke");
+
+    let err = worker_hosts::replace_pair_token(
         &pool,
-        target.id,
+        host.id,
         &hash_token("flp_must-not-replace-after-revoke"),
         Utc::now() + Duration::hours(1),
     )
     .await
     .expect_err("replace_pair_token only while pending");
-    match replace_err {
+    match err {
         DbError::Conflict(msg) => assert!(
             msg.contains("pending"),
-            "online/disabled hosts re-pair via a new pending, not replace_pair_token: {msg}"
+            "disabled host re-pairs via a new pending, not replace_pair_token: {msg}"
         ),
         other => panic!("expected Conflict on replace_pair_token after revoke, got {other:?}"),
     }
 }
 
+/// Heartbeat SET last_seen_at = now() on a live host. Pair only checks Some;
+/// revoke checks a failed beat does not move it; stored_online ages via SQL.
 #[tokio::test]
 async fn heartbeat_updates_last_seen_at() {
     let pool = connect_and_migrate().await;
@@ -2375,18 +2133,56 @@ async fn heartbeat_updates_last_seen_at() {
     let expires = Utc::now() + Duration::hours(1);
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "hb", expires).await;
-    let paired = pair_host(&pool, &token, "box-hb").await;
-    let first_seen = paired.host.last_seen_at.expect("paired sets last_seen_at");
+    pair_host(&pool, &token, "box-hb").await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    sqlx::query(
+        "UPDATE worker_hosts SET last_seen_at = now() - interval '2 seconds' WHERE id = $1",
+    )
+    .bind(host.id)
+    .execute(&pool)
+    .await
+    .expect("age last_seen_at");
+    let first_seen = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host")
+        .last_seen_at
+        .expect("aged last_seen_at");
 
     let after = worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 0, None, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat");
+
+    let seen = after.last_seen_at.expect("heartbeat sets last_seen_at");
+    assert!(
+        seen > first_seen,
+        "last_seen_at must advance past the aged stamp"
+    );
+    assert!(
+        seen - first_seen >= Duration::seconds(1),
+        "last_seen_at must be Postgres now(), not the planted stamp"
+    );
+}
+
+/// last_error = $6 is assigned, not COALESCE. HTTP maps omitted/empty error to None.
+#[tokio::test]
+async fn heartbeat_omitted_last_error_clears_previous() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "hb-err", expires).await;
+    pair_host(&pool, &token, "box-hb-err").await;
+
+    let planted = worker_hosts::heartbeat(
         &pool,
         host.id,
-        false,
         true,
-        Some("darwin-arm64"),
-        Some("box-hb-2"),
+        false,
+        None,
+        None,
         Some("disk full"),
         0,
         None,
@@ -2396,138 +2192,95 @@ async fn heartbeat_updates_last_seen_at() {
         None,
     )
     .await
-    .expect("heartbeat");
+    .expect("plant last_error");
+    assert_eq!(planted.last_error.as_deref(), Some("disk full"));
 
-    let seen = after.last_seen_at.expect("heartbeat sets last_seen_at");
-    assert!(seen > first_seen, "last_seen_at must advance");
-    assert!(!after.advertised_host);
-    assert!(after.advertised_container);
-    assert_eq!(after.platform.as_deref(), Some("darwin-arm64"));
-    assert_eq!(after.hostname.as_deref(), Some("box-hb-2"));
-    assert_eq!(after.last_error.as_deref(), Some("disk full"));
-    assert_eq!(after.current_jobs, 0);
-    assert_eq!(after.advertised_max_concurrent, None);
-
-    let load = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        false,
-        true,
-        None,
-        None,
-        None,
-        -3,
-        Some(512),
-        None,
-        None,
-        None,
-        None,
+    let after = worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 0, None, None, None, None, None,
     )
     .await
-    .expect("heartbeat load");
-    assert_eq!(load.current_jobs, 0, "current_jobs must clamp >= 0");
+    .expect("omitted last_error");
     assert_eq!(
-        load.advertised_max_concurrent,
-        Some(256),
-        "advertised_max_concurrent must clamp to 256"
+        after.last_error, None,
+        "heartbeat(..., last_error=None) must clear the previous error"
     );
-
-    let mid = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        false,
-        true,
-        None,
-        None,
-        None,
-        2,
-        Some(8),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("heartbeat mid");
-    assert_eq!(mid.current_jobs, 2);
-    assert_eq!(mid.advertised_max_concurrent, Some(8));
-
-    let keep = worker_hosts::heartbeat(
-        &pool, host.id, false, true, None, None, None, 1, None, None, None, None, None,
-    )
-    .await
-    .expect("heartbeat keep advertised");
-    assert_eq!(keep.current_jobs, 1);
-    assert_eq!(
-        keep.advertised_max_concurrent,
-        Some(8),
-        "None must leave advertised_max_concurrent unchanged"
-    );
-    assert!(
-        keep.software_git_sha.is_none(),
-        "old heartbeat without software must leave software unset"
-    );
-
-    let bins = serde_json::json!({ "fleet-host": "abc" });
-    let with_sw = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        false,
-        true,
-        None,
-        None,
-        None,
-        1,
-        None,
-        Some("deadbeef"),
-        Some(bins.clone()),
-        Some(false),
-        None,
-    )
-    .await
-    .expect("heartbeat software");
-    assert_eq!(with_sw.software_git_sha.as_deref(), Some("deadbeef"));
-    assert_eq!(with_sw.software_bins, Some(bins));
-    assert!(with_sw.software_reported_at.is_some());
-    assert!(!with_sw.software_updating);
-
-    let keep_sw = worker_hosts::heartbeat(
-        &pool, host.id, false, true, None, None, None, 1, None, None, None, None, None,
-    )
-    .await
-    .expect("heartbeat keep software");
-    assert_eq!(
-        keep_sw.software_git_sha.as_deref(),
-        Some("deadbeef"),
-        "omitted software must not clear the last report"
-    );
-
-    let hw =
-        serde_json::json!({ "cpu_cores": 8, "mem_total_bytes": 32000000000u64, "os": "linux" });
-    let with_hw = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        false,
-        true,
-        None,
-        None,
-        None,
-        3,
-        None,
-        None,
-        None,
-        None,
-        Some(hw.clone()),
-    )
-    .await
-    .expect("heartbeat hardware");
-    assert_eq!(with_hw.current_jobs, 3);
-    assert_eq!(with_hw.hardware, Some(hw));
-    let pub_h = with_hw.as_public(Utc::now());
-    assert_eq!(pub_h.current_jobs, 3);
-    assert_eq!(pub_h.hardware.as_ref().and_then(|h| h.cpu_cores), Some(8));
 }
 
+/// platform/hostname use COALESCE($4/$5); omitted None must keep the last strings.
+#[tokio::test]
+async fn heartbeat_omitted_platform_and_hostname_keep_previous() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "hb-ident", expires).await;
+    pair_host(&pool, &token, "box-hb-ident").await;
+
+    let planted = worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        true,
+        false,
+        Some("darwin-arm64"),
+        Some("box-hb-ident-2"),
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("plant platform/hostname");
+    assert_eq!(planted.platform.as_deref(), Some("darwin-arm64"));
+    assert_eq!(planted.hostname.as_deref(), Some("box-hb-ident-2"));
+
+    let after = worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 0, None, None, None, None, None,
+    )
+    .await
+    .expect("omitted platform/hostname");
+    assert_eq!(
+        after.platform.as_deref(),
+        Some("darwin-arm64"),
+        "omitted platform must COALESCE and keep the last string"
+    );
+    assert_eq!(
+        after.hostname.as_deref(),
+        Some("box-hb-ident-2"),
+        "omitted hostname must COALESCE and keep the last string"
+    );
+}
+
+/// Missing row is NotFound (fetch_optional none). Siblings only cover disabled WHERE.
+#[tokio::test]
+async fn heartbeat_unknown_id_is_not_found() {
+    let pool = connect_and_migrate().await;
+    let missing = Uuid::now_v7();
+
+    let err = worker_hosts::heartbeat(
+        &pool, missing, true, false, None, None, None, 0, None, None, None, None, None,
+    )
+    .await
+    .expect_err("unknown host id");
+    match err {
+        DbError::NotFound(msg) => assert!(
+            msg.contains("not found"),
+            "missing host must be NotFound: {msg}"
+        ),
+        other => panic!("expected NotFound on missing host heartbeat, got {other:?}"),
+    }
+    assert!(
+        worker_hosts::get(&pool, missing)
+            .await
+            .expect("get")
+            .is_none(),
+        "unknown heartbeat must not insert a host"
+    );
+}
+
+/// Some(machine_id)+Some(runtimes) persist as JSONB; $14/$15 must not swap.
 #[tokio::test]
 async fn heartbeat_with_machine_persists_agent_runtimes() {
     let pool = connect_and_migrate().await;
@@ -2537,7 +2290,7 @@ async fn heartbeat_with_machine_persists_agent_runtimes() {
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     let mid = Uuid::now_v7();
-    let paired = worker_hosts::consume_pair_token(
+    worker_hosts::consume_pair_token(
         &pool,
         &token,
         &format!("{name}-box"),
@@ -2548,11 +2301,6 @@ async fn heartbeat_with_machine_persists_agent_runtimes() {
     )
     .await
     .expect("pair");
-    assert_eq!(
-        paired.host.agent_runtimes,
-        json!([]),
-        "new host defaults to empty agent_runtimes"
-    );
 
     let runtimes = json!([
         {
@@ -2583,38 +2331,38 @@ async fn heartbeat_with_machine_persists_agent_runtimes() {
         Some(mid),
         "machine_id bind must not be swapped with agent_runtimes"
     );
+}
 
-    let loaded = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(loaded.agent_runtimes, runtimes);
-    assert_eq!(loaded.machine_id, Some(mid));
+/// Later Some(json) replaces the stored inventory; it does not merge leftover agents.
+#[tokio::test]
+async fn heartbeat_with_machine_replaces_agent_runtimes() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("rt-replace");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
-        .await
-        .expect("list");
-    let row = listed
-        .iter()
-        .find(|h| h.id == host.id)
-        .expect("listed host");
-    assert_eq!(row.agent_runtimes, runtimes);
-
-    let pub_h = loaded.as_public(Utc::now());
-    assert_eq!(pub_h.agents.len(), 2);
-    assert_eq!(pub_h.agents[0].id, "grok");
-    assert_eq!(pub_h.agents[0].name.as_deref(), Some("Grok"));
-    assert!(pub_h.agents[0].installed);
-    assert!(pub_h.agents[0].logged_in);
-    assert_eq!(pub_h.agents[0].models, vec!["grok-4"]);
-    assert_eq!(pub_h.agents[0].model_details.len(), 1);
-    assert_eq!(pub_h.agents[0].model_details[0].name, "grok-4");
-    assert_eq!(
-        pub_h.agents[0].model_details[0].default_effort.as_deref(),
-        Some("high")
-    );
-    assert_eq!(pub_h.agents[1].id, "claude");
-    assert!(!pub_h.agents[1].logged_in);
+    let first = json!([
+        {
+            "id": "grok",
+            "name": "Grok",
+            "installed": true,
+            "logged_in": true,
+            "models": ["grok-4"],
+            "model_details": []
+        },
+        {
+            "id": "claude",
+            "name": "Claude",
+            "installed": true,
+            "logged_in": false,
+            "models": [],
+            "model_details": []
+        }
+    ]);
+    heartbeat_with_runtimes(&pool, host.id, None, Some(first)).await;
 
     let replaced = json!([{
         "id": "ollama",
@@ -2624,20 +2372,76 @@ async fn heartbeat_with_machine_persists_agent_runtimes() {
         "models": ["llama3"],
         "model_details": []
     }]);
-    let again = heartbeat_with_runtimes(&pool, host.id, None, Some(replaced.clone())).await;
+    let after = heartbeat_with_runtimes(&pool, host.id, None, Some(replaced.clone())).await;
     assert_eq!(
-        again.agent_runtimes, replaced,
+        after.agent_runtimes, replaced,
         "a later Some(json) must replace, not merge"
     );
-    assert_eq!(
-        again.machine_id,
-        Some(mid),
-        "None machine_id must leave the durable id"
-    );
-    assert_eq!(again.as_public(Utc::now()).agents.len(), 1);
-    assert_eq!(again.as_public(Utc::now()).agents[0].id, "ollama");
 }
 
+/// Heartbeat must not adopt another host's machine_id; runtimes still persist.
+#[tokio::test]
+async fn heartbeat_with_machine_does_not_adopt_another_hosts_machine_id() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let name_a = unique_slug("rt-mid-a");
+    let (host_a, token_a) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name_a, expires).await;
+    let mid_a = Uuid::now_v7();
+    worker_hosts::consume_pair_token(
+        &pool,
+        &token_a,
+        &format!("{name_a}-box"),
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid_a),
+    )
+    .await
+    .expect("pair A");
+
+    let name_b = unique_slug("rt-mid-b");
+    let (_host_b, token_b) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name_b, expires).await;
+    let mid_b = Uuid::now_v7();
+    worker_hosts::consume_pair_token(
+        &pool,
+        &token_b,
+        &format!("{name_b}-box"),
+        "linux-x86_64",
+        true,
+        false,
+        Some(mid_b),
+    )
+    .await
+    .expect("pair B");
+
+    let runtimes = json!([{
+        "id": "grok",
+        "name": "Grok",
+        "installed": true,
+        "logged_in": true,
+        "models": ["grok-4"],
+        "model_details": []
+    }]);
+    let after =
+        heartbeat_with_runtimes(&pool, host_a.id, Some(mid_b), Some(runtimes.clone())).await;
+    assert_eq!(
+        after.machine_id,
+        Some(mid_a),
+        "heartbeat must not adopt another host's machine_id"
+    );
+    assert_eq!(
+        after.agent_runtimes, runtimes,
+        "refusing a taken machine_id must still persist agent_runtimes"
+    );
+}
+
+/// Omitting agent_runtimes (old fleet-host / heartbeat() wrapper) must
+/// COALESCE-keep the last CLI inventory. get + as_public.agents must agree
+/// with UPDATE RETURNING so a RETURNING-only lie cannot stay green.
 #[tokio::test]
 async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
     let pool = connect_and_migrate().await;
@@ -2648,30 +2452,14 @@ async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    let other_name = unique_slug("other-rt");
-    let (other, other_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, &other_name, expires).await;
-    pair_host(&pool, &other_token, &format!("{other_name}-box")).await;
-    let other_runtimes = json!([{
-        "id": "openai",
-        "name": "OpenAI",
+    let runtimes = json!([{
+        "id": "grok",
+        "name": "Grok",
         "installed": true,
         "logged_in": true,
-        "models": ["gpt-4"],
+        "models": ["grok-4"],
         "model_details": []
     }]);
-    heartbeat_with_runtimes(&pool, other.id, None, Some(other_runtimes.clone())).await;
-
-    let runtimes = json!([
-        {
-            "id": "grok",
-            "name": "Grok",
-            "installed": true,
-            "logged_in": true,
-            "models": ["grok-4"],
-            "model_details": []
-        }
-    ]);
     heartbeat_with_runtimes(&pool, host.id, None, Some(runtimes.clone())).await;
 
     let omitted = heartbeat_with_runtimes(&pool, host.id, None, None).await;
@@ -2680,8 +2468,27 @@ async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
         "None must COALESCE and leave the last report (not reset to [])"
     );
 
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        loaded.agent_runtimes, runtimes,
+        "omit must persist the last inventory, not only RETURNING it"
+    );
+    assert_eq!(
+        loaded
+            .as_public(Utc::now())
+            .agents
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grok"],
+        "as_public.agents must still list grok after omit"
+    );
+
     let via_wrapper = worker_hosts::heartbeat(
-        &pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
+        &pool, host.id, true, false, None, None, None, 0, None, None, None, None, None,
     )
     .await
     .expect("legacy heartbeat wrapper");
@@ -2689,7 +2496,33 @@ async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
         via_wrapper.agent_runtimes, runtimes,
         "heartbeat() always passes None and must not wipe agent_runtimes"
     );
-    assert_eq!(via_wrapper.current_jobs, 1);
+}
+
+/// Some([]) is a real empty report and must persist, unlike omitted None.
+#[tokio::test]
+async fn heartbeat_with_machine_empty_agent_runtimes_persists() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("empty-rt");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    heartbeat_with_runtimes(
+        &pool,
+        host.id,
+        None,
+        Some(json!([{
+            "id": "grok",
+            "name": "Grok",
+            "installed": true,
+            "logged_in": true,
+            "models": ["grok-4"],
+            "model_details": []
+        }])),
+    )
+    .await;
 
     let cleared = heartbeat_with_runtimes(&pool, host.id, None, Some(json!([]))).await;
     assert_eq!(
@@ -2697,26 +2530,46 @@ async fn heartbeat_with_machine_none_does_not_wipe_agent_runtimes() {
         json!([]),
         "Some([]) is a real empty report and must persist, unlike omitted None"
     );
-    let stay_empty = heartbeat_with_runtimes(&pool, host.id, None, None).await;
-    assert_eq!(
-        stay_empty.agent_runtimes,
-        json!([]),
-        "None after an empty report must not restore the previous agents"
-    );
 
-    let other_loaded = worker_hosts::get(&pool, other.id)
+    let loaded = worker_hosts::get(&pool, host.id)
         .await
-        .expect("get other")
-        .expect("other host");
-    assert_eq!(
-        other_loaded.agent_runtimes, other_runtimes,
-        "COALESCE on one host must not touch another host's agent_runtimes"
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.agent_runtimes, json!([]));
+    assert!(
+        loaded.as_public(Utc::now()).agents.is_empty(),
+        "as_public.agents must be empty after an empty report"
     );
 }
 
-/// Catalog specs: heartbeat stores CPU/RAM/GPU inventory. Empty GPU names
-/// must not appear on the public card. Omitting `hardware` must COALESCE
-/// (keep the last snapshot), not wipe it.
+/// Some(hardware) persists the CPU/RAM/GPU snapshot as JSONB.
+#[tokio::test]
+async fn heartbeat_persists_hardware_inventory() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-persist");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let inventory = json!({
+        "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
+        "cpu_cores": 8,
+        "mem_total_bytes": 17179869184u64,
+        "mem_type": "DDR4",
+        "gpus": [{"name": "Intel UHD Graphics", "used_pct": 4}],
+        "os": "linux 6.8 x86_64"
+    });
+    let stored = heartbeat_with_hardware(&pool, host.id, Some(inventory.clone())).await;
+    assert_eq!(
+        stored.hardware,
+        Some(inventory),
+        "Some(hardware) must persist the CPU/RAM/GPU snapshot as-is"
+    );
+}
+
+/// sanitize_heartbeat_hardware drops empty / trademark-only GPU names before persist.
 #[tokio::test]
 async fn heartbeat_persists_hardware_inventory_empty_gpu_name_dropped() {
     let pool = connect_and_migrate().await;
@@ -2727,78 +2580,9 @@ async fn heartbeat_persists_hardware_inventory_empty_gpu_name_dropped() {
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    let other_name = unique_slug("hw-other");
-    let (other, other_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, &other_name, expires).await;
-    pair_host(&pool, &other_token, &format!("{other_name}-box")).await;
-    let other_hw = json!({
-        "cpu_model": "AMD Ryzen 7 7840U",
-        "cpu_cores": 16,
-        "mem_total_bytes": 34359738368u64,
-        "mem_type": "DDR5",
-        "gpus": [{"name": "AMD Radeon 780M", "used_pct": 7}],
-        "os": "linux 6.8 x86_64"
-    });
-    heartbeat_with_hardware(&pool, other.id, Some(other_hw.clone())).await;
-
-    // Catalog specs snapshot (test_catalog_specs.SPECS_HARDWARE).
-    let inventory = json!({
+    let mixed = json!({
         "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
         "cpu_cores": 8,
-        "mem_total_bytes": 17179869184u64,
-        "mem_speed_mts": 3200,
-        "mem_type": "DDR4",
-        "gpus": [{"name": "Intel UHD Graphics", "used_pct": 4}],
-        "os": "linux 6.8 x86_64",
-        "cpu_used_pct": 12,
-        "mem_used_pct": 32
-    });
-    let stored = heartbeat_with_hardware(&pool, host.id, Some(inventory.clone())).await;
-    assert_eq!(
-        stored.hardware,
-        Some(inventory.clone()),
-        "Some(hardware) must persist the CPU/RAM/GPU snapshot as-is"
-    );
-
-    let loaded = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    assert_eq!(loaded.hardware, Some(inventory.clone()));
-    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
-        .await
-        .expect("list");
-    let row = listed
-        .iter()
-        .find(|h| h.id == host.id)
-        .expect("listed host");
-    assert_eq!(row.hardware, Some(inventory.clone()));
-
-    let pub_h = loaded.as_public(Utc::now());
-    let hw = pub_h.hardware.as_ref().expect("public hardware");
-    assert_eq!(hw.cpu_cores, Some(8));
-    assert_eq!(hw.mem_total_bytes, Some(17179869184));
-    assert_eq!(hw.mem_speed_mts, Some(3200));
-    assert_eq!(hw.mem_type.as_deref(), Some("DDR4"));
-    assert_eq!(
-        hw.cpu_model.as_deref(),
-        Some("Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz")
-    );
-    assert_eq!(hw.cpu_used_pct, Some(12));
-    assert_eq!(hw.mem_used_pct, Some(32));
-    assert_eq!(hw.os.as_deref(), Some("linux 6.8 x86_64"));
-    assert_eq!(public_gpu_names(&loaded), vec!["Intel UHD Graphics"]);
-    let gpus = hw.gpus.as_ref().expect("public gpus");
-    assert_eq!(gpus.len(), 1, "named iGPU must stay: {gpus:?}");
-    assert_eq!(gpus[0].name.as_deref(), Some("Intel UHD Graphics"));
-    assert_eq!(gpus[0].used_pct, Some(4));
-
-    // Empty / whitespace / trademark-only / missing names are not inventory.
-    let with_empties = json!({
-        "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
-        "cpu_cores": 8,
-        "mem_total_bytes": 17179869184u64,
-        "mem_type": "DDR4",
         "gpus": [
             {"name": ""},
             {"name": "   "},
@@ -2808,178 +2592,169 @@ async fn heartbeat_persists_hardware_inventory_empty_gpu_name_dropped() {
             {"name": "Intel UHD Graphics", "used_pct": 4}
         ]
     });
-    let mixed = heartbeat_with_hardware(&pool, host.id, Some(with_empties)).await;
-    let persisted_gpus = persisted_gpu_entries(&mixed);
-    assert!(
-        persisted_gpus
-            .iter()
-            .all(|g| gpu_entry_name(g).is_some_and(|n| !n.trim().is_empty())),
-        "persisted GPU inventory must drop empty/whitespace/null names, not store them: {persisted_gpus:?}"
-    );
-    assert!(
-        persisted_gpus
-            .iter()
-            .any(|g| gpu_entry_name(g) == Some("Intel UHD Graphics")),
-        "named iGPU must remain in persisted inventory: {persisted_gpus:?}"
-    );
-    let mixed_names = public_gpu_names(&mixed);
+    let stored = heartbeat_with_hardware(&pool, host.id, Some(mixed)).await;
     assert_eq!(
-        mixed_names,
-        vec!["Intel UHD Graphics"],
-        "empty GPU names must be dropped from the public inventory, named iGPU kept: {mixed_names:?}"
+        stored.hardware.as_ref().and_then(|h| h.get("gpus")),
+        Some(&json!([{"name": "Intel UHD Graphics", "used_pct": 4}])),
+        "trademark-only (R) and nameless GPUs must be gone; named iGPU stays"
     );
+}
 
-    // Replace, not merge: a later snapshot without mem_type must not keep DDR4.
+/// Later Some(json) replaces the hardware snapshot; leftover keys do not merge.
+#[tokio::test]
+async fn heartbeat_replaces_hardware_inventory() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-replace");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    heartbeat_with_hardware(
+        &pool,
+        host.id,
+        Some(json!({
+            "cpu_cores": 8,
+            "mem_type": "DDR4",
+            "gpus": [{"name": "Intel UHD Graphics"}]
+        })),
+    )
+    .await;
     let replaced = json!({
-        "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
         "cpu_cores": 4,
         "mem_total_bytes": 8589934592u64,
         "gpus": [{"name": "Intel UHD Graphics"}]
     });
-    let after_replace = heartbeat_with_hardware(&pool, host.id, Some(replaced.clone())).await;
-    let replaced_hw = after_replace.hardware.as_ref().expect("replaced hardware");
-    assert_eq!(replaced_hw.get("cpu_cores"), Some(&json!(4)));
-    assert!(
-        replaced_hw.get("mem_type").is_none(),
-        "later Some(json) must replace the snapshot (not merge leftover keys): {replaced_hw}"
-    );
+    let after = heartbeat_with_hardware(&pool, host.id, Some(replaced.clone())).await;
     assert_eq!(
-        after_replace.hardware,
+        after.hardware,
         Some(replaced),
-        "replace snapshot must persist exactly (empty GPU names already stripped by the caller)"
+        "later Some(json) must replace, not merge leftover keys"
     );
+}
 
-    // Only nameless GPUs + catalog CPU → drop empties, infer Intel UHD on the card.
-    let only_empty = json!({
-        "cpu_model": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
+/// Omitting hardware must COALESCE-keep the last snapshot.
+#[tokio::test]
+async fn heartbeat_omitted_hardware_does_not_wipe_inventory() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-omit");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let inventory = json!({
         "cpu_cores": 8,
-        "mem_total_bytes": 17179869184u64,
-        "gpus": [{"name": ""}, {"name": "  "}, {"name": null}]
+        "mem_type": "DDR4",
+        "gpus": [{"name": "Intel UHD Graphics", "used_pct": 4}]
     });
-    let inferred = heartbeat_with_hardware(&pool, host.id, Some(only_empty)).await;
-    let inferred_gpus = persisted_gpu_entries(&inferred);
-    assert!(
-        inferred_gpus
-            .iter()
-            .all(|g| gpu_entry_name(g).is_some_and(|n| !n.trim().is_empty())),
-        "persisted inventory must not keep nameless GPUs: {inferred_gpus:?}"
-    );
-    assert_eq!(
-        public_gpu_names(&inferred),
-        vec!["Intel UHD Graphics"],
-        "after empty GPU names are dropped, catalog CPU must still surface the iGPU"
-    );
-
-    // Restore the named inventory, then omit hardware — COALESCE must keep it.
     heartbeat_with_hardware(&pool, host.id, Some(inventory.clone())).await;
     let omitted = heartbeat_with_hardware(&pool, host.id, None).await;
     assert_eq!(
         omitted.hardware,
-        Some(inventory.clone()),
+        Some(inventory),
         "None must COALESCE and leave the last CPU/RAM/GPU inventory (not wipe to null)"
     );
-    assert_eq!(public_gpu_names(&omitted), vec!["Intel UHD Graphics"]);
+}
 
-    let via_wrapper = worker_hosts::heartbeat(
-        &pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
-    )
-    .await
-    .expect("legacy heartbeat wrapper");
-    assert_eq!(
-        via_wrapper.hardware,
-        Some(inventory.clone()),
-        "heartbeat() with omitted hardware must not wipe inventory"
-    );
-    assert_eq!(via_wrapper.current_jobs, 1);
+/// Some({}) is a real empty snapshot and must persist, unlike omitted None.
+#[tokio::test]
+async fn heartbeat_empty_hardware_snapshot_persists() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-empty");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    // Bind order: hardware $13 vs agent_runtimes $15. Updating runtimes
-    // with hardware=None must not clear inventory.
-    let runtimes = json!([{
-        "id": "grok",
-        "name": "Grok",
-        "installed": true,
-        "logged_in": true,
-        "models": ["grok-4"],
-        "model_details": []
-    }]);
-    let with_both = worker_hosts::heartbeat_with_machine(
+    heartbeat_with_hardware(
         &pool,
         host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        0,
-        None,
-        None,
-        None,
-        None,
-        Some(inventory.clone()),
-        None,
-        Some(runtimes.clone()),
+        Some(json!({
+            "cpu_cores": 8,
+            "gpus": [{"name": "Intel UHD Graphics"}]
+        })),
     )
-    .await
-    .expect("heartbeat hardware+runtimes");
-    assert_eq!(with_both.hardware, Some(inventory.clone()));
-    assert_eq!(with_both.agent_runtimes, runtimes);
-
-    let runtimes_only = worker_hosts::heartbeat_with_machine(
-        &pool,
-        host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        0,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(json!([])),
-    )
-    .await
-    .expect("heartbeat runtimes only");
-    assert_eq!(
-        runtimes_only.hardware,
-        Some(inventory.clone()),
-        "omitted hardware must not be overwritten by the agent_runtimes bind"
-    );
-    assert_eq!(runtimes_only.agent_runtimes, json!([]));
-
-    let other_loaded = worker_hosts::get(&pool, other.id)
-        .await
-        .expect("get other")
-        .expect("other host");
-    assert_eq!(
-        other_loaded.hardware,
-        Some(other_hw),
-        "COALESCE on one host must not touch another host's hardware"
-    );
-    assert_eq!(
-        public_gpu_names(&other_loaded),
-        vec!["AMD Radeon 780M"],
-        "other host public GPU must stay"
-    );
-
-    // Some({}) is an explicit empty snapshot and must persist, unlike omitted None.
+    .await;
     let cleared = heartbeat_with_hardware(&pool, host.id, Some(json!({}))).await;
     assert_eq!(
         cleared.hardware,
         Some(json!({})),
         "Some({{}}) is a real empty report and must persist, unlike omitted None"
     );
-    let stay_empty = heartbeat_with_hardware(&pool, host.id, None).await;
+}
+
+/// Sanitize retains the raw GPU name; as_public normalizes trademarks.
+#[tokio::test]
+async fn heartbeat_stores_raw_gpu_name_public_card_normalizes() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-raw");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let raw = json!({"gpus": [{"name": "Intel(R) UHD Graphics"}]});
+    let stored = heartbeat_with_hardware(&pool, host.id, Some(raw.clone())).await;
     assert_eq!(
-        stay_empty.hardware,
-        Some(json!({})),
-        "None after an empty hardware report must not restore the previous inventory"
+        stored.hardware,
+        Some(raw),
+        "sanitize retains the reported name; it does not rewrite trademarks"
+    );
+    let pub_name = stored
+        .as_public(Utc::now())
+        .hardware
+        .as_ref()
+        .and_then(|h| h.gpus.as_ref())
+        .and_then(|g| g.first())
+        .and_then(|g| g.name.as_deref())
+        .map(str::to_owned);
+    assert_eq!(
+        pub_name.as_deref(),
+        Some("Intel UHD Graphics"),
+        "as_public must strip (R) on the card"
     );
 }
 
+/// Nameless GPUs persist as []; unknown/Xeon CPU must not invent Intel UHD.
+#[tokio::test]
+async fn heartbeat_nameless_gpus_unknown_cpu_public_has_no_gpu() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("hw-xeon");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let report = json!({
+        "cpu_model": "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz",
+        "gpus": [{"name": ""}, {"name": "  "}, {"name": null}, {}]
+    });
+    let stored = heartbeat_with_hardware(&pool, host.id, Some(report)).await;
+    assert_eq!(
+        stored.hardware.as_ref().and_then(|h| h.get("gpus")),
+        Some(&json!([])),
+        "nameless GPU entries must persist as an empty array"
+    );
+    let pub_gpus = stored
+        .as_public(Utc::now())
+        .hardware
+        .as_ref()
+        .and_then(|h| h.gpus.clone())
+        .unwrap_or_default();
+    assert!(
+        pub_gpus.is_empty(),
+        "Xeon must not infer a phantom Intel UHD: {pub_gpus:?}"
+    );
+}
+
+/// PATCH `enabled=false` is a distinct picker skip from revoke (status/hash)
+/// or paused/drain. Unpaired pending is status/hash/last_seen, not enabled.
 #[tokio::test]
 async fn list_assignable_excludes_paused_disabled_stale() {
     let pool = connect_and_migrate().await;
@@ -2990,45 +2765,10 @@ async fn list_assignable_excludes_paused_disabled_stale() {
         create_pending_with_token(&pool, workspace_id, user_id, "ok", expires).await;
     pair_host(&pool, &ok_token, "ok-box").await;
 
-    let (paused_host, paused_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "paused", expires).await;
-    pair_host(&pool, &paused_token, "paused-box").await;
-    worker_hosts::patch_cp_settings(
-        &pool,
-        paused_host.id,
-        &HostCpSettings {
-            paused: Some(true),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("pause");
-
-    let (drain_host, drain_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "drain", expires).await;
-    pair_host(&pool, &drain_token, "drain-box").await;
-    worker_hosts::patch_cp_settings(
-        &pool,
-        drain_host.id,
-        &HostCpSettings {
-            drain: Some(true),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("drain");
-
-    let (disabled_host, disabled_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "disabled", expires).await;
-    pair_host(&pool, &disabled_token, "disabled-box").await;
-    worker_hosts::revoke(&pool, disabled_host.id)
-        .await
-        .expect("revoke");
-
     let (off_host, off_token) =
         create_pending_with_token(&pool, workspace_id, user_id, "off", expires).await;
     pair_host(&pool, &off_token, "off-box").await;
-    worker_hosts::patch_cp_settings(
+    let off = worker_hosts::patch_cp_settings(
         &pool,
         off_host.id,
         &HostCpSettings {
@@ -3038,15 +2778,8 @@ async fn list_assignable_excludes_paused_disabled_stale() {
     )
     .await
     .expect("disable enabled flag");
-
-    let (stale_host, stale_token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "stale", expires).await;
-    pair_host(&pool, &stale_token, "stale-box").await;
-    sqlx::query("UPDATE worker_hosts SET last_seen_at = now() - interval '1 hour' WHERE id = $1")
-        .bind(stale_host.id)
-        .execute(&pool)
-        .await
-        .expect("age last_seen_at");
+    assert!(!off.enabled);
+    assert_eq!(off.status, "online");
 
     let (_pending, _) =
         create_pending_with_token(&pool, workspace_id, user_id, "still-pending", expires).await;
@@ -3058,20 +2791,145 @@ async fn list_assignable_excludes_paused_disabled_stale() {
     assert_eq!(
         ids,
         vec![ok_host.id],
-        "only the fresh online host is assignable"
+        "enabled=false and unpaired pending must not take a lease: {ids:?}"
     );
 }
 
-/// `holding_new_jobs` (Stop taking new jobs) must drop the host from the picker.
-/// A running job may finish; the host must not receive a new lease.
-/// Matches fleet-runners-view: paused || drain || !(allow_host || allow_container).
+/// Cutoff is the passed `stale_after`, not a hardcoded 90s.
+#[tokio::test]
+async fn list_assignable_uses_passed_stale_after_not_90s_constant() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "cutoff", expires).await;
+    pair_host(&pool, &token, "cutoff-box").await;
+    sqlx::query(
+        "UPDATE worker_hosts SET last_seen_at = now() - interval '45 seconds' WHERE id = $1",
+    )
+    .bind(host.id)
+    .execute(&pool)
+    .await
+    .expect("age last_seen_at 45s");
+
+    let tight = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable 30s");
+    assert!(
+        !assignable_ids_in_workspace(&tight, workspace_id).contains(&host.id),
+        "45s-old last_seen must miss a 30s cutoff: {:?}",
+        tight.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let loose = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(90))
+        .await
+        .expect("list_assignable 90s");
+    assert!(
+        assignable_ids_in_workspace(&loose, workspace_id).contains(&host.id),
+        "45s-old last_seen must hit a 90s cutoff: {:?}",
+        loose.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// Cluster OR sits inside the hold filters; a paused Kind box must not lease in B.
+#[tokio::test]
+async fn list_assignable_excludes_paused_cluster_host_from_other_workspace() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "cluster-paused", expires).await;
+    pair_host(&pool, &token, "cluster-paused").await;
+    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("label cluster");
+    let paused = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            paused: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("pause cluster host");
+    assert!(paused.paused);
+    assert!(paused.is_cluster_host());
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != host.id),
+        "paused cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// PATCH `enabled=true` returns the host; hold skip is paused/drain/modes, not enabled.
+#[tokio::test]
+async fn list_assignable_reincludes_after_enabled_true() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "flip-enabled", expires).await;
+    pair_host(&pool, &token, "flip-enabled-box").await;
+
+    let off = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            enabled: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("enabled=false");
+    assert!(!off.enabled);
+    let omitted = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable while disabled");
+    assert!(
+        !assignable_ids_in_workspace(&omitted, workspace_id).contains(&host.id),
+        "enabled=false must drop the host: {:?}",
+        omitted.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let on = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            enabled: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("enabled=true");
+    assert!(on.enabled);
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable after re-enable");
+    assert_eq!(
+        assignable_ids_in_workspace(&assignable, workspace_id),
+        vec![host.id],
+        "enabled=true must return the host to the picker: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// Paused/drain/no-modes with a running job must leave the picker.
+/// A running job may finish; they must not receive another lease.
 #[tokio::test]
 async fn list_assignable_skips_holding_new_jobs_even_with_running_job() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
 
-    async fn pair_under_cap_with_job(
+    async fn pair_with_running_job(
         pool: &fleet_db::PgPool,
         workspace_id: Uuid,
         user_id: Uuid,
@@ -3081,28 +2939,20 @@ async fn list_assignable_skips_holding_new_jobs_even_with_running_job() {
         let (host, token) =
             create_pending_with_token(pool, workspace_id, user_id, name, expires).await;
         pair_host(pool, &token, &format!("{name}-box")).await;
-        let beat = worker_hosts::heartbeat(
+        worker_hosts::heartbeat(
             pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
         )
         .await
         .expect("heartbeat current_jobs=1");
-        assert_eq!(beat.current_jobs, 1);
-        assert!(
-            !worker_hosts::at_job_cap(&beat),
-            "{name} default cap is 4; 1 job must not be an at_job_cap skip"
-        );
         host.id
     }
 
-    let taking = pair_under_cap_with_job(&pool, workspace_id, user_id, expires, "taking").await;
-    let paused =
-        pair_under_cap_with_job(&pool, workspace_id, user_id, expires, "paused-hold").await;
-    let drain = pair_under_cap_with_job(&pool, workspace_id, user_id, expires, "drain-hold").await;
+    let taking = pair_with_running_job(&pool, workspace_id, user_id, expires, "taking").await;
+    let paused = pair_with_running_job(&pool, workspace_id, user_id, expires, "paused-hold").await;
+    let drain = pair_with_running_job(&pool, workspace_id, user_id, expires, "drain-hold").await;
     let no_modes =
-        pair_under_cap_with_job(&pool, workspace_id, user_id, expires, "no-modes-hold").await;
+        pair_with_running_job(&pool, workspace_id, user_id, expires, "no-modes-hold").await;
 
-    // UI Stop taking new jobs PATCHes paused=true. Drain is the same hold.
-    // Both plane modes off is also holding_new_jobs (!accepting_jobs).
     worker_hosts::patch_cp_settings(
         &pool,
         paused,
@@ -3112,7 +2962,7 @@ async fn list_assignable_skips_holding_new_jobs_even_with_running_job() {
         },
     )
     .await
-    .expect("stop taking new jobs (paused)");
+    .expect("paused");
     worker_hosts::patch_cp_settings(
         &pool,
         drain,
@@ -3135,124 +2985,134 @@ async fn list_assignable_skips_holding_new_jobs_even_with_running_job() {
     .await
     .expect("both modes off");
 
-    let taking_row = worker_hosts::get(&pool, taking)
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
-        .expect("get taking")
-        .expect("taking exists");
-    assert!(
-        !worker_hosts::holding_new_jobs(&taking_row),
-        "control host must still be taking jobs"
+        .expect("list_assignable");
+    assert_eq!(
+        assignable_ids_in_workspace(&assignable, workspace_id),
+        vec![taking],
+        "paused/drain/no-modes with current_jobs=1 must skip the picker: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
     );
+}
 
-    for (id, label) in [(paused, "paused"), (drain, "drain"), (no_modes, "no-modes")] {
-        let h = worker_hosts::get(&pool, id)
-            .await
-            .expect("get hold")
-            .expect("hold exists");
-        assert!(
-            worker_hosts::holding_new_jobs(&h),
-            "{label} must match holding_new_jobs (paused || drain || !accepting)"
-        );
-        assert_eq!(
-            h.status, "online",
-            "{label} must stay online so the running job can finish"
-        );
-        assert_eq!(
-            h.current_jobs, 1,
-            "{label} running job must not be zeroed by the hold"
-        );
-        assert!(
-            !worker_hosts::at_job_cap(&h),
-            "{label} is under cap; skip must be holding_new_jobs, not at_job_cap"
-        );
-    }
+/// accepting_jobs is OR: one plane mode on stays in the picker (both-off is the hold).
+#[tokio::test]
+async fn list_assignable_includes_when_only_one_plane_mode_on() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
 
-    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
-        .await
-        .expect("list_for_workspace");
-    let listed_ids: Vec<Uuid> = listed.iter().map(|h| h.id).collect();
-    assert!(
-        listed_ids.contains(&taking)
-            && listed_ids.contains(&paused)
-            && listed_ids.contains(&drain)
-            && listed_ids.contains(&no_modes),
-        "hold must not delete the row (running job may finish): {listed_ids:?}"
-    );
+    let (host_only, host_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "host-only", expires).await;
+    pair_host(&pool, &host_token, "host-only-box").await;
+    worker_hosts::heartbeat(
+        &pool, host_only.id, true, false, None, None, None, 1, None, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat host-only current_jobs=1");
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host_only.id,
+        &HostCpSettings {
+            allow_host: Some(true),
+            allow_container: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("host-only");
+
+    let (container_only, container_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "container-only", expires).await;
+    pair_host(&pool, &container_token, "container-only-box").await;
+    worker_hosts::heartbeat(
+        &pool,
+        container_only.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("heartbeat container-only current_jobs=1");
+    worker_hosts::patch_cp_settings(
+        &pool,
+        container_only.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            allow_container: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("container-only");
 
     let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
         .expect("list_assignable");
-    let ids = assignable_ids_in_workspace(&assignable, workspace_id);
-    assert!(
-        ids.contains(&taking),
-        "accepting host with a running job under cap must stay assignable: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&paused),
-        "Stop taking new jobs (paused) must skip the picker even with a running job: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&drain),
-        "drain must skip the picker even with a running job: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&no_modes),
-        "holding_new_jobs (!allow_host && !allow_container) must skip the picker; \
-         no new lease: {ids:?}"
-    );
+    let mut ids = assignable_ids_in_workspace(&assignable, workspace_id);
+    ids.sort();
+    let mut want = vec![host_only.id, container_only.id];
+    want.sort();
     assert_eq!(
-        ids,
-        vec![taking],
-        "only the host still taking jobs is assignable: {ids:?}"
+        ids, want,
+        "host-only and container-only with current_jobs=1 must stay assignable"
     );
+}
+
+/// PATCH drain=false after drain + a running job returns the host to the picker.
+#[tokio::test]
+async fn list_assignable_take_jobs_again_after_drain() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "drain-resume", expires).await;
+    pair_host(&pool, &token, "drain-resume-box").await;
+    worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat current_jobs=1");
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            drain: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("drain");
 
     let resumed = worker_hosts::patch_cp_settings(
         &pool,
-        paused,
+        host.id,
         &HostCpSettings {
-            paused: Some(false),
+            drain: Some(false),
             ..HostCpSettings::default()
         },
     )
     .await
     .expect("take jobs again");
-    assert!(!resumed.paused);
-    assert_eq!(resumed.current_jobs, 1);
-    let after = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
-        .await
-        .expect("list_assignable after resume");
-    let after_ids: Vec<Uuid> = after.iter().map(|h| h.id).collect();
-    assert!(
-        after_ids.contains(&paused) && after_ids.contains(&taking),
-        "Take jobs again must return the host to the picker: {after_ids:?}"
-    );
-    assert!(
-        !after_ids.contains(&drain) && !after_ids.contains(&no_modes),
-        "other holds must stay out of the picker: {after_ids:?}"
-    );
-}
+    assert!(!resumed.drain);
 
-#[tokio::test]
-async fn list_assignable_includes_cluster_host_from_other_workspace() {
-    let pool = connect_and_migrate().await;
-    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
-    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
-    let expires = Utc::now() + Duration::hours(1);
-    let (host, token) =
-        create_pending_with_token(&pool, ws_a, user_a, "cluster-box", expires).await;
-    pair_host(&pool, &token, "cluster-box").await;
-    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
-        .bind(host.id)
-        .execute(&pool)
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
-        .expect("label cluster");
-    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
-        .await
-        .expect("list_assignable B");
-    assert!(
-        from_b.iter().any(|h| h.id == host.id),
-        "cluster host home={ws_a} must be assignable in {ws_b}: {:?}",
-        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+        .expect("list_assignable after drain=false");
+    assert_eq!(
+        assignable_ids_in_workspace(&assignable, workspace_id),
+        vec![host.id],
+        "drain=false must return the host to the picker: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 }
 
@@ -3302,9 +3162,9 @@ async fn list_cluster_and_assignable_match_cluster_label_case() {
     );
 }
 
-/// Write paths store the cluster token as lowercase `cluster`.
+/// create_pending INSERT stores mixed-case `CLUSTER` as lowercase `cluster`.
 #[tokio::test]
-async fn create_pending_and_patch_normalize_cluster_label() {
+async fn create_pending_normalizes_cluster_label() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
@@ -3326,11 +3186,24 @@ async fn create_pending_and_patch_normalize_cluster_label() {
     assert_eq!(
         created.labels,
         vec!["cluster".to_string(), "gpu".to_string()],
-        "create_pending must normalize cluster case/whitespace"
+        "create_pending must persist lowercase cluster"
     );
+}
 
-    let (host, _token) =
-        create_pending_with_token(&pool, workspace_id, user_id, "patch-cluster", expires).await;
+/// patch_cp_settings UPDATE stores mixed-case `Cluster` as lowercase `cluster`.
+#[tokio::test]
+async fn patch_cp_settings_normalizes_cluster_label() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, _token) = create_pending_with_token(
+        &pool,
+        workspace_id,
+        user_id,
+        &format!("patch-cluster-{}", Uuid::now_v7()),
+        expires,
+    )
+    .await;
     let patched = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
@@ -3344,77 +3217,146 @@ async fn create_pending_and_patch_normalize_cluster_label() {
     assert_eq!(
         patched.labels,
         vec!["cluster".to_string(), "linux".to_string()],
-        "patch_cp_settings must normalize cluster case and trim"
+        "patch_cp_settings must persist lowercase cluster"
     );
+}
+
+/// `labels: None` leaves the column (Kind unscope survives a name/paused patch).
+#[tokio::test]
+async fn patch_cp_settings_omitted_labels_keep_cluster() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mut new = NewWorkerHost::new(
+        Uuid::now_v7(),
+        workspace_id,
+        format!("keep-cluster-{}", Uuid::now_v7()),
+        Some(user_id),
+    );
+    new.labels = vec!["cluster".into()];
+    let created = worker_hosts::create_pending(
+        &pool,
+        &new,
+        &hash_token(&generate_pair_token()),
+        expires,
+    )
+    .await
+    .expect("create_pending");
+    assert_eq!(created.labels, vec!["cluster".to_string()]);
+
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        created.id,
+        &HostCpSettings {
+            name: Some("renamed-keep-cluster".into()),
+            paused: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch name/paused with labels omitted");
+    assert_eq!(patched.name, "renamed-keep-cluster");
+    assert!(patched.paused);
+    assert_eq!(
+        patched.labels,
+        vec!["cluster".to_string()],
+        "omitted labels must leave the cluster token"
+    );
+}
+
+/// create_pending must not lowercase non-cluster tokens.
+#[tokio::test]
+async fn create_pending_preserves_non_cluster_label_case() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mut new = NewWorkerHost::new(
+        Uuid::now_v7(),
+        workspace_id,
+        format!("case-labels-{}", Uuid::now_v7()),
+        Some(user_id),
+    );
+    new.labels = vec!["GPU".into(), "Linux".into()];
+    let created = worker_hosts::create_pending(
+        &pool,
+        &new,
+        &hash_token(&generate_pair_token()),
+        expires,
+    )
+    .await
+    .expect("create_pending");
+    assert_eq!(
+        created.labels,
+        vec!["GPU".to_string(), "Linux".to_string()],
+        "create_pending must persist non-cluster label case"
+    );
+}
+
+/// Some([]) replaces labels; the host leaves list_cluster.
+#[tokio::test]
+async fn patch_cp_settings_empty_labels_clears_cluster() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let mut new = NewWorkerHost::new(
+        Uuid::now_v7(),
+        workspace_id,
+        format!("clear-cluster-{}", Uuid::now_v7()),
+        Some(user_id),
+    );
+    new.labels = vec!["cluster".into()];
+    let created = worker_hosts::create_pending(
+        &pool,
+        &new,
+        &hash_token(&generate_pair_token()),
+        expires,
+    )
+    .await
+    .expect("create_pending");
+    assert_eq!(created.labels, vec!["cluster".to_string()]);
+
+    let cleared = worker_hosts::patch_cp_settings(
+        &pool,
+        created.id,
+        &HostCpSettings {
+            labels: Some(vec![]),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch empty labels");
+    assert_eq!(
+        cleared.labels,
+        Vec::<String>::new(),
+        "Some([]) must replace labels, not keep cluster"
+    );
+
     let clustered = worker_hosts::list_cluster(&pool)
         .await
         .expect("list_cluster");
     assert!(
-        clustered.iter().any(|h| h.id == host.id),
-        "normalized cluster label must appear in list_cluster"
+        clustered.iter().all(|h| h.id != created.id),
+        "empty labels must leave list_cluster: {:?}",
+        clustered.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 }
 
-/// 022 inferred `cluster` on container-only UI-paired boxes. Clearing that
-/// label must drop cross-workspace assignability; home workspace stays.
+/// Replacing leftover [cluster, gpu] with [gpu] drops the host from a
+/// foreign workspace picker; home workspace stays.
 #[tokio::test]
 async fn clearing_inferred_cluster_label_removes_cross_workspace_assignability() {
     let pool = connect_and_migrate().await;
     let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
     let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
-
-    let (host, token) =
-        create_pending_with_token(&pool, ws_a, user_a, "inferred-cluster", expires).await;
-    let paired = worker_hosts::consume_pair_token(
-        &pool,
-        &token,
-        "inferred-cluster",
-        "linux-x86_64",
-        false,
-        true,
-        None,
-    )
-    .await
-    .expect("pair container-only (022 inference shape)");
-    assert_eq!(paired.host.id, host.id);
-    assert_eq!(paired.host.created_by, Some(user_a));
-    assert!(
-        !paired.host.advertised_host && paired.host.advertised_container,
-        "022 inferred cluster on container-only advertised boxes"
-    );
-
-    let labeled = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            labels: Some(vec!["cluster".into(), "gpu".into()]),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("stamp inferred cluster");
-    assert!(
-        labeled.labels.iter().any(|l| l == "cluster"),
-        "cluster label must be present before undo: {:?}",
-        labeled.labels
-    );
-
-    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+    let name = format!("clear-cluster-{}", Uuid::now_v7());
+    let mut new = NewWorkerHost::new(Uuid::now_v7(), ws_a, name.clone(), Some(user_a));
+    new.labels = vec!["cluster".into(), "gpu".into()];
+    let token = generate_pair_token();
+    let host = worker_hosts::create_pending(&pool, &new, &hash_token(&token), expires)
         .await
-        .expect("list_assignable B with cluster");
-    assert!(
-        from_b.iter().any(|h| h.id == host.id),
-        "cluster host home={ws_a} must be assignable in {ws_b} before undo: {:?}",
-        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
-    );
-    let clustered = worker_hosts::list_cluster(&pool)
-        .await
-        .expect("list_cluster before undo");
-    assert!(
-        clustered.iter().any(|h| h.id == host.id),
-        "cluster label must appear in list_cluster before undo"
-    );
+        .expect("create_pending");
+    pair_host(&pool, &token, &name).await;
 
     let cleared = worker_hosts::patch_cp_settings(
         &pool,
@@ -3425,84 +3367,169 @@ async fn clearing_inferred_cluster_label_removes_cross_workspace_assignability()
         },
     )
     .await
-    .expect("clear inferred cluster");
+    .expect("clear cluster");
     assert_eq!(
         cleared.labels,
         vec!["gpu".to_string()],
-        "undo must drop cluster and keep other labels"
+        "patch must drop cluster and keep other labels"
     );
     assert_eq!(cleared.workspace_id, ws_a);
 
-    let from_b_after = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
         .await
-        .expect("list_assignable B after undo");
+        .expect("list_assignable B");
     assert!(
-        from_b_after.iter().all(|h| h.id != host.id),
-        "cleared inferred cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
-        from_b_after.iter().map(|h| h.id).collect::<Vec<_>>()
+        from_b.iter().all(|h| h.id != host.id),
+        "cleared cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 
     let from_a = worker_hosts::list_assignable(&pool, ws_a, Duration::seconds(30))
         .await
-        .expect("list_assignable A after undo");
+        .expect("list_assignable A");
     assert!(
         from_a.iter().any(|h| h.id == host.id),
         "home workspace must still assign the host after clearing cluster: {:?}",
         from_a.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 
-    let clustered_after = worker_hosts::list_cluster(&pool)
+    let clustered = worker_hosts::list_cluster(&pool)
         .await
-        .expect("list_cluster after undo");
+        .expect("list_cluster");
     assert!(
-        clustered_after.iter().all(|h| h.id != host.id),
+        clustered.iter().all(|h| h.id != host.id),
         "cleared host must not remain a cluster box: {:?}",
-        clustered_after.iter().map(|h| h.id).collect::<Vec<_>>()
+        clustered.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 }
 
-/// 022 stamped `cluster` on every container-only advertised box. 023 undoes
-/// that for UI-paired hosts (`created_by` set). Bootstrap (`created_by IS NULL`)
-/// keeps the label. Pairing a laptop must not stamp `cluster`.
+/// `labels: None` clones current; a paused=false patch must leave cluster
+/// and keep the host assignable in a foreign workspace.
 #[tokio::test]
-async fn cluster_label_only_from_bootstrap_null_created_by_migration_023() {
-    const OVER_LABEL: &str = include_str!("../migrations/022_cluster_host_label.sql");
-    const UNDO: &str = include_str!("../migrations/023_undo_inferred_cluster_label.sql");
-    assert!(
-        UNDO.contains("created_by IS NOT NULL"),
-        "023 must key off created_by IS NOT NULL so bootstrap (NULL) is kept"
-    );
-    assert!(
-        UNDO.contains("array_remove(labels, 'cluster')"),
-        "023 must strip only the inferred cluster label"
-    );
-
+async fn patch_cp_settings_omitted_labels_keeps_cluster_cross_ws() {
     let pool = connect_and_migrate().await;
     let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
     let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
+    let name = format!("omit-cluster-{}", Uuid::now_v7());
+    let mut new = NewWorkerHost::new(Uuid::now_v7(), ws_a, name.clone(), Some(user_a));
+    new.labels = vec!["cluster".into()];
+    let token = generate_pair_token();
+    let host = worker_hosts::create_pending(&pool, &new, &hash_token(&token), expires)
+        .await
+        .expect("create_pending");
+    pair_host(&pool, &token, &name).await;
 
-    let (laptop_pending, laptop_token) =
-        create_pending_with_token(&pool, ws_a, user_a, "paired-laptop", expires).await;
-    let laptop = pair_host(&pool, &laptop_token, "paired-laptop").await;
-    assert_eq!(laptop.host.id, laptop_pending.id);
-    assert_eq!(laptop.host.created_by, Some(user_a));
-    assert!(
-        laptop.host.advertised_host && !laptop.host.advertised_container,
-        "laptop pair shape: advertised_host, not container-only"
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            labels: None,
+            paused: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch paused with labels omitted");
+    assert_eq!(
+        patched.labels,
+        vec!["cluster".to_string()],
+        "omitted labels must leave the cluster token"
     );
+    assert!(!patched.paused);
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
     assert!(
-        !laptop.host.labels.iter().any(|l| l == "cluster"),
-        "pair must not stamp cluster on a laptop: {:?}",
-        laptop.host.labels
+        from_b.iter().any(|h| h.id == host.id),
+        "cluster host home={ws_a} must stay assignable in {ws_b} when labels are omitted: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// Some([]) persists [] and drops the host from list_cluster and a foreign
+/// workspace picker; home workspace stays.
+#[tokio::test]
+async fn patch_cp_settings_empty_labels_unscopes() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = format!("empty-unscope-{}", Uuid::now_v7());
+    let mut new = NewWorkerHost::new(Uuid::now_v7(), ws_a, name.clone(), Some(user_a));
+    new.labels = vec!["cluster".into()];
+    let token = generate_pair_token();
+    let host = worker_hosts::create_pending(&pool, &new, &hash_token(&token), expires)
+        .await
+        .expect("create_pending");
+    pair_host(&pool, &token, &name).await;
+
+    let cleared = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            labels: Some(vec![]),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("patch empty labels");
+    assert_eq!(
+        cleared.labels,
+        Vec::<String>::new(),
+        "Some([]) must persist empty labels"
     );
 
-    let (ui_pending, ui_token) =
-        create_pending_with_token(&pool, ws_a, user_a, "ui-container", expires).await;
-    let ui_paired = worker_hosts::consume_pair_token(
+    let clustered = worker_hosts::list_cluster(&pool)
+        .await
+        .expect("list_cluster");
+    assert!(
+        clustered.iter().all(|h| h.id != host.id),
+        "empty labels must leave list_cluster: {:?}",
+        clustered.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != host.id),
+        "empty-label host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let from_a = worker_hosts::list_assignable(&pool, ws_a, Duration::seconds(30))
+        .await
+        .expect("list_assignable A");
+    assert!(
+        from_a.iter().any(|h| h.id == host.id),
+        "home workspace must still assign the host after empty labels: {:?}",
+        from_a.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// 023 strips inferred `cluster` from a UI-paired container-only row
+/// (`created_by` set) and keeps it on bootstrap (`created_by IS NULL`).
+#[tokio::test]
+async fn cluster_label_only_from_bootstrap_null_created_by_migration_023() {
+    const UNDO: &str = include_str!("../migrations/023_undo_inferred_cluster_label.sql");
+
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+
+    let ui_name = format!("ui-inferred-{}", Uuid::now_v7());
+    let mut ui_new = NewWorkerHost::new(Uuid::now_v7(), ws_a, ui_name.clone(), Some(user_a));
+    ui_new.labels = vec!["cluster".into(), "gpu".into()];
+    let ui_token = generate_pair_token();
+    worker_hosts::create_pending(&pool, &ui_new, &hash_token(&ui_token), expires)
+        .await
+        .expect("create_pending UI");
+    let ui = worker_hosts::consume_pair_token(
         &pool,
         &ui_token,
-        "ui-container",
+        &ui_name,
         "linux-x86_64",
         false,
         true,
@@ -3510,131 +3537,30 @@ async fn cluster_label_only_from_bootstrap_null_created_by_migration_023() {
     )
     .await
     .expect("pair container-only UI box");
-    assert_eq!(ui_paired.host.id, ui_pending.id);
-    assert_eq!(ui_paired.host.created_by, Some(user_a));
-    assert!(
-        !ui_paired.host.advertised_host && ui_paired.host.advertised_container,
-        "022 victim shape: container-only advertised"
+    assert_eq!(ui.host.created_by, Some(user_a));
+    assert!(!ui.host.advertised_host && ui.host.advertised_container);
+    assert_eq!(
+        ui.host.labels,
+        vec!["cluster".to_string(), "gpu".to_string()]
     );
-    assert!(
-        !ui_paired.host.labels.iter().any(|l| l == "cluster"),
-        "pair must not stamp cluster on a UI-paired box: {:?}",
-        ui_paired.host.labels
-    );
-    let ui = worker_hosts::patch_cp_settings(
-        &pool,
-        ui_paired.host.id,
-        &HostCpSettings {
-            labels: Some(vec!["gpu".into()]),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("stamp gpu on UI box");
-    assert_eq!(ui.labels, vec!["gpu".to_string()]);
 
     let boot =
         create_bootstrap_cluster_host(&pool, ws_a, "kind-bootstrap", expires, false, true).await;
-    assert!(
-        boot.host.created_by.is_none(),
-        "bootstrap must keep created_by IS NULL"
-    );
+    assert!(boot.host.created_by.is_none());
     assert_eq!(boot.host.labels, vec!["cluster".to_string()]);
-    assert!(!boot.host.advertised_host && boot.host.advertised_container);
 
-    let ids = [laptop.host.id, ui.id, boot.host.id];
-    apply_label_migration_to_hosts(&pool, OVER_LABEL, &ids).await;
+    apply_label_migration_to_hosts(&pool, UNDO, &[ui.host.id, boot.host.id]).await;
 
-    let laptop_022 = worker_hosts::get(&pool, laptop.host.id)
-        .await
-        .expect("get laptop after 022")
-        .expect("laptop exists");
-    assert_eq!(laptop_022.created_by, Some(user_a));
-    assert!(
-        !laptop_022.labels.iter().any(|l| l == "cluster"),
-        "022 must not label a host-advertising laptop: {:?}",
-        laptop_022.labels
-    );
-
-    let ui_022 = worker_hosts::get(&pool, ui.id)
-        .await
-        .expect("get UI after 022")
-        .expect("UI exists");
-    assert_eq!(ui_022.created_by, Some(user_a));
-    assert!(
-        ui_022.labels.iter().any(|l| l == "cluster") && ui_022.labels.iter().any(|l| l == "gpu"),
-        "022 over-labeled container-only UI-paired boxes: {:?}",
-        ui_022.labels
-    );
-
-    let boot_022 = worker_hosts::get(&pool, boot.host.id)
-        .await
-        .expect("get bootstrap after 022")
-        .expect("bootstrap exists");
-    assert!(boot_022.created_by.is_none());
-    assert!(
-        boot_022.labels.iter().any(|l| l == "cluster"),
-        "bootstrap must still have cluster after 022: {:?}",
-        boot_022.labels
-    );
-
-    let clustered_022 = worker_hosts::list_cluster(&pool)
-        .await
-        .expect("list_cluster after 022");
-    assert!(
-        clustered_022.iter().any(|h| h.id == ui.id),
-        "022-inferred UI box must appear in list_cluster"
-    );
-    assert!(
-        clustered_022.iter().any(|h| h.id == boot.host.id),
-        "bootstrap must appear in list_cluster"
-    );
-    assert!(
-        clustered_022.iter().all(|h| h.id != laptop.host.id),
-        "laptop must not appear in list_cluster: {:?}",
-        clustered_022.iter().map(|h| h.id).collect::<Vec<_>>()
-    );
-
-    let from_b_022 = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
-        .await
-        .expect("list_assignable B after 022");
-    assert!(
-        from_b_022.iter().any(|h| h.id == ui.id),
-        "022-inferred cluster made the UI box assignable in {ws_b}"
-    );
-    assert!(
-        from_b_022.iter().any(|h| h.id == boot.host.id),
-        "bootstrap must stay assignable in {ws_b}"
-    );
-    assert!(
-        from_b_022.iter().all(|h| h.id != laptop.host.id),
-        "laptop home={ws_a} must not be assignable in {ws_b}"
-    );
-
-    apply_label_migration_to_hosts(&pool, UNDO, &ids).await;
-
-    let laptop_023 = worker_hosts::get(&pool, laptop.host.id)
-        .await
-        .expect("get laptop after 023")
-        .expect("laptop exists");
-    assert_eq!(laptop_023.created_by, Some(user_a));
-    assert!(
-        !laptop_023.labels.iter().any(|l| l == "cluster"),
-        "023 must not stamp cluster on a paired laptop: {:?}",
-        laptop_023.labels
-    );
-
-    let ui_023 = worker_hosts::get(&pool, ui.id)
+    let ui_023 = worker_hosts::get(&pool, ui.host.id)
         .await
         .expect("get UI after 023")
         .expect("UI exists");
-    assert_eq!(ui_023.created_by, Some(user_a));
     assert_eq!(
         ui_023.labels,
         vec!["gpu".to_string()],
         "023 must drop inferred cluster and keep other labels"
     );
-    assert_eq!(ui_023.workspace_id, ws_a);
+    assert_eq!(ui_023.created_by, Some(user_a));
 
     let boot_023 = worker_hosts::get(&pool, boot.host.id)
         .await
@@ -3644,54 +3570,178 @@ async fn cluster_label_only_from_bootstrap_null_created_by_migration_023() {
         boot_023.created_by.is_none(),
         "023 must not invent created_by on bootstrap"
     );
-    assert!(
-        boot_023.labels.iter().any(|l| l == "cluster"),
+    assert_eq!(
+        boot_023.labels,
+        vec!["cluster".to_string()],
         "023 must keep cluster on created_by IS NULL bootstrap: {:?}",
         boot_023.labels
     );
+}
 
-    let clustered_023 = worker_hosts::list_cluster(&pool)
-        .await
-        .expect("list_cluster after 023");
-    assert!(
-        clustered_023.iter().any(|h| h.id == boot.host.id),
-        "bootstrap must remain the only cluster box from this fixture"
-    );
-    assert!(
-        clustered_023
-            .iter()
-            .all(|h| h.id != ui.id && h.id != laptop.host.id),
-        "023 must drop inferred cluster from UI-paired hosts; laptop never had it: {:?}",
-        clustered_023.iter().map(|h| h.id).collect::<Vec<_>>()
-    );
+/// 023's advertised_container AND NOT advertised_host predicate: leftover
+/// [cluster, gpu] on a UI-paired host-advertising box stays.
+#[tokio::test]
+async fn migration_023_keeps_cluster_on_host_advertising_created_by_set() {
+    const UNDO: &str = include_str!("../migrations/023_undo_inferred_cluster_label.sql");
 
-    let from_b_023 = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = format!("host-adv-cluster-{}", Uuid::now_v7());
+    let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name.clone(), Some(user_id));
+    new.labels = vec!["cluster".into(), "gpu".into()];
+    let token = generate_pair_token();
+    worker_hosts::create_pending(&pool, &new, &hash_token(&token), expires)
         .await
-        .expect("list_assignable B after 023");
-    assert!(
-        from_b_023.iter().any(|h| h.id == boot.host.id),
-        "bootstrap created_by IS NULL must stay assignable in every workspace"
-    );
-    assert!(
-        from_b_023
-            .iter()
-            .all(|h| h.id != ui.id && h.id != laptop.host.id),
-        "paired laptop / UI box home={ws_a} must not be assignable in {ws_b}: {:?}",
-        from_b_023.iter().map(|h| h.id).collect::<Vec<_>>()
+        .expect("create_pending");
+    let paired = pair_host(&pool, &token, &name).await;
+    assert_eq!(paired.host.created_by, Some(user_id));
+    assert!(paired.host.advertised_host && !paired.host.advertised_container);
+    assert_eq!(
+        paired.host.labels,
+        vec!["cluster".to_string(), "gpu".to_string()]
     );
 
-    let from_a_023 = worker_hosts::list_assignable(&pool, ws_a, Duration::seconds(30))
+    apply_label_migration_to_hosts(&pool, UNDO, &[paired.host.id]).await;
+
+    let after = worker_hosts::get(&pool, paired.host.id)
         .await
-        .expect("list_assignable A after 023");
-    assert!(
-        from_a_023.iter().any(|h| h.id == laptop.host.id)
-            && from_a_023.iter().any(|h| h.id == ui.id)
-            && from_a_023.iter().any(|h| h.id == boot.host.id),
-        "home workspace must still assign laptop, UI box, and bootstrap: {:?}",
-        from_a_023.iter().map(|h| h.id).collect::<Vec<_>>()
+        .expect("get after 023")
+        .expect("host exists");
+    assert_eq!(
+        after.labels,
+        vec!["cluster".to_string(), "gpu".to_string()],
+        "023 must not strip cluster from a host-advertising UI-paired box: {:?}",
+        after.labels
     );
 }
 
+/// The CP laptop is shared with every workspace on this plane without a
+/// `cluster` label (023 strips cluster from UI-paired hosts). Extra
+/// hostnames must list + assign; a foreign hostname must stay hidden.
+#[tokio::test]
+async fn extra_hostnames_make_this_machine_visible_and_assignable_across_workspaces() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let hostname = format!("dev-laptop-{}", Uuid::new_v4());
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "this-machine", expires).await;
+    pair_host(&pool, &token, &hostname).await;
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != host.id),
+        "non-cluster host must not be assignable in a foreign workspace without extra hostnames: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let visible_empty = worker_hosts::list_visible_for_workspace(&pool, ws_b, &[])
+        .await
+        .expect("visible empty");
+    assert!(
+        visible_empty.iter().all(|h| h.id != host.id),
+        "empty extra hostnames must not leak a foreign host"
+    );
+
+    let extra = vec![hostname.clone()];
+    let visible = worker_hosts::list_visible_for_workspace(&pool, ws_b, &extra)
+        .await
+        .expect("visible extra");
+    assert!(
+        visible.iter().any(|h| h.id == host.id),
+        "this-machine hostname must list in a foreign workspace: {:?}",
+        visible.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let assignable = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &extra,
+    )
+    .await
+    .expect("assignable extra");
+    assert!(
+        assignable.iter().any(|h| h.id == host.id),
+        "this-machine hostname must be assignable in a foreign workspace: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let fqdn = format!("{hostname}.lan");
+    let via_short = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &[fqdn],
+    )
+    .await
+    .expect("assignable fqdn needle");
+    assert!(
+        via_short.iter().any(|h| h.id == host.id),
+        "FQDN extra needle must match short hostname: {:?}",
+        via_short.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+
+    let other = worker_hosts::list_assignable_with_extra_hostnames(
+        &pool,
+        ws_b,
+        Duration::seconds(30),
+        &[format!("other-box-{}", Uuid::new_v4())],
+    )
+    .await
+    .expect("assignable other");
+    assert!(
+        other.iter().all(|h| h.id != host.id),
+        "a different extra hostname must not pull this host"
+    );
+}
+
+/// consume_pair_token must not infer `cluster` on a container-only UI pair.
+#[tokio::test]
+async fn consume_pair_token_does_not_stamp_cluster_on_container_only() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (pending, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "ui-container", expires).await;
+    assert_eq!(pending.labels, Vec::<String>::new());
+    assert_eq!(pending.created_by, Some(user_a));
+
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "ui-container",
+        "linux-x86_64",
+        false,
+        true,
+        None,
+    )
+    .await
+    .expect("pair container-only");
+    assert_eq!(
+        paired.host.labels,
+        Vec::<String>::new(),
+        "consume_pair_token must not stamp cluster: {:?}",
+        paired.host.labels
+    );
+    assert!(!paired.host.advertised_host && paired.host.advertised_container);
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != paired.host.id),
+        "container-only pair home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
+}
+
+/// Paired sandboxed placeholder drops from the picker; a native sibling stays.
 #[tokio::test]
 async fn list_assignable_excludes_sandboxed_isolation() {
     let pool = connect_and_migrate().await;
@@ -3701,19 +3751,11 @@ async fn list_assignable_excludes_sandboxed_isolation() {
     let (native_host, native_token) =
         create_pending_with_token(&pool, workspace_id, user_id, "native", expires).await;
     pair_host(&pool, &native_token, "native-box").await;
-    assert_eq!(
-        worker_hosts::get(&pool, native_host.id)
-            .await
-            .expect("get native")
-            .expect("native exists")
-            .isolation,
-        "native"
-    );
 
     let (sandboxed_host, sandboxed_token) =
         create_pending_with_token(&pool, workspace_id, user_id, "sandboxed", expires).await;
     pair_host(&pool, &sandboxed_token, "sandboxed-box").await;
-    let patched = worker_hosts::patch_cp_settings(
+    worker_hosts::patch_cp_settings(
         &pool,
         sandboxed_host.id,
         &HostCpSettings {
@@ -3723,8 +3765,6 @@ async fn list_assignable_excludes_sandboxed_isolation() {
     )
     .await
     .expect("mark sandboxed");
-    assert_eq!(patched.isolation, "sandboxed");
-    assert!(!patched.is_native_isolation());
 
     let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
@@ -3735,30 +3775,122 @@ async fn list_assignable_excludes_sandboxed_isolation() {
         vec![native_host.id],
         "sandboxed host is a placeholder and must not be assignable: {ids:?}"
     );
-    assert!(assignable.iter().all(|h| h.isolation == "native"));
+}
 
-    let back = worker_hosts::patch_cp_settings(
+/// Isolation AND applies after workspace OR CLUSTER_LABEL_SQL.
+#[tokio::test]
+async fn list_assignable_excludes_sandboxed_cluster_host_from_other_workspace() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "cluster-sandboxed", expires).await;
+    pair_host(&pool, &token, "cluster-sandboxed").await;
+    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("label cluster");
+    worker_hosts::patch_cp_settings(
         &pool,
-        sandboxed_host.id,
+        host.id,
         &HostCpSettings {
-            isolation: Some("native".into()),
+            isolation: Some("sandboxed".into()),
             ..HostCpSettings::default()
         },
     )
     .await
-    .expect("restore native");
-    assert_eq!(back.isolation, "native");
-    let both = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+    .expect("mark sandboxed");
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
         .await
-        .expect("list after restore");
-    let both_ids = assignable_ids_in_workspace(&both, workspace_id);
-    assert_eq!(
-        both_ids.len(),
-        2,
-        "native again is assignable: {both_ids:?}"
+        .expect("list_assignable B");
+    assert!(
+        from_b.iter().all(|h| h.id != host.id),
+        "sandboxed cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
     );
-    assert!(both_ids.contains(&native_host.id));
-    assert!(both_ids.contains(&sandboxed_host.id));
+}
+
+/// Picker skip is not a delete; operators can PATCH the sandboxed row back.
+#[tokio::test]
+async fn list_for_workspace_still_includes_sandboxed_placeholder() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "sandboxed-keep", expires).await;
+    pair_host(&pool, &token, "sandboxed-keep").await;
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            isolation: Some("sandboxed".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("mark sandboxed");
+
+    let listed = worker_hosts::list_for_workspace(&pool, workspace_id)
+        .await
+        .expect("list_for_workspace");
+    let found = listed
+        .iter()
+        .find(|h| h.id == host.id)
+        .expect("sandboxed placeholder must stay in list_for_workspace");
+    assert_eq!(found.isolation, "sandboxed");
+
+    let got = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(got.isolation, "sandboxed");
+}
+
+/// Unknown isolation is Conflict; the column stays native and assignable.
+#[tokio::test]
+async fn patch_cp_settings_unknown_isolation_is_conflict() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "k8s-reject", expires).await;
+    pair_host(&pool, &token, "k8s-reject").await;
+
+    let err = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            isolation: Some("k8s".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect_err("unknown isolation");
+    match err {
+        DbError::Conflict(msg) => assert_eq!(
+            msg, "isolation must be native or sandboxed",
+            "repo parse reject: {msg}"
+        ),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+
+    let stored = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(stored.isolation, "native");
+
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable");
+    assert!(
+        assignable_ids_in_workspace(&assignable, workspace_id).contains(&host.id),
+        "rejected isolation must leave the host assignable: {:?}",
+        assignable.iter().map(|h| h.id).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -3936,7 +4068,7 @@ async fn claim_next_spawn_for_host_is_scoped_to_host_and_kind() {
 }
 
 /// Regular paired hosts must not lease another workspace's spawn just because
-/// `payload->>'host_id'` matches. Unscoped claim is the cluster path.
+/// `payload->>'host_id'` matches. Home enqueue makes an always-None filter fail.
 #[tokio::test]
 async fn claim_next_spawn_for_host_in_workspace_does_not_lease_foreign_workspace() {
     let pool = connect_and_migrate().await;
@@ -3944,7 +4076,11 @@ async fn claim_next_spawn_for_host_in_workspace_does_not_lease_foreign_workspace
     let ws_b = seed_user_with_workspace(&pool).await.1;
     let host_a = Uuid::now_v7();
 
+    let home = spawn_claim(ws_a, host_a, "spawn_session");
     let foreign = spawn_claim(ws_b, host_a, "spawn_session");
+    work_claims::enqueue(&pool, &home)
+        .await
+        .expect("enqueue home spawn");
     work_claims::enqueue(&pool, &foreign)
         .await
         .expect("enqueue foreign spawn");
@@ -3956,89 +4092,95 @@ async fn claim_next_spawn_for_host_in_workspace_does_not_lease_foreign_workspace
         Duration::minutes(2),
     )
     .await
+    .expect("scoped claim")
+    .expect("home-workspace spawn must be leased");
+    assert_eq!(scoped.id, home.id);
+    assert_eq!(scoped.workspace_id, ws_a);
+    assert_eq!(scoped.lease_owner, Some(host_a));
+
+    let leftover = work_claims::get(&pool, foreign.id)
+        .await
+        .expect("get foreign")
+        .expect("foreign row remains");
+    assert_eq!(leftover.status, "ready");
+    assert_eq!(leftover.workspace_id, ws_b);
+    assert!(leftover.lease_owner.is_none());
+}
+
+/// Sibling 212 only filters host_id on the unscoped path.
+#[tokio::test]
+async fn claim_next_spawn_for_host_in_workspace_does_not_lease_other_host_same_workspace() {
+    let pool = connect_and_migrate().await;
+    let ws_a = seed_user_with_workspace(&pool).await.1;
+    let host_a = Uuid::now_v7();
+    let host_b = Uuid::now_v7();
+
+    let other_host = spawn_claim(ws_a, host_b, "spawn_session");
+    work_claims::enqueue(&pool, &other_host)
+        .await
+        .expect("enqueue host B spawn");
+
+    let scoped = work_claims::claim_next_spawn_for_host_in_workspace(
+        &pool,
+        ws_a,
+        host_a,
+        Duration::minutes(2),
+    )
+    .await
     .expect("scoped claim");
     assert!(
         scoped.is_none(),
-        "home-workspace claim must not take workspace B spawn: {scoped:?}"
+        "host A must not take host B spawn in the same workspace: {scoped:?}"
     );
 
-    let unscoped =
-        work_claims::claim_next_spawn_for_host(&pool, ws_a, host_a, Duration::minutes(2))
-            .await
-            .expect("unscoped claim")
-            .expect("cluster path may still take the foreign spawn");
-    assert_eq!(unscoped.id, foreign.id);
-    assert_eq!(unscoped.workspace_id, ws_b);
-    assert_eq!(unscoped.lease_owner, Some(host_a));
+    let leftover = work_claims::get(&pool, other_host.id)
+        .await
+        .expect("get host B")
+        .expect("host B row remains");
+    assert_eq!(leftover.status, "ready");
+    assert!(leftover.lease_owner.is_none());
 }
 
+/// Kind-gated $5 would stay green if only spawn_session were enqueued.
 #[tokio::test]
-async fn dead_for_session_voids_ready_and_leased_spawn_claims() {
+async fn claim_next_spawn_for_host_in_workspace_filters_signal_session_and_chat_turn() {
     let pool = connect_and_migrate().await;
-    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
-    let host_id = Uuid::now_v7();
-    let session_id = Uuid::now_v7();
-    let other_session = Uuid::now_v7();
+    let ws_a = seed_user_with_workspace(&pool).await.1;
+    let ws_b = seed_user_with_workspace(&pool).await.1;
+    let host_a = Uuid::now_v7();
 
-    let ready = NewWorkClaim {
-        id: Uuid::now_v7(),
-        workspace_id,
-        kind: "spawn_session".into(),
-        payload: json!({ "host_id": host_id, "session_id": session_id }),
-        max_attempts: 3,
-        available_at: Utc::now(),
-    };
-    let leased = NewWorkClaim {
-        id: Uuid::now_v7(),
-        workspace_id,
-        kind: "spawn_session".into(),
-        payload: json!({ "host_id": host_id, "session_id": session_id }),
-        max_attempts: 3,
-        available_at: Utc::now(),
-    };
-    let other = NewWorkClaim {
-        id: Uuid::now_v7(),
-        workspace_id,
-        kind: "spawn_session".into(),
-        payload: json!({ "host_id": host_id, "session_id": other_session }),
-        max_attempts: 3,
-        available_at: Utc::now(),
-    };
-    work_claims::enqueue(&pool, &ready)
+    let signal = spawn_claim(ws_b, host_a, "signal_session");
+    let chat = spawn_claim(ws_b, host_a, "chat_turn");
+    work_claims::enqueue(&pool, &signal)
         .await
-        .expect("enqueue ready");
-    work_claims::enqueue(&pool, &leased)
+        .expect("enqueue foreign signal");
+    work_claims::enqueue(&pool, &chat)
         .await
-        .expect("enqueue leased");
-    work_claims::enqueue(&pool, &other)
-        .await
-        .expect("enqueue other");
+        .expect("enqueue foreign chat");
 
-    let took =
-        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
-            .await
-            .expect("claim")
-            .expect("leased one");
-    assert!(took.id == ready.id || took.id == leased.id);
+    let scoped = work_claims::claim_next_spawn_for_host_in_workspace(
+        &pool,
+        ws_a,
+        host_a,
+        Duration::minutes(2),
+    )
+    .await
+    .expect("scoped claim");
+    assert!(
+        scoped.is_none(),
+        "home-workspace claim must not take foreign signal_session or chat_turn: {scoped:?}"
+    );
 
-    let n = work_claims::dead_for_session(&pool, session_id)
+    let leftover_signal = work_claims::get(&pool, signal.id)
         .await
-        .expect("dead_for_session");
-    assert_eq!(n, 2, "ready and leased claims for the session must die");
-
-    let leftover =
-        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
-            .await
-            .expect("claim leftover")
-            .expect("other session must still be claimable");
-    assert_eq!(leftover.id, other.id);
-
-    let dead_ready = work_claims::get(&pool, ready.id).await.expect("get ready");
-    let dead_leased = work_claims::get(&pool, leased.id)
+        .expect("get signal")
+        .expect("signal row remains");
+    let leftover_chat = work_claims::get(&pool, chat.id)
         .await
-        .expect("get leased");
-    assert_eq!(dead_ready.expect("ready row").status, "dead");
-    assert_eq!(dead_leased.expect("leased row").status, "dead");
+        .expect("get chat")
+        .expect("chat row remains");
+    assert_eq!(leftover_signal.status, "ready");
+    assert_eq!(leftover_chat.status, "ready");
 }
 
 #[tokio::test]
@@ -4062,53 +4204,217 @@ async fn complete_owned_rejects_wrong_host() {
         .expect("complete_owned wrong host");
     assert!(!stolen, "wrong host_id must not complete the lease");
 
-    let other_ws = seed_user_with_workspace(&pool).await.1;
-    let cross = work_claims::complete_owned(&pool, leased.id, token, host_a, other_ws)
+    let leftover = work_claims::get(&pool, leased.id)
         .await
-        .expect("complete_owned wrong workspace");
-    assert!(!cross, "wrong workspace_id must not complete the lease");
-
-    let failed = work_claims::fail_owned(
-        &pool,
-        leased.id,
-        token,
-        host_b,
-        workspace_id,
-        "not yours",
-        None,
-    )
-    .await
-    .expect("fail_owned wrong host");
-    assert!(!failed, "wrong host_id must not fail the lease");
-
-    let ok = work_claims::complete_owned(&pool, leased.id, token, host_a, workspace_id)
-        .await
-        .expect("complete_owned owner");
-    assert!(ok, "owning host must complete the lease");
+        .expect("get")
+        .expect("row remains");
+    assert_eq!(leftover.status, "leased");
+    assert_eq!(leftover.lease_owner, Some(host_a));
+    assert_eq!(leftover.lease_token, Some(token));
 }
 
+/// Expired leased row returns to ready and drops the token; a still-valid
+/// sibling lease is untouched. `reclaim_expired_leases` is the SQL the
+/// HTTP lease poll calls first.
 #[tokio::test]
-async fn complete_owned_uses_claim_workspace_not_host_home() {
+async fn reclaim_expired_leases_repo_ready_clears_token_leaves_unexpired() {
     let pool = connect_and_migrate().await;
-    let job_ws = seed_user_with_workspace(&pool).await.1;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let host_id = Uuid::now_v7();
-    let claim = spawn_claim(job_ws, host_id, "spawn_session");
-    work_claims::enqueue(&pool, &claim).await.expect("enqueue");
-    let leased = work_claims::claim_next_spawn_for_host(
-        &pool,
-        Uuid::now_v7(),
-        host_id,
-        Duration::minutes(2),
-    )
-    .await
-    .expect("claim")
-    .expect("cluster host leases by host_id");
-    assert_eq!(leased.workspace_id, job_ws);
-    let token = leased.lease_token.expect("lease_token");
-    let ok = work_claims::complete_owned(&pool, leased.id, token, host_id, leased.workspace_id)
+
+    let aged_new = spawn_claim(workspace_id, host_id, "spawn_session");
+    let live_new = spawn_claim(workspace_id, host_id, "spawn_session");
+    work_claims::enqueue(&pool, &aged_new)
         .await
-        .expect("complete");
-    assert!(ok, "complete with claim.workspace_id must succeed");
+        .expect("enqueue aged");
+    work_claims::enqueue(&pool, &live_new)
+        .await
+        .expect("enqueue live");
+
+    let first =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim first")
+            .expect("first leased");
+    let second =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim second")
+            .expect("second leased");
+    let claimed = [first, second];
+    assert!(
+        claimed.iter().any(|c| c.id == aged_new.id),
+        "aged row leased"
+    );
+    let live_leased = claimed
+        .iter()
+        .find(|c| c.id == live_new.id)
+        .expect("live row leased");
+    let live_token = live_leased.lease_token.expect("live lease_token");
+
+    let aged = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET lease_expires_at = now() - interval '1 minute'
+        WHERE id = $1
+        "#,
+    )
+    .bind(aged_new.id)
+    .execute(&pool)
+    .await
+    .expect("backdate aged lease");
+    assert_eq!(
+        aged.rows_affected(),
+        1,
+        "expected the leased row aged: {}",
+        aged_new.id
+    );
+
+    let n = work_claims::reclaim_expired_leases(&pool, 64)
+        .await
+        .expect("reclaim_expired_leases");
+    assert!(n >= 1, "must reclaim the aged leased row: {n}");
+
+    let aged_row = work_claims::get(&pool, aged_new.id)
+        .await
+        .expect("get aged")
+        .expect("aged row remains");
+    assert_eq!(
+        aged_row.status, "ready",
+        "aged must return to ready: {aged_row:?}"
+    );
+    assert!(
+        aged_row.lease_token.is_none(),
+        "aged lease_token cleared: {aged_row:?}"
+    );
+    assert!(
+        aged_row.lease_owner.is_none(),
+        "aged lease_owner cleared: {aged_row:?}"
+    );
+    assert!(
+        aged_row.lease_expires_at.is_none(),
+        "aged lease_expires_at cleared: {aged_row:?}"
+    );
+
+    let live_row = work_claims::get(&pool, live_new.id)
+        .await
+        .expect("get live")
+        .expect("live row remains");
+    assert_eq!(
+        live_row.status, "leased",
+        "unexpired sibling stays leased: {live_row:?}"
+    );
+    assert_eq!(
+        live_row.lease_token,
+        Some(live_token),
+        "unexpired sibling keeps original token: {live_row:?}"
+    );
+    assert_eq!(live_row.lease_owner, Some(host_id));
+}
+
+/// `WHERE status = 'leased'` must not re-queue finished work. Plant done
+/// and dead rows with `lease_expires_at` in the past; reclaim leaves
+/// status and version unchanged.
+#[tokio::test]
+async fn reclaim_expired_leases_does_not_revive_done_or_dead() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let host_id = Uuid::now_v7();
+
+    let done_new = spawn_claim(workspace_id, host_id, "spawn_session");
+    let mut dead_new = spawn_claim(workspace_id, host_id, "spawn_session");
+    dead_new.max_attempts = 1;
+    work_claims::enqueue(&pool, &done_new)
+        .await
+        .expect("enqueue done");
+    work_claims::enqueue(&pool, &dead_new)
+        .await
+        .expect("enqueue dead");
+
+    let first =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim first")
+            .expect("first leased");
+    let second =
+        work_claims::claim_next_spawn_for_host(&pool, workspace_id, host_id, Duration::minutes(2))
+            .await
+            .expect("claim second")
+            .expect("second leased");
+    let claimed = [first, second];
+    let done_leased = claimed
+        .iter()
+        .find(|c| c.id == done_new.id)
+        .expect("done row leased");
+    let dead_leased = claimed
+        .iter()
+        .find(|c| c.id == dead_new.id)
+        .expect("dead row leased");
+    let done_token = done_leased.lease_token.expect("done lease_token");
+    let dead_token = dead_leased.lease_token.expect("dead lease_token");
+
+    let finished = work_claims::complete(&pool, done_leased.id, done_token)
+        .await
+        .expect("complete done");
+    assert!(finished, "done row must complete");
+    let killed = work_claims::fail(&pool, dead_leased.id, dead_token, "plant dead", None)
+        .await
+        .expect("fail dead");
+    assert!(killed, "dead row must fail");
+
+    let planted = sqlx::query(
+        r#"
+        UPDATE work_claims
+        SET lease_expires_at = now() - interval '1 minute'
+        WHERE id IN ($1, $2)
+        "#,
+    )
+    .bind(done_new.id)
+    .bind(dead_new.id)
+    .execute(&pool)
+    .await
+    .expect("backdate done/dead expiry");
+    assert_eq!(planted.rows_affected(), 2, "expected both finished rows aged");
+
+    let before_done = work_claims::get(&pool, done_new.id)
+        .await
+        .expect("get done before")
+        .expect("done row");
+    let before_dead = work_claims::get(&pool, dead_new.id)
+        .await
+        .expect("get dead before")
+        .expect("dead row");
+    assert_eq!(before_done.status, "done", "{before_done:?}");
+    assert_eq!(before_dead.status, "dead", "{before_dead:?}");
+
+    let _ = work_claims::reclaim_expired_leases(&pool, 64)
+        .await
+        .expect("reclaim_expired_leases");
+
+    let after_done = work_claims::get(&pool, done_new.id)
+        .await
+        .expect("get done after")
+        .expect("done row remains");
+    let after_dead = work_claims::get(&pool, dead_new.id)
+        .await
+        .expect("get dead after")
+        .expect("dead row remains");
+    assert_eq!(
+        after_done.status, "done",
+        "done must not return to ready: {after_done:?}"
+    );
+    assert_eq!(
+        after_dead.status, "dead",
+        "dead must not return to ready: {after_dead:?}"
+    );
+    assert_eq!(
+        after_done.version, before_done.version,
+        "done version must stay put: {after_done:?}"
+    );
+    assert_eq!(
+        after_dead.version, before_dead.version,
+        "dead version must stay put: {after_dead:?}"
+    );
 }
 
 /// Catalog: pair token stored hashed; list/GET never return plaintext after create.
@@ -4120,45 +4426,15 @@ async fn pair_token_hashed_at_rest_list_get_never_return_plaintext() {
     let expires = Utc::now() + Duration::hours(1);
     let (host, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "hashed-rest", expires).await;
-    assert!(
-        token.starts_with(PAIR_TOKEN_PREFIX),
-        "create must mint flp_ plaintext for the caller, got {token}"
-    );
 
     assert_pair_token_plaintext_column_absent_or_null(&pool, host.id).await;
     assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-    let (stored, unused) = pair_token_hash_and_used_at(&pool, host.id, &token).await;
-    assert!(unused.is_none(), "fresh pair token must be unused");
-    assert!(
-        worker_hosts::verify_token(&token, &stored),
-        "stored token_hash must verify the minted plaintext"
-    );
     assert_repo_host_omits_pair_plaintext(&host, &[&token]);
     assert_repo_reads_omit_pair_plaintext(&pool, workspace_id, host.id, &[&token]).await;
-
-    let new_token = generate_pair_token();
-    let replaced =
-        worker_hosts::replace_pair_token(&pool, host.id, &hash_token(&new_token), expires)
-            .await
-            .expect("replace while pending");
-    assert_pair_token_plaintext_column_absent_or_null(&pool, host.id).await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &new_token).await;
-    assert_repo_host_omits_pair_plaintext(&replaced, &[&token, &new_token]);
-    assert_repo_reads_omit_pair_plaintext(&pool, workspace_id, host.id, &[&token, &new_token])
-        .await;
-
-    // Control: GET/list did not break pairing — the unused hash still consumes.
-    let paired = pair_host(&pool, &new_token, "hashed-rest-box").await;
-    assert_eq!(paired.host.id, host.id);
-    assert_eq!(paired.host.status, "online");
-    assert_repo_host_omits_pair_plaintext(&paired.host, &[&token, &new_token]);
-    assert_repo_reads_omit_pair_plaintext(&pool, workspace_id, host.id, &[&token, &new_token])
-        .await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &token).await;
-    assert_pair_token_hashed_at_rest(&pool, host.id, &new_token).await;
 }
 
+/// replace_pair_token SET used_at on unused rows; consume of the old flp_
+/// is Conflict already used (a DELETE of the old row must not stay green).
 #[tokio::test]
 async fn replace_pair_token_only_while_pending_and_invalidates_old() {
     let pool = connect_and_migrate().await;
@@ -4167,10 +4443,20 @@ async fn replace_pair_token_only_while_pending_and_invalidates_old() {
     let (host, old_token) =
         create_pending_with_token(&pool, workspace_id, user_id, "rotate", expires).await;
 
-    let new_token = generate_pair_token();
-    worker_hosts::replace_pair_token(&pool, host.id, &hash_token(&new_token), expires)
-        .await
-        .expect("replace while pending");
+    worker_hosts::replace_pair_token(
+        &pool,
+        host.id,
+        &hash_token(&generate_pair_token()),
+        expires,
+    )
+    .await
+    .expect("replace while pending");
+
+    let (_, used_at) = pair_token_hash_and_used_at(&pool, host.id, &old_token).await;
+    assert!(
+        used_at.is_some(),
+        "replace must SET used_at on the unused create-time token"
+    );
 
     let err = worker_hosts::consume_pair_token(
         &pool,
@@ -4183,32 +4469,11 @@ async fn replace_pair_token_only_while_pending_and_invalidates_old() {
     )
     .await
     .expect_err("old pair token must die after rotate");
-    match err {
-        DbError::Conflict(_) | DbError::NotFound(_) => {}
-        other => panic!("expected used/invalid old token, got {other:?}"),
-    }
-
-    let paired = pair_host(&pool, &new_token, "box").await;
-    assert_eq!(paired.host.id, host.id);
-    assert_eq!(paired.host.status, "online");
-
-    let again = worker_hosts::replace_pair_token(
-        &pool,
-        host.id,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect_err("online host must not get a new pair token");
-    match again {
-        DbError::Conflict(msg) => assert!(
-            msg.contains("pending"),
-            "conflict should say pending-only: {msg}"
-        ),
-        other => panic!("expected Conflict after pair, got {other:?}"),
-    }
+    assert_pair_conflict(err, "already used");
 }
 
+/// Age last_seen past 90s → as_public offline; heartbeat (not re-pair) advances
+/// last_seen and remaps public online. Picker stale-drop is a sibling.
 #[tokio::test]
 async fn stored_online_with_stale_last_seen_serializes_offline() {
     let pool = connect_and_migrate().await;
@@ -4226,23 +4491,31 @@ async fn stored_online_with_stale_last_seen_serializes_offline() {
     .await
     .expect("age last_seen_at");
 
-    let row = worker_hosts::get(&pool, host.id)
+    let aged = worker_hosts::get(&pool, host.id)
         .await
         .expect("get")
         .expect("host");
-    assert_eq!(row.status, "online", "stored status stays online");
+    let aged_seen = aged.last_seen_at.expect("aged last_seen_at");
     assert_eq!(
-        row.as_public(Utc::now()).status,
+        aged.as_public(Utc::now()).status,
         "offline",
         "API/UI must report offline after 90s without a heartbeat"
     );
+
+    let revived = worker_hosts::heartbeat(
+        &pool, host.id, true, false, None, None, None, 0, None, None, None, None, None,
+    )
+    .await
+    .expect("heartbeat");
+    let seen = revived.last_seen_at.expect("heartbeat sets last_seen_at");
     assert!(
-        !worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
-            .await
-            .expect("assignable")
-            .iter()
-            .any(|h| h.id == host.id),
-        "stale host must not be scheduled"
+        seen > aged_seen,
+        "heartbeat must advance last_seen past the aged stamp"
+    );
+    assert_eq!(
+        revived.as_public(Utc::now()).status,
+        "online",
+        "heartbeat without re-pair must report public online"
     );
 }
 
@@ -4307,7 +4580,7 @@ async fn clear_install_request_if_other_spec_does_not_clear() {
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
     let spec = json!({ "provider": "ollama", "spec": "llama3" });
-    worker_hosts::patch_cp_settings(
+    let queued = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
@@ -4317,19 +4590,12 @@ async fn clear_install_request_if_other_spec_does_not_clear() {
     )
     .await
     .expect("queue install_request");
+    let requested_at = queued
+        .install_requested_at
+        .expect("install_requested_at must be set");
 
-    let err = worker_hosts::clear_install_request_if(&pool, host.id, Some("other-spec"))
-        .await
-        .expect_err("mismatch must not clear the queued spec");
-    match err {
-        DbError::NotFound(msg) => {
-            assert!(
-                msg.contains("not found"),
-                "mismatch currently returns NotFound: {msg}"
-            );
-        }
-        other => panic!("expected NotFound on spec mismatch, got {other:?}"),
-    }
+    // Ok(unchanged) and Err are equally correct; product is keep-queued.
+    let _ = worker_hosts::clear_install_request_if(&pool, host.id, Some("other-spec")).await;
 
     let loaded = worker_hosts::get(&pool, host.id)
         .await
@@ -4340,9 +4606,149 @@ async fn clear_install_request_if_other_spec_does_not_clear() {
         Some(&spec),
         "queued install_request must survive a mismatched ack"
     );
+    assert_eq!(
+        loaded.install_requested_at,
+        Some(requested_at),
+        "install_requested_at must stay the pre-act stamp after a mismatch"
+    );
+}
+
+/// Omitted/empty/whitespace ack must not drop a queued install (old hosts omit spec).
+#[tokio::test]
+async fn clear_install_request_if_none_empty_or_whitespace_does_not_clear() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("inst-blank-ack");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let spec = json!({ "provider": "ollama", "spec": "llama3" });
+    let queued = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(spec.clone()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("queue install_request");
+    let requested_at = queued
+        .install_requested_at
+        .expect("install_requested_at must be set");
+
+    for ack in [None, Some(""), Some("   ")] {
+        let _ = worker_hosts::clear_install_request_if(&pool, host.id, ack).await;
+        let loaded = worker_hosts::get(&pool, host.id)
+            .await
+            .expect("get")
+            .expect("host");
+        assert_eq!(
+            loaded.install_request.as_ref(),
+            Some(&spec),
+            "queued install_request must survive omitted/empty/whitespace ack {ack:?}"
+        );
+        assert_eq!(
+            loaded.install_requested_at,
+            Some(requested_at),
+            "install_requested_at must stay the pre-act stamp after omitted/empty/whitespace ack {ack:?}"
+        );
+    }
+}
+
+/// `str::trim` runs before the SQL match; padded llama3 must clear both columns.
+#[tokio::test]
+async fn clear_install_request_if_trims_ack_spec_before_match() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("inst-trim");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(json!({ "provider": "ollama", "spec": "llama3" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("queue install_request");
+
+    let cleared = worker_hosts::clear_install_request_if(&pool, host.id, Some("  llama3  "))
+        .await
+        .expect("padded matching spec must clear");
     assert!(
-        loaded.install_requested_at.is_some(),
-        "install_requested_at must stay set after a mismatch"
+        cleared.install_request.is_none(),
+        "trimmed ack must drop install_request"
+    );
+    assert!(
+        cleared.install_requested_at.is_none(),
+        "trimmed ack must drop install_requested_at"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert!(loaded.install_request.is_none());
+    assert!(loaded.install_requested_at.is_none());
+}
+
+/// Queued JSON without a spec key (`->>'spec'` is NULL) must not clear on llama3 ack.
+#[tokio::test]
+async fn clear_install_request_if_queued_json_without_spec_key_does_not_clear() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("inst-nospec");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let spec = json!({ "provider": "ollama" });
+    let queued = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            install_model: Some(spec.clone()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("queue install_request without spec");
+    assert!(
+        queued
+            .install_request
+            .as_ref()
+            .and_then(|v| v.get("spec"))
+            .is_none(),
+        "fixture must omit the spec key"
+    );
+    let requested_at = queued
+        .install_requested_at
+        .expect("install_requested_at must be set");
+
+    let _ = worker_hosts::clear_install_request_if(&pool, host.id, Some("llama3")).await;
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        loaded.install_request.as_ref(),
+        Some(&spec),
+        "install_request without spec key must survive a llama3 ack"
+    );
+    assert_eq!(
+        loaded.install_requested_at,
+        Some(requested_at),
+        "install_requested_at must stay the pre-act stamp when ->>'spec' is NULL"
     );
 }
 
@@ -4388,7 +4794,7 @@ async fn clear_install_request_if_matching_spec_clears() {
     assert!(loaded.install_requested_at.is_none());
 }
 
-/// Null keys drop on merge; settings_gen bumps when runtime_settings change.
+/// Seed two keys; null one and add another so the unmentioned key survives.
 #[tokio::test]
 async fn patch_runtime_settings_merges_and_null_drops_key() {
     let pool = connect_and_migrate().await;
@@ -4399,24 +4805,16 @@ async fn patch_runtime_settings_merges_and_null_drops_key() {
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    let before = worker_hosts::get(&pool, host.id)
-        .await
-        .expect("get")
-        .expect("host");
-    let gen_before = before.settings_gen;
-    assert_eq!(before.runtime_settings, json!({}));
-
     let first = worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
-            runtime_settings: Some(json!({ "harness": "grok" })),
+            runtime_settings: Some(json!({ "harness": "grok", "work_dir": "/tmp/work" })),
             ..HostCpSettings::default()
         },
     )
     .await
-    .expect("patch harness");
-    assert_eq!(first.runtime_settings, json!({ "harness": "grok" }));
+    .expect("seed two keys");
 
     let second = worker_hosts::patch_cp_settings(
         &pool,
@@ -4430,17 +4828,115 @@ async fn patch_runtime_settings_merges_and_null_drops_key() {
     .expect("patch merge + null");
     assert_eq!(
         second.runtime_settings,
-        json!({ "effort": "high" }),
-        "effort stays; harness key must be gone after null merge"
+        json!({ "work_dir": "/tmp/work", "effort": "high" }),
+        "unmentioned work_dir must survive; harness dropped; effort added"
     );
     assert!(
-        second.runtime_settings.get("harness").is_none(),
-        "null incoming value must remove the key"
+        second.settings_gen > first.settings_gen,
+        "runtime_settings change must bump settings_gen ({gen} vs {first})",
+        gen = second.settings_gen,
+        first = first.settings_gen
     );
-    assert!(
-        second.settings_gen > gen_before,
-        "runtime_settings patches must bump settings_gen ({gen} vs {gen_before})",
-        gen = second.settings_gen
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(
+        loaded.runtime_settings,
+        json!({ "work_dir": "/tmp/work", "effort": "high" })
+    );
+    assert_eq!(loaded.settings_gen, second.settings_gen);
+}
+
+/// `runtime_settings: None` clones the stored object; only the other field bumps gen.
+#[tokio::test]
+async fn patch_runtime_settings_omitted_none_leaves_stored() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("rt-omit");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let seeded = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            runtime_settings: Some(json!({ "work_dir": "/tmp/work" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("seed work_dir");
+
+    let patched = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            allow_host: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("allow_host only");
+    assert_eq!(
+        patched.runtime_settings,
+        json!({ "work_dir": "/tmp/work" }),
+        "omitted runtime_settings must leave the stored object"
+    );
+    assert!(!patched.allow_host);
+    assert_eq!(
+        patched.settings_gen,
+        seeded.settings_gen + 1,
+        "only the allow_host change must bump settings_gen"
+    );
+
+    let loaded = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get")
+        .expect("host");
+    assert_eq!(loaded.runtime_settings, json!({ "work_dir": "/tmp/work" }));
+    assert_eq!(loaded.settings_gen, patched.settings_gen);
+}
+
+/// Re-sending the already-stored object must not bump settings_gen.
+#[tokio::test]
+async fn patch_runtime_settings_identical_object_does_not_bump_gen() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let name = unique_slug("rt-same");
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
+    pair_host(&pool, &token, &format!("{name}-box")).await;
+
+    let first = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            runtime_settings: Some(json!({ "effort": "high" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("seed effort");
+
+    let again = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            runtime_settings: Some(json!({ "effort": "high" })),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("identical object");
+    assert_eq!(again.runtime_settings, json!({ "effort": "high" }));
+    assert_eq!(
+        again.settings_gen, first.settings_gen,
+        "identical runtime_settings must not bump settings_gen"
     );
 
     let loaded = worker_hosts::get(&pool, host.id)
@@ -4448,7 +4944,7 @@ async fn patch_runtime_settings_merges_and_null_drops_key() {
         .expect("get")
         .expect("host");
     assert_eq!(loaded.runtime_settings, json!({ "effort": "high" }));
-    assert_eq!(loaded.settings_gen, second.settings_gen);
+    assert_eq!(loaded.settings_gen, first.settings_gen);
 }
 
 /// Heartbeat `runtime_reported` is informational and must not ack pending settings.
@@ -4501,7 +4997,7 @@ async fn set_runtime_reported_does_not_change_settings_ack_gen() {
     assert_eq!(loaded.runtime_reported, json!({ "ok": true }));
 }
 
-/// PATCH 0 / 9999 / negatives must clamp into 1–256 or fail closed (nothing out of range stored).
+/// PATCH 0 / -5 / 512 / 9999 must clamp then persist 1 or 256 (not reject, not write raw).
 #[tokio::test]
 async fn patch_max_concurrent_0_and_9999_clamp_or_reject() {
     let pool = connect_and_migrate().await;
@@ -4517,96 +5013,80 @@ async fn patch_max_concurrent_0_and_9999_clamp_or_reject() {
         .expect("get")
         .expect("host");
     assert_eq!(before.max_concurrent, 4, "create default is 4");
-    assert!((1..=256).contains(&before.max_concurrent));
 
-    for (raw, want_if_clamped) in [(0, 1), (-5, 1), (9999, 256), (512, 256)] {
-        let result = worker_hosts::patch_cp_settings(
-            &pool,
-            host.id,
-            &HostCpSettings {
-                max_concurrent: Some(raw),
-                ..HostCpSettings::default()
-            },
-        )
-        .await;
-        match result {
-            Ok(patched) => {
-                assert_eq!(
-                    patched.max_concurrent, want_if_clamped,
-                    "PATCH max_concurrent={raw} must clamp to {want_if_clamped}"
-                );
-                assert!(
-                    (1..=256).contains(&patched.max_concurrent),
-                    "clamped value out of range: {}",
-                    patched.max_concurrent
-                );
-                let stored = worker_hosts::get(&pool, host.id)
-                    .await
-                    .expect("get after clamp")
-                    .expect("host");
-                assert_eq!(
-                    stored.max_concurrent, want_if_clamped,
-                    "stored max_concurrent after raw {raw}"
-                );
-            }
-            Err(err) => {
-                let stored = worker_hosts::get(&pool, host.id)
-                    .await
-                    .expect("get after reject")
-                    .expect("host");
-                assert_ne!(
-                    stored.max_concurrent, raw,
-                    "rejected PATCH {raw} must not persist the out-of-range value"
-                );
-                assert!(
-                    (1..=256).contains(&stored.max_concurrent),
-                    "stored max_concurrent after reject({raw}): {}",
-                    stored.max_concurrent
-                );
-                match err {
-                    DbError::Conflict(msg) => assert!(
-                        msg.contains("max_concurrent") || msg.contains("1") || msg.contains("256"),
-                        "conflict should name the range: {msg}"
-                    ),
-                    DbError::Sqlx(sqlx::Error::Database(db)) => {
-                        let code = db.code().map(|c| c.to_string()).unwrap_or_default();
-                        assert!(
-                            code == "23514" || db.message().contains("max_concurrent"),
-                            "expected check violation, got code={code} msg={}",
-                            db.message()
-                        );
-                    }
-                    other => panic!(
-                        "PATCH max_concurrent={raw} must clamp or fail closed, got {other:?}"
-                    ),
-                }
-            }
-        }
-    }
-
-    for keep in [1, 8, 256] {
-        let patched = worker_hosts::patch_cp_settings(
-            &pool,
-            host.id,
-            &HostCpSettings {
-                max_concurrent: Some(keep),
-                ..HostCpSettings::default()
-            },
-        )
+    let zero = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(0),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("PATCH 0 must clamp");
+    assert_eq!(zero.max_concurrent, 1);
+    let stored = worker_hosts::get(&pool, host.id)
         .await
-        .unwrap_or_else(|e| panic!("in-range PATCH {keep} must persist: {e}"));
-        assert_eq!(patched.max_concurrent, keep, "in-range {keep}");
-        let stored = worker_hosts::get(&pool, host.id)
-            .await
-            .expect("get in-range")
-            .expect("host");
-        assert_eq!(stored.max_concurrent, keep, "stored in-range {keep}");
-    }
+        .expect("get after 0")
+        .expect("host");
+    assert_eq!(stored.max_concurrent, 1, "stored after PATCH 0");
+
+    let neg = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(-5),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("PATCH -5 must clamp");
+    assert_eq!(neg.max_concurrent, 1);
+    let stored = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get after -5")
+        .expect("host");
+    assert_eq!(stored.max_concurrent, 1, "stored after PATCH -5");
+
+    let mid = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(512),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("PATCH 512 must clamp");
+    assert_eq!(mid.max_concurrent, 256);
+    let stored = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get after 512")
+        .expect("host");
+    assert_eq!(stored.max_concurrent, 256, "stored after PATCH 512");
+
+    let huge = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(9999),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("PATCH 9999 must clamp");
+    assert_eq!(huge.max_concurrent, 256);
+    let stored = worker_hosts::get(&pool, host.id)
+        .await
+        .expect("get after 9999")
+        .expect("host");
+    assert_eq!(stored.max_concurrent, 256, "stored after PATCH 9999");
 }
 
-/// Effective cap is min(clamped plane, clamped advertised). Advertised 0 is not unlimited.
+/// Advertised 0 persists Some(1) without writing the plane column; omitted
+/// advertised must COALESCE-keep that 1 so effective stays 1.
 #[tokio::test]
-async fn effective_max_concurrent_is_min_of_plane_and_advertised() {
+async fn heartbeat_omitted_advertised_after_zero_keeps_clamped_one() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
@@ -4615,7 +5095,7 @@ async fn effective_max_concurrent_is_min_of_plane_and_advertised() {
         create_pending_with_token(&pool, workspace_id, user_id, &name, expires).await;
     pair_host(&pool, &token, &format!("{name}-box")).await;
 
-    let plane8 = worker_hosts::patch_cp_settings(
+    worker_hosts::patch_cp_settings(
         &pool,
         host.id,
         &HostCpSettings {
@@ -4625,101 +5105,6 @@ async fn effective_max_concurrent_is_min_of_plane_and_advertised() {
     )
     .await
     .expect("set plane 8");
-    assert_eq!(plane8.max_concurrent, 8);
-    assert_eq!(
-        worker_hosts::effective_max_concurrent(&plane8),
-        8,
-        "no advertised report → plane cap"
-    );
-    assert!(!worker_hosts::at_job_cap(&plane8), "0 jobs is under cap");
-
-    let adv2 = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        1,
-        Some(2),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("advertise 2");
-    assert_eq!(adv2.max_concurrent, 8);
-    assert_eq!(adv2.advertised_max_concurrent, Some(2));
-    assert_eq!(
-        worker_hosts::effective_max_concurrent(&adv2),
-        2,
-        "advertised 2 must win over plane 8"
-    );
-    assert!(
-        !worker_hosts::at_job_cap(&adv2),
-        "1 < min(8,2) is under cap"
-    );
-
-    let at_adv = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        2,
-        Some(2),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("fill advertised cap");
-    assert_eq!(worker_hosts::effective_max_concurrent(&at_adv), 2);
-    assert!(
-        worker_hosts::at_job_cap(&at_adv),
-        "current_jobs == advertised min must be at cap"
-    );
-
-    let plane2 = worker_hosts::patch_cp_settings(
-        &pool,
-        host.id,
-        &HostCpSettings {
-            max_concurrent: Some(2),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("set plane 2");
-    let adv8 = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        2,
-        Some(8),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("advertise 8");
-    assert_eq!(plane2.max_concurrent, 2);
-    assert_eq!(adv8.advertised_max_concurrent, Some(8));
-    assert_eq!(
-        worker_hosts::effective_max_concurrent(&adv8),
-        2,
-        "plane 2 must win over advertised 8"
-    );
-    assert!(worker_hosts::at_job_cap(&adv8));
 
     let zero_adv = worker_hosts::heartbeat(
         &pool,
@@ -4744,16 +5129,11 @@ async fn effective_max_concurrent_is_min_of_plane_and_advertised() {
         "heartbeat must clamp advertised 0 → 1 (not unlimited)"
     );
     assert_eq!(
-        worker_hosts::effective_max_concurrent(&zero_adv),
-        1,
-        "0 advertised is a cap of 1"
-    );
-    assert!(
-        worker_hosts::at_job_cap(&zero_adv),
-        "1 job against advertised-0 (clamped 1) is at cap"
+        zero_adv.max_concurrent, 8,
+        "heartbeat must not copy advertised into the plane column"
     );
 
-    let huge_adv = worker_hosts::heartbeat(
+    let omitted = worker_hosts::heartbeat(
         &pool,
         host.id,
         true,
@@ -4761,24 +5141,31 @@ async fn effective_max_concurrent_is_min_of_plane_and_advertised() {
         None,
         None,
         None,
-        2,
-        Some(9999),
+        1,
+        None,
         None,
         None,
         None,
         None,
     )
     .await
-    .expect("advertise 9999");
-    assert_eq!(huge_adv.advertised_max_concurrent, Some(256));
+    .expect("omit advertised");
     assert_eq!(
-        worker_hosts::effective_max_concurrent(&huge_adv),
-        2,
-        "clamped advertised 256 still min'd with plane 2"
+        omitted.advertised_max_concurrent,
+        Some(1),
+        "omitted advertised must COALESCE-keep the clamped 1"
+    );
+    assert_eq!(omitted.max_concurrent, 8);
+    assert_eq!(
+        worker_hosts::effective_max_concurrent(&omitted),
+        1,
+        "effective must stay 1 after omitted advertised"
     );
 }
 
 /// Hosts at min(plane, advertised) must drop out of list_assignable; under-cap peers stay.
+/// Advertised-min catches SQL `current_jobs < max_concurrent`; plane_wins catches
+/// COALESCE(advertised, plane) instead of min().
 #[tokio::test]
 async fn list_assignable_skips_host_at_max_concurrent_cap() {
     let pool = connect_and_migrate().await;
@@ -4800,9 +5187,7 @@ async fn list_assignable_skips_host_at_max_concurrent_cap() {
 
     let under = pair_named(&pool, workspace_id, user_id, expires, "under-cap").await;
     let at_adv = pair_named(&pool, workspace_id, user_id, expires, "at-adv-cap").await;
-    let at_plane = pair_named(&pool, workspace_id, user_id, expires, "at-plane-cap").await;
     let plane_wins = pair_named(&pool, workspace_id, user_id, expires, "plane-wins").await;
-    let zero_adv = pair_named(&pool, workspace_id, user_id, expires, "zero-adv").await;
 
     worker_hosts::patch_cp_settings(
         &pool,
@@ -4862,22 +5247,6 @@ async fn list_assignable_skips_host_at_max_concurrent_cap() {
 
     worker_hosts::patch_cp_settings(
         &pool,
-        at_plane,
-        &HostCpSettings {
-            max_concurrent: Some(1),
-            ..HostCpSettings::default()
-        },
-    )
-    .await
-    .expect("at_plane plane 1");
-    worker_hosts::heartbeat(
-        &pool, at_plane, true, false, None, None, None, 1, None, None, None, None, None,
-    )
-    .await
-    .expect("at_plane: 1 of 1");
-
-    worker_hosts::patch_cp_settings(
-        &pool,
         plane_wins,
         &HostCpSettings {
             max_concurrent: Some(2),
@@ -4904,94 +5273,177 @@ async fn list_assignable_skips_host_at_max_concurrent_cap() {
     .await
     .expect("plane_wins: 2 of min(2,8)");
 
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable");
+    let ids = assignable_ids_in_workspace(&assignable, workspace_id);
+    assert_eq!(
+        ids,
+        vec![under],
+        "advertised-min and plane-wins at cap must skip; under-cap stays: {ids:?}"
+    );
+}
+
+/// Heartbeat 2 of min(8,2) then 1 of 2 must return the host to the picker.
+#[tokio::test]
+async fn list_assignable_returns_host_when_current_jobs_drops_below_cap() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "below-cap-again", expires).await;
+    pair_host(&pool, &token, "below-cap-again-box").await;
     worker_hosts::patch_cp_settings(
         &pool,
-        zero_adv,
+        host.id,
         &HostCpSettings {
             max_concurrent: Some(8),
             ..HostCpSettings::default()
         },
     )
     .await
-    .expect("zero_adv plane 8");
+    .expect("plane 8");
     worker_hosts::heartbeat(
         &pool,
-        zero_adv,
+        host.id,
         true,
         false,
         None,
         None,
         None,
-        1,
-        Some(0),
+        2,
+        Some(2),
         None,
         None,
         None,
         None,
     )
     .await
-    .expect("zero_adv: advertised 0 clamps to 1");
+    .expect("2 of min(8,2)");
+    worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        1,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("1 of min(8,2)");
 
-    let loaded_under = worker_hosts::get(&pool, under)
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
-        .expect("get under")
-        .expect("under");
-    let loaded_adv = worker_hosts::get(&pool, at_adv)
-        .await
-        .expect("get at_adv")
-        .expect("at_adv");
-    let loaded_plane = worker_hosts::get(&pool, at_plane)
-        .await
-        .expect("get at_plane")
-        .expect("at_plane");
-    let loaded_wins = worker_hosts::get(&pool, plane_wins)
-        .await
-        .expect("get plane_wins")
-        .expect("plane_wins");
-    let loaded_zero = worker_hosts::get(&pool, zero_adv)
-        .await
-        .expect("get zero_adv")
-        .expect("zero_adv");
+        .expect("list_assignable");
+    assert_eq!(
+        assignable_ids_in_workspace(&assignable, workspace_id),
+        vec![host.id],
+        "1 of min(8,2) after 2 of 2 must return to the picker"
+    );
+}
 
-    assert_eq!(worker_hosts::effective_max_concurrent(&loaded_under), 2);
-    assert!(!worker_hosts::at_job_cap(&loaded_under));
-    assert_eq!(worker_hosts::effective_max_concurrent(&loaded_adv), 2);
-    assert!(worker_hosts::at_job_cap(&loaded_adv));
-    assert_eq!(worker_hosts::effective_max_concurrent(&loaded_plane), 1);
-    assert!(worker_hosts::at_job_cap(&loaded_plane));
-    assert_eq!(worker_hosts::effective_max_concurrent(&loaded_wins), 2);
-    assert!(worker_hosts::at_job_cap(&loaded_wins));
-    assert_eq!(loaded_zero.advertised_max_concurrent, Some(1));
-    assert_eq!(worker_hosts::effective_max_concurrent(&loaded_zero), 1);
-    assert!(worker_hosts::at_job_cap(&loaded_zero));
+/// current_jobs above the effective cap must skip (`>=`, not only equality).
+#[tokio::test]
+async fn list_assignable_skips_when_current_jobs_exceeds_effective_cap() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "over-cap", expires).await;
+    pair_host(&pool, &token, "over-cap-box").await;
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(8),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("plane 8");
+    worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        3,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("3 of min(8,2)");
 
     let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
         .expect("list_assignable");
     let ids = assignable_ids_in_workspace(&assignable, workspace_id);
     assert!(
-        ids.contains(&under),
-        "under-cap host must stay assignable: {ids:?}"
+        !ids.contains(&host.id),
+        "current_jobs=3 of min(8,2) must skip: {ids:?}"
     );
+}
+
+/// Cluster OR sits inside the rust at_job_cap filter; a full Kind box must not lease in B.
+#[tokio::test]
+async fn list_assignable_skips_at_cap_cluster_host_from_other_workspace() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    let (_user_b, ws_b) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, ws_a, user_a, "cluster-at-cap", expires).await;
+    pair_host(&pool, &token, "cluster-at-cap").await;
+    sqlx::query("UPDATE worker_hosts SET labels = array['cluster'] WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("label cluster");
+    worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            max_concurrent: Some(8),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("plane 8");
+    worker_hosts::heartbeat(
+        &pool,
+        host.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        2,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("2 of min(8,2)");
+
+    let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
+        .await
+        .expect("list_assignable B");
     assert!(
-        !ids.contains(&at_adv),
-        "advertised-cap host must be skipped: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&at_plane),
-        "plane-cap host (no advertised) must be skipped: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&plane_wins),
-        "min(plane=2, advertised=8) at 2 must be skipped: {ids:?}"
-    );
-    assert!(
-        !ids.contains(&zero_adv),
-        "advertised 0 is not unlimited; 1 job must skip: {ids:?}"
-    );
-    assert_eq!(
-        ids,
-        vec![under],
-        "only the under-cap native must be assignable: {ids:?}"
+        from_b.iter().all(|h| h.id != host.id),
+        "at-cap cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        from_b.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 }

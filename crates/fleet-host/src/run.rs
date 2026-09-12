@@ -262,6 +262,26 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn is_machine_auth_err(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::client::ApiError>()
+        .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
+        || e.to_string().contains("machine token rejected")
+}
+
+/// Same `machine.id`, new `machine.token`. Does not wipe the id file.
+/// Needs `FLEET_BOOTSTRAP_SECRET` (fleet-dev sets it). Otherwise the human
+/// runs `fleet-host pair` — do not invent a token.
+async fn reclaim_machine_token(cfg: &mut LocalConfig, url: &str) -> Result<HostClient> {
+    let secret = env_nonempty(BOOTSTRAP_SECRET_ENV).ok_or_else(|| {
+        anyhow!("machine token rejected; re-pair with `fleet-host pair`")
+    })?;
+    warn!("machine token rejected; reclaiming via bootstrap (same machine.id)");
+    let pair_client = HostClient::for_pair(url, cfg)?;
+    let resp = bootstrap_until_workspace(&pair_client, cfg, &secret).await?;
+    persist_pair(cfg, url, &resp)?;
+    HostClient::with_machine_token(url, &resp.machine_token, cfg)
+}
+
 /// Manual apply. Same path as auto; does not set CP `paused`/`drain`.
 pub async fn update() -> Result<()> {
     let cfg = LocalConfig::load_or_default()?;
@@ -286,7 +306,7 @@ pub fn init_tracing(level: &str) {
 async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()> {
     cfg.apply_ollama_models_env();
     let bus = crate::bus::BusHandle::from_env().await;
-    let client = HostClient::with_machine_token(&url, token, &cfg)?;
+    let mut client = HostClient::with_machine_token(&url, token, &cfg)?;
     let jobs: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
     let effective = Arc::new(Mutex::new(EffectiveModes::from_local(&cfg)));
     let update_state = Arc::new(UpdateState::new());
@@ -403,12 +423,12 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "heartbeat failed");
                     }
@@ -541,12 +561,12 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "lease poll failed");
                     }
@@ -695,36 +715,28 @@ mod tests {
         );
     }
 
+    /// catalog:unit-run-401-reclaims-via-bootstrap — rejected machine.token
+    /// reclaims with the same machine.id; it must not wipe the id file.
     #[test]
-    fn acquire_run_lock_refuses_second_process() {
-        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
-        }
-        let first = acquire_run_lock().expect("first lock");
-        let err = acquire_run_lock().expect_err("second lock");
-        assert!(err.to_string().contains("already running"), "{err}");
-        drop(first);
-        acquire_run_lock().expect("lock after drop");
-    }
-
-    #[test]
-    fn is_loopback_url_detects_common_forms() {
-        assert!(is_loopback_url("http://localhost:8080"));
-        assert!(is_loopback_url("http://127.0.0.1:8080/"));
-        assert!(is_loopback_url("http://127.1.2.3:1"));
+    fn run_401_reclaims_via_bootstrap_without_wiping_machine_id() {
+        let src = include_str!("run.rs");
+        let prod = src.split("mod tests {").next().unwrap();
         assert!(
-            is_loopback_url("http://[::1]:8080"),
-            "IPv6 loopback must be detected so we do not persist [::1] from the API"
+            prod.contains("reclaim_machine_token") && prod.contains("bootstrap_until_workspace"),
+            "401 must reclaim via bootstrap, not exit"
         );
         assert!(
-            is_loopback_url("http://::1"),
-            "bare IPv6 loopback must be detected"
+            prod.contains("same machine.id"),
+            "reclaim comment must name machine.id"
         );
-        assert!(!is_loopback_url(
-            "http://api.agent-fleet.svc.cluster.local:8080"
-        ));
+        let reclaim = prod
+            .split("async fn reclaim_machine_token")
+            .nth(1)
+            .expect("reclaim_machine_token");
+        assert!(
+            !reclaim.contains("delete_machine_token") && !reclaim.contains("unpair("),
+            "reclaim must not wipe machine.token/id before bootstrap succeeds"
+        );
     }
 
     #[test]

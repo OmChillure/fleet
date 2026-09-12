@@ -4,6 +4,7 @@ How this repo is tested. Install is still one script
 (`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`)
 and repo-root `.env`. This page only says **how to run tests**.
 Where a new test belongs: [`testing-standardization.md`](./testing-standardization.md).
+Whether a test is good enough to merge: [`qa-rulebook.md`](./qa-rulebook.md).
 
 ## No GitLab CI
 

@@ -495,7 +495,6 @@ fn run_git(args: &[&str], env_vars: &[(String, String)], cwd: Option<&Path>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::ProjectSetup;
 
     #[test]
     fn setup_commands_from_project_setup() {
@@ -507,24 +506,117 @@ mod tests {
             }
         }))
         .unwrap();
-        let (c, s, _) = setup_commands(&job);
-        assert_eq!(c.len(), 1);
-        assert_eq!(s.len(), 1);
+        let (c, s, env) = setup_commands(&job);
+        assert_eq!(c, ["pip install -r requirements.txt"]);
+        assert_eq!(s, ["python manage.py check"]);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn setup_commands_absent_project_setup_returns_empty() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git"
+        }))
+        .unwrap();
+        let (c, s, env) = setup_commands(&job);
+        assert!(c.is_empty());
+        assert!(s.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn setup_commands_clones_project_setup_env() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "commands": ["pip install -r requirements.txt"],
+                "smoke_commands": ["python manage.py check"],
+                "env": {"FOO": "bar"}
+            }
+        }))
+        .unwrap();
+        let (c, s, env) = setup_commands(&job);
+        assert_eq!(c, ["pip install -r requirements.txt"]);
+        assert_eq!(s, ["python manage.py check"]);
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(env.len(), 1);
+    }
+
+    #[test]
+    fn setup_commands_script_with_space_uses_bash_lc() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "strategy": "script",
+                "script": "scripts/setup.sh --prod"
+            }
+        }))
+        .unwrap();
+        let (c, s, env) = setup_commands(&job);
+        assert_eq!(c, ["bash -lc 'scripts/setup.sh --prod'"]);
+        assert!(s.is_empty());
+        assert!(env.is_empty());
     }
 
     #[test]
     fn setup_commands_script_strategy() {
-        let mut job: Job = serde_json::from_value(serde_json::json!({
-            "repo_url": "https://example.com/r.git"
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "strategy": "script",
+                "script": "scripts/fleet-setup.sh"
+            }
         }))
         .unwrap();
-        job.project_setup = Some(ProjectSetup {
-            strategy: "script".into(),
-            script: Some("scripts/fleet-setup.sh".into()),
-            ..Default::default()
-        });
+        let (c, s, env) = setup_commands(&job);
+        assert_eq!(c, ["bash scripts/fleet-setup.sh"]);
+        assert!(s.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn setup_commands_script_with_spaces_uses_bash_lc_and_escapes_quotes() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "strategy": "script",
+                "script": "echo 'hi there'"
+            }
+        }))
+        .unwrap();
+        let (c, s, env) = setup_commands(&job);
+        assert_eq!(c, ["bash -lc 'echo '\\''hi there'\\'''"]);
+        assert!(s.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn setup_commands_script_replaces_existing_commands() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "strategy": "script",
+                "script": "scripts/fleet-setup.sh",
+                "commands": ["pip install"]
+            }
+        }))
+        .unwrap();
         let (c, _, _) = setup_commands(&job);
-        assert!(c[0].contains("scripts/fleet-setup.sh"));
+        assert_eq!(c, ["bash scripts/fleet-setup.sh"]);
+    }
+
+    #[test]
+    fn setup_commands_script_without_script_keeps_commands() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "repo_url": "https://example.com/r.git",
+            "project_setup": {
+                "strategy": "script",
+                "commands": ["pip install"]
+            }
+        }))
+        .unwrap();
+        let (c, _, _) = setup_commands(&job);
+        assert_eq!(c, ["pip install"]);
     }
 
     #[test]
@@ -550,7 +642,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // empty tools still written
         write_tools_file(&dir, &Default::default()).unwrap();
         assert!(dir.join(".fleet-tools.json").is_file());
         assert!(dir.join("FLEET_TOOLS.md").is_file());
@@ -565,7 +656,65 @@ mod tests {
         );
         write_tools_file(&dir, &tools).unwrap();
         let raw = fs::read_to_string(dir.join(".fleet-tools.json")).unwrap();
-        assert!(raw.contains("npm_test"));
+        let parsed: std::collections::BTreeMap<String, crate::job::WorkspaceTool> =
+            serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["npm_test"].argv, ["npm", "test"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_tools_file_empty_md_says_none_and_no_free_shell() {
+        let dir = std::env::temp_dir().join(format!("fleet-tools-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_tools_file(&dir, &Default::default()).unwrap();
+        let md = fs::read_to_string(dir.join("FLEET_TOOLS.md")).unwrap();
+        assert!(md.contains("(none — no project tools configured)"));
+        assert!(md.contains("No free shell into the workspace."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_tools_file_md_lists_wsexec_line_and_description() {
+        let dir = std::env::temp_dir().join(format!("fleet-tools-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert(
+            "npm_test".into(),
+            crate::job::WorkspaceTool {
+                argv: vec!["npm".into(), "test".into()],
+                description: Some("unit".into()),
+            },
+        );
+        write_tools_file(&dir, &tools).unwrap();
+        let md = fs::read_to_string(dir.join("FLEET_TOOLS.md")).unwrap();
+        assert!(md.contains("`fleet-wsexec npm_test` -> `npm test`"));
+        assert!(md.contains("  - unit"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_tools_file_reject_does_not_overwrite_previous() {
+        let dir = std::env::temp_dir().join(format!("fleet-tools-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert(
+            "npm_test".into(),
+            crate::job::WorkspaceTool {
+                argv: vec!["npm".into(), "test".into()],
+                description: Some("unit".into()),
+            },
+        );
+        write_tools_file(&dir, &tools).unwrap();
 
         tools.insert(
             "evil".into(),
@@ -575,6 +724,13 @@ mod tests {
             },
         );
         assert!(write_tools_file(&dir, &tools).is_err());
+
+        let parsed: std::collections::BTreeMap<String, crate::job::WorkspaceTool> =
+            serde_json::from_str(&fs::read_to_string(dir.join(".fleet-tools.json")).unwrap())
+                .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["npm_test"].argv, ["npm", "test"]);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

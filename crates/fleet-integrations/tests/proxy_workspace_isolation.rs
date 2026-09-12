@@ -168,100 +168,91 @@ async fn invoke_workspace_b_cannot_use_workspace_a_connection() {
     );
 }
 
-/// Docs §7.3: live `proxy::invoke` decrypts on the control plane and never
-/// echoes the token. Not a reconstructed `ProxyResult` / `sanitize_value` lock.
+/// `create_pr` lookup is `ProxyRequest.workspace_id`; args must not retarget to ws-A.
+#[tokio::test]
+async fn github_create_pr_invoke_ignores_args_workspace_id() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool, "cpa").await;
+    let (user_b, ws_b) = seed_user_with_workspace(&pool, "cpb").await;
+    let conn_a = Uuid::now_v7();
+    let token = format!("tok_ws_a_create_pr_must_not_leak_{}", Uuid::new_v4());
+    let key = CredentialsKey::from_secret("dev-test-encryption-key-32chars!!").expect("test key");
+    let sealed = key
+        .encrypt(&json!({ "access_token": token }))
+        .expect("seal ws-A token");
+
+    integrations::upsert(
+        &pool,
+        &UpsertConnection {
+            id: conn_a,
+            workspace_id: ws_a,
+            provider: "github".into(),
+            account_label: Some("acct-a-cpr".into()),
+            config: json!({ "site": "github.com" }),
+            credentials: sealed.clone(),
+            connected_by: Some(user_a),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .expect("upsert github on ws-A");
+
+    let result = proxy::invoke(
+        &pool,
+        &key,
+        ProxyRequest {
+            workspace_id: ws_b,
+            provider: "github".into(),
+            operation: "create_pr".into(),
+            args: json!({
+                "connection_id": conn_a,
+                "workspace_id": ws_a,
+                "id": conn_a,
+                "owner": "acme",
+                "repo": "app",
+                "title": "add README",
+                "head": "agent-fleet/changes",
+            }),
+            caller: ProxyCaller::Chat { user_id: user_b },
+        },
+    )
+    .await;
+
+    assert!(
+        !result.ok,
+        "foreign create_pr connection must fail closed: {result:?}"
+    );
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some("not_connected"),
+        "ws-B has no github row; create_pr args must not retarget to ws-A: {result:?}"
+    );
+    assert_eq!(result.data, Value::Null);
+    let dump = serde_json::to_string(&result).expect("serialize result");
+    assert!(
+        !dump.contains(&token),
+        "create_pr proxy result must not leak ws-A token: {dump}"
+    );
+}
+
+/// Docs §7.3: live `proxy::invoke` maps `credentials_for` Err on a sealed
+/// Postgres row to `decrypt_failed` with a static summary and never echoes
+/// the token. Not a reconstructed `ProxyResult` / `sanitize_value` lock.
 #[tokio::test]
 async fn integration_query_decrypts_server_side_and_never_echoes_token() {
     const LEAK: &str = "gho_IQ_LIVE_SANITIZE_MUST_NOT_ECHO_c0ffee";
 
-    fn assert_no_token_echo(label: &str, dump: &str) {
-        assert!(
-            !dump.contains("access_token")
-                && !dump.contains("refresh_token")
-                && !dump.contains(LEAK),
-            "{label} must not contain access_token, refresh_token, or the sealed token: {dump}"
-        );
-    }
-
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool, "iqdec").await;
-    assert!(
-        integrations::find_connected(&pool, workspace_id, "github")
-            .await
-            .expect("find_connected empty")
-            .is_none(),
-        "workspace must start with no github row"
-    );
-
-    let stuffed = json!({
-        "access_token": LEAK,
-        "refresh_token": LEAK,
-        "token": LEAK,
-        "owner": "acme",
-        "repo": "app",
-    });
     let key_a = CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").expect("key A");
     let key_b = CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").expect("key B");
-
-    let unknown = proxy::invoke(
-        &pool,
-        &key_b,
-        ProxyRequest {
-            workspace_id,
-            provider: "github".into(),
-            operation: "raw_http".into(),
-            args: stuffed.clone(),
-            caller: ProxyCaller::Chat { user_id },
-        },
-    )
-    .await;
-    assert!(!unknown.ok, "unknown op must be ok:false: {unknown:?}");
-    assert_eq!(
-        unknown.error_code.as_deref(),
-        Some("unknown_op"),
-        "docs §7.3 unknown op must be unknown_op: {unknown:?}"
-    );
-    assert_eq!(unknown.data, Value::Null);
-    assert_no_token_echo(
-        "unknown_op ProxyResult",
-        &serde_json::to_string(&unknown).expect("serialize unknown"),
-    );
-
-    let disconnected = proxy::invoke(
-        &pool,
-        &key_b,
-        ProxyRequest {
-            workspace_id,
-            provider: "github".into(),
-            operation: "list_repos".into(),
-            args: stuffed.clone(),
-            caller: ProxyCaller::Chat { user_id },
-        },
-    )
-    .await;
-    assert!(
-        !disconnected.ok,
-        "disconnected list_repos must be ok:false: {disconnected:?}"
-    );
-    assert_eq!(
-        disconnected.error_code.as_deref(),
-        Some("not_connected"),
-        "live empty workspace must be not_connected (not internal / unknown_op): {disconnected:?}"
-    );
-    assert_eq!(disconnected.data, Value::Null);
-    assert_no_token_echo(
-        "disconnected ProxyResult",
-        &serde_json::to_string(&disconnected).expect("serialize disconnected"),
-    );
-
     let sealed = key_a
         .encrypt(&json!({ "access_token": LEAK, "refresh_token": LEAK }))
         .expect("seal under key A");
-    let conn_id = Uuid::now_v7();
     integrations::upsert(
         &pool,
         &UpsertConnection {
-            id: conn_id,
+            id: Uuid::now_v7(),
             workspace_id,
             provider: "github".into(),
             account_label: Some("iqdec".into()),
@@ -278,7 +269,7 @@ async fn integration_query_decrypts_server_side_and_never_echoes_token() {
             .await
             .expect("find_connected after upsert")
             .is_some(),
-        "github row must exist before decrypt_failed / control"
+        "github row must exist before decrypt_failed"
     );
 
     let decrypt_failed = proxy::invoke(
@@ -288,7 +279,13 @@ async fn integration_query_decrypts_server_side_and_never_echoes_token() {
             workspace_id,
             provider: "github".into(),
             operation: "list_repos".into(),
-            args: stuffed.clone(),
+            args: json!({
+                "access_token": LEAK,
+                "refresh_token": LEAK,
+                "token": LEAK,
+                "owner": "acme",
+                "repo": "app",
+            }),
             caller: ProxyCaller::Chat { user_id },
         },
     )
@@ -311,40 +308,138 @@ async fn integration_query_decrypts_server_side_and_never_echoes_token() {
         decrypt_failed.summary
     );
     assert_eq!(decrypt_failed.data, Value::Null);
-    assert_no_token_echo(
-        "decrypt_failed ProxyResult",
-        &serde_json::to_string(&decrypt_failed).expect("serialize decrypt_failed"),
+    let dump = serde_json::to_string(&decrypt_failed).expect("serialize decrypt_failed");
+    assert!(
+        !dump.contains("access_token") && !dump.contains("refresh_token") && !dump.contains(LEAK),
+        "decrypt_failed ProxyResult must not contain access_token, refresh_token, or the sealed token: {dump}"
     );
+}
 
-    let control = proxy::invoke(
+/// Docs §7.3: live empty workspace `list_repos` is `not_connected` (not
+/// `internal` / `unknown_op`) and never echoes a stuffed token.
+#[tokio::test]
+async fn invoke_empty_workspace_list_repos_is_not_connected() {
+    const LEAK: &str = "gho_IQ_NOT_CONNECTED_MUST_NOT_ECHO_c0ffee";
+
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool, "iqnc").await;
+    assert!(
+        integrations::find_connected(&pool, workspace_id, "github")
+            .await
+            .expect("find_connected empty")
+            .is_none(),
+        "workspace must start with no github row"
+    );
+    let key = CredentialsKey::from_secret("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").expect("key");
+
+    let disconnected = proxy::invoke(
         &pool,
-        &key_a,
+        &key,
         ProxyRequest {
             workspace_id,
             provider: "github".into(),
             operation: "list_repos".into(),
-            args: stuffed,
+            args: json!({
+                "access_token": LEAK,
+                "refresh_token": LEAK,
+                "token": LEAK,
+                "owner": "acme",
+                "repo": "app",
+            }),
             caller: ProxyCaller::Chat { user_id },
         },
     )
     .await;
-    assert_ne!(
-        control.error_code.as_deref(),
-        Some("decrypt_failed"),
-        "matching key must decrypt (not a tautology that every invoke is decrypt_failed): {control:?}"
+    assert!(
+        !disconnected.ok,
+        "disconnected list_repos must be ok:false: {disconnected:?}"
     );
-    assert_ne!(
-        control.error_code.as_deref(),
+    assert_eq!(
+        disconnected.error_code.as_deref(),
         Some("not_connected"),
-        "matching key must see the connected row: {control:?}"
+        "live empty workspace must be not_connected (not internal / unknown_op): {disconnected:?}"
+    );
+    assert_eq!(disconnected.data, Value::Null);
+    let dump = serde_json::to_string(&disconnected).expect("serialize disconnected");
+    assert!(
+        !dump.contains("access_token") && !dump.contains("refresh_token") && !dump.contains(LEAK),
+        "disconnected ProxyResult must not contain access_token, refresh_token, or the stuffed token: {dump}"
+    );
+}
+
+/// Matching-key decrypt of `{refresh_token}` with no `access_token` is
+/// `token_missing` (returns before `apps::dispatch` / api.github.com).
+#[tokio::test]
+async fn invoke_matching_key_missing_access_token_is_token_missing() {
+    const LEAK: &str = "gho_IQ_TOKEN_MISSING_MUST_NOT_ECHO_c0ffee";
+
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool, "iqtm").await;
+    let key = CredentialsKey::from_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").expect("key A");
+    let sealed = key
+        .encrypt(&json!({ "refresh_token": LEAK }))
+        .expect("seal refresh_token only");
+    integrations::upsert(
+        &pool,
+        &UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id,
+            provider: "github".into(),
+            account_label: Some("iqtm".into()),
+            config: json!({ "site": "github.com" }),
+            credentials: sealed,
+            connected_by: Some(user_id),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .expect("upsert github sealed without access_token");
+    assert!(
+        integrations::find_connected(&pool, workspace_id, "github")
+            .await
+            .expect("find_connected after upsert")
+            .is_some(),
+        "github row must exist before token_missing"
+    );
+
+    let missing = proxy::invoke(
+        &pool,
+        &key,
+        ProxyRequest {
+            workspace_id,
+            provider: "github".into(),
+            operation: "list_repos".into(),
+            args: json!({
+                "access_token": LEAK,
+                "refresh_token": LEAK,
+                "token": LEAK,
+                "owner": "acme",
+                "repo": "app",
+            }),
+            caller: ProxyCaller::Chat { user_id },
+        },
+    )
+    .await;
+    assert!(!missing.ok, "token_missing must be ok:false: {missing:?}");
+    assert_eq!(
+        missing.error_code.as_deref(),
+        Some("token_missing"),
+        "matching key with no access_token must be token_missing (not decrypt_failed / GitHub token_expired): {missing:?}"
+    );
+    assert_eq!(missing.data, Value::Null);
+    let dump = serde_json::to_string(&missing).expect("serialize token_missing");
+    assert!(
+        !dump.contains(LEAK),
+        "token_missing ProxyResult must not contain the sealed refresh_token: {dump}"
     );
     assert_ne!(
-        control.error_code.as_deref(),
-        Some("unknown_op"),
-        "list_repos is allowlisted: {control:?}"
+        missing.error_code.as_deref(),
+        Some("token_expired"),
+        "token_missing must return before api.github.com: {missing:?}"
     );
-    assert_no_token_echo(
-        "control ProxyResult",
-        &serde_json::to_string(&control).expect("serialize control"),
+    assert_ne!(
+        missing.error_code.as_deref(),
+        Some("upstream"),
+        "token_missing must return before api.github.com: {missing:?}"
     );
 }

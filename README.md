@@ -81,10 +81,11 @@ dx serve --package fleet-ui --port 3030
    to GitHub, write it in Notion.” Workers can `use_integration` mid-run; plan `outputs`
    write back when the run ends.
    Live workers
-   message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
-   and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
-   (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
-   bash fences from the task spec.
+   message each other mid-run (`./fleet-tool.sh chat-post` / `chat-list`), share `work/`,
+   and reviewers can `request-changes` to bounce work back. Fleet workers use the
+   **Chat composer** provider on the selected runner (Grok / Claude / Ollama).
+   Settings Ollama is only a fallback when a run has no chat model. Without a
+   paired runner the task stays ready.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`) leased to a

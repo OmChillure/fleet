@@ -3,6 +3,7 @@
 mod auth;
 mod handlers;
 mod state;
+mod worker_io;
 
 pub use state::{
     AppState, build_app_state, build_app_state_with_pool, build_app_state_with_pool_io,
@@ -19,6 +20,7 @@ use handlers::{
     healthz, list_runs, list_tasks, list_workers, openapi_yaml, patch_config, post_heartbeat,
     post_status, readyz, resume_task, root_index,
 };
+use worker_io::post_worker_io;
 
 /// Core routes (no CORS). Safe to nest/fallback into fleet-server.
 pub fn router(state: AppState) -> Router {
@@ -53,6 +55,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/projects/{project_id}/workers/{session_id}/status",
             post(post_status),
+        )
+        .route(
+            "/v1/projects/{project_id}/workers/{session_id}/io",
+            post(post_worker_io),
         )
         .route("/v1/projects/{project_id}/admin/tick", post(admin_tick))
         .with_state(state)

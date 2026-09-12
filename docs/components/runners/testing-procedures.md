@@ -79,7 +79,7 @@ Catalog → test (layer 2):
 | Redirects | `test_08` (`/workers`), `test_09` (`/runners`) |
 | Add / pair / Done / token once | `test_05_workers_add_shows_pair_token` |
 | Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons_http_lan_fallback`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
-| Loopback URL warning | `test_14i_loopback_warning`; `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
+| Loopback URL warning | `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
 | Cancel discards pending | `test_15_cancel_discards_pending_worker` |
 | API is not a runner; empty Self-hosted | `test_16_control_plane_card`; `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
 | Apply changes appears when dirty | `test_17_apply_changes_when_dirty` |

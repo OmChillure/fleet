@@ -549,7 +549,7 @@ New route `/{workspace_id}/workers` (sidebar: Workspace → Workers).
   card (git bake vs file hash are not the same id).
   `updating` replaces outdated while a swap is in progress. Outdated is
   amber. Desired bits come from the staged dist, not the API compile sha.
-- **Add worker**: POST, show pair token **once** + install commands
+- **Add worker**: POST (name optional; hostname on pair), show pair token **once** + install commands
   (copy). Token is not shown again.
 - Everyday: Stop taking new jobs / Take jobs again, Auto-update (on by default), Update now if auto is off and the box is outdated. Rename by clicking the name. Each box has a durable `machine_id` (`~/.config/fleet-host/machine.id`, or the first pair’s row id if the binary is too old to send one). Re-pair of the same `machine_id` or the same hostname+platform reclaims that row. Removed clones of a live box are hidden.
 - Remove worker (revoke). Do not expose allow_host / allow_container on the card

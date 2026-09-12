@@ -2,7 +2,7 @@
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MdPart {
     Html(String),
     Code { lang: String, code: String },
@@ -92,28 +92,6 @@ pub fn markdown_to_parts(input: &str) -> Vec<MdPart> {
     }
     flush_html(&mut parts, &mut html);
     parts
-}
-
-#[cfg(test)]
-pub fn markdown_to_html(input: &str) -> String {
-    markdown_to_parts(input)
-        .into_iter()
-        .map(|p| match p {
-            MdPart::Html(h) => h,
-            MdPart::Code { lang, code } => {
-                let mut s = String::from("<pre><code");
-                if !lang.is_empty() {
-                    s.push_str(" class=\"language-");
-                    push_esc(&mut s, &lang);
-                    s.push('"');
-                }
-                s.push('>');
-                s.push_str(&highlight(&lang, &code));
-                s.push_str("</code></pre>");
-                s
-            }
-        })
-        .collect()
 }
 
 fn flush_html(parts: &mut Vec<MdPart>, html: &mut String) {
@@ -501,94 +479,281 @@ mod tests {
 
     #[test]
     fn renders_headings_lists_and_code() {
-        let html = markdown_to_html(
-            "# Title\n\n- one\n- two\n\n`code` and **bold**\n\n```rs\nlet x = 1;\n```\n",
+        let parts = markdown_to_parts("# Title\n\n`code` and **bold**\n");
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<h1>Title</h1>")))
         );
-        assert!(html.contains("<h1>Title</h1>"));
-        assert!(html.contains("<ul>"));
-        assert!(html.contains("<code>code</code>"));
-        assert!(html.contains("<strong>bold</strong>"));
-        assert!(html.contains("tok-kw") || html.contains("let"));
-        assert!(!html.contains("<script"));
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<code>code</code>")))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<strong>bold</strong>")))
+        );
     }
 
     #[test]
-    fn strips_raw_html_and_bad_links() {
-        let html = markdown_to_html("Hello <script>alert(1)</script>\n\n[x](javascript:alert(1))");
-        assert!(!html.contains("<script>"));
-        assert!(html.contains("&lt;script&gt;"));
-        assert!(!html.contains("javascript:"));
+    fn fenced_rs_is_code_part_with_tok_kw_on_let() {
+        let parts = markdown_to_parts("```rs\nlet x = 1;\n```");
+        let code = parts.iter().find_map(|p| match p {
+            MdPart::Code { lang, code } if lang == "rs" => Some(code.as_str()),
+            _ => None,
+        });
+        let code = code.expect("rs code part");
+        let hi = highlight("rs", code);
+        assert!(hi.contains("<span class=\"tok-kw\">let</span>"), "{hi}");
+    }
+
+    #[test]
+    fn unordered_list_emits_li_for_each_item() {
+        let parts = markdown_to_parts("- one\n- two");
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<ul>")))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<li>one</li>")))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<li>two</li>")))
+        );
+    }
+
+    #[test]
+    fn ordered_list_renders_ol() {
+        let parts = markdown_to_parts("1. a\n2. b");
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<ol>")))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MdPart::Html(h) if h.contains("<li>a</li>")))
+        );
     }
 
     #[test]
     fn does_not_emit_raw_html_from_user_text() {
-        let html = markdown_to_html(
+        let parts = markdown_to_parts(
             "Hello <script>alert(1)</script>\n\n<SCRIPT src=//evil.test></SCRIPT>\n\n\
              <img src=x onerror=alert(1)>\n\n<iframe src=//evil.test></iframe>\n\n<svg onload=alert(1)>",
         );
+        let html = parts
+            .iter()
+            .find_map(|p| match p {
+                MdPart::Html(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .expect("html part");
+        assert!(html.contains("&lt;script"), "{html}");
+        assert!(html.contains("&lt;SCRIPT"), "{html}");
+        assert!(html.contains("&lt;img"), "{html}");
+        assert!(html.contains("&lt;iframe"), "{html}");
+        assert!(html.contains("&lt;svg"), "{html}");
         let lower = html.to_ascii_lowercase();
         assert!(!lower.contains("<script"), "{html}");
         assert!(!lower.contains("<img"), "{html}");
         assert!(!lower.contains("<iframe"), "{html}");
         assert!(!lower.contains("<svg"), "{html}");
-        assert!(
-            html.contains("&lt;script") || !lower.contains("script"),
-            "{html}"
-        );
+    }
 
-        let js = markdown_to_html(
+    #[test]
+    fn javascript_and_data_links_have_no_href() {
+        let parts = markdown_to_parts(
             "[x](javascript:alert(1))\n\n[y](JAVASCRIPT:alert(1))\n\n\
              ![z](javascript:alert(1))\n\n[d](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
         );
-        let js_l = js.to_ascii_lowercase();
-        assert!(!js_l.contains("href=\"javascript:"), "{js}");
-        assert!(!js_l.contains("href='javascript:"), "{js}");
-        assert!(!js_l.contains("src=\"javascript:"), "{js}");
-        assert!(!js_l.contains("src='javascript:"), "{js}");
-        assert!(!js_l.contains("href=\"data:"), "{js}");
-        assert!(!js_l.contains("javascript:"), "{js}");
-        assert!(!js_l.contains("<script"), "{js}");
+        let html = parts
+            .iter()
+            .find_map(|p| match p {
+                MdPart::Html(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .expect("html part");
+        assert!(html.contains("<a>"), "{html}");
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("href=\"javascript:"), "{html}");
+        assert!(!lower.contains("href='javascript:"), "{html}");
+        assert!(!lower.contains("src=\"javascript:"), "{html}");
+        assert!(!lower.contains("src='javascript:"), "{html}");
+        assert!(!lower.contains("href=\"data:"), "{html}");
+        assert!(!lower.contains("href='data:"), "{html}");
+        assert!(!lower.contains("javascript:"), "{html}");
+    }
 
-        let broke = markdown_to_html("[x](https://example.test/a\" onclick=\"alert(1))");
-        assert!(broke.contains("&quot;"), "{broke}");
-        assert!(
-            !broke.contains("href=\"https://example.test/a\""),
-            "{broke}"
+    #[test]
+    fn href_quote_break_is_escaped() {
+        let parts = markdown_to_parts("[x](https://example.test/a\" onclick=\"alert(1))");
+        let html = parts
+            .iter()
+            .find_map(|p| match p {
+                MdPart::Html(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .expect("html part");
+        assert!(html.contains("&quot;"), "{html}");
+        assert!(!html.contains("href=\"https://example.test/a\""), "{html}");
+    }
+
+    #[test]
+    fn protocol_relative_file_and_vbscript_links_have_no_href() {
+        let parts = markdown_to_parts(
+            "[x](//evil.test) [y](file:///etc/passwd) [z](vbscript:alert(1))",
         );
+        let html = parts
+            .iter()
+            .find_map(|p| match p {
+                MdPart::Html(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .expect("html part");
+        assert!(html.contains("<a>"), "{html}");
+        let lower = html.to_ascii_lowercase();
+        assert!(!lower.contains("href=\"//"), "{html}");
+        assert!(!lower.contains("href='//"), "{html}");
+        assert!(!lower.contains("href=\"file:"), "{html}");
+        assert!(!lower.contains("href='file:"), "{html}");
+        assert!(!lower.contains("href=\"vbscript:"), "{html}");
+        assert!(!lower.contains("href='vbscript:"), "{html}");
+        assert!(!lower.contains("src=\"//"), "{html}");
+        assert!(!lower.contains("src=\"file:"), "{html}");
+        assert!(!lower.contains("src=\"vbscript:"), "{html}");
+    }
 
-        let fenced = markdown_to_html("```html\n<script>alert(1)</script>\n```");
-        assert!(!fenced.to_ascii_lowercase().contains("<script"), "{fenced}");
-        assert!(fenced.contains("&lt;script"), "{fenced}");
+    #[test]
+    fn http_https_mailto_and_hash_links_keep_href() {
+        let parts = markdown_to_parts(
+            "[a](https://example.test) [b](http://example.test) [c](mailto:a@example.test) [d](#frag)",
+        );
+        let html = parts
+            .iter()
+            .find_map(|p| match p {
+                MdPart::Html(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .expect("html part");
+        assert!(html.contains("href=\"https://example.test\""), "{html}");
+        assert!(html.contains("href=\"http://example.test\""), "{html}");
+        assert!(html.contains("href=\"mailto:a@example.test\""), "{html}");
+        assert!(html.contains("href=\"#frag\""), "{html}");
+    }
 
-        for part in markdown_to_parts("Hi <script>alert(1)</script>\n\n[x](javascript:alert(1))") {
-            if let MdPart::Html(h) = part {
-                let l = h.to_ascii_lowercase();
-                assert!(!l.contains("<script"), "{h}");
-                assert!(!l.contains("href=\"javascript:"), "{h}");
-                assert!(!l.contains("javascript:"), "{h}");
-            }
-        }
+    #[test]
+    fn highlight_unknown_lang_escapes_raw_tags() {
+        let hi = highlight("html", "<script>alert(1)</script>");
+        assert!(hi.contains("&lt;script"), "{hi}");
+        assert!(!hi.contains("<script"), "{hi}");
     }
 
     #[test]
     fn parts_split_code_blocks() {
         let parts = markdown_to_parts("hi\n\n```json\n{\"a\": 1}\n```\n\nok");
-        assert!(
-            parts
-                .iter()
-                .any(|p| matches!(p, MdPart::Code { lang, .. } if lang == "json"))
-        );
-        assert!(
-            parts
-                .iter()
-                .any(|p| matches!(p, MdPart::Html(h) if h.contains("hi")))
-        );
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[0], MdPart::Html("<p>hi</p>".into()), "{parts:?}");
+        match &parts[1] {
+            MdPart::Code { lang, code } => {
+                assert_eq!(lang, "json", "{parts:?}");
+                assert!(
+                    code.contains("{\"a\": 1}"),
+                    "code must contain {{\"a\": 1}}: {parts:?}"
+                );
+            }
+            other => panic!("expected Code {{ lang: json, .. }}, got {other:?}"),
+        }
+        assert_eq!(parts[2], MdPart::Html("<p>ok</p>".into()), "{parts:?}");
+    }
+
+    #[test]
+    fn fence_info_string_non_ident_is_empty_lang() {
+        let parts = markdown_to_parts("```json;alert(1)\n{}\n```");
+        match parts.as_slice() {
+            [MdPart::Code { lang, code }] => {
+                assert_eq!(lang, "", "{parts:?}");
+                assert!(code.contains("{}"), "{parts:?}");
+            }
+            _ => panic!("expected one Code with empty lang, got {parts:?}"),
+        }
+    }
+
+    #[test]
+    fn indented_code_block_is_code_part_empty_lang() {
+        let parts = markdown_to_parts("    x = 1\n");
+        match parts.as_slice() {
+            [MdPart::Code { lang, code }] => {
+                assert_eq!(lang, "", "{parts:?}");
+                assert!(code.contains("x = 1"), "{parts:?}");
+            }
+            _ => panic!("expected one indented Code, got {parts:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_fences_are_two_code_parts() {
+        let parts = markdown_to_parts("```rs\na\n```\n```json\n{}\n```");
+        match parts.as_slice() {
+            [MdPart::Code {
+                lang: rs,
+                code: rs_code,
+            }, MdPart::Code {
+                lang: json,
+                code: json_code,
+            }] => {
+                assert_eq!(rs, "rs", "{parts:?}");
+                assert!(rs_code.contains('a'), "{parts:?}");
+                assert_eq!(json, "json", "{parts:?}");
+                assert!(json_code.contains("{}"), "{parts:?}");
+            }
+            _ => panic!("expected [Code rs, Code json], got {parts:?}"),
+        }
     }
 
     #[test]
     fn json_highlight_strings_and_nums() {
         let h = highlight("json", r#"{"n": 4}"#);
-        assert!(h.contains("tok-str"));
-        assert!(h.contains("tok-num"));
+        assert!(
+            h.contains("<span class=\"tok-str\">&quot;n&quot;</span>"),
+            "{h}"
+        );
+        assert!(h.contains("<span class=\"tok-num\">4</span>"), "{h}");
+    }
+
+    #[test]
+    fn jsonc_alias_highlights_like_json() {
+        let h = highlight("jsonc", r#"{"n": 4}"#);
+        assert!(
+            h.contains("<span class=\"tok-str\">&quot;n&quot;</span>"),
+            "{h}"
+        );
+        assert!(h.contains("<span class=\"tok-num\">4</span>"), "{h}");
+    }
+
+    #[test]
+    fn json_highlight_keywords_true_false_null() {
+        let h = highlight("json", "true false null");
+        assert!(h.contains("<span class=\"tok-kw\">true</span>"), "{h}");
+        assert!(h.contains("<span class=\"tok-kw\">false</span>"), "{h}");
+        assert!(h.contains("<span class=\"tok-kw\">null</span>"), "{h}");
+    }
+
+    #[test]
+    fn json_highlight_escapes_html_in_strings() {
+        let h = highlight("json", r#""<script>""#);
+        assert!(
+            h.contains("<span class=\"tok-str\">&quot;&lt;script&gt;&quot;</span>"),
+            "{h}"
+        );
+        assert!(!h.contains("<script"), "{h}");
     }
 }

@@ -201,7 +201,7 @@ fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSo
     // the staged tarball (different artifact, same number). When it is
     // behind, send desired so auto-update can apply — withholding it is
     // why 5700g stayed behind with auto_update on.
-    if should_withhold_desired(host, &staged, &local_hostname()) {
+    if should_withhold_desired(host, &staged, &local_hostname(), plane_git_sha()) {
         return None;
     }
     Some(staged)
@@ -212,9 +212,10 @@ fn should_withhold_desired(
     host: &WorkerHost,
     staged: &fleet_db::WorkerSoftwareManifest,
     local: &str,
+    plane: Option<&str>,
 ) -> bool {
     // Already running this process's bake: staged tarball is often older.
-    if host_reports_plane_bake(host) {
+    if host_reports_plane_bake(host, plane) {
         return true;
     }
     host_is_this_machine(host, local)
@@ -258,8 +259,8 @@ fn staged_pkg_version(staged: &fleet_db::WorkerSoftwareManifest, stem: &str) -> 
         .map(|s| s.to_string())
 }
 
-fn host_reports_plane_bake(host: &WorkerHost) -> bool {
-    sha_matches_plane(host.software_git_sha.as_deref(), plane_git_sha())
+fn host_reports_plane_bake(host: &WorkerHost, plane: Option<&str>) -> bool {
+    sha_matches_plane(host.software_git_sha.as_deref(), plane)
 }
 
 /// True when the host already runs this process's bake. Those boxes are
@@ -275,28 +276,74 @@ fn sha_matches_plane(got: Option<&str>, plane: Option<&str>) -> bool {
 }
 
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+    local_machine_names()
+        .into_iter()
+        .next()
         .unwrap_or_default()
 }
 
-fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
-    if !local.is_empty()
-        && host
-            .hostname
-            .as_deref()
-            .is_some_and(|h| h.eq_ignore_ascii_case(local))
-    {
+/// HOSTNAME, `/etc/hostname`, `uname -n`, `hostname` — same needles the
+/// tick picker uses so a FQDN vs short name still lists this box.
+fn local_machine_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let s = raw.trim();
+        if s.is_empty() {
+            return;
+        }
+        if !out.iter().any(|n| n.eq_ignore_ascii_case(s)) {
+            out.push(s.to_string());
+        }
+    };
+    if let Ok(s) = std::env::var("HOSTNAME") {
+        push(&mut out, &s);
+    }
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        push(&mut out, &s);
+    }
+    if let Ok(outp) = std::process::Command::new("uname").arg("-n").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    if let Ok(outp) = std::process::Command::new("hostname").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    out
+}
+
+fn hostnames_match(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
         return true;
     }
+    let al = a.split('.').next().unwrap_or(a);
+    let bl = b.split('.').next().unwrap_or(b);
+    !al.is_empty() && al.eq_ignore_ascii_case(bl)
+}
+
+fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
+    let mut names = local_machine_names();
+    if !local.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(local)) {
+        names.push(local.to_string());
+    }
+    if let Some(hn) = host
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if names.iter().any(|n| hostnames_match(hn, n)) {
+            return true;
+        }
+    }
+    host_advertises_local_ip(host)
+}
+
+/// Unscoped list/assign/lease: advertised LAN IP ∩ this plane.
+/// Hostname alone is impersonable.
+fn host_advertises_local_ip(host: &WorkerHost) -> bool {
     let mut advertised = host
         .hardware
         .as_ref()
@@ -326,12 +373,49 @@ fn origin_is_loopback(headers: &HeaderMap) -> bool {
         let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
             continue;
         };
-        let v = raw.to_ascii_lowercase();
-        if v.contains("localhost") || v.contains("127.0.0.1") || v.contains("[::1]") {
+        if host_is_loopback_origin(raw) {
             return true;
         }
     }
     false
+}
+
+/// Host of Origin/Referer only — not a substring in the query or a
+/// `localhost.evil` label.
+fn host_is_loopback_origin(raw: &str) -> bool {
+    // http::Uri::host() keeps brackets on IPv6 literals (`[::1]`).
+    if let Ok(uri) = raw.parse::<axum::http::Uri>() {
+        if let Some(host) = uri.host() {
+            let host = host.trim_matches(['[', ']']);
+            // Host only — a substring match would treat localhost.evil / ?next=localhost as loopback.
+            if host.eq_ignore_ascii_case("localhost")
+                || host.eq_ignore_ascii_case("127.0.0.1")
+                || host.eq_ignore_ascii_case("::1")
+                || host.to_ascii_lowercase().starts_with("127.")
+            {
+                return true;
+            }
+        }
+    }
+    let rest = raw
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(raw);
+    let hostport = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.starts_with("127.")
 }
 
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
@@ -356,8 +440,8 @@ fn host_json_for_viewer(
     public.is_this_machine = plane_box && viewer_loopback;
     if let Some(rt) = public.runtime_reported.as_ref() {
         let clean = sanitize_runtime_object(rt);
-        public.runtime_reported = Some(clean)
-            .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+        public.runtime_reported =
+            Some(clean).filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
     }
     public
 }
@@ -741,12 +825,13 @@ async fn http_create(
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
+    // Name is optional. Empty pending rows take the device hostname on pair.
     let name = body
         .name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::bad_request("name is required"))?;
+        .unwrap_or("");
     if name.len() > 255 {
         return Err(AppError::bad_request("name is too long"));
     }
@@ -780,10 +865,17 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let viewer_loopback = origin_is_loopback(&headers);
-    let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    // Paired rows in this workspace only. Do not merge other workspaces' cluster hosts.
+    // Home-workspace rows plus this-machine boxes (the CP laptop). Cluster
+    // hosts from other workspaces stay off this list; they remain assignable.
+    let names = local_machine_names();
+    let rows = host_repo::list_visible_for_workspace(&state.db, workspace_id, &names).await?;
     let hosts: Vec<_> = rows
         .iter()
+        .filter(|h| {
+            h.workspace_id == workspace_id
+                || h.is_cluster_host()
+                || host_advertises_local_ip(h)
+        })
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
@@ -817,6 +909,7 @@ pub(crate) async fn load_visible_host(
     }
     match host_repo::get(&state.db, host_id).await? {
         Some(host) if host.is_cluster_host() => Ok(host),
+        Some(host) if host_advertises_local_ip(&host) => Ok(host),
         // Do not name the other workspace — that is a tenant leak.
         Some(_) | None => Err(AppError::not_found("worker host not found")),
     }
@@ -1173,8 +1266,8 @@ async fn http_heartbeat(
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt))
-            .await;
+        let _ =
+            host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt)).await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1205,7 +1298,8 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     // Lease poll is the reclaim path. A sweeper-only helper would never run
     // in this process; expired rows must return to ready before this claim.
     let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
-    let claim = if host.is_cluster_host() {
+    let claim = if host.is_cluster_host() || host_advertises_local_ip(&host) {
+        // Cluster and the CP laptop take jobs from any workspace.
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
     } else {
@@ -1338,16 +1432,110 @@ async fn http_complete(
 
 #[cfg(test)]
 mod plane_bake_tests {
-    use super::{host_on_manifest_versions, sha_matches_plane, should_withhold_desired};
+    use super::{
+        host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    fn headers(key: axum::http::HeaderName, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(key, HeaderValue::from_str(value).expect("header value"));
+        h
+    }
+
+    #[test]
+    fn origin_is_loopback_parses_host_not_substring() {
+        for origin in [
+            "http://localhost:3030",
+            "http://127.0.0.1:3030",
+            "http://[::1]:3030",
+        ] {
+            assert!(
+                origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "loopback Origin {origin}"
+            );
+        }
+        for origin in [
+            "http://localhost.evil.example.test",
+            "http://evil-127.0.0.1.example.test",
+            "http://192.168.1.50:3030",
+        ] {
+            assert!(
+                !origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "non-loopback Origin {origin}"
+            );
+        }
+        assert!(
+            !origin_is_loopback(&headers(
+                header::REFERER,
+                "http://192.168.1.50:3030/?next=http://localhost:3030"
+            )),
+            "Referer query localhost must not count as loopback"
+        );
+        assert!(
+            origin_is_loopback(&headers(header::REFERER, "http://[::1]:3030")),
+            "Referer [::1] is loopback"
+        );
+        assert!(
+            !origin_is_loopback(&HeaderMap::new()),
+            "no Origin/Referer is not loopback"
+        );
+    }
+
+    #[test]
+    fn origin_host_not_substring() {
+        assert!(super::host_is_loopback_origin("http://localhost:3030"));
+        assert!(super::host_is_loopback_origin("http://127.0.0.1:3030"));
+        assert!(super::host_is_loopback_origin("http://[::1]:3030"));
+        assert!(!super::host_is_loopback_origin("http://localhost.evil.example.test"));
+        assert!(!super::host_is_loopback_origin(
+            "http://192.168.1.50:3030/?next=http://localhost:3030"
+        ));
+    }
+
     #[test]
     fn matching_sha_is_plane_bake() {
-        assert!(sha_matches_plane(Some("abc123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("ABC123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("  abc123  "), Some("abc123")));
+        for (got, plane, case) in [
+            (Some("abc123"), Some("abc123"), "exact"),
+            (Some("ABC123"), Some("abc123"), "case-insensitive"),
+            (Some("  abc123  "), Some("abc123"), "trimmed"),
+        ] {
+            assert!(
+                sha_matches_plane(got, plane),
+                "{case} reported sha is this process bake: got={got:?} plane={plane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sha_matches_plane_rejects_dirty_tree_id_suffix() {
+        // scripts/tree-id.sh: clean is 40 lowercase hex; dirty is HEAD-<12hex>.
+        let clean = "0123456789abcdef0123456789abcdef01234567";
+        let dirty = "0123456789abcdef0123456789abcdef01234567-aaaaaaaaaaaa";
+        assert!(
+            !sha_matches_plane(Some(dirty), Some(clean)),
+            "dirty host bake {dirty} is not the clean plane bake {clean}"
+        );
+    }
+
+    #[test]
+    fn should_withhold_desired_when_reported_sha_matches_plane_ignoring_case_and_trim() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some(" ABC123 ".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote host behind package versions still withholds when software_git_sha matches plane after trim+case"
+        );
     }
 
     #[test]
@@ -1443,7 +1631,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&host, &staged, "viny-5700g"),
+            !should_withhold_desired(&host, &staged, "viny-5700g", None),
             "behind plane box must get desired so auto-update can apply"
         );
         assert!(!host_on_manifest_versions(
@@ -1462,7 +1650,7 @@ mod plane_bake_tests {
                 "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
             })),
         );
-        assert!(should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(should_withhold_desired(&host, &staged, "viny-5700g", None));
         let remote = plane_host(
             "x1",
             Some(json!({
@@ -1471,7 +1659,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&remote, &staged, "viny-5700g"),
+            !should_withhold_desired(&remote, &staged, "viny-5700g", None),
             "remote hosts still receive desired"
         );
     }
@@ -1480,21 +1668,67 @@ mod plane_bake_tests {
     fn this_machine_without_report_must_receive_desired() {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
-        assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(!should_withhold_desired(&host, &staged, "viny-5700g", None));
     }
 
     #[test]
     fn host_on_this_process_bake_withholds_even_when_remote() {
-        let Some(plane) = super::plane_git_sha() else {
-            // Host cargo test without FLEET_GIT_SHA: bake check is off.
-            return;
-        };
         let staged = staged("0.0.2", "0.0.2");
         let mut host = plane_host("x1", None);
-        host.software_git_sha = Some(plane.to_string());
+        host.software_git_sha = Some("abc123".into());
         assert!(
-            should_withhold_desired(&host, &staged, "viny-5700g"),
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
             "a host already on this process bake must not get an older staged tarball"
+        );
+    }
+
+    #[test]
+    fn remote_other_bake_sha_still_receives_desired() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": "cargo", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
+            })),
+        );
+        host.software_git_sha = Some("old-dist".into());
+        assert!(
+            !should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote on a different bake still receives desired even when package versions match"
+        );
+    }
+
+    #[test]
+    fn this_machine_behind_but_on_plane_bake_still_withholds() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "viny-5700g",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some("abc123".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "plane bake withholds even when this-machine package versions are behind"
+        );
+    }
+
+    #[test]
+    fn this_machine_matches_fqdn_vs_short_hostname() {
+        // Do not use this box's real hostname — local_machine_names()
+        // would make the negative case true.
+        let host = plane_host("unique-box-xyz.lan", None);
+        assert!(super::host_is_this_machine(&host, "unique-box-xyz"));
+        assert!(super::host_is_this_machine(&host, "UNIQUE-BOX-XYZ"));
+        let short = plane_host("unique-box-xyz", None);
+        assert!(super::host_is_this_machine(&short, "unique-box-xyz.lan"));
+        assert!(!super::host_is_this_machine(&short, "other-box"));
+        assert!(
+            !super::host_advertises_local_ip(&short),
+            "hostname-only must not unscoped-share"
         );
     }
 }
