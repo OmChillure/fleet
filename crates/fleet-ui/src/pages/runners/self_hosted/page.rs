@@ -1095,7 +1095,7 @@ fn AgentLoginBlock(
                                 }
                                 if !installed {
                                     div { class: "mt-0.5 flex flex-wrap items-center gap-1",
-                                        code { class: "min-w-0 flex-1 break-all text-[11px] text-[var(--app-muted)]",
+                                        code { class: "min-w-0 flex-1 overflow-x-auto whitespace-pre text-[11px] text-[var(--app-muted)]",
                                             "{cmd}"
                                         }
                                         button {

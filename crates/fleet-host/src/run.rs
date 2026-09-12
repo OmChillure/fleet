@@ -262,6 +262,26 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn is_machine_auth_err(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::client::ApiError>()
+        .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
+        || e.to_string().contains("machine token rejected")
+}
+
+/// Same `machine.id`, new `machine.token`. Does not wipe the id file.
+/// Needs `FLEET_BOOTSTRAP_SECRET` (fleet-dev sets it). Otherwise the human
+/// runs `fleet-host pair` — do not invent a token.
+async fn reclaim_machine_token(cfg: &mut LocalConfig, url: &str) -> Result<HostClient> {
+    let secret = env_nonempty(BOOTSTRAP_SECRET_ENV).ok_or_else(|| {
+        anyhow!("machine token rejected; re-pair with `fleet-host pair`")
+    })?;
+    warn!("machine token rejected; reclaiming via bootstrap (same machine.id)");
+    let pair_client = HostClient::for_pair(url, cfg)?;
+    let resp = bootstrap_until_workspace(&pair_client, cfg, &secret).await?;
+    persist_pair(cfg, url, &resp)?;
+    HostClient::with_machine_token(url, &resp.machine_token, cfg)
+}
+
 /// Manual apply. Same path as auto; does not set CP `paused`/`drain`.
 pub async fn update() -> Result<()> {
     let cfg = LocalConfig::load_or_default()?;
@@ -286,7 +306,7 @@ pub fn init_tracing(level: &str) {
 async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()> {
     cfg.apply_ollama_models_env();
     let bus = crate::bus::BusHandle::from_env().await;
-    let client = HostClient::with_machine_token(&url, token, &cfg)?;
+    let mut client = HostClient::with_machine_token(&url, token, &cfg)?;
     let jobs: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
     let effective = Arc::new(Mutex::new(EffectiveModes::from_local(&cfg)));
     let update_state = Arc::new(UpdateState::new());
@@ -403,12 +423,12 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "heartbeat failed");
                     }
@@ -541,12 +561,12 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "lease poll failed");
                     }
@@ -692,6 +712,30 @@ mod tests {
         assert_eq!(
             cfg.control_plane_url.as_deref(),
             Some("http://api.example.test:8080")
+        );
+    }
+
+    /// catalog:unit-run-401-reclaims-via-bootstrap — rejected machine.token
+    /// reclaims with the same machine.id; it must not wipe the id file.
+    #[test]
+    fn run_401_reclaims_via_bootstrap_without_wiping_machine_id() {
+        let src = include_str!("run.rs");
+        let prod = src.split("mod tests {").next().unwrap();
+        assert!(
+            prod.contains("reclaim_machine_token") && prod.contains("bootstrap_until_workspace"),
+            "401 must reclaim via bootstrap, not exit"
+        );
+        assert!(
+            prod.contains("same machine.id"),
+            "reclaim comment must name machine.id"
+        );
+        let reclaim = prod
+            .split("async fn reclaim_machine_token")
+            .nth(1)
+            .expect("reclaim_machine_token");
+        assert!(
+            !reclaim.contains("delete_machine_token") && !reclaim.contains("unpair("),
+            "reclaim must not wipe machine.token/id before bootstrap succeeds"
         );
     }
 

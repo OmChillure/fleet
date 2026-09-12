@@ -416,6 +416,52 @@ class RecordDemoContractTests(unittest.TestCase):
             rec.match_http_log(wrong_method, "POST", "/api/auth/signup", ("201",))
         )
 
+    def test_self_hosted_film_accepts_pending_last_seen_cards(self):
+        text = REC.read_text(encoding="utf-8")
+        self.assertIn(
+            'filter(has_text="last seen")',
+            text,
+            "unify/runners film must treat pending last-seen cards as a list",
+        )
+        self.assertIn(
+            '"pending" not in body.lower()',
+            text,
+            "pending pill is a listed worker, not a blank page",
+        )
+
+    def test_toast_card_does_not_eat_clicks_and_install_cmd_does_not_break_all(self):
+        toast = (
+            REPO
+            / "crates"
+            / "fleet-ui"
+            / "src"
+            / "components"
+            / "toast.rs"
+        ).read_text(encoding="utf-8")
+        toast_prod = toast.split("#[cfg(test)]", 1)[0]
+        page = (
+            REPO
+            / "crates"
+            / "fleet-ui"
+            / "src"
+            / "pages"
+            / "runners"
+            / "self_hosted"
+            / "page.rs"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            "pointer-events-auto relative overflow-hidden",
+            toast_prod,
+            "toast card must not intercept Apply under it",
+        )
+        self.assertIn("pointer-events-none relative overflow-hidden", toast_prod)
+        self.assertNotIn(
+            "break-all text-[11px]",
+            page,
+            "provider install curl|bash must not wrap mid-token",
+        )
+        self.assertIn("whitespace-pre", page)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

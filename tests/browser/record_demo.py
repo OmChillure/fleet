@@ -195,7 +195,9 @@ class Demo:
                 btn = oks.nth(i)
                 try:
                     if btn.is_visible():
-                        btn.click(timeout=1000)
+                        # force: the toast card used to intercept its own OK
+                        # and nearby controls (Apply).
+                        btn.click(timeout=1000, force=True)
                         clicked = True
                 except Exception:
                     continue
@@ -1111,6 +1113,9 @@ class Demo:
             "No workers yet" not in body
             and p.locator("article").count() == 0
             and p.locator("button").filter(has_text="online").count() == 0
+            and p.locator("button").filter(has_text="last seen").count() == 0
+            and "pending" not in body.lower()
+            and "Waiting to pair" not in body
         ):
             raise RuntimeError("self-hosted page missing empty state or cards")
         self.snap("list")
@@ -1171,6 +1176,7 @@ class Demo:
         if hold.count() and hold.first.is_visible():
             hold.first.click()
             pause(p, 400)
+            self.dismiss_toasts()
             apply = p.get_by_role("button", name="Apply", exact=True)
             if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                 with self.expect_http("PATCH", "/worker-hosts/", status="200"):
@@ -1181,6 +1187,7 @@ class Demo:
             if resume.count():
                 resume.first.click()
                 pause(p, 400)
+                self.dismiss_toasts()
                 apply = p.get_by_role("button", name="Apply", exact=True)
                 if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                     with self.expect_http("PATCH", "/worker-hosts/", status="200"):
