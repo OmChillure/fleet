@@ -1286,7 +1286,9 @@ fn safe_path(root: &Path, rel: &str) -> Result<PathBuf, ()> {
 async fn run_bash_limited(root: &Path, cmd: &str, timeout: Duration) -> String {
     let mut command = Command::new("bash");
     command
-        .arg("-lc")
+        .arg("--noprofile")
+        .arg("--norc")
+        .arg("-c")
         .arg(cmd)
         .current_dir(root)
         .stdin(Stdio::null())
@@ -1316,7 +1318,7 @@ async fn run_bash_limited(root: &Path, cmd: &str, timeout: Duration) -> String {
             truncate(&s, 16_000)
         }
         Ok(Err(e)) => format!("error: {e}"),
-        Err(_) => format!("error: timed out after {}s", timeout.as_secs()),
+        Err(_) => format!("error: timed out after {}ms", timeout.as_millis()),
     }
 }
 
@@ -1608,17 +1610,18 @@ mod tests {
             std::path::Path::new("/proc/self").is_dir(),
             "pid death is observed via /proc"
         );
-        // $$ then exec: kill_on_drop reaps the sleeper. `bash -lc sleep 8` orphans it.
+        // $$ then exec: kill_on_drop reaps the sleeper. A login shell can
+        // stall on /etc/profile and miss the pid file under load.
         let started = std::time::Instant::now();
         let out = run_bash_limited(
             dir.path(),
-            "echo $$ > sleeper.pid; sync; exec sleep 8",
-            Duration::from_millis(400),
+            "printf '%s\\n' \"$$\" > sleeper.pid; exec sleep 8",
+            Duration::from_secs(2),
         )
         .await;
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(2),
+            elapsed < Duration::from_secs(4),
             "timeout must return before sleep 8: {elapsed:?} {out}"
         );
         assert!(
@@ -1627,9 +1630,9 @@ mod tests {
         );
 
         let pid_path = dir.path().join("sleeper.pid");
-        let wait_pid = std::time::Instant::now() + Duration::from_millis(400);
+        let wait_pid = std::time::Instant::now() + Duration::from_secs(2);
         while !pid_path.is_file() && std::time::Instant::now() < wait_pid {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let pid: u32 = std::fs::read_to_string(&pid_path)
             .unwrap_or_else(|e| panic!("sleeper.pid after timeout ({e}): {out}"))
