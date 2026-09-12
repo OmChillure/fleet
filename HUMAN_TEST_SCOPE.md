@@ -71,7 +71,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes — `GET /health.git_sha` and UI `/fleet-git-sha.txt` = `c2f43289696282c9ed5b1443d2e732bfa0c58ff7`. Clip `.tmp/demos/20260912T200147Z-auth-shell-workspace-api-chat-integrations-settings-admin.webm`.
+- Frames + webm inspected: yes — 53 frames under `.tmp/demos/20260912T200147Z-frames/` plus the `.webm`.
+- Bugs found:
+  - none. Promote/Demote toasts fired. Inbox and OAuth lines are readable text. Control plane git sha matches the bake. No pair tokens or JWT on screen.
