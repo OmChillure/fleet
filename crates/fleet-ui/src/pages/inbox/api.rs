@@ -163,7 +163,7 @@ pub async fn start_monitor(workspace_id: &str) -> Result<Value, InboxError> {
         workspace_id,
         &MonitorPatch {
             enabled: Some(true),
-            auto_launch: Some(true),
+            auto_launch: Some(false),
             follow_connected: Some(true),
             ..MonitorPatch::default()
         },

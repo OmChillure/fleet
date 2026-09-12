@@ -59,6 +59,10 @@ pub struct FinishTicketArgs {
     pub provider: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// When true, a pasted provider+key that is not in this workspace is
+    /// inserted as an open stub. Default is look-up only.
+    #[serde(default)]
+    pub create_if_missing: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,12 +121,9 @@ fn github_key_from_url_or_slash(raw: &str) -> Option<String> {
     }
     if let Some((repo, num)) = s.split_once('#') {
         let repo = repo.trim();
-        let num = num
-            .trim()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .unwrap_or("");
-        if repo.contains('/') && !num.is_empty() {
+        let num = num.trim();
+        // Whole suffix must be digits. `stack#5cc319fa` is not issue 5.
+        if repo.contains('/') && !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
             return Some(format!("{repo}#{num}"));
         }
     }
@@ -372,8 +373,14 @@ pub async fn prepare_finish(
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
     require_ticket_workspace(&item, workspace_id)?;
-    if item.state != "open" || item.run_id.is_some() {
-        return Err(AppError::conflict("ticket is not open"));
+    if item.state == "launched" || item.run_id.is_some() {
+        return Err(AppError::conflict_code(
+            "already_launched",
+            "ticket already launched",
+        ));
+    }
+    if item.state != "open" {
+        return Err(AppError::conflict_code("not_open", "ticket is not open"));
     }
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
     let spec = format!(
@@ -785,6 +792,7 @@ async fn drive_inbox(
                 ticket: None,
                 provider: Some(item.provider.clone()),
                 key: Some(item.external_key.clone()),
+                create_if_missing: None,
             },
         )
         .await
@@ -1834,11 +1842,13 @@ async fn resolve_ticket(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let parsed = raw.and_then(parse_ticket_ref);
-    let provider = args
+    let explicit_provider = args
         .provider
         .as_deref()
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    let provider = explicit_provider
+        .clone()
         .or_else(|| parsed.as_ref().and_then(|p| p.provider.clone()));
     if let Some(p) = provider.as_deref() {
         if !inbox_sources::is_inbox_provider(p) {
@@ -1847,7 +1857,16 @@ async fn resolve_ticket(
             )));
         }
     }
-    let key = parsed.as_ref().map(|p| p.key.clone());
+    let key = if explicit_provider.is_some() {
+        args.key
+            .as_deref()
+            .or(args.ticket.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        parsed.as_ref().map(|p| p.key.clone())
+    };
 
     if let (Some(provider), Some(key)) = (provider.as_deref(), key.as_deref()) {
         if let Some(hit) = ticket_repo::find_inbox(&state.db, workspace_id, provider, key)
@@ -1856,21 +1875,25 @@ async fn resolve_ticket(
         {
             return Ok(hit);
         }
-        // Not seen yet — seed a stub so finish still works from a pasted key.
-        return ticket_repo::upsert_inbox(
-            &state.db,
-            &UpsertInbox {
-                workspace_id,
-                provider: provider.to_string(),
-                external_key: key.to_string(),
-                title: key.to_string(),
-                url: None,
-                summary: String::new(),
-                provider_closed: false,
-            },
-        )
-        .await
-        .map_err(|e| AppError::internal(e.to_string()));
+        if args.create_if_missing.unwrap_or(false) {
+            return ticket_repo::upsert_inbox(
+                &state.db,
+                &UpsertInbox {
+                    workspace_id,
+                    provider: provider.to_string(),
+                    external_key: key.to_string(),
+                    title: key.to_string(),
+                    url: None,
+                    summary: String::new(),
+                    provider_closed: false,
+                },
+            )
+            .await
+            .map_err(|e| AppError::internal(e.to_string()));
+        }
+        return Err(AppError::not_found(format!(
+            "no inbox item `{provider}:{key}` in this workspace"
+        )));
     }
 
     if let Some(key) = key.as_deref() {
@@ -2243,6 +2266,14 @@ mod tests {
         let p = parse_ticket_ref("acme/app#42").unwrap();
         assert_eq!(p.provider.as_deref(), Some("github"));
         assert_eq!(p.key, "acme/app#42");
+    }
+
+    #[test]
+    fn parse_ticket_ref_hex_suffix_is_not_github_issue_5() {
+        let p = parse_ticket_ref("live-sim/stack#5cc319fa").unwrap();
+        assert!(p.provider.is_none(), "{p:?}");
+        assert_eq!(p.key, "live-sim/stack#5cc319fa");
+        assert!(github_key_from_url_or_slash("live-sim/stack#5cc319fa").is_none());
     }
 
     #[test]

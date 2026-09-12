@@ -591,6 +591,9 @@ impl Store {
         .bind(status)
         .execute(&self.pool)
         .await?;
+        if matches!(status, "failed" | "cancelled") {
+            let _ = fleet_db::repos::tickets::reopen_tickets_for_run_id(&self.pool, run_id).await;
+        }
         Ok(())
     }
 

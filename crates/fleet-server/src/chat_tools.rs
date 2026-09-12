@@ -1053,6 +1053,7 @@ pub async fn execute_tool(
                             .get("key")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string()),
+                        create_if_missing: None,
                     });
             match crate::tickets::ticket_context_for_model(state, workspace_id, user_id, args).await
             {

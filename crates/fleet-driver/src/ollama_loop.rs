@@ -61,8 +61,13 @@ pub async fn run_ollama_on(
         }),
         json!({"role": "user", "content": prompt}),
     ];
+    let http_timeout = std::env::var("OLLAMA_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(600);
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(http_timeout))
         .build()?;
     let deadline = tokio::time::Instant::now() + job_timeout;
     let mut last = String::new();
@@ -88,6 +93,13 @@ pub async fn run_ollama_on(
         let body = res.text().await.unwrap_or_default();
         if !status.is_success() {
             if use_tools && model_rejects_tools(&body) {
+                let profile = std::env::var("FLEET_WORKER_PROFILE").unwrap_or_default();
+                let p = profile.to_ascii_lowercase();
+                if p.contains("cod") || p.contains("review") || p.contains("implement") {
+                    return Err(anyhow!(
+                        "ollama model does not support tools; cannot complete {profile} acceptance"
+                    ));
+                }
                 use_tools = false;
                 continue;
             }

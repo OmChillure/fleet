@@ -23,6 +23,7 @@ struct TaskCard {
     block_reason: String,
     hitl_notes: String,
     session_id: String,
+    failure_reason: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -64,6 +65,7 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                         block_reason: t["block_reason"].as_str().unwrap_or("").to_string(),
                         hitl_notes: t["hitl_notes"].as_str().unwrap_or("").to_string(),
                         session_id: t["claimed_session_id"].as_str().unwrap_or("").to_string(),
+                        failure_reason: t["failure_reason"].as_str().unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -433,7 +435,9 @@ pub fn Fleet(workspace_id: String) -> Element {
             section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs" }
                 if runs().is_empty() {
-                    p { class: "text-sm text-[var(--app-muted)]", "No runs yet. Start a 2-task run." }
+                    p { class: "text-sm text-[var(--app-muted)]",
+                        "No runs yet. Finish an Inbox item, start a goal, or use Start 2-task run."
+                    }
                 } else {
                     div { class: "flex flex-col gap-2",
                         for run in runs() {
@@ -586,6 +590,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                 class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-2.5 shadow-sm",
                                                 p { class: "m-0 text-sm font-medium text-[var(--app-fg)]", "{t.title}" }
                                                 p { class: "m-0 mt-0.5 font-mono text-[10px] text-[var(--app-muted)]", "{t.plan_task_id}" }
+                                                if !t.failure_reason.is_empty() {
+                                                    p { class: "m-0 mt-1 text-[11px] text-red-400", "{t.failure_reason}" }
+                                                }
                                                 div { class: "mt-2 flex flex-wrap items-center gap-1.5",
                                                     span {
                                                         class: "rounded-full border px-1.5 py-0.5 text-[10px] font-medium {status_pill_class(&t.status)}",
