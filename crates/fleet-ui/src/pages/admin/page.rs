@@ -197,7 +197,7 @@ fn UsersSection(
         section { class: "mt-8 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
             h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Users" }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "Promote or disable accounts on this instance. Workspace roles stay under Settings."
+                "Newest 200 accounts. Promote or disable here. Workspace roles stay under Settings."
             }
             div { class: "mt-3 overflow-x-auto",
                 table { class: "w-full min-w-[40rem] border-collapse text-left text-sm",
@@ -394,7 +394,7 @@ fn RunnersSection(runners: Vec<Value>) -> Element {
         section { class: "mt-8 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
             h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Runners" }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "Every paired host on this instance. Pair tokens stay on the workspace Self-hosted page."
+                "Newest 200 paired hosts. Pair tokens stay on the workspace Self-hosted page."
             }
             if runners.is_empty() {
                 p { class: "mt-3 text-sm text-[var(--app-muted)]", "No runners registered." }

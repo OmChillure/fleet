@@ -77,21 +77,36 @@ pub async fn list_users(pool: &PgPool) -> DbResult<Vec<AdminUserRow>> {
             u.instance_admin,
             u.created_at,
             u.updated_at,
-            (SELECT COUNT(*) FROM workspace_members m WHERE m.user_id = u.id)::bigint
-                AS workspace_count,
-            (SELECT MAX(s.last_seen_at) FROM auth_sessions s WHERE s.user_id = u.id)
-                AS last_seen_at,
-            (
-                SELECT COUNT(*) FROM auth_sessions s
-                WHERE s.user_id = u.id
-                  AND s.revoked_at IS NULL
-                  AND s.expires_at > now()
-                  AND s.absolute_expires_at > now()
-            )::bigint AS active_sessions,
-            (SELECT COUNT(*) FROM worker_hosts h WHERE h.created_by = u.id)::bigint
-                AS runners_created
+            COALESCE(m.workspace_count, 0)::bigint AS workspace_count,
+            s.last_seen_at,
+            COALESCE(s.active_sessions, 0)::bigint AS active_sessions,
+            COALESCE(h.runners_created, 0)::bigint AS runners_created
         FROM users u
+        LEFT JOIN (
+            SELECT user_id, COUNT(*)::bigint AS workspace_count
+            FROM workspace_members
+            GROUP BY user_id
+        ) m ON m.user_id = u.id
+        LEFT JOIN (
+            SELECT
+                user_id,
+                MAX(last_seen_at) AS last_seen_at,
+                COUNT(*) FILTER (
+                    WHERE revoked_at IS NULL
+                      AND expires_at > now()
+                      AND absolute_expires_at > now()
+                )::bigint AS active_sessions
+            FROM auth_sessions
+            GROUP BY user_id
+        ) s ON s.user_id = u.id
+        LEFT JOIN (
+            SELECT created_by AS user_id, COUNT(*)::bigint AS runners_created
+            FROM worker_hosts
+            WHERE created_by IS NOT NULL
+            GROUP BY created_by
+        ) h ON h.user_id = u.id
         ORDER BY u.created_at DESC, u.id ASC
+        LIMIT 200
         "#,
     )
     .fetch_all(pool)
@@ -108,30 +123,50 @@ pub async fn list_workspaces(pool: &PgPool) -> DbResult<Vec<AdminWorkspaceRow>> 
             w.name,
             w.created_at,
             w.min_isolation,
-            (SELECT COUNT(*) FROM workspace_members m WHERE m.workspace_id = w.id)::bigint
-                AS member_count,
-            (SELECT COUNT(*) FROM worker_hosts h WHERE h.workspace_id = w.id)::bigint
-                AS runner_count,
-            (
-                SELECT COUNT(*) FROM worker_hosts h
-                WHERE h.workspace_id = w.id AND h.status = 'online'
-            )::bigint AS online_runners,
-            (
-                SELECT COUNT(*) FROM integration_connections c
-                WHERE c.workspace_id = w.id AND c.status = 'connected'
-            )::bigint AS connected_integrations,
+            COALESCE(m.member_count, 0)::bigint AS member_count,
+            COALESCE(h.runner_count, 0)::bigint AS runner_count,
+            COALESCE(h.online_runners, 0)::bigint AS online_runners,
+            COALESCE(c.connected_integrations, 0)::bigint AS connected_integrations,
             EXISTS(
                 SELECT 1 FROM ticket_monitors t
                 WHERE t.workspace_id = w.id AND t.enabled
             ) AS inbox_monitor,
             (w.partners_disclaimer_accepted_at IS NOT NULL) AS partners_disclaimer,
-            (
-                SELECT string_agg(u.email, ', ' ORDER BY u.email)
-                FROM workspace_members m
-                JOIN users u ON u.id = m.user_id
-                WHERE m.workspace_id = w.id AND m.role = 'owner'
-            ) AS owners
-        FROM workspaces w
+            o.owners
+        FROM (
+            SELECT id, slug, name, created_at, min_isolation,
+                   partners_disclaimer_accepted_at
+            FROM workspaces
+            ORDER BY created_at DESC, id ASC
+            LIMIT 200
+        ) w
+        LEFT JOIN (
+            SELECT workspace_id, COUNT(*)::bigint AS member_count
+            FROM workspace_members
+            GROUP BY workspace_id
+        ) m ON m.workspace_id = w.id
+        LEFT JOIN (
+            SELECT
+                workspace_id,
+                COUNT(*)::bigint AS runner_count,
+                COUNT(*) FILTER (WHERE status = 'online')::bigint AS online_runners
+            FROM worker_hosts
+            GROUP BY workspace_id
+        ) h ON h.workspace_id = w.id
+        LEFT JOIN (
+            SELECT workspace_id, COUNT(*)::bigint AS connected_integrations
+            FROM integration_connections
+            WHERE status = 'connected'
+            GROUP BY workspace_id
+        ) c ON c.workspace_id = w.id
+        LEFT JOIN (
+            SELECT m.workspace_id,
+                   string_agg(u.email, ', ' ORDER BY u.email) AS owners
+            FROM workspace_members m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.role = 'owner'
+            GROUP BY m.workspace_id
+        ) o ON o.workspace_id = w.id
         ORDER BY w.created_at DESC, w.id ASC
         "#,
     )
@@ -145,7 +180,8 @@ pub async fn list_hosts(pool: &PgPool) -> DbResult<Vec<WorkerHost>> {
         r#"
         SELECT {HOST_COLS}
         FROM worker_hosts
-        ORDER BY last_seen_at DESC NULLS LAST, created_at DESC, id ASC
+        ORDER BY created_at DESC, id ASC
+        LIMIT 200
         "#
     );
     sqlx::query_as::<_, WorkerHost>(&q)
@@ -199,6 +235,58 @@ pub async fn count_hosts(pool: &PgPool) -> DbResult<i64> {
         .fetch_one(pool)
         .await
         .map_err(map_query_err)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct HostRollup {
+    pub total: i64,
+    pub pending: i64,
+    pub error: i64,
+    pub disabled: i64,
+    pub online: i64,
+    pub offline: i64,
+    pub paused: i64,
+    pub drain: i64,
+    pub updating: i64,
+    pub assignable: i64,
+}
+
+pub async fn host_rollup(pool: &PgPool) -> DbResult<HostRollup> {
+    sqlx::query_as::<_, HostRollup>(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS total,
+            COUNT(*) FILTER (WHERE status = 'pending')::bigint AS pending,
+            COUNT(*) FILTER (WHERE status = 'error')::bigint AS error,
+            COUNT(*) FILTER (WHERE status = 'disabled')::bigint AS disabled,
+            COUNT(*) FILTER (
+                WHERE status = 'online'
+                  AND last_seen_at IS NOT NULL
+                  AND last_seen_at >= now() - interval '90 seconds'
+            )::bigint AS online,
+            COUNT(*) FILTER (
+                WHERE status = 'online'
+                  AND (last_seen_at IS NULL
+                       OR last_seen_at < now() - interval '90 seconds')
+            )::bigint AS offline,
+            COUNT(*) FILTER (WHERE paused)::bigint AS paused,
+            COUNT(*) FILTER (WHERE drain)::bigint AS drain,
+            COUNT(*) FILTER (WHERE software_updating)::bigint AS updating,
+            COUNT(*) FILTER (
+                WHERE enabled
+                  AND NOT paused
+                  AND NOT drain
+                  AND isolation = 'native'
+                  AND status = 'online'
+                  AND last_seen_at IS NOT NULL
+                  AND last_seen_at >= now() - interval '90 seconds'
+            )::bigint AS assignable
+        FROM worker_hosts
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(map_query_err)
 }
 
 pub async fn count_pending_invites(pool: &PgPool) -> DbResult<i64> {

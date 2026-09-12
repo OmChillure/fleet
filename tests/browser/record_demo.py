@@ -989,7 +989,11 @@ class Demo:
         if self.email.lower() not in out.lower():
             raise RuntimeError(f"promote missed {self.email}: {out!r}")
 
-        p.goto(f"{UI}/admin", wait_until="networkidle")
+        p.goto(f"{UI}/admin", wait_until="domcontentloaded")
+        p.get_by_role("heading", name="Instance", exact=True).first.wait_for(
+            timeout=25_000
+        )
+        p.get_by_role("heading", name="Users", exact=True).wait_for(timeout=25_000)
         pause(p, 800)
         if p.locator("h1").first.inner_text().strip() != "Instance":
             raise RuntimeError(f"admin missing Instance heading ({p.url})")

@@ -11,7 +11,7 @@ use axum_extra::extract::CookieJar;
 use chrono::Utc;
 use fleet_auth::{require_instance_admin, AppError, AppResult, AuthState};
 use fleet_db::repos::{admin as admin_repo, sessions as session_repo, users as user_repo};
-use fleet_db::{User, WORKER_HOST_OFFLINE_AFTER};
+use fleet_db::User;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -62,41 +62,19 @@ async fn http_overview(
     }
     let instance_admins = user_repo::count_instance_admins(&state.db).await?;
     let workspaces = admin_repo::count_workspaces(&state.db).await?;
-    let hosts = admin_repo::list_hosts(&state.db).await?;
-    let now = Utc::now();
-    let mut runners = BTreeMap::from([
-        ("total".into(), hosts.len() as i64),
-        ("online".into(), 0),
-        ("offline".into(), 0),
-        ("pending".into(), 0),
-        ("error".into(), 0),
-        ("disabled".into(), 0),
-        ("paused".into(), 0),
-        ("drain".into(), 0),
-        ("assignable".into(), 0),
-        ("behind".into(), 0),
-        ("updating".into(), 0),
+    let hosts = admin_repo::host_rollup(&state.db).await?;
+    let runners: BTreeMap<String, i64> = BTreeMap::from([
+        ("total".into(), hosts.total),
+        ("online".into(), hosts.online),
+        ("offline".into(), hosts.offline),
+        ("pending".into(), hosts.pending),
+        ("error".into(), hosts.error),
+        ("disabled".into(), hosts.disabled),
+        ("paused".into(), hosts.paused),
+        ("drain".into(), hosts.drain),
+        ("assignable".into(), hosts.assignable),
+        ("updating".into(), hosts.updating),
     ]);
-    for h in &hosts {
-        let pub_st = h.public_status(now);
-        *runners.entry(pub_st.to_string()).or_insert(0) += 1;
-        if h.paused {
-            *runners.get_mut("paused").expect("paused") += 1;
-        }
-        if h.drain {
-            *runners.get_mut("drain").expect("drain") += 1;
-        }
-        if h.accepts_v1_leases()
-            && now
-                .signed_duration_since(h.last_seen_at.unwrap_or(now))
-                <= WORKER_HOST_OFFLINE_AFTER
-        {
-            *runners.get_mut("assignable").expect("assignable") += 1;
-        }
-        if h.software_updating {
-            *runners.get_mut("updating").expect("updating") += 1;
-        }
-    }
     let claims = counts_map(admin_repo::count_work_claims(&state.db).await?);
     let cases = counts_map(admin_repo::count_cases(&state.db).await?);
     let goals = counts_map(admin_repo::count_goals(&state.db).await?);
