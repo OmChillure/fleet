@@ -132,20 +132,17 @@ async fn reclaim_stale_deciding_returns_stuck_deciding_to_waiting() {
         .await
         .expect("get stale")
         .expect("stale row");
-    // Live process_due on the shared DB may reclaim (n=1) or may have
-    // already reclaimed before this call (n=0, last_error set).
-    assert!(
-        n == 1 || n == 0,
-        "reclaim affects 0 or 1 row, got {n}"
-    );
-    if n == 1 {
+    // n is global (every stale deciding row in the shared DB), so leftover
+    // cases from other workspaces can make it > 1. This test locks our row.
+    let _ = n;
+    if stale.status == "waiting" {
         assert!(
             stale.last_error.is_some(),
             "unset last_error is filled on reclaim"
         );
     } else {
-        assert!(
-            stale.status == "waiting" || stale.status == "deciding",
+        assert_eq!(
+            stale.status, "deciding",
             "live process_due already moved the stale row: {}",
             stale.status
         );
