@@ -82,7 +82,10 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes — host stack `GET /health.git_sha` and UI `/fleet-git-sha.txt` = `b4253dd0c2a780451de9eb4f9bee735b4f8cc2bd` (frame `10-api-health.png`). Clip `.tmp/demos/20260912T203200Z-auth-workspace-api-chat-fleet-sandboxes-cases-inbox.webm`.
+- Frames + webm inspected: yes — 61 mid-action frames under `.tmp/demos/20260912T203200Z-frames/` plus the `.webm`.
+- Bugs found:
+  - `inbox`: Finish returned 400 `no paired runner taking jobs` (four recorder lines, one cause). Host film stack had no Grok/Claude/Ollama pair taking jobs; this is the existing `require_taking` gate, not a regression. Ticket row + Finish stayed visible (correct). Start monitor without a connected app toasted the connect-first copy (correct).
+  - Settings: Isolation, **Where new fleet jobs run** (Run on a PC), and **API keys for Run in a container** all present; Save / invite / revoke logged 200/201. No key secret on screen.
+  - Runners: **Only me** / **Anyone in this workspace** radios present; pair command + token shown once (product); card reads `Run on a PC · only you can send work`. Hold/resume toasted `Settings sent`.
+  - Lab protocol 30/30 ok. k8s kubectl: CRD + operator. `/health` includes `admin` (already on main) and this tree sha. No `.env` / JWT / `auth.json` leaked.
