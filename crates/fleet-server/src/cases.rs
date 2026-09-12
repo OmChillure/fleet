@@ -1502,9 +1502,15 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
 
     let mut plan = build_multi_task_plan(case.workspace_id, None, tasks);
     plan.source = "case".into();
-    let llm = crate::chat_tools::composer_or_fallback(state, case.workspace_id).await;
+    let llm = crate::chat_tools::composer_or_fallback_for(
+        state,
+        case.workspace_id,
+        case.created_by,
+    )
+    .await;
     crate::chat_tools::require_taking_runner(&llm).map_err(|e| e.to_string())?;
     crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
+    plan.policy.requested_by = case.created_by;
     validate::validate_plan(&plan).map_err(|e| e.to_string())?;
 
     state

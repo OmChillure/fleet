@@ -334,30 +334,15 @@ class KindSmokeTests(unittest.TestCase):
         self.assertTrue(ws, "login/signup returned no workspace id")
 
         fleet = f"http://127.0.0.1:8080/api/workspaces/{ws}/fleet"
-        deadline = time.monotonic() + 90
-        host_online = False
-        while time.monotonic() < deadline:
-            st, hosts, raw = _json_request(
-                opener, "GET", f"http://127.0.0.1:8080/api/workspaces/{ws}/worker-hosts"
-            )
-            self.assertEqual(st, 200, f"hosts {st}: {raw[:400]}")
-            rows = (hosts or {}).get("hosts") or []
-            host_online = any(
-                isinstance(h, dict)
-                and h.get("kind") != "control_plane"
-                and str(h.get("status") or "").lower() == "online"
-                for h in rows
-            )
-            if host_online:
-                break
-            time.sleep(2)
-        self.assertTrue(
-            host_online,
-            "cluster fleet-host did not bootstrap-pair after signup",
-        )
+        # Lab host card stays on the workspace that bootstrapped it.
+        # In-container assign is plane-global, so a new signup must not
+        # wait to see that machine on its Runners list.
 
         st, fx, raw = _json_request(
-            opener, "POST", f"{fleet}/runs/fixture", {"kind": "chain"}
+            opener,
+            "POST",
+            f"{fleet}/runs/fixture",
+            {"kind": "chain", "run_mode": "in_container"},
         )
         self.assertEqual(st, 201, f"fixture {st}: {raw[:400]}")
         self.assertIsInstance(fx, dict)

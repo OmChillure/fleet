@@ -4,7 +4,8 @@ use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
 use crate::sandbox::remote::{self, RemoteHostHandle};
 use crate::sandbox::{fleet_worker_env, SpawnRequest};
 use crate::store::{
-    enqueue_remote_spawn, hold_ready_for_host_update, select_assignable_runner_preferring,
+    enqueue_remote_spawn, hold_ready_for_host_update, JobNeed, RunMode,
+    select_assignable_runner_preferring_for_job,
     workspace_has_updating_host, BoardSnapshot, Store,
 };
 use std::collections::{HashMap, HashSet};
@@ -69,9 +70,45 @@ pub async fn schedule_and_spawn(
         // Missing worker_hosts must not fail the tick.
         let plan_hint = store.get_plan_body(task.plan_id).await.ok().flatten();
         let preferred = plan_hint.as_ref().and_then(|p| p.policy.preferred_host_id);
-        let remote_host =
-            select_assignable_runner_preferring(store, project_id, preferred, orchestrator_url)
-                .await;
+        let actor = plan_hint.as_ref().and_then(|p| p.policy.requested_by);
+        let run_mode = plan_hint
+            .as_ref()
+            .and_then(|p| RunMode::parse(&p.policy.run_mode))
+            .unwrap_or(RunMode::OnPc);
+        let min_isolation = match fleet_db::repos::workspaces::min_isolation(store.pool(), project_id)
+            .await
+        {
+            Ok(raw) => crate::domain::IsolationClass::parse(&raw)
+                .unwrap_or(crate::domain::IsolationClass::Process),
+            Err(_) => crate::domain::IsolationClass::Process,
+        };
+        let provider = plan_hint
+            .as_ref()
+            .and_then(|p| p.policy.llm_provider.clone());
+        let vendor_key_ok = match run_mode {
+            RunMode::OnPc => true,
+            RunMode::InContainer => match provider.as_deref() {
+                None | Some("mock") | Some("off") | Some("ollama") => true,
+                Some(p) => fleet_db::repos::llm_keys::has_active(store.pool(), project_id, p)
+                    .await
+                    .unwrap_or(false),
+            },
+        };
+        let job = JobNeed {
+            run_mode,
+            actor,
+            min_isolation,
+            provider,
+            vendor_key_ok,
+        };
+        let remote_host = select_assignable_runner_preferring_for_job(
+            store,
+            project_id,
+            preferred,
+            orchestrator_url,
+            &job,
+        )
+        .await;
         let updating = workspace_has_updating_host(store, project_id).await;
         if hold_ready_for_host_update(remote_host.is_some(), updating) {
             tracing::info!(
@@ -186,6 +223,15 @@ pub async fn schedule_and_spawn(
             req.env
                 .entry("FLEET_REASONING_EFFORT".into())
                 .or_insert(effort);
+        }
+        if job.run_mode == RunMode::InContainer {
+            inject_workspace_vendor_key(
+                &mut req.env,
+                store.pool(),
+                project_id,
+                job.provider.as_deref(),
+            )
+            .await;
         }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
@@ -337,4 +383,47 @@ pub async fn apply_retry_after_failure(
         RetryAction::None => {}
     }
     Ok(())
+}
+
+async fn inject_workspace_vendor_key(
+    env: &mut HashMap<String, String>,
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    provider: Option<&str>,
+) {
+    let Some(provider) = provider.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let p = provider.to_ascii_lowercase();
+    let env_name = match p.as_str() {
+        "grok" | "xai" => "XAI_API_KEY",
+        "claude" | "anthropic" => "ANTHROPIC_API_KEY",
+        _ => return,
+    };
+    if env.contains_key(env_name) {
+        return;
+    }
+    let Ok(Some(ct)) = fleet_db::repos::llm_keys::active_ciphertext(pool, workspace_id, &p).await
+    else {
+        return;
+    };
+    let secret = std::env::var("INTEGRATIONS_ENCRYPTION_KEY")
+        .or_else(|_| std::env::var("JWT_SECRET"))
+        .ok();
+    let Some(secret) = secret else {
+        tracing::warn!("in-container vendor key present but no INTEGRATIONS_ENCRYPTION_KEY/JWT_SECRET");
+        return;
+    };
+    let Ok(key) = fleet_integrations::CredentialsKey::from_secret(&secret) else {
+        tracing::warn!("in-container vendor key: bad encryption secret");
+        return;
+    };
+    let Ok(plain) = key.decrypt(&ct) else {
+        tracing::warn!("in-container vendor key decrypt failed");
+        return;
+    };
+    let Some(api_key) = plain.get("api_key").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    env.insert(env_name.into(), api_key.to_string());
 }

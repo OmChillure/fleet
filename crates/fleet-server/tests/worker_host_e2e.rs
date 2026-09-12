@@ -1230,10 +1230,10 @@ async fn signal_session_complete_does_not_spawn_fail() {
 }
 
 #[tokio::test]
-async fn cluster_host_completes_claim_in_other_workspace() {
+async fn cluster_host_is_not_assignable_in_other_workspace() {
     let (app, state) = app_with_state().await;
     let (_a, jar_a, ws_a) = signup_and_login(&app).await;
-    let (host_id, machine) = create_pair_and_heartbeat(&app, &jar_a, &ws_a, "cluster").await;
+    let (host_id, _machine) = create_pair_and_heartbeat(&app, &jar_a, &ws_a, "cluster").await;
     fleet_db::repos::worker_hosts::patch_cp_settings(
         &state.db,
         host_id,
@@ -1265,252 +1265,29 @@ async fn cluster_host_completes_claim_in_other_workspace() {
         "test host must carry the cluster label: {:?}",
         labeled.labels
     );
-    // Drain leftover spawn/signal/chat claims addressed to this host_id
-    // (shared DB / prior runs) so lease returns the claim we enqueue.
-    loop {
-        let leftover = fleet_db::repos::work_claims::claim_next_spawn_for_host(
-            &state.db,
-            Uuid::parse_str(&ws_a).expect("ws a"),
-            host_id,
-            chrono::Duration::minutes(1),
-        )
-        .await
-        .expect("drain leftover");
-        let Some(c) = leftover else {
-            break;
-        };
-        if let Some(token) = c.lease_token {
-            let _ = fleet_db::repos::work_claims::complete(&state.db, c.id, token).await;
-        }
-    }
-    let (_b, jar_b, ws_b) = signup_and_login(&app).await;
+    let (_b, _jar_b, ws_b) = signup_and_login(&app).await;
     let ws_b_id = Uuid::parse_str(&ws_b).expect("ws b");
-    call(&app, "GET", &fleet(&ws_b, ""), Some(&jar_b), None).await;
-    let fx = call(
-        &app,
-        "POST",
-        &fleet(&ws_b, "/runs/fixture"),
-        Some(&jar_b),
-        Some(json!({ "kind": "chain" })),
-    )
-    .await;
-    let plan_id = Uuid::parse_str(fx.body["plan_id"].as_str().expect("plan_id")).expect("plan");
-    state
-        .orch
-        .store
-        .materialize_plan(ws_b_id, plan_id)
-        .await
-        .expect("materialize");
-    let tasks = state
-        .orch
-        .store
-        .list_tasks_slim(ws_b_id, None)
-        .await
-        .expect("tasks");
-    let root = tasks.iter().find(|t| t.plan_task_id == "t1").expect("t1");
-    state
-        .orch
-        .store
-        .update_task_status(root.id, "queued", "ready", None)
-        .await
-        .expect("ready");
-    let assignment = state
-        .orch
-        .store
-        .begin_spawn_assignment(
-            root.id,
-            ws_b_id,
-            root.run_id,
-            &root.worker_profile,
-            "remote",
-            None,
-        )
-        .await
-        .expect("assign")
-        .expect("cas");
-    let session_id = assignment.session_id;
-    state
-        .orch
-        .store
-        .record_remote_enqueued(session_id, &format!("host:{host_id}"), None)
-        .await
-        .expect("enq");
-    loop {
-        let leftover = fleet_db::repos::work_claims::claim_next_spawn_for_host(
-            &state.db,
-            ws_b_id,
-            host_id,
-            chrono::Duration::minutes(1),
-        )
-        .await
-        .expect("drain after assign");
-        let Some(c) = leftover else {
-            break;
-        };
-        if let Some(token) = c.lease_token {
-            let _ = fleet_db::repos::work_claims::complete(&state.db, c.id, token).await;
-        }
-    }
-    let claim_id = Uuid::new_v4();
-    fleet_db::repos::work_claims::enqueue(
+    let from_b = fleet_db::repos::worker_hosts::list_assignable(
         &state.db,
-        &fleet_db::NewWorkClaim {
-            id: claim_id,
-            workspace_id: ws_b_id,
-            kind: "spawn_session".into(),
-            payload: json!({
-                "session_id": session_id,
-                "board_task_id": root.id,
-                "host_id": host_id,
-            }),
-            max_attempts: 3,
-            available_at: chrono::Utc::now(),
-        },
+        ws_b_id,
+        fleet_db::WORKER_HOST_OFFLINE_AFTER,
     )
     .await
-    .expect("claim");
-    // Shared live API may enqueue another spawn for this cluster host
-    // between drain and lease. Complete those and keep leasing until ours.
-    let mut lease = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/lease",
-        &machine,
-        Some(json!({})),
-    )
-    .await;
-    for _ in 0..16 {
-        assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
-        let got = lease.body["claim"]["id"].as_str();
-        if got == Some(claim_id.to_string().as_str()) {
-            break;
-        }
-        if let (Some(id), Some(token)) = (
-            got.and_then(|s| Uuid::parse_str(s).ok()),
-            lease.body["claim"]["lease_token"]
-                .as_str()
-                .and_then(|s| Uuid::parse_str(s).ok()),
-        ) {
-            let _ = fleet_db::repos::work_claims::complete(&state.db, id, token).await;
-        }
-        lease = call_bearer(
-            &app,
-            "POST",
-            "/api/worker-hosts/me/lease",
-            &machine,
-            Some(json!({})),
-        )
-        .await;
-    }
-    assert_eq!(lease.status, StatusCode::OK, "lease: {}", lease.body);
-    assert_eq!(
-        lease.body["claim"]["id"].as_str(),
-        Some(claim_id.to_string().as_str()),
-        "{}",
-        lease.body
-    );
-    let token = lease.body["claim"]["lease_token"].as_str().expect("token");
-    let done = call_bearer(
-        &app,
-        "POST",
-        &format!("/api/worker-hosts/me/lease/{claim_id}/complete"),
-        &machine,
-        Some(json!({ "lease_token": token, "ok": true })),
-    )
-    .await;
-    assert_eq!(
-        done.status,
-        StatusCode::OK,
-        "complete cross-ws: {}",
-        done.body
-    );
-    let home_task = state
-        .orch
-        .store
-        .get_task(Uuid::parse_str(&ws_a).expect("ws a"), root.id)
-        .await
-        .expect("get home");
+    .expect("list B");
     assert!(
-        home_task.is_none(),
-        "cluster complete must not write the host's home workspace: {home_task:?}"
+        from_b.iter().all(|h| h.id != host_id),
+        "cluster host must not be assignable in a foreign workspace"
     );
-    let foreign = state
-        .orch
-        .store
-        .get_task(ws_b_id, root.id)
-        .await
-        .expect("get foreign")
-        .expect("task lives in the claim workspace");
-    assert_ne!(
-        foreign.status, "done_success",
-        "lease complete is not proof of work; inbox/validate_done is: {}",
-        foreign.status
-    );
-
-    let job_token = assignment.worker_token.clone();
-    let worker_base = format!("/v1/projects/{ws_b}/workers/{session_id}");
-    let status = call_bearer(
-        &app,
-        "POST",
-        &format!("{worker_base}/status"),
-        &job_token,
-        Some(json!({
-            "seq": 1,
-            "status": "success",
-            "reason": Value::Null
-        })),
-    )
-    .await;
-    assert_eq!(status.status, StatusCode::ACCEPTED, "{}", status.body);
-    let tick = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
-    assert_eq!(tick.status, StatusCode::OK, "tick: {}", tick.body);
-    let after = state
-        .orch
-        .store
-        .get_task(ws_b_id, root.id)
-        .await
-        .expect("get after")
-        .expect("task");
-    assert_ne!(
-        after.status, "done_success",
-        "remote guest success without result.md / artifacts is not done: {}",
-        after.status
-    );
-
-    let stale = call_bearer(
-        &app,
-        "POST",
-        &format!("{worker_base}/status"),
-        &job_token,
-        Some(json!({
-            "seq": 2,
-            "status": "success",
-            "result_md": "# Result\n\nACP end_turn. hello from mock agent.\nWork is in work/.\n",
-            "files": { "work/.keep": "ok" }
-        })),
+    let picked = fleet_orchestrator::store::select_assignable_runner_preferring(
+        &state.orch.store,
+        ws_b_id,
+        None,
+        "http://127.0.0.1:8080",
     )
     .await;
     assert!(
-        stale.status == StatusCode::UNAUTHORIZED || stale.status == StatusCode::ACCEPTED,
-        "stale success after lease complete: {} {}",
-        stale.status,
-        stale.body
-    );
-    if stale.status == StatusCode::ACCEPTED {
-        let tick2 = call(&app, "POST", &fleet(&ws_b, "/tick"), Some(&jar_b), None).await;
-        assert_eq!(tick2.status, StatusCode::OK, "tick2: {}", tick2.body);
-    }
-    let after_stale = state
-        .orch
-        .store
-        .get_task(ws_b_id, root.id)
-        .await
-        .expect("get after stale")
-        .expect("task");
-    assert_ne!(
-        after_stale.status, "done_success",
-        "success from a session that no longer holds the claim must not complete: {}",
-        after_stale.status
+        picked.as_ref().map(|c| c.id() != host_id).unwrap_or(true),
+        "picker must not send foreign workspace work to the cluster host"
     );
 }
 

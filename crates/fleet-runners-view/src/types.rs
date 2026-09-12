@@ -90,6 +90,20 @@ pub struct HostPublic {
     pub runtime_settings: Option<serde_json::Value>,
     #[serde(default)]
     pub runtime_reported: Option<serde_json::Value>,
+    #[serde(default = "default_send_policy")]
+    pub send_policy: String,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default = "default_host_run_mode")]
+    pub run_mode: String,
+}
+
+fn default_host_run_mode() -> String {
+    "on_pc".into()
+}
+
+fn default_send_policy() -> String {
+    "owner_only".into()
 }
 
 /// One official agent CLI on a runner (`grok`, `claude`, `openai`, `ollama`).

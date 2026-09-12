@@ -337,6 +337,20 @@ pub async fn run_claim_with(
     probe: &ToolProbe,
 ) -> Result<()> {
     let runtime = payload.resolved_runtime()?;
+    if let Some(mode) = payload
+        .run_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let ok = matches!(
+            (mode, runtime),
+            ("on_pc", JobRuntime::Host) | ("in_container", JobRuntime::Container)
+        );
+        if !ok {
+            bail!("run_mode {mode} does not match runtime {}", runtime.as_str());
+        }
+    }
     if !runtime_allowed_with(runtime, cfg, effective_host, effective_container, probe) {
         match runtime {
             JobRuntime::Vm => bail!(
@@ -740,6 +754,7 @@ mod tests {
             worker_token: String::new(),
             orchestrator_url: String::new(),
             runtime: JobRuntime::Host,
+            run_mode: None,
             isolation: None,
             task_title: String::new(),
             task_spec: String::new(),

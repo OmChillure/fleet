@@ -10,8 +10,10 @@ use uuid::Uuid;
 use crate::error::{DbError, DbResult};
 use crate::models::{
     HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
-    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
-    WorkerHostPairToken, normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
+    WORKER_HOST_STATUS_DISABLED,
+    WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
+    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
+    parse_worker_host_run_mode, parse_worker_host_send_policy,
 };
 use crate::pool::map_query_err;
 
@@ -30,7 +32,7 @@ pub(crate) const HOST_COLS: &str = r#"
     hardware, agent_runtimes, settings_gen, settings_ack_gen,
     install_request, install_requested_at,
     runtime_settings, runtime_reported,
-    created_by, created_at, paired_at, updated_at
+    created_by, send_policy, run_mode, created_at, paired_at, updated_at
 "#;
 
 const PAIR_TOKEN_COLS: &str = r#"
@@ -83,13 +85,18 @@ pub async fn create_pending(
         INSERT INTO worker_hosts (
             id, workspace_id, name, status,
             allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
-            created_by
+            created_by, send_policy, run_mode
         )
-        VALUES ($1, $2, $3, '{WORKER_HOST_STATUS_PENDING}', $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, '{WORKER_HOST_STATUS_PENDING}', $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING {HOST_COLS}
         "#
     );
     let labels = normalize_host_labels(&new.labels);
+    let run_mode = if labels.iter().any(|l| crate::label_is_cluster(l)) {
+        crate::WORKER_HOST_RUN_IN_CONTAINER.to_string()
+    } else {
+        new.run_mode.clone()
+    };
     let host = sqlx::query_as::<_, WorkerHost>(&q)
         .bind(new.id)
         .bind(new.workspace_id)
@@ -100,6 +107,8 @@ pub async fn create_pending(
         .bind(new.max_job_timeout_s)
         .bind(&labels)
         .bind(new.created_by)
+        .bind(&new.send_policy)
+        .bind(&run_mode)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_query_err)?;
@@ -1095,7 +1104,10 @@ async fn list_assignable_filtered(
         r#"
         SELECT {HOST_COLS}
         FROM worker_hosts
-        WHERE (workspace_id = $1 OR {CLUSTER_LABEL_SQL})
+        WHERE (
+                workspace_id = $1
+             OR (run_mode = 'in_container' AND {CLUSTER_LABEL_SQL})
+              )
           AND enabled
           AND NOT paused
           AND NOT drain
@@ -1157,7 +1169,13 @@ pub async fn list_assignable_by_hostnames(
         .fetch_all(pool)
         .await
         .map_err(map_query_err)?;
-    Ok(filter_taking(hosts, false))
+    Ok(filter_taking(
+        hosts
+            .into_iter()
+            .filter(|h| h.created_by.is_some() && !h.is_cluster_host())
+            .collect(),
+        false,
+    ))
 }
 
 /// Like [`list_assignable_by_hostnames`] including hosts at job cap.
@@ -1198,7 +1216,13 @@ pub async fn list_online_by_hostnames(
         .fetch_all(pool)
         .await
         .map_err(map_query_err)?;
-    Ok(filter_taking(hosts, true))
+    Ok(filter_taking(
+        hosts
+            .into_iter()
+            .filter(|h| h.created_by.is_some() && !h.is_cluster_host())
+            .collect(),
+        true,
+    ))
 }
 
 /// Home-workspace rows plus this-machine boxes that are taking jobs.
@@ -1222,6 +1246,146 @@ pub async fn list_visible_for_workspace(
         }
     }
     Ok(rows)
+}
+
+pub async fn set_run_mode(pool: &PgPool, host_id: Uuid, mode: &str) -> DbResult<WorkerHost> {
+    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
+        DbError::Conflict("run_mode must be on_pc or in_container".into())
+    })?;
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET run_mode = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(mode)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+pub async fn set_send_policy(pool: &PgPool, host_id: Uuid, policy: &str) -> DbResult<WorkerHost> {
+    let policy = parse_worker_host_send_policy(policy).ok_or_else(|| {
+        DbError::Conflict("send_policy must be owner_only, allowlist, or workspace".into())
+    })?;
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET send_policy = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(policy)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+/// User ids allowed to send work when `send_policy = allowlist`.
+pub async fn list_send_allowlist(pool: &PgPool, host_id: Uuid) -> DbResult<Vec<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT user_id
+        FROM worker_host_send_allowlist
+        WHERE host_id = $1
+        ORDER BY added_at ASC, user_id ASC
+        "#,
+    )
+    .bind(host_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+/// Replace the allowlist. Callers must ensure every id is a current member
+/// and `send_policy = allowlist`.
+pub async fn replace_send_allowlist(
+    pool: &PgPool,
+    host_id: Uuid,
+    user_ids: &[Uuid],
+    added_by: Uuid,
+) -> DbResult<()> {
+    let mut tx = pool.begin().await.map_err(DbError::from)?;
+    sqlx::query("DELETE FROM worker_host_send_allowlist WHERE host_id = $1")
+        .bind(host_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_query_err)?;
+    for uid in user_ids {
+        sqlx::query(
+            r#"
+            INSERT INTO worker_host_send_allowlist (host_id, user_id, added_by)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (host_id, user_id) DO NOTHING
+            "#,
+        )
+        .bind(host_id)
+        .bind(uid)
+        .bind(added_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_query_err)?;
+    }
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+/// Drop allowlist rows for this user on every host in the workspace.
+pub async fn delete_send_allowlist_for_member(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        DELETE FROM worker_host_send_allowlist a
+        USING worker_hosts h
+        WHERE a.host_id = h.id
+          AND h.workspace_id = $1
+          AND a.user_id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}
+
+pub async fn list_send_allowlists_for_hosts(
+    pool: &PgPool,
+    host_ids: &[Uuid],
+) -> DbResult<std::collections::HashMap<Uuid, Vec<Uuid>>> {
+    use std::collections::HashMap;
+    if host_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
+        r#"
+        SELECT host_id, user_id
+        FROM worker_host_send_allowlist
+        WHERE host_id = ANY($1)
+        "#,
+    )
+    .bind(host_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)?;
+    let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (host_id, user_id) in rows {
+        out.entry(host_id).or_default().push(user_id);
+    }
+    Ok(out)
 }
 
 pub async fn list_by_hostnames(
@@ -1347,6 +1511,8 @@ mod effective_max_concurrent_tests {
             runtime_settings: serde_json::json!({}),
             runtime_reported: serde_json::json!({}),
             created_by: None,
+            send_policy: crate::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: crate::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,
@@ -1451,6 +1617,8 @@ mod holding_new_jobs_tests {
             runtime_settings: serde_json::json!({}),
             runtime_reported: serde_json::json!({}),
             created_by: None,
+            send_policy: crate::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: crate::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,

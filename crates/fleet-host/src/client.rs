@@ -595,6 +595,8 @@ pub struct SpawnPayload {
     pub orchestrator_url: String,
     #[serde(default)]
     pub runtime: JobRuntime,
+    #[serde(default)]
+    pub run_mode: Option<String>,
     /// Isolation class (`process` | `container` | `vm`). When set, maps onto `runtime`.
     /// Placement words (`k8s`) are rejected — a pod is still container isolation.
     #[serde(default)]

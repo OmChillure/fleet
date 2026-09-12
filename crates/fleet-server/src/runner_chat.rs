@@ -112,6 +112,11 @@ pub(crate) async fn require_taking(
     runner_id: Uuid,
 ) -> AppResult<WorkerHost> {
     let host = crate::worker_hosts::load_visible_host(state, workspace_id, runner_id).await?;
+    if host.is_cluster_host() || host.created_by.is_none() {
+        return Err(AppError::bad_request(
+            "This runner is not Run on a PC",
+        ));
+    }
     ensure_online(&host)?;
     Ok(host)
 }
@@ -390,6 +395,8 @@ mod tests {
             runtime_settings: json!({}),
             runtime_reported: json!({}),
             created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,

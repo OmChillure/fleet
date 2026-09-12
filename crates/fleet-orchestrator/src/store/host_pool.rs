@@ -75,6 +75,12 @@ pub struct AssignableHost {
     pub hostname: Option<String>,
     /// Non-loopback IPs from the last heartbeat (`hardware.addrs`).
     pub addrs: Vec<String>,
+    pub created_by: Option<Uuid>,
+    pub send_policy: String,
+    pub send_allowlist: Vec<Uuid>,
+    pub labels: Vec<String>,
+    pub run_mode: String,
+    pub settings_acked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +107,128 @@ pub struct ChosenHost {
 impl ChosenHost {
     pub fn id(&self) -> Uuid {
         self.host.id
+    }
+}
+
+/// Cluster label → not a PC (chat must not use it).
+pub fn host_is_not_a_pc(host: &AssignableHost) -> bool {
+    host.labels
+        .iter()
+        .any(|l| fleet_db::label_is_cluster(l))
+}
+
+/// Who may send work to this PC. Cluster → false.
+/// No pairer and not cluster: unowned box (tests / bootstrap without label) is open.
+pub fn send_acl_allows(host: &AssignableHost, actor: Option<Uuid>, is_member: bool) -> bool {
+    if host_is_not_a_pc(host) {
+        return false;
+    }
+    let Some(owner) = host.created_by else {
+        return true;
+    };
+    let Some(actor) = actor else {
+        return false;
+    };
+    match host.send_policy.as_str() {
+        fleet_db::WORKER_HOST_SEND_WORKSPACE => is_member,
+        fleet_db::WORKER_HOST_SEND_ALLOWLIST => {
+            if host.send_allowlist.is_empty() {
+                owner == actor
+            } else {
+                host.send_allowlist.contains(&actor)
+            }
+        }
+        _ => owner == actor,
+    }
+}
+
+/// Tick in this slice: send-ACL on real PCs only. Kind/bootstrap still assigns.
+pub fn pr1_tick_allows(host: &AssignableHost, actor: Option<Uuid>, is_member: bool) -> bool {
+    if host_is_not_a_pc(host) {
+        return true;
+    }
+    send_acl_allows(host, actor, is_member)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    OnPc,
+    InContainer,
+}
+
+impl RunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnPc => fleet_db::WORKER_HOST_RUN_ON_PC,
+            Self::InContainer => fleet_db::WORKER_HOST_RUN_IN_CONTAINER,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match fleet_db::parse_worker_host_run_mode(raw)? {
+            fleet_db::WORKER_HOST_RUN_IN_CONTAINER => Some(Self::InContainer),
+            _ => Some(Self::OnPc),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobNeed {
+    pub run_mode: RunMode,
+    pub actor: Option<Uuid>,
+    pub min_isolation: IsolationClass,
+    pub provider: Option<String>,
+    /// True when a matching workspace vendor key exists (or the job is mock/lab).
+    pub vendor_key_ok: bool,
+}
+
+fn in_container_vendor_ok(job: &JobNeed) -> bool {
+    match job
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "mock" | "off" | "none" | "bash" | "ollama" => true,
+        "grok" | "claude" | "anthropic" | "xai" => job.vendor_key_ok,
+        _ => job.vendor_key_ok,
+    }
+}
+
+pub fn runtime_for_run_mode(mode: RunMode) -> HostRuntime {
+    match mode {
+        RunMode::OnPc => HostRuntime::Host,
+        RunMode::InContainer => HostRuntime::Container,
+    }
+}
+
+/// Only assign predicate after chunk 2. No process→container upgrade.
+pub fn host_matches_job(host: &AssignableHost, job: &JobNeed, is_member: bool) -> bool {
+    if !host.isolation.is_assignable() {
+        return false;
+    }
+    if !host.settings_acked {
+        return false;
+    }
+    let host_mode = RunMode::parse(&host.run_mode).unwrap_or(RunMode::OnPc);
+    if host_mode != job.run_mode {
+        return false;
+    }
+    match job.run_mode {
+        RunMode::OnPc => {
+            host.allow_host
+                && host.advertised_host
+                && send_acl_allows(host, job.actor, is_member)
+                && job.min_isolation <= IsolationClass::Process
+        }
+        RunMode::InContainer => {
+            host.allow_container
+                && host.advertised_container
+                && job.min_isolation <= IsolationClass::Container
+                && in_container_vendor_ok(job)
+        }
     }
 }
 
@@ -301,12 +429,23 @@ pub fn pick_assignable_runner(
 /// container must not win `select_assignable_runner`.
 /// Cloud / Partners / public-cloud cannot be chosen.
 pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
+    select_assignable_runner_for_actor(store, project_id, None).await
+}
+
+/// Chat / inbox taking-runner: send-ACL on (cluster is not a PC).
+pub async fn select_assignable_runner_for_actor(
+    store: &Store,
+    project_id: Uuid,
+    actor: Option<Uuid>,
+) -> Option<ChosenHost> {
     let hosts = list_assignable_hosts(store, project_id).await?;
     let need = workspace_need(store, project_id).await;
+    let member = actor_is_member(store, project_id, actor).await;
     let host_only: Vec<AssignableHost> = hosts
         .into_iter()
         .filter(|h| h.isolation.is_assignable())
         .filter(|h| effective_runtime_for(h, need) == Some(HostRuntime::Host))
+        .filter(|h| send_acl_allows(h, actor, member))
         .collect();
     if host_only.is_empty() {
         return None;
@@ -324,6 +463,14 @@ pub async fn select_assignable_runner(store: &Store, project_id: Uuid) -> Option
 /// Online native host-runtime, even at job cap. Inbox finish stamps this so
 /// the ticket waits instead of 400 when every box is busy.
 pub async fn select_online_runner(store: &Store, project_id: Uuid) -> Option<ChosenHost> {
+    select_online_runner_for_actor(store, project_id, None).await
+}
+
+pub async fn select_online_runner_for_actor(
+    store: &Store,
+    project_id: Uuid,
+    actor: Option<Uuid>,
+) -> Option<ChosenHost> {
     let scoped = match fleet_db::repos::worker_hosts::list_online_runners(
         store.pool(),
         project_id,
@@ -351,11 +498,15 @@ pub async fn select_online_runner(store: &Store, project_id: Uuid) -> Option<Cho
             hosts.push(ah);
         }
     }
+    attach_send_allowlists(store, &mut hosts).await;
+    let member = actor_is_member(store, project_id, actor).await;
     let need = workspace_need(store, project_id).await;
     hosts
         .into_iter()
         .find(|h| {
-            h.isolation.is_assignable() && effective_runtime_for(h, need) == Some(HostRuntime::Host)
+            h.isolation.is_assignable()
+                && effective_runtime_for(h, need) == Some(HostRuntime::Host)
+                && send_acl_allows(h, actor, member)
         })
         .map(|host| ChosenHost {
             host,
@@ -373,28 +524,75 @@ pub async fn select_assignable_runner_preferring(
     preferred: Option<Uuid>,
     orchestrator_url: &str,
 ) -> Option<ChosenHost> {
-    let hosts = list_assignable_hosts(store, project_id).await?;
+    select_assignable_runner_preferring_for_actor(
+        store,
+        project_id,
+        preferred,
+        orchestrator_url,
+        None,
+    )
+    .await
+}
+
+pub async fn select_assignable_runner_preferring_for_actor(
+    store: &Store,
+    project_id: Uuid,
+    preferred: Option<Uuid>,
+    orchestrator_url: &str,
+    actor: Option<Uuid>,
+) -> Option<ChosenHost> {
     let need = workspace_need(store, project_id).await;
+    let job = JobNeed {
+        run_mode: RunMode::OnPc,
+        actor,
+        min_isolation: need,
+        provider: None,
+        vendor_key_ok: true,
+    };
+    select_assignable_runner_preferring_for_job(
+        store,
+        project_id,
+        preferred,
+        orchestrator_url,
+        &job,
+    )
+    .await
+}
+
+pub async fn select_assignable_runner_preferring_for_job(
+    store: &Store,
+    project_id: Uuid,
+    preferred: Option<Uuid>,
+    orchestrator_url: &str,
+    job: &JobNeed,
+) -> Option<ChosenHost> {
+    let hosts = list_assignable_hosts(store, project_id).await?;
+    let member = actor_is_member(store, project_id, job.actor).await;
     let loopback = agent_fleet_contracts::url_is_loopback(orchestrator_url);
     let reachable: Vec<AssignableHost> = hosts
         .into_iter()
-        .filter(|h| host_reachable_on_plane(h, need, loopback))
+        .filter(|h| host_reachable_on_plane(h, job.min_isolation, loopback))
+        .filter(|h| host_matches_job(h, job, member))
         .collect();
     if reachable.is_empty() {
         return None;
     }
+    let runtime = runtime_for_run_mode(job.run_mode);
     if let Some(id) = preferred {
         if let Some(host) = reachable.iter().find(|h| h.id == id) {
-            if let Some(runtime) = effective_runtime_for(host, need) {
-                return Some(ChosenHost {
-                    host: host.clone(),
-                    runtime,
-                });
-            }
+            return Some(ChosenHost {
+                host: host.clone(),
+                runtime,
+            });
         }
     }
     let in_flight = count_remote_in_flight(store).await?;
-    pick_assignable_host_in(&reachable, &in_flight, need, Some(project_id))
+    pick_assignable_host_in(&reachable, &in_flight, job.min_isolation, Some(project_id)).map(
+        |mut chosen| {
+            chosen.runtime = runtime;
+            chosen
+        },
+    )
 }
 
 /// How long after last_seen a `software_updating` host still holds ready tasks.
@@ -500,6 +698,12 @@ impl From<&fleet_db::WorkerHost> for AssignableHost {
             workspace_id: h.workspace_id,
             hostname: h.hostname.clone(),
             addrs: advertised_addrs(h),
+            created_by: h.created_by,
+            send_policy: h.send_policy.clone(),
+            send_allowlist: Vec::new(),
+            labels: h.labels.clone(),
+            run_mode: h.run_mode.clone(),
+            settings_acked: h.settings_gen == h.settings_ack_gen,
         }
     }
 }
@@ -642,7 +846,35 @@ async fn list_assignable_hosts(store: &Store, project_id: Uuid) -> Option<Vec<As
             hosts.push(ah);
         }
     }
+    attach_send_allowlists(store, &mut hosts).await;
     Some(hosts)
+}
+
+async fn attach_send_allowlists(store: &Store, hosts: &mut [AssignableHost]) {
+    let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
+    let map = match fleet_db::repos::worker_hosts::list_send_allowlists_for_hosts(
+        store.pool(),
+        &ids,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    for h in hosts.iter_mut() {
+        if let Some(ids) = map.get(&h.id) {
+            h.send_allowlist = ids.clone();
+        }
+    }
+}
+
+async fn actor_is_member(store: &Store, workspace_id: Uuid, actor: Option<Uuid>) -> bool {
+    let Some(uid) = actor else {
+        return false;
+    };
+    fleet_db::repos::workspaces::is_member(store.pool(), workspace_id, uid)
+        .await
+        .unwrap_or(false)
 }
 
 async fn count_remote_in_flight(store: &Store) -> Option<HashMap<Uuid, i64>> {
@@ -696,6 +928,12 @@ mod tests {
             workspace_id: Uuid::nil(),
             hostname: None,
             addrs: vec![],
+            created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            send_allowlist: vec![],
+            labels: vec![],
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
+            settings_acked: true,
         }
     }
 
@@ -1064,6 +1302,8 @@ mod tests {
             runtime_settings: serde_json::json!({}),
             runtime_reported: serde_json::json!({}),
             created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,
@@ -1121,5 +1361,82 @@ mod tests {
             home_host.id,
             "list order must not change the home winner"
         );
+    }
+
+    #[test]
+    fn send_acl_owner_only_is_pairer() {
+        let maya = Uuid::new_v4();
+        let jordan = Uuid::new_v4();
+        let mut pc = host(Uuid::new_v4(), true, true, true, true, 4);
+        pc.created_by = Some(maya);
+        pc.send_policy = fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string();
+        assert!(send_acl_allows(&pc, Some(maya), true));
+        assert!(!send_acl_allows(&pc, Some(jordan), true));
+        assert!(!send_acl_allows(&pc, None, true));
+    }
+
+    #[test]
+    fn send_acl_cluster_is_not_a_pc() {
+        let maya = Uuid::new_v4();
+        let mut cluster = host(Uuid::new_v4(), true, true, true, true, 4);
+        cluster.created_by = None;
+        cluster.labels = vec!["cluster".into()];
+        assert!(host_is_not_a_pc(&cluster));
+        assert!(!send_acl_allows(&cluster, Some(maya), true));
+        assert!(pr1_tick_allows(&cluster, Some(maya), true));
+        assert!(pr1_tick_allows(&cluster, None, false));
+    }
+
+    #[test]
+    fn send_acl_workspace_rechecks_membership() {
+        let maya = Uuid::new_v4();
+        let jordan = Uuid::new_v4();
+        let mut pc = host(Uuid::new_v4(), true, true, true, true, 4);
+        pc.created_by = Some(maya);
+        pc.send_policy = fleet_db::WORKER_HOST_SEND_WORKSPACE.to_string();
+        assert!(send_acl_allows(&pc, Some(jordan), true));
+        assert!(!send_acl_allows(&pc, Some(jordan), false));
+    }
+
+    #[test]
+    fn send_acl_empty_allowlist_is_owner_only() {
+        let maya = Uuid::new_v4();
+        let jordan = Uuid::new_v4();
+        let mut pc = host(Uuid::new_v4(), true, true, true, true, 4);
+        pc.created_by = Some(maya);
+        pc.send_policy = fleet_db::WORKER_HOST_SEND_ALLOWLIST.to_string();
+        pc.send_allowlist = vec![];
+        assert!(send_acl_allows(&pc, Some(maya), true));
+        assert!(!send_acl_allows(&pc, Some(jordan), true));
+        pc.send_allowlist = vec![jordan];
+        assert!(send_acl_allows(&pc, Some(jordan), true));
+        assert!(!send_acl_allows(&pc, Some(maya), true));
+    }
+
+    #[test]
+    fn host_matches_job_does_not_cross_modes() {
+        let maya = Uuid::new_v4();
+        let mut pc = host(Uuid::new_v4(), true, true, true, true, 4);
+        pc.created_by = Some(maya);
+        pc.run_mode = fleet_db::WORKER_HOST_RUN_ON_PC.to_string();
+        let on_pc = JobNeed {
+            run_mode: RunMode::OnPc,
+            actor: Some(maya),
+            min_isolation: IsolationClass::Process,
+            provider: None,
+            vendor_key_ok: true,
+        };
+        let in_c = JobNeed {
+            run_mode: RunMode::InContainer,
+            actor: Some(maya),
+            min_isolation: IsolationClass::Process,
+            provider: None,
+            vendor_key_ok: true,
+        };
+        assert!(host_matches_job(&pc, &on_pc, true));
+        assert!(!host_matches_job(&pc, &in_c, true));
+        pc.run_mode = fleet_db::WORKER_HOST_RUN_IN_CONTAINER.to_string();
+        assert!(!host_matches_job(&pc, &on_pc, true));
+        assert!(host_matches_job(&pc, &in_c, true));
     }
 }

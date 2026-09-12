@@ -14,6 +14,7 @@ pub mod grok;
 pub mod inbox_sources;
 pub mod inbox_webhooks;
 pub mod install_routes;
+pub mod llm_keys;
 pub mod local_models;
 pub mod package_versions;
 pub mod partners;
@@ -66,6 +67,7 @@ pub fn build_router() -> Router<AppState> {
         .merge(inbox_webhooks::router())
         .merge(workforce::router())
         .merge(fleet_routes::router())
+        .merge(llm_keys::router())
         .merge(worker_hosts::router())
         .merge(partners::router())
         .merge(install_routes::router())

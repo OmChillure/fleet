@@ -2108,7 +2108,7 @@ pub async fn finish_and_launch(
     args: FinishTicketArgs,
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
-    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
+    let llm = crate::chat_tools::composer_or_fallback_for(state, workspace_id, Some(user_id)).await;
     crate::chat_tools::require_taking_runner(&llm)?;
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
     let claimed = ticket_repo::claim_launch(
@@ -2137,6 +2137,7 @@ pub async fn finish_and_launch(
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = true;
     crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
+    plan.policy.requested_by = Some(user_id);
     let (run, _) = match state
         .orch
         .store

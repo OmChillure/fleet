@@ -26,6 +26,7 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 fleet-db = { workspace = true }
+fleet-integrations = { workspace = true }
 agent-fleet-contracts = { path = "../agent-fleet-contracts" }
 
 [dev-dependencies]

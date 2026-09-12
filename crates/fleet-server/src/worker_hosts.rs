@@ -191,6 +191,30 @@ async fn require_owner(
     Ok(user)
 }
 
+fn send_policy_rank(raw: &str) -> Option<u8> {
+    match fleet_db::parse_worker_host_send_policy(raw)? {
+        fleet_db::WORKER_HOST_SEND_OWNER_ONLY => Some(0),
+        fleet_db::WORKER_HOST_SEND_ALLOWLIST => Some(1),
+        fleet_db::WORKER_HOST_SEND_WORKSPACE => Some(2),
+        _ => None,
+    }
+}
+
+fn resolve_send_policy<'a>(wanted: &'a str, ceiling: &str) -> AppResult<&'a str> {
+    let wanted = fleet_db::parse_worker_host_send_policy(wanted).ok_or_else(|| {
+        AppError::bad_request("send_policy must be owner_only, allowlist, or workspace")
+    })?;
+    let ceil = fleet_db::parse_worker_host_send_policy(ceiling).unwrap_or(
+        fleet_db::WORKER_HOST_SEND_OWNER_ONLY,
+    );
+    if send_policy_rank(wanted).unwrap_or(99) > send_policy_rank(ceil).unwrap_or(0) {
+        return Err(AppError::bad_request(
+            "send_policy cannot be more open than the workspace default",
+        ));
+    }
+    Ok(wanted)
+}
+
 fn parse_machine_id(raw: Option<&str>) -> Option<Uuid> {
     Uuid::parse_str(raw?.trim()).ok()
 }
@@ -663,6 +687,9 @@ pub struct CreateWorkerHostBody {
     /// Rejected on create. Isolation is a PATCH of a paired native box.
     #[serde(default)]
     pub isolation: Option<String>,
+    /// `owner_only` | `allowlist` | `workspace`. Capped by workspace default.
+    #[serde(default)]
+    pub send_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -695,6 +722,12 @@ pub struct PatchWorkerHostBody {
     pub install_model: Option<InstallModelBody>,
     #[serde(default)]
     pub runtime_settings: Option<Value>,
+    #[serde(default)]
+    pub send_policy: Option<String>,
+    #[serde(default)]
+    pub send_allowlist: Option<Vec<Uuid>>,
+    #[serde(default)]
+    pub run_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -836,6 +869,14 @@ async fn http_create(
         return Err(AppError::bad_request("name is too long"));
     }
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name, Some(user.id));
+    let ceiling = workspace_repo::default_send_policy(&state.db, workspace_id).await?;
+    let wanted = body
+        .send_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ceiling.as_str());
+    new.send_policy = resolve_send_policy(wanted, &ceiling)?.to_string();
     if let Some(v) = body.allow_host {
         new.allow_host = v;
     }
@@ -865,8 +906,8 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let viewer_loopback = origin_is_loopback(&headers);
-    // Home-workspace rows plus this-machine boxes (the CP laptop). Cluster
-    // hosts from other workspaces stay off this list; they remain assignable.
+    // Home-workspace rows plus this-machine PCs (the CP laptop). Cluster
+    // hosts from other workspaces stay off this list and off list_assignable.
     let names = local_machine_names();
     let rows = host_repo::list_visible_for_workspace(&state.db, workspace_id, &names).await?;
     let hosts: Vec<_> = rows
@@ -1026,7 +1067,42 @@ async fn http_patch(
             None => None,
         },
     };
-    let host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
+    let mut host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
+    if let Some(raw) = body.run_mode.as_deref() {
+        let host_now = host_repo::get(&state.db, host_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("worker host not found"))?;
+        if host_now.current_jobs > 0 {
+            return Err(AppError::conflict("run_mode cannot change while jobs are running"));
+        }
+        let mode = fleet_db::parse_worker_host_run_mode(raw)
+            .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?;
+        host_repo::set_run_mode(&state.db, host_id, mode).await?;
+    }
+    if let Some(raw) = body.send_policy.as_deref() {
+        let ceiling = workspace_repo::default_send_policy(&state.db, workspace_id).await?;
+        let policy = resolve_send_policy(raw, &ceiling)?;
+        host = host_repo::set_send_policy(&state.db, host_id, policy).await?;
+    }
+    if let Some(ids) = body.send_allowlist.as_ref() {
+        if host.send_policy != fleet_db::WORKER_HOST_SEND_ALLOWLIST {
+            return Err(AppError::bad_request(
+                "send_allowlist requires send_policy=allowlist",
+            ));
+        }
+        for uid in ids {
+            if !workspace_repo::is_member(&state.db, workspace_id, *uid).await? {
+                return Err(AppError::bad_request(
+                    "allowlisted user must be a workspace member",
+                ));
+            }
+        }
+        let user = require_user(&auth_state(&state), &jar).await?;
+        host_repo::replace_send_allowlist(&state.db, host_id, ids, user.id).await?;
+        host = host_repo::get(&state.db, host_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("worker host not found"))?;
+    }
     Ok(Json(host_json(&state, &host)))
 }
 
@@ -1165,6 +1241,7 @@ async fn http_bootstrap(
     new.allow_host = body.advertised_host;
     new.allow_container = body.advertised_container;
     new.labels = vec!["cluster".into()];
+    new.run_mode = fleet_db::WORKER_HOST_RUN_IN_CONTAINER.to_string();
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     host_repo::create_pending(&state.db, &new, &pair_token_hash, pair_expires_at).await?;
     let PairedWorkerHost {
@@ -1280,14 +1357,20 @@ async fn http_heartbeat(
 }
 
 fn host_accepts_leases(host: &WorkerHost) -> bool {
-    host.enabled
-        && !host.paused
-        && !host.drain
-        && host.is_native_isolation()
-        && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && host.effective_host()
-        && !host.software_updating
-        && !host_repo::at_job_cap(host)
+    if !host.enabled
+        || host.paused
+        || host.drain
+        || !host.is_native_isolation()
+        || host.status != fleet_db::WORKER_HOST_STATUS_ONLINE
+        || host.software_updating
+        || host_repo::at_job_cap(host)
+    {
+        return false;
+    }
+    match host.run_mode.as_str() {
+        fleet_db::WORKER_HOST_RUN_IN_CONTAINER => host.effective_container(),
+        _ => host.effective_host(),
+    }
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -1614,6 +1697,8 @@ mod plane_bake_tests {
             runtime_settings: json!({}),
             runtime_reported: json!({}),
             created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,

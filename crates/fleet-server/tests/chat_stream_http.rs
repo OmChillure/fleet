@@ -2570,7 +2570,7 @@ async fn chat_invited_member_status_and_complete_allowed() {
 /// Member cookie on a foreign (non-cluster) `runner_id` is 404, not 403
 /// membership, and must not leak that host's heartbeat name/models.
 /// Other-ws cookie is the 403 sibling. Cluster visibility is
-/// `chat_cluster_runner_id_status_on_other_workspace_is_200`.
+/// `chat_cluster_runner_id_status_on_other_workspace_is_400`.
 /// Filter `-- foreign_runner`.
 fn assert_foreign_runner_404(out: &HttpOut, secrets: &[&str], what: &str) {
     assert_ne!(
@@ -2635,7 +2635,7 @@ fn assert_foreign_runner_404(out: &HttpOut, secrets: &[&str], what: &str) {
 /// (`load_visible_host` → not_found). Must not leak B's heartbeat name/models,
 /// enqueue `chat_turn`, or INSERT a conversation (`ensure_conversation` is
 /// before `require_taking`). Other-ws cookie is the 403 sibling. Cluster
-/// is `chat_cluster_runner_id_status_on_other_workspace_is_200`. Same-user
+/// is `chat_cluster_runner_id_status_on_other_workspace_is_400`. Same-user
 /// other-ws is `chat_same_user_other_workspace_runner_id_is_404`.
 #[tokio::test]
 async fn chat_foreign_runner_id_is_404_and_does_not_enqueue() {
@@ -2770,11 +2770,10 @@ async fn chat_same_user_other_workspace_runner_id_is_404() {
     assert_no_chat_turn(&state, b_uuid, "same-user foreign runner_id vs B").await;
 }
 
-/// Cluster-labeled host's `runner_id` on workspace B GET /chat/status is 200
-/// with that inventory (`load_visible_host` allows `is_cluster_host`).
-/// Non-cluster foreign id is `chat_foreign_runner_id_is_404_and_does_not_enqueue`.
+/// Cluster-labeled host is not Run on a PC. GET /chat/status?runner_id= on
+/// another workspace is 400. Non-cluster foreign id stays 404.
 #[tokio::test]
-async fn chat_cluster_runner_id_status_on_other_workspace_is_200() {
+async fn chat_cluster_runner_id_status_on_other_workspace_is_400() {
     let (app, state) = app_with_state().await;
     let tag = Uuid::new_v4();
     let name = format!("cluster-chat-{tag}");
@@ -2817,28 +2816,18 @@ async fn chat_cluster_runner_id_status_on_other_workspace_is_200() {
     .await;
     assert_eq!(
         status.status,
-        StatusCode::OK,
-        "cluster runner_id on other-ws GET /chat/status must be 200: {} {}",
+        StatusCode::BAD_REQUEST,
+        "cluster runner_id on other-ws GET /chat/status must be 400: {} {}",
         status.status,
         status.body
     );
-    assert_eq!(
-        status.body["available"],
-        true,
-        "cluster host must stay a ready inventory: {}",
-        status.body
-    );
-    let hay = format!("{} {}", status.body, status.raw);
+    let hay = format!("{} {}", status.body, status.raw).to_ascii_lowercase();
     assert!(
-        hay.contains(&grok) || hay.contains(&ollama),
-        "other-ws cluster status must advertise the planted inventory: {}",
+        hay.contains("not run on a pc") || hay.contains("not a pc"),
+        "400 body must say this runner is not Run on a PC: {}",
         status.body
     );
-    assert!(
-        hay.contains(&name),
-        "other-ws cluster status must name the cluster host: {}",
-        status.body
-    );
+    let _ = (grok, ollama, name);
 }
 
 /// Empty / whitespace-only messages on POST /chat and /chat/stream must 400

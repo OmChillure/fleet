@@ -108,6 +108,7 @@ same change. The walkthrough is allowed to go stale only if the product did.
    success — do not require a second machine. On a runner with Ollama:
    disk free, a searchable current top-50 popular-model list, and an
    Unlisted field for any name/URL. `/{ws}/workers` redirects here.
+   A later scene will cover **send-ACL** (only me vs shared PC).
 9. **Cloud** — `/{ws}/runners/cloud`. Placeholders for public cloud
    (AWS / GCP / Azure) and Fleet Cloud. Do not enter provider keys.
 10. **Partners** — `/{ws}/runners/partners`. Trust copy + disclaimer;
@@ -223,6 +224,7 @@ really spans the product.
 | `crates/fleet-server` `admin.rs`, `fleet-ui` `/admin` | `admin` | Instance page: counts, Users Promote/Demote, Workspaces, all runners, health. Promote via INSTANCE_ADMIN_EMAILS or `scripts/promote-instance-admin.sh`. Non-admin sees Instance admin required |
 | unify-runners (isolation, picker, single guest, self-hosted) | `unify` | Settings Isolation save; Self-hosted Add worker; Fleet Start 2-task + tick; Sandboxes. Process-only host must not take a container workspace |
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. Private (Ollama): top-50, tags, models directory, disk/RAM/VRAM guards. Sandboxing Native / VMs / Containers. `/{ws}/workers` redirects |
+| send-ACL / run-mode (only me vs shared PC) | later scene (extend `runners` or `run-mode`) | Pair as my PC; a second user cannot send. Shared-box PC can. Not a full film script in this change |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
 | `crates/fleet-ui` Partners `/{ws}/runners/partners` | `partners` | trust copy, disclaimer, verified vs open. Ack does not enable lending |
 | `crates/fleet-ui` dashboard + `fleet/overview` + workforce | `dashboard` | Workforce: Set a goal, Open goals / Open runs / Team board (empty OK) |

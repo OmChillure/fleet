@@ -50,8 +50,20 @@ fn replace_host(list: &mut Vec<HostPublic>, updated: HostPublic) {
     }
 }
 
+fn send_policy_line(host: &HostPublic) -> String {
+    if host.run_mode == "in_container" {
+        return "Run in a container · jobs are guests, not this desktop".into();
+    }
+    match host.send_policy.as_str() {
+        "workspace" => "Run on a PC · anyone in this workspace can send work".into(),
+        "allowlist" => "Run on a PC · only people you allow can send work".into(),
+        _ => "Run on a PC · only you can send work".into(),
+    }
+}
+
 fn request_create_host(
     workspace_id: String,
+    send_policy: String,
     mut creating: Signal<bool>,
     mut hosts: Signal<Vec<HostPublic>>,
     mut pair_result: Signal<Option<CreateHostResponse>>,
@@ -67,6 +79,7 @@ fn request_create_host(
             &workspace_id,
             &CreateHostBody {
                 name: Some("worker".into()),
+                send_policy: Some(send_policy),
             },
         )
         .await {
@@ -95,6 +108,7 @@ fn request_create_host(
 pub fn SelfHosted(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
     let mut creating = use_signal(|| false);
+    let mut send_policy = use_signal(|| "owner_only".to_string());
     let mut error = use_signal(|| None::<String>);
     let mut hosts = use_signal(Vec::<HostPublic>::new);
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
@@ -155,7 +169,36 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         "{NAV_LABEL_SELF_HOSTED}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine as a self-hosted worker. It phones home; the API never dials inbound. Jobs run on that machine, not in this process."
+                        "Pair a machine to Run on a PC. The agent is a program on that computer. Anyone you allow can send work there — that is not isolated."
+                    }
+                    fieldset { class: "mt-3 flex flex-col gap-1.5 text-sm text-[var(--app-fg)]",
+                        legend { class: "text-xs font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                            "Who can send work to this computer"
+                        }
+                        label { class: "flex items-start gap-2",
+                            input {
+                                r#type: "radio",
+                                name: "send_policy",
+                                value: "owner_only",
+                                checked: send_policy() == "owner_only",
+                                onchange: move |_| send_policy.set("owner_only".into()),
+                            }
+                            span {
+                                "Only me — my laptop or dedicated AI box"
+                            }
+                        }
+                        label { class: "flex items-start gap-2",
+                            input {
+                                r#type: "radio",
+                                name: "send_policy",
+                                value: "workspace",
+                                checked: send_policy() == "workspace",
+                                onchange: move |_| send_policy.set("workspace".into()),
+                            }
+                            span {
+                                "Anyone in this workspace — this is a shared PC, not someone's laptop"
+                            }
+                        }
                     }
                     if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
@@ -183,6 +226,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         move |_| {
                             request_create_host(
                                 ws.clone(),
+                                send_policy(),
                                 creating,
                                 hosts,
                                 pair_result,
@@ -572,6 +616,7 @@ fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) 
                     p { class: "m-0", "{specs}" }
                 }
                 p { class: "m-0", "{jobs_line(&host)}" }
+                p { class: "m-0", "{send_policy_line(&host)}" }
                 p { class: "m-0", "{runtime}" }
             }
         }

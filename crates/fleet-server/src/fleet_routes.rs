@@ -75,7 +75,7 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-async fn require_member(
+pub(crate) async fn require_member(
     state: &AppState,
     jar: &CookieJar,
     workspace_id: Uuid,
@@ -164,6 +164,12 @@ async fn settings_json(
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
         "min_isolation": min_isolation,
+        "default_run_mode": workspace_repo::default_run_mode(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
+        "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "owner_only".into()),
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
         "fleet_llm": cfg.fleet_llm,
@@ -196,6 +202,8 @@ pub struct PatchSettingsBody {
     pub fleet_llm: Option<String>,
     pub fleet_llm_model: Option<String>,
     pub min_isolation: Option<String>,
+    pub default_run_mode: Option<String>,
+    pub default_send_policy: Option<String>,
 }
 
 async fn patch_settings(
@@ -204,7 +212,7 @@ async fn patch_settings(
     Path(workspace_id): Path<Uuid>,
     Json(body): Json<PatchSettingsBody>,
 ) -> AppResult<Json<Value>> {
-    let _ = require_member(&state, &jar, workspace_id).await?;
+    let (_user, role) = require_member(&state, &jar, workspace_id).await?;
     ensure_project(&state, workspace_id, "workspace fleet").await?;
     let current = state
         .orch
@@ -238,6 +246,19 @@ async fn patch_settings(
 
     if let Some(raw) = body.min_isolation.as_deref() {
         workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
+    }
+    if body.default_run_mode.is_some() || body.default_send_policy.is_some() {
+        if role != "owner" && role != "admin" {
+            return Err(AppError::forbidden(
+                "owner or admin required to change default run mode",
+            ));
+        }
+    }
+    if let Some(raw) = body.default_run_mode.as_deref() {
+        workspace_repo::set_default_run_mode(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_send_policy.as_deref() {
+        workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;
     }
 
     let cfg = state
@@ -333,6 +354,9 @@ pub struct FixtureRequest {
     /// `chain` (default) or `diamond`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// `on_pc` | `in_container`. Default: workspace `default_run_mode`.
+    #[serde(default)]
+    pub run_mode: Option<String>,
 }
 
 fn fixture_tasks(kind: &str) -> Option<Vec<PlanTask>> {
@@ -415,6 +439,15 @@ async fn post_fixture(
         .ok_or_else(|| AppError::bad_request(format!("unknown fixture kind: {kind}")))?;
     let run_id = Uuid::new_v4();
     let plan_id = Uuid::new_v4();
+    let ws_default = workspace_repo::default_run_mode(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
+    let run_mode = match body.run_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => fleet_db::parse_worker_host_run_mode(raw)
+            .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?
+            .to_string(),
+        None => ws_default,
+    };
     let plan = WorkPlanBody {
         plan_id,
         project_id: workspace_id,
@@ -429,6 +462,8 @@ async fn post_fixture(
             auto_sync_external: false,
             llm_provider: None,
             llm_model: None,
+            requested_by: Some(user.id),
+            run_mode,
             ..Default::default()
         },
     };
