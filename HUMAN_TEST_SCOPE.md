@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `b6054ef8a908900e1bc2068989abece54ef738ae`
-- Tree-id: `11f053da1e377988667c7bd3f8789f5ae1e78400`
+- Tree-id: `fc8f0a9c0fbd9b28f3a1bca0e6a7a27c1011dc74`
 
 ## Scenes
 
@@ -71,9 +71,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes — host stack `GET /health.git_sha` and UI `/fleet-git-sha.txt` = `bccf446b01617ef1234edfed5a8599a5b0f67c72` (this film). Clip: `.tmp/demos/20260912T193912Z-auth-shell-workspace-api-chat-integrations-settings-admin.webm` (runners frames in the same stamp).
-- Frames + webm inspected: yes — all 53 frames under `.tmp/demos/20260912T193912Z-frames/` plus the `.webm`.
-- Bugs found:
-  - Recorder flagged three “error copy” lines that are status rollups (`failed 13`, `failed_spawn 1422`). Not product errors; allowlist updated.
-  - Live work / OAuth flags render as raw JSON objects. Readable, no secrets. Polish later.
-  - Promote / Demote toasts worked. Instance nav, counts, users, workspaces, runners, health (git sha matches bake) all present. No pair tokens or JWT on screen.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)
