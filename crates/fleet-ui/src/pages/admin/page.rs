@@ -42,6 +42,36 @@ fn json_bool(v: &Value, key: &str) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
 }
 
+fn fmt_counts(v: &Value) -> String {
+    match v.as_object() {
+        Some(obj) if obj.is_empty() => "none".into(),
+        Some(obj) => obj
+            .iter()
+            .map(|(k, n)| format!("{k} {}", n.as_i64().unwrap_or(0)))
+            .collect::<Vec<_>>()
+            .join(" · "),
+        None => "none".into(),
+    }
+}
+
+fn fmt_true_keys(v: &Value) -> String {
+    match v.as_object() {
+        Some(obj) => {
+            let on: Vec<&str> = obj
+                .iter()
+                .filter(|(_, n)| n.as_bool() == Some(true))
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if on.is_empty() {
+                "none".into()
+            } else {
+                on.join(", ")
+            }
+        }
+        None => "none".into(),
+    }
+}
+
 fn short_time(raw: &str) -> String {
     if raw.len() >= 16 {
         raw[..16].replace('T', " ")
@@ -463,7 +493,7 @@ fn WorkSection(work: Value, sessions: Vec<Value>) -> Element {
                 CountBlock { title: "Goals", value: goals }
             }
             p { class: "mt-3 text-xs text-[var(--app-muted)]",
-                "Inbox: {inbox} · monitors {json_i64(&work, \"inbox_monitors\")} · unpublished events {json_i64(&work, \"unpublished_events\")}"
+                "Inbox: {fmt_counts(&inbox)} · monitors {json_i64(&work, \"inbox_monitors\")} · unpublished events {json_i64(&work, \"unpublished_events\")}"
             }
             if !sessions.is_empty() {
                 h3 { class: "mt-4 mb-1 text-xs font-semibold uppercase tracking-wide text-[var(--app-muted)]",
@@ -495,18 +525,7 @@ fn WorkSection(work: Value, sessions: Vec<Value>) -> Element {
 
 #[component]
 fn CountBlock(title: String, value: Value) -> Element {
-    let text = if let Some(obj) = value.as_object() {
-        if obj.is_empty() {
-            "none".into()
-        } else {
-            obj.iter()
-                .map(|(k, v)| format!("{k} {}", v.as_i64().unwrap_or(0)))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        }
-    } else {
-        "none".into()
-    };
+    let text = fmt_counts(&value);
     rsx! {
         div { class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2",
             p { class: "m-0 text-[11px] uppercase tracking-wide text-[var(--app-muted)]", "{title}" }
@@ -557,7 +576,7 @@ fn InstanceSection(instance: Value) -> Element {
                 "LLM: ollama={json_bool(&providers, \"ollama\")} grok={json_bool(&providers, \"grok\")} openai={json_bool(&providers, \"openai\")} claude={json_bool(&providers, \"claude\")}"
             }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "OAuth configured: {oauth}"
+                "OAuth configured: {fmt_true_keys(&oauth)}"
             }
             if packages.is_empty() {
                 p { class: "mt-2 text-xs text-[var(--app-muted)]",
