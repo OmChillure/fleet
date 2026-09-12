@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `ace6eae53e2cba80516f1171a83084488eeadec6`
-- Tree-id: `3f9a71a76b830a658077f89be947aa78b1abf16e`
+- Tree-id: `eb270bd1929bc2ff9f10fd3973db5eac42d873ed`
 
 ## Scenes
 
