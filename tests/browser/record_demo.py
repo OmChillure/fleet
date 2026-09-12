@@ -1061,6 +1061,8 @@ class Demo:
                 "Instance admin required",
                 "No runners registered",
                 "No staged worker packages",
+                "failed",
+                "failed_spawn",
             )
         )
         _ = base
