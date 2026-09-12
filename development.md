@@ -154,6 +154,7 @@ Listen ports are declared once (`PORT`, optional `FLEET_UI_PORT`). Local API / U
 | `FLEET_UI_PORT` | UI listen port (default 3030). `UI_PUBLIC_BASE` and `CORS_ORIGINS` follow it. |
 | `WORKER_PUBLIC_BASE` | Pair + guest heartbeat. Unset = this machine's LAN IP + `PORT`. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
+| `INSTANCE_ADMIN_EMAILS` | Comma-separated emails granted `/admin` on login |
 
 The API does not run jobs. Pair a `fleet-host`.
 

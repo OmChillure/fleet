@@ -13,6 +13,7 @@
 //!   …
 //! ```
 
+pub mod admin;
 pub mod agents;
 pub mod auth;
 pub mod cases;

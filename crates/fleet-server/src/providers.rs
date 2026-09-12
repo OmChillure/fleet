@@ -1052,6 +1052,7 @@ mod tests {
                 cookie_secure: false,
                 cookie_samesite: cookie::SameSite::Lax,
                 signup_token: None,
+                instance_admin_emails: Vec::new(),
             },
             integrations: fleet_integrations::IntegrationsConfig {
                 api_public_base: "http://127.0.0.1:0".into(),

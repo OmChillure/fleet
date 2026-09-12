@@ -53,6 +53,10 @@ pub struct UserPublic {
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub instance_admin: bool,
+    #[serde(default)]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

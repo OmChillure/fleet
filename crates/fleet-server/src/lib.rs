@@ -3,6 +3,7 @@
 //! Auth + workspaces + integrations + orchestrator control plane on one process.
 //! The binary (`src/main.rs`) binds a port; tests use [`build_http_app`] without serving.
 
+pub mod admin;
 pub mod bus;
 pub mod cases;
 pub mod chat;
@@ -68,6 +69,7 @@ pub fn build_router() -> Router<AppState> {
         .merge(worker_hosts::router())
         .merge(partners::router())
         .merge(install_routes::router())
+        .merge(admin::router())
 }
 
 /// Full HTTP app: fleet-server routes + orchestrator fallback + TraceLayer + CORS.
@@ -194,7 +196,7 @@ pub async fn health(State(state): State<AppState>) -> Json<Value> {
         "service": "fleet-server",
         "db": if db_ok { "up" } else { "down" },
         "git_sha": git_sha,
-        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator", "worker_hosts"],
+        "apis": ["auth", "workspaces", "personas", "integrations", "chat", "cases", "fleet", "orchestrator", "worker_hosts", "admin"],
     }))
 }
 
@@ -237,6 +239,16 @@ pub async fn api_index() -> Json<Value> {
                 "workers": "GET /api/workspaces/{workspace_id}/fleet/workers",
                 "resume": "POST /api/workspaces/{workspace_id}/fleet/tasks/{task_id}/resume",
                 "kill": "POST /api/workspaces/{workspace_id}/fleet/sessions/{session_id}/kill",
+            },
+            "admin": {
+                "overview": "GET /api/admin/overview",
+                "users": "GET /api/admin/users",
+                "patch_user": "PATCH /api/admin/users/{user_id}",
+                "workspaces": "GET /api/admin/workspaces",
+                "runners": "GET /api/admin/runners",
+                "instance": "GET /api/admin/instance",
+                "work": "GET /api/admin/work",
+                "sessions": "GET /api/admin/sessions",
             },
             "inbox": {
                 "list": "GET /api/workspaces/{workspace_id}/inbox",

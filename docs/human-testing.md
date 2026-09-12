@@ -220,6 +220,7 @@ really spans the product.
 | `crates/fleet-auth` personas, `fleet-ui` agents | `agents` | Seed starters → eight cards |
 | `crates/fleet-integrations` catalog/oauth/proxy | `integrations` | catalog + search. Do not complete real OAuth unless the MR is that provider |
 | `crates/fleet-server` + UI settings | `settings` | agent count + Ollama fallback. No git URL. Members: invite by email (member/admin); existing user joins; pending invite; owner remove |
+| `crates/fleet-server` `admin.rs`, `fleet-ui` `/admin` | `admin` | Instance page: counts, Users Promote/Demote, Workspaces, all runners, health. Promote via INSTANCE_ADMIN_EMAILS or `scripts/promote-instance-admin.sh`. Non-admin sees Instance admin required |
 | unify-runners (isolation, picker, single guest, self-hosted) | `unify` | Settings Isolation save; Self-hosted Add worker; Fleet Start 2-task + tick; Sandboxes. Process-only host must not take a container workspace |
 | `crates/fleet-host`, worker-hosts API, UI `/{ws}/runners/self-hosted` | `runners` (`workers` alias) | add worker, paste install command; token panel is success (no second machine). After signup a bootstrap `cluster-host` / local fleet-host may appear. Private (Ollama): top-50, tags, models directory, disk/RAM/VRAM guards. Sandboxing Native / VMs / Containers. `/{ws}/workers` redirects |
 | `crates/fleet-ui` Cloud `/{ws}/runners/cloud` | `cloud` | public cloud (AWS / GCP / Azure) + Fleet Cloud placeholders. No provider keys |
@@ -234,7 +235,7 @@ really spans the product.
 | `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |
 
 `all` = landing, auth, shell, workspace, api, chat, fleet, sandboxes, cases, inbox, agents,
-integrations, settings, runners, cloud, partners, sessions (logout at the
+integrations, settings, admin, runners, cloud, partners, sessions (logout at the
 end of `auth`/`shell` as needed). `workers` is an alias for `runners`.
 `lab`, `kind`, and `unify` are extra — pass them when that is the MR.
 

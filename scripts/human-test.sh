@@ -283,6 +283,13 @@ cmd_guide() {
     "Refresh now polls. Finish starts one open row by hand. A closed board item on a launched row should go done." \
     "Empty is OK until Integrations are connected. Start monitor without a Connect is 400." || return 0
 
+  pause_step "Admin  ${UI_URL}/admin" \
+    "Instance page (sidebar Instance → Overview, or user menu Instance admin)." \
+    "Only instance admins see the nav. Others get Instance admin required." \
+    "First admin: INSTANCE_ADMIN_EMAILS=you@example.test in .env, then log in — or scripts/promote-instance-admin.sh you@example.test." \
+    "Overview counts, Users (Promote / Demote / Disable), Workspaces, all runners, live work, instance health (git sha, signup mode, OAuth flags, staged packages)." \
+    "Do not show pair tokens, JWT, or OAuth secrets. Disable is for throwaway @example.test accounts only." || return 0
+
   pause_step "Settings members" \
     "/{ws}/settings — Members: invite by email (member/admin)." \
     "Existing users join immediately; others join on signup or next login." \

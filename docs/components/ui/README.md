@@ -58,6 +58,7 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 | `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
 | `/{workspace_id}/cases` | Durable cases | List + detail, observe, cancel |
 | `/{workspace_id}/integrations` | Connect platforms via OAuth | Catalog + connect flow |
+| `/admin` | Instance admin | Users, all runners, health (instance_admin only) |
 | `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM (no git URL) |
 | `/{workspace_id}/workers` | Self-hosted workers | Add worker + one-time pair token |
 

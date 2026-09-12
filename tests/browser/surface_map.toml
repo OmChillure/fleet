@@ -126,6 +126,16 @@ pauses = ["Integrations"]
 
 [[rule]]
 paths = [
+  "crates/fleet-server/src/admin.rs",
+  "crates/fleet-db/src/repos/admin.rs",
+  "crates/fleet-db/migrations/032_instance_admin.sql",
+  "crates/fleet-ui/src/pages/admin",
+]
+scenes = ["admin"]
+pauses = ["Admin"]
+
+[[rule]]
+paths = [
   "crates/fleet-ui/src/pages/settings",
   "crates/fleet-auth/src/routes/members.rs",
   "crates/fleet-server/src/config.rs",
