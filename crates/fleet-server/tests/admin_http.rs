@@ -395,12 +395,42 @@ async fn signup_and_login(app: &axum::Router) -> (String, CookieJar, String) {
     (email, jar, ws_id)
 }
 
+/// Shared DB: last-admin isolation must not race other promote tests.
+static INSTANCE_ADMIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_instance_admin() -> std::sync::MutexGuard<'static, ()> {
+    INSTANCE_ADMIN_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 async fn promote(state: &AppState, email: &str) {
     sqlx::query("UPDATE users SET instance_admin = TRUE WHERE email_normalized = $1")
         .bind(email.to_lowercase())
         .execute(&state.db)
         .await
         .expect("promote instance admin");
+}
+
+async fn snapshot_admin_ids(state: &AppState) -> Vec<uuid::Uuid> {
+    sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE instance_admin = TRUE")
+        .fetch_all(&state.db)
+        .await
+        .expect("snapshot instance admins")
+}
+
+async fn restore_admins(state: &AppState, ids: &[uuid::Uuid]) {
+    sqlx::query("UPDATE users SET instance_admin = FALSE")
+        .execute(&state.db)
+        .await
+        .expect("clear instance admins");
+    for id in ids {
+        sqlx::query("UPDATE users SET instance_admin = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .expect("restore instance admin");
+    }
 }
 
 fn user_id_from_login(body: &Value) -> String {
@@ -428,6 +458,7 @@ async fn admin_overview_is_403_for_ordinary_member() {
 
 #[tokio::test]
 async fn admin_overview_lists_counts_for_instance_admin() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (email, jar, _ws) = signup_and_login(&app).await;
     promote(&state, &email).await;
@@ -448,6 +479,7 @@ async fn admin_overview_lists_counts_for_instance_admin() {
 
 #[tokio::test]
 async fn admin_users_promote_and_demote() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (admin_email, admin_jar, _ws) = signup_and_login(&app).await;
     promote(&state, &admin_email).await;
@@ -490,7 +522,9 @@ async fn admin_users_promote_and_demote() {
 
 #[tokio::test]
 async fn admin_cannot_demote_last_instance_admin() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
+    let previous = snapshot_admin_ids(&state).await;
     let (email, jar, _ws) = signup_and_login(&app).await;
     promote(&state, &email).await;
     sqlx::query("UPDATE users SET instance_admin = FALSE WHERE email_normalized <> $1")
@@ -508,19 +542,22 @@ async fn admin_cannot_demote_last_instance_admin() {
         Some(json!({ "instance_admin": false })),
     )
     .await;
-    assert_eq!(out.status, StatusCode::BAD_REQUEST, "{}", out.body);
+    let status = out.status;
+    let body = out.body.clone();
+    restore_admins(&state, &previous).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        out.body["error"]
+        body["error"]
             .as_str()
             .unwrap_or("")
             .contains("last instance admin"),
-        "{}",
-        out.body
+        "{body}"
     );
 }
 
 #[tokio::test]
 async fn admin_disable_user_revokes_session() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (admin_email, admin_jar, _ws) = signup_and_login(&app).await;
     promote(&state, &admin_email).await;
@@ -552,6 +589,7 @@ async fn admin_disable_user_revokes_session() {
 
 #[tokio::test]
 async fn admin_runners_lists_hosts_across_workspaces_without_secrets() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (admin_email, admin_jar, ws) = signup_and_login(&app).await;
     promote(&state, &admin_email).await;
@@ -591,6 +629,7 @@ async fn admin_runners_lists_hosts_across_workspaces_without_secrets() {
 
 #[tokio::test]
 async fn admin_instance_reports_health_without_secrets() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (email, jar, _ws) = signup_and_login(&app).await;
     promote(&state, &email).await;
@@ -606,6 +645,7 @@ async fn admin_instance_reports_health_without_secrets() {
 
 #[tokio::test]
 async fn admin_work_and_sessions_ok() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (email, jar, _ws) = signup_and_login(&app).await;
     promote(&state, &email).await;
@@ -623,6 +663,7 @@ async fn admin_work_and_sessions_ok() {
 
 #[tokio::test]
 async fn admin_workspaces_lists_across_tenants() {
+    let _lock = lock_instance_admin();
     let (app, state) = app_with_state().await;
     let (email, jar, _ws) = signup_and_login(&app).await;
     promote(&state, &email).await;
