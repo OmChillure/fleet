@@ -19,6 +19,9 @@ pub struct Persona {
     pub division: String,
     pub emoji: String,
     pub vibe: String,
+    /// Workspace catalog `model_preference`. Empty for roster personas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_preference: String,
     /// Full markdown body (frontmatter stripped + original).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub body: String,
@@ -129,6 +132,49 @@ pub async fn list_personas(data_dir: &Path) -> Vec<PersonaSummary> {
     let mut out: Vec<PersonaSummary> = all.into_iter().map(|p| p.summary()).collect();
     out.sort_by(|a, b| a.division.cmp(&b.division).then(a.name.cmp(&b.name)));
     out
+}
+
+/// Workspace catalog first (role_prompt + model_preference), then the
+/// agency-agents roster. The personas HTTP API never invokes an LLM;
+/// this is consumption at spawn.
+pub async fn resolve_for_workspace(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    profile: &str,
+    data_dir: &Path,
+) -> Persona {
+    match fleet_db::repos::personas::find_by_slug(pool, workspace_id, profile).await {
+        Ok(Some(row)) => return persona_from_workspace_row(&row),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                workspace_id = %workspace_id,
+                profile,
+                "workspace persona lookup failed; using roster"
+            );
+        }
+    }
+    resolve(profile, data_dir).await
+}
+
+fn persona_from_workspace_row(row: &fleet_db::Persona) -> Persona {
+    let role = row.role_prompt.trim();
+    let body = if role.is_empty() {
+        format!("# {}\n", row.name.trim())
+    } else {
+        format!("# {}\n\n{}\n", row.name.trim(), role)
+    };
+    Persona {
+        slug: row.slug.clone(),
+        name: row.name.clone(),
+        description: row.description.clone(),
+        division: "workspace".into(),
+        emoji: row.icon.clone(),
+        vibe: String::new(),
+        model_preference: row.model_preference.clone().unwrap_or_default(),
+        body,
+    }
 }
 
 /// Resolve `worker_profile` to a full persona (body included).
@@ -263,6 +309,7 @@ fn parse_file(root: &Path, path: &Path) -> Option<Persona> {
         division,
         emoji: meta.get("emoji").cloned().unwrap_or_else(|| "•".into()),
         vibe: meta.get("vibe").cloned().unwrap_or_default(),
+        model_preference: String::new(),
         body: if body.trim().is_empty() { raw } else { body },
     })
 }
@@ -312,6 +359,7 @@ fn fallback_persona() -> Persona {
         division: "specialized".into(),
         emoji: "•".into(),
         vibe: "Does the job, stays in lane, hands off clearly.".into(),
+        model_preference: String::new(),
         body: BUILTIN_GENERALIST.into(),
     }
 }
@@ -326,6 +374,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Ships durable APIs and clear module boundaries.".into(),
+            model_preference: String::new(),
             body: BUILTIN_CODING.into(),
         },
         Persona {
@@ -335,6 +384,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Finds the three issues that actually matter.".into(),
+            model_preference: String::new(),
             body: BUILTIN_REVIEWER.into(),
         },
         Persona {
@@ -344,6 +394,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Pixel-aware, accessibility-first.".into(),
+            model_preference: String::new(),
             body: BUILTIN_FRONTEND.into(),
         },
     ]
@@ -453,6 +504,7 @@ mod tests {
             division: "testing".into(),
             emoji: "•".into(),
             vibe: String::new(),
+            model_preference: String::new(),
             body: String::new(),
         });
         for alias in ["tester", "qa", "testing"] {

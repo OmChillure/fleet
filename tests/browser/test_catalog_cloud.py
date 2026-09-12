@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: Cloud cards do not create hosts (catalog:list-cloud-four-provider-cards).
 
-Clicking AWS / GCP / Azure / Fleet Cloud on /runners/cloud must not mint a
-worker-hosts row. Four-card / no-button chrome is test_11_cloud_page_coming_soon.
+Clicking AWS / GCP / Azure headings on /runners/cloud must not mint a
+worker-hosts row. Fleet Cloud Attach creates a sandboxed host via
+/runners/cloud/fleet (not /worker-hosts).
 """
 from __future__ import annotations
 
@@ -200,7 +201,7 @@ class CatalogCloudComingSoonE2ETests(unittest.TestCase):
             page.on("request", on_request)
             try:
                 _goto_cloud(page, base)
-                for name in CLOUD_NAMES:
+                for name in ("AWS", "GCP", "Azure"):
                     page.get_by_role("heading", name=name, exact=True).click()
                     page.wait_for_url(_CLOUD_URL)
             finally:
@@ -209,13 +210,13 @@ class CatalogCloudComingSoonE2ETests(unittest.TestCase):
             self.assertEqual(
                 writes,
                 [],
-                "clicking Cloud provider cards must not write worker-hosts",
+                "clicking BYO Cloud headings must not write worker-hosts",
             )
             after = _own_host_ids(list_hosts(page, ws), ws)
             self.assertEqual(
                 after,
                 [],
-                "clicking Cloud cards must not create a worker-hosts row: "
+                "clicking BYO Cloud headings must not create a worker-hosts row: "
                 f"{after!r}",
             )
         finally:

@@ -17,6 +17,10 @@ pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 /// Native host process (v1). Only this isolation is assignable.
 pub const WORKER_HOST_KIND_HOST: &str = "host";
 pub const WORKER_HOST_KIND_CONTROL_PLANE: &str = "control_plane";
+pub const RUNNER_KIND_SELF_HOSTED: &str = "self_hosted";
+pub const RUNNER_KIND_FLEET_CLOUD: &str = "fleet_cloud";
+pub const RUNNER_KIND_PUBLIC_CLOUD: &str = "public_cloud";
+pub const RUNNER_KIND_PARTNERS: &str = "partners";
 
 /// Bootstrap-only guest label. HTTP PATCH must not stamp this.
 pub const WORKER_HOST_LABEL_CLUSTER: &str = "cluster";
@@ -102,8 +106,10 @@ pub struct WorkerHost {
     pub enabled: bool,
     pub paused: bool,
     pub drain: bool,
-    /// `native` (v1) or `sandboxed` (placeholder; not assignable).
+    /// `native` or `sandboxed` (assignable when container/VM is advertised).
     pub isolation: String,
+    #[serde(default = "default_runner_kind")]
+    pub runner_kind: String,
     pub allow_host: bool,
     pub allow_container: bool,
     pub max_concurrent: i32,
@@ -228,6 +234,8 @@ pub struct WorkerHostPublic {
     /// `host` (paired fleet-host) or `control_plane` (this API process).
     #[serde(default = "default_host_kind")]
     pub kind: String,
+    #[serde(default = "default_runner_kind")]
+    pub runner_kind: String,
     pub status: String,
     pub enabled: bool,
     pub paused: bool,
@@ -368,6 +376,20 @@ fn default_host_kind() -> String {
     WORKER_HOST_KIND_HOST.to_string()
 }
 
+fn default_runner_kind() -> String {
+    RUNNER_KIND_SELF_HOSTED.to_string()
+}
+
+pub fn parse_runner_kind(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        RUNNER_KIND_SELF_HOSTED => Some(RUNNER_KIND_SELF_HOSTED),
+        RUNNER_KIND_FLEET_CLOUD => Some(RUNNER_KIND_FLEET_CLOUD),
+        RUNNER_KIND_PUBLIC_CLOUD => Some(RUNNER_KIND_PUBLIC_CLOUD),
+        RUNNER_KIND_PARTNERS => Some(RUNNER_KIND_PARTNERS),
+        _ => None,
+    }
+}
+
 fn default_software_status() -> String {
     WORKER_SOFTWARE_STATUS_UNKNOWN.to_string()
 }
@@ -484,6 +506,11 @@ impl WorkerHostPublic {
             workspace_id: host.workspace_id,
             name: host.name.clone(),
             kind: WORKER_HOST_KIND_HOST.to_string(),
+            runner_kind: if host.runner_kind.trim().is_empty() {
+                RUNNER_KIND_SELF_HOSTED.to_string()
+            } else {
+                host.runner_kind.clone()
+            },
             status: host.public_status(now).to_string(),
             enabled: host.enabled,
             paused: host.paused,
@@ -739,6 +766,8 @@ pub struct NewWorkerHost {
     pub max_concurrent: i32,
     pub max_job_timeout_s: i32,
     pub labels: Vec<String>,
+    pub isolation: String,
+    pub runner_kind: String,
     pub send_policy: String,
     pub run_mode: String,
 }
@@ -760,6 +789,8 @@ impl NewWorkerHost {
             max_concurrent: 4,
             max_job_timeout_s: 3600,
             labels: Vec::new(),
+            isolation: WORKER_HOST_ISOLATION_NATIVE.to_string(),
+            runner_kind: RUNNER_KIND_SELF_HOSTED.to_string(),
             send_policy: WORKER_HOST_SEND_OWNER_ONLY.to_string(),
             run_mode: WORKER_HOST_RUN_ON_PC.to_string(),
         }
@@ -804,6 +835,7 @@ mod public_view_tests {
             paused: false,
             drain: false,
             isolation: WORKER_HOST_ISOLATION_NATIVE.into(),
+            runner_kind: RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: true,
             max_concurrent: 4,

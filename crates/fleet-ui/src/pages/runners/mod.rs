@@ -1,5 +1,5 @@
 //! Runners: self-hosted machines that pair and phone home, plus
-//! cloud and partners placeholder pages.
+//! Cloud attach and Partners lend / borrow.
 
 pub mod cloud;
 pub mod partners;

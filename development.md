@@ -166,7 +166,7 @@ The API does not run jobs. Pair a `fleet-host`.
 - UI: **Agents** in the sidebar  
 - API: `/api/workspaces/{id}/personas` (+ `seed-starters`)
 
-No LLM is called yet; personas store role prompts and model preferences for a future driver.
+Personas store role prompts and model preferences. Spawn consumes the workspace catalog (`PERSONA.md` + model preference) and falls back to the agency-agents roster. The personas HTTP API still does not invoke an LLM.
 
 ---
 

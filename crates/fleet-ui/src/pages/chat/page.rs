@@ -1,4 +1,4 @@
-//! Workspace chat — composer with provider + model dropdowns (Grok + Ollama).
+//! Workspace chat — composer with provider + model dropdowns.
 
 use std::sync::Mutex;
 
@@ -129,7 +129,7 @@ fn write_stored_composer(workspace_id: &str, provider: &str, model: &str) {
     write_stored_model(workspace_id, model);
 }
 
-const CATALOG_PROVIDER_IDS: &[&str] = &["grok", "claude", "openai", "ollama"];
+const CATALOG_PROVIDER_IDS: &[&str] = &["grok", "claude", "openai", "gemini", "ollama"];
 
 fn plane_openai_from_status(status: Option<&ChatStatus>) -> Option<&ChatProviderInfo> {
     status.and_then(|s| s.providers.iter().find(|p| p.id == "openai"))
@@ -155,7 +155,9 @@ fn providers_from_runner(
         .iter()
         .map(|id| {
             if *id == "openai" {
-                return plane_openai.cloned().unwrap_or_else(unavailable_openai);
+                if let Some(plane) = plane_openai.filter(|p| p.available) {
+                    return plane.clone();
+                }
             }
             let reported = host.agents.iter().find(|a| a.id == *id);
             let installed = reported.map(|a| a.installed).unwrap_or(false);
@@ -1448,7 +1450,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                     }
                 }
                 p { class: "pointer-events-auto mx-auto mt-1.5 max-w-3xl px-1 text-[10px] leading-4 text-[var(--app-muted)]",
-                    "Grok, Claude, and Private (Ollama) turns run on the selected runner’s official CLI. OpenAI still uses the API key on the control plane."
+                    "Grok, Claude, Gemini, OpenAI (Codex), and Private (Ollama) run on the selected runner’s official CLI. A plane API key is a fallback when no runner CLI is logged in."
                 }
             }
         }

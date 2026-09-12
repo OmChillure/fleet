@@ -20,7 +20,10 @@ const WAIT: Duration = Duration::from_secs(240);
 const OFFLINE_AFTER: TimeDelta = TimeDelta::seconds(90);
 
 pub fn runner_cli_provider(provider: &str) -> bool {
-    matches!(provider, "grok" | "xai" | "claude" | "anthropic" | "ollama")
+    matches!(
+        provider,
+        "grok" | "xai" | "claude" | "anthropic" | "ollama" | "openai" | "gemini"
+    )
 }
 
 pub fn format_transcript(pairs: &[(String, String)]) -> String {
@@ -365,6 +368,7 @@ mod tests {
             paused: false,
             drain: false,
             isolation: "native".into(),
+            runner_kind: fleet_db::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: false,
             max_concurrent: 2,

@@ -65,13 +65,14 @@ pub fn normalize_provider(provider: &str) -> Option<String> {
     }
 }
 
-/// Guest harness on a paired runner. OpenAI and unknown stay mock — they
-/// have no official runner CLI. Callers that launch fleet work must refuse
-/// those providers instead of silently mocking.
+/// Guest harness on a paired runner. Unknown stays mock — callers that
+/// launch fleet work must refuse those providers instead of silently mocking.
 pub fn harness_for_backend(backend: Option<&str>) -> &'static str {
     match backend.map(str::trim).map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("grok" | "xai") => "grok",
         Some("claude" | "anthropic") => "claude",
+        Some("openai" | "codex") => "openai",
+        Some("gemini" | "google") => "gemini",
         Some("ollama") => "ollama",
         _ => "mock",
     }
@@ -1573,7 +1574,8 @@ mod tests {
         assert_eq!(normalize_provider("xai").as_deref(), Some("grok"));
         assert_eq!(harness_for_backend(Some("claude")), "claude");
         assert_eq!(harness_for_backend(Some("ollama")), "ollama");
-        assert_eq!(harness_for_backend(Some("openai")), "mock");
+        assert_eq!(harness_for_backend(Some("openai")), "openai");
+        assert_eq!(harness_for_backend(Some("gemini")), "gemini");
         assert_eq!(harness_for_backend(None), "mock");
         assert_eq!(normalize_provider("GROK").as_deref(), Some("grok"));
         assert_eq!(normalize_provider("ollama").as_deref(), Some("ollama"));
@@ -1610,8 +1612,8 @@ mod tests {
         let started = std::time::Instant::now();
         let out = run_bash_limited(
             dir.path(),
-            "echo $$ > sleeper.pid; exec sleep 8",
-            Duration::from_millis(200),
+            "echo $$ > sleeper.pid; sync; exec sleep 8",
+            Duration::from_millis(400),
         )
         .await;
         let elapsed = started.elapsed();
@@ -1624,8 +1626,13 @@ mod tests {
             "cutoff must fail the tool result, not empty stdout: {out}"
         );
 
-        let pid: u32 = std::fs::read_to_string(dir.path().join("sleeper.pid"))
-            .expect("sleeper.pid")
+        let pid_path = dir.path().join("sleeper.pid");
+        let wait_pid = std::time::Instant::now() + Duration::from_millis(400);
+        while !pid_path.is_file() && std::time::Instant::now() < wait_pid {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .unwrap_or_else(|e| panic!("sleeper.pid after timeout ({e}): {out}"))
             .trim()
             .parse()
             .expect("sleeper pid");

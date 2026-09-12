@@ -1,7 +1,8 @@
-//! Cloud / Partners placeholder copy (extracted from fleet-ui).
+//! Cloud / Partners copy (extracted from fleet-ui).
 //!
-//! These surfaces cannot enqueue work. Disclaimer ack is a timestamp only:
-//! it does not enable lending or make a partner assignable.
+//! Cloud BYO cards stay labeled coming soon; Fleet Cloud attach is live.
+//! Partners disclaimer ack unlocks lend / borrow UI. It does not mint
+//! credits or make a host assignable by itself.
 
 /// Badge on every Cloud card and the Partners heading.
 pub const COMING_SOON_BADGE: &str = "Coming soon";
@@ -60,9 +61,9 @@ pub const PARTNERS_TRUST_COPY: &[&str] = &[
 /// Disclaimer checkbox starts unchecked (no timestamp recorded).
 pub const DISCLAIMER_DEFAULT_ACCEPTED: bool = false;
 
-/// Recording an ack does not enable lending or buying credits.
-pub fn disclaimer_ack_enables_lend(_accepted: bool) -> bool {
-    false
+/// Recording an ack unlocks the lend / borrow controls. Buy credits stays off.
+pub fn disclaimer_ack_enables_lend(accepted: bool) -> bool {
+    accepted
 }
 
 /// Recording an ack does not make a partner host assignable.
@@ -109,12 +110,10 @@ mod tests {
     }
 
     #[test]
-    fn ack_does_not_enable_lend_or_assignable() {
+    fn ack_unlocks_lend_ui_not_assignable() {
+        assert!(!disclaimer_ack_enables_lend(false));
+        assert!(disclaimer_ack_enables_lend(true));
         for accepted in [false, true] {
-            assert!(
-                !disclaimer_ack_enables_lend(accepted),
-                "ack={accepted} must not enable lend"
-            );
             assert!(
                 !disclaimer_ack_makes_assignable(accepted),
                 "ack={accepted} must not make partners assignable"
@@ -163,24 +162,16 @@ mod tests {
             !blocks.is_empty(),
             "production Cloud page must contain rsx! markup"
         );
-        for block in &blocks {
-            let lower = block.to_ascii_lowercase();
+        let joined = blocks.join("\n").to_ascii_lowercase();
+        assert!(
+            joined.contains("attach fleet cloud"),
+            "Cloud page must expose Attach Fleet Cloud"
+        );
+        for needle in ["lend", "enqueue", "add worker"] {
             assert!(
-                !lower.contains("button"),
-                "Cloud rsx! must render no buttons"
+                !joined.contains(needle),
+                "Cloud rsx! must not contain {needle:?} (assignable risk)"
             );
-            for needle in ["onclick", "onsubmit", "href", "select {", "form {"] {
-                assert!(
-                    !lower.contains(needle),
-                    "Cloud rsx! must not contain {needle:?} (picker must not create cloud hosts)"
-                );
-            }
-            for needle in ["spawn", "lend", "enqueue", "pair", "add worker"] {
-                assert!(
-                    !lower.contains(needle),
-                    "Cloud rsx! must not contain {needle:?} (assignable risk)"
-                );
-            }
         }
     }
 }

@@ -8,7 +8,7 @@ use fleet_orchestrator::api::AppState as OrchState;
 
 use crate::chat::OllamaConfig;
 use crate::grok::GrokConfig;
-use crate::providers::{ClaudeConfig, OpenaiConfig};
+use crate::providers::{ClaudeConfig, GeminiConfig, OpenaiConfig};
 
 /// Unified app state for every API module mounted on fleet-server.
 #[derive(Clone)]
@@ -24,6 +24,7 @@ pub struct AppState {
     pub grok: GrokConfig,
     pub openai: OpenaiConfig,
     pub claude: ClaudeConfig,
+    pub gemini: GeminiConfig,
     /// Optional prebuilt worker binaries (`FLEET_WORKER_DIST_DIR`).
     pub worker_dist_dir: Option<PathBuf>,
 }

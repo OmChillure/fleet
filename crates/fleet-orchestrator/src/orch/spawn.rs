@@ -158,7 +158,13 @@ pub async fn schedule_and_spawn(
         crate::sandbox::team::prepare_agent_workspace(data_dir, &session_work, task, snap).await;
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
-        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        let persona = crate::personas::resolve_for_workspace(
+            store.pool(),
+            project_id,
+            &task.worker_profile,
+            data_dir,
+        )
+        .await;
         let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
             cached.clone()
         } else {
@@ -209,6 +215,17 @@ pub async fn schedule_and_spawn(
                 req.agent_backend.as_deref(),
             );
             req.env.insert("FLEET_HARNESS".into(), harness.into());
+        }
+        if req
+            .agent_model
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|s| s.is_empty())
+        {
+            let pref = persona.model_preference.trim();
+            if !pref.is_empty() && !pref.eq_ignore_ascii_case("auto") {
+                req.agent_model = Some(pref.to_string());
+            }
         }
         if let Some(model) = req.agent_model.as_deref().filter(|s| !s.is_empty()) {
             req.env

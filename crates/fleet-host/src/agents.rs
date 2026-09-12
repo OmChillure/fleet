@@ -78,7 +78,13 @@ pub fn probe_all() -> Vec<AgentProbe> {
             }
         }
     }
-    let fresh = vec![probe_grok(), probe_claude(), probe_openai(), probe_ollama()];
+    let fresh = vec![
+        probe_grok(),
+        probe_claude(),
+        probe_openai(),
+        probe_gemini(),
+        probe_ollama(),
+    ];
     if let Ok(mut g) = PROBE_CACHE.lock() {
         *g = Some((Instant::now(), fresh.clone()));
     }
@@ -469,6 +475,41 @@ fn claude_creds_present(path: &Path) -> bool {
         return false;
     };
     meta.is_file() && meta.len() > 2
+}
+
+fn probe_gemini() -> AgentProbe {
+    let installed = which("gemini").is_some();
+    let key = std::env::var("GEMINI_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+        .is_some_and(|s| !s.trim().is_empty());
+    let home = home_dir();
+    let cli_session = home
+        .as_ref()
+        .map(|h| {
+            claude_creds_present(&h.join(".gemini/oauth_creds.json"))
+                || claude_creds_present(&h.join(".config/gemini/oauth_creds.json"))
+        })
+        .unwrap_or(false);
+    let logged_in = key || cli_session;
+    let models = if logged_in {
+        env_model_list("GEMINI_MODELS").unwrap_or_else(|| {
+            vec![
+                "gemini-2.5-flash".into(),
+                "gemini-2.0-flash".into(),
+            ]
+        })
+    } else {
+        vec![]
+    };
+    AgentProbe {
+        id: "gemini",
+        name: "Gemini",
+        installed: installed || key,
+        logged_in,
+        models,
+        model_details: vec![],
+    }
 }
 
 fn probe_openai() -> AgentProbe {

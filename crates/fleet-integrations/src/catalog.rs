@@ -95,10 +95,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "bitbucket".into(),
             name: "Bitbucket".into(),
-            description: "Connect Bitbucket Cloud for PRs and pipelines. Tools are ready; OAuth connect is coming soon.".into(),
+            description: "Connect Bitbucket Cloud for PRs and pipelines.".into(),
             category: IntegrationCategory::CodeVersioning,
             category_label: "Source control".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "bitbucket".into(),
             docs_url: Some("https://developer.atlassian.com/cloud/bitbucket/oauth-2/".into()),
             auth_method: AuthMethod::Oauth,
@@ -180,10 +180,10 @@ pub fn catalog() -> Vec<IntegrationView> {
         IntegrationView {
             id: "confluence".into(),
             name: "Confluence".into(),
-            description: "Pull Confluence pages as agent context and publish status. Tools are ready; OAuth connect is coming soon.".into(),
+            description: "Pull Confluence pages as agent context and publish status.".into(),
             category: IntegrationCategory::TaskControl,
             category_label: "Docs".into(),
-            availability: IntegrationAvailability::ComingSoon,
+            availability: IntegrationAvailability::Available,
             icon: "confluence".into(),
             docs_url: Some("https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/".into()),
             auth_method: AuthMethod::Oauth,
@@ -289,6 +289,8 @@ pub fn oauth_app_create_url(provider: &str) -> Option<&'static str> {
         "discord" => "https://discord.com/developers/applications",
         "trello" => "https://trello.com/power-ups/admin",
         "asana" => "https://app.asana.com/0/my-apps",
+        "bitbucket" => "https://support.atlassian.com/bitbucket-cloud/docs/use-oauth-on-bitbucket-cloud/",
+        "confluence" => "https://developer.atlassian.com/console/myapps/",
         _ => return None,
     })
 }
@@ -400,25 +402,24 @@ mod tests {
         );
     }
 
-    /// Coming-soon Confluence must not expose a Connect oauth/start path.
-    /// Call `oauth_start_path()` — the static catalog field is None on every row.
     #[test]
-    fn confluence_is_coming_soon_and_must_not_expose_oauth_start() {
-        let c = find_provider("confluence").expect("confluence");
-        assert_eq!(c.availability, IntegrationAvailability::ComingSoon);
-
-        let ws = "11111111-1111-1111-1111-111111111111";
-        assert_eq!(
-            oauth_start_path(ws, "confluence"),
-            None,
-            "coming-soon Confluence must not expose GET …/oauth/start"
-        );
-        assert_eq!(
-            oauth_start_path(ws, "github").as_deref(),
-            Some(
-                "/api/workspaces/11111111-1111-1111-1111-111111111111/integrations/github/oauth/start"
-            ),
-            "available providers still expose oauth/start so this test is not a tautology"
-        );
+    fn confluence_and_bitbucket_are_available_and_expose_oauth_start() {
+        for id in ["confluence", "bitbucket"] {
+            let c = find_provider(id).expect(id);
+            assert_eq!(c.availability, IntegrationAvailability::Available, "{id}");
+            let ws = "11111111-1111-1111-1111-111111111111";
+            assert_eq!(
+                oauth_start_path(ws, id).as_deref(),
+                Some(
+                    format!(
+                        "/api/workspaces/11111111-1111-1111-1111-111111111111/integrations/{id}/oauth/start"
+                    )
+                    .as_str()
+                ),
+                "{id} must expose GET …/oauth/start"
+            );
+        }
+        assert!(oauth_app_create_url("confluence").is_some());
+        assert!(oauth_app_create_url("bitbucket").is_some());
     }
 }

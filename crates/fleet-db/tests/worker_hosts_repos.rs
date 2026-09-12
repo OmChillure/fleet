@@ -3812,6 +3812,12 @@ async fn list_assignable_excludes_sandboxed_isolation() {
     )
     .await
     .expect("mark sandboxed");
+    // Placeholder: sandboxed without a container/VM executor stays unlistable.
+    sqlx::query("UPDATE worker_hosts SET advertised_container = FALSE WHERE id = $1")
+        .bind(sandboxed_host.id)
+        .execute(&pool)
+        .await
+        .expect("clear advertised_container");
 
     let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
         .await
@@ -3820,7 +3826,44 @@ async fn list_assignable_excludes_sandboxed_isolation() {
     assert_eq!(
         ids,
         vec![native_host.id],
-        "sandboxed host is a placeholder and must not be assignable: {ids:?}"
+        "sandboxed host without container capability must not be assignable: {ids:?}"
+    );
+}
+
+/// Sandboxed + advertised container is a real executor and must be assignable.
+#[tokio::test]
+async fn list_assignable_includes_sandboxed_with_container() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (sandboxed_host, sandboxed_token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "sandboxed-live", expires).await;
+    pair_host(&pool, &sandboxed_token, "sandboxed-live").await;
+    worker_hosts::patch_cp_settings(
+        &pool,
+        sandboxed_host.id,
+        &HostCpSettings {
+            isolation: Some("sandboxed".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("mark sandboxed");
+    sqlx::query(
+        "UPDATE worker_hosts SET advertised_container = TRUE, allow_container = TRUE WHERE id = $1",
+    )
+    .bind(sandboxed_host.id)
+    .execute(&pool)
+    .await
+    .expect("advertise container");
+
+    let assignable = worker_hosts::list_assignable(&pool, workspace_id, Duration::seconds(30))
+        .await
+        .expect("list_assignable");
+    let ids = assignable_ids_in_workspace(&assignable, workspace_id);
+    assert!(
+        ids.contains(&sandboxed_host.id),
+        "sandboxed host with container capability must be assignable: {ids:?}"
     );
 }
 
@@ -3849,13 +3892,18 @@ async fn list_assignable_excludes_sandboxed_cluster_host_from_other_workspace() 
     )
     .await
     .expect("mark sandboxed");
+    sqlx::query("UPDATE worker_hosts SET advertised_container = FALSE WHERE id = $1")
+        .bind(host.id)
+        .execute(&pool)
+        .await
+        .expect("clear advertised_container");
 
     let from_b = worker_hosts::list_assignable(&pool, ws_b, Duration::seconds(30))
         .await
         .expect("list_assignable B");
     assert!(
         from_b.iter().all(|h| h.id != host.id),
-        "sandboxed cluster host home={ws_a} must not be assignable in {ws_b}: {:?}",
+        "sandboxed cluster host without container capability home={ws_a} must not be assignable in {ws_b}: {:?}",
         from_b.iter().map(|h| h.id).collect::<Vec<_>>()
     );
 }

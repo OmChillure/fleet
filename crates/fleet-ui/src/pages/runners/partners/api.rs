@@ -1,11 +1,4 @@
-//! Partners disclaimer ack client (fetch / post only).
-//!
-//! B2 (`page.rs`) should call:
-//!   `fetch_disclaimer_ack(workspace_id) -> Result<DisclaimerAck, String>`
-//!   `post_disclaimer_ack(workspace_id) -> Result<DisclaimerAck, String>`
-//!
-//! `accepted` is a recorded timestamp only. It does **not** enable
-//! lending, borrowing, enqueue, or assignable partner runners.
+//! Partners disclaimer + lend/borrow client.
 
 use serde::{Deserialize, Serialize};
 
@@ -94,4 +87,54 @@ pub async fn fetch_disclaimer_ack(workspace_id: &str) -> Result<DisclaimerAck, S
 pub async fn post_disclaimer_ack(workspace_id: &str) -> Result<DisclaimerAck, String> {
     let res = authorized_post_json(&disclaimer_path(workspace_id), &serde_json::json!({})).await?;
     parse_json(res).await
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PartnerOffer {
+    pub id: String,
+    pub host_id: String,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub tier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PartnerOfferList {
+    #[serde(default)]
+    pub offers: Vec<PartnerOffer>,
+    #[serde(default)]
+    pub killed: bool,
+}
+
+pub async fn list_partner_offers(workspace_id: &str) -> Result<PartnerOfferList, String> {
+    let res = authorized_get(&format!(
+        "/api/workspaces/{workspace_id}/runners/partners/offers"
+    ))
+    .await?;
+    parse_json(res).await
+}
+
+pub async fn offer_partner_host(workspace_id: &str, host_id: &str) -> Result<(), String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/runners/partners/offer"),
+        &serde_json::json!({ "host_id": host_id }),
+    )
+    .await?;
+    let _: serde_json::Value = parse_json(res).await?;
+    Ok(())
+}
+
+pub async fn borrow_partner_offer(
+    workspace_id: &str,
+    offer_id: &str,
+    allow_open: bool,
+) -> Result<(), String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/runners/partners/borrow"),
+        &serde_json::json!({ "offer_id": offer_id, "allow_open": allow_open }),
+    )
+    .await?;
+    let _: serde_json::Value = parse_json(res).await?;
+    Ok(())
 }

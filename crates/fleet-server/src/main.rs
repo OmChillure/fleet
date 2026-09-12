@@ -129,6 +129,14 @@ async fn run() -> anyhow::Result<()> {
         e
     })?;
     validate_cookie_policy(&config.auth);
+    fleet_auth::validate_signup_policy(
+        config.auth.signup_token.as_deref(),
+        &[
+            config.integrations.api_public_base.as_str(),
+            config.integrations.ui_public_base.as_str(),
+        ],
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     let oauth_configured: Vec<&str> = [
         ("github", config.integrations.github.is_some()),
@@ -227,6 +235,7 @@ async fn run() -> anyhow::Result<()> {
         grok: config.grok.clone(),
         openai: config.openai.clone(),
         claude: config.claude.clone(),
+        gemini: config.gemini.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 

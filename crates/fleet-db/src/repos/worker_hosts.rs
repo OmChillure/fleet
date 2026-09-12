@@ -23,7 +23,7 @@ pub const MACHINE_TOKEN_PREFIX: &str = "flm_";
 pub const PAIR_TTL: Duration = Duration::hours(1);
 
 pub(crate) const HOST_COLS: &str = r#"
-    id, workspace_id, name, status, enabled, paused, drain, isolation,
+    id, workspace_id, name, status, enabled, paused, drain, isolation, runner_kind,
     allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
     machine_token_hash, advertised_host, advertised_container, platform, hostname,
     last_seen_at, last_error, current_jobs, advertised_max_concurrent,
@@ -85,9 +85,9 @@ pub async fn create_pending(
         INSERT INTO worker_hosts (
             id, workspace_id, name, status,
             allow_host, allow_container, max_concurrent, max_job_timeout_s, labels,
-            created_by, send_policy, run_mode
+            isolation, runner_kind, created_by, send_policy, run_mode
         )
-        VALUES ($1, $2, $3, '{WORKER_HOST_STATUS_PENDING}', $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, '{WORKER_HOST_STATUS_PENDING}', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING {HOST_COLS}
         "#
     );
@@ -97,6 +97,10 @@ pub async fn create_pending(
     } else {
         new.run_mode.clone()
     };
+    let isolation = parse_worker_host_isolation(&new.isolation)
+        .unwrap_or(crate::models::WORKER_HOST_ISOLATION_NATIVE);
+    let runner_kind = crate::models::parse_runner_kind(&new.runner_kind)
+        .unwrap_or(crate::models::RUNNER_KIND_SELF_HOSTED);
     let host = sqlx::query_as::<_, WorkerHost>(&q)
         .bind(new.id)
         .bind(new.workspace_id)
@@ -106,6 +110,8 @@ pub async fn create_pending(
         .bind(new.max_concurrent)
         .bind(new.max_job_timeout_s)
         .bind(&labels)
+        .bind(isolation)
+        .bind(runner_kind)
         .bind(new.created_by)
         .bind(&new.send_policy)
         .bind(&run_mode)
@@ -177,6 +183,21 @@ pub async fn list_for_workspace(pool: &PgPool, workspace_id: Uuid) -> DbResult<V
         .fetch_all(pool)
         .await
         .map_err(map_query_err)
+}
+
+pub async fn patch_cp_settings_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    host_id: Uuid,
+    patch: &HostCpSettings,
+) -> DbResult<WorkerHost> {
+    let current = get(pool, host_id)
+        .await?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))?;
+    if current.workspace_id != workspace_id {
+        return Err(DbError::NotFound("worker host not found".into()));
+    }
+    patch_cp_settings(pool, host_id, patch).await
 }
 
 pub async fn patch_cp_settings(
@@ -894,6 +915,20 @@ pub async fn heartbeat_with_machine(
         .ok_or_else(|| DbError::NotFound("worker host not found".into()))
 }
 
+pub async fn revoke_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> DbResult<WorkerHost> {
+    let current = get(pool, host_id)
+        .await?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))?;
+    if current.workspace_id != workspace_id {
+        return Err(DbError::NotFound("worker host not found".into()));
+    }
+    revoke(pool, host_id).await
+}
+
 pub async fn revoke(pool: &PgPool, host_id: Uuid) -> DbResult<WorkerHost> {
     let mut tx = pool.begin().await.map_err(DbError::from)?;
     let q = format!(
@@ -1112,7 +1147,10 @@ async fn list_assignable_filtered(
           AND NOT paused
           AND NOT drain
           AND (allow_host OR allow_container)
-          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+          AND (
+            isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+            OR (allow_container AND advertised_container)
+          )
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
           AND machine_token_hash IS NOT NULL
           AND last_seen_at IS NOT NULL
@@ -1155,7 +1193,10 @@ pub async fn list_assignable_by_hostnames(
           AND NOT paused
           AND NOT drain
           AND (allow_host OR allow_container)
-          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+          AND (
+            isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+            OR (allow_container AND advertised_container)
+          )
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
           AND machine_token_hash IS NOT NULL
           AND last_seen_at IS NOT NULL
@@ -1202,7 +1243,10 @@ pub async fn list_online_by_hostnames(
           AND NOT paused
           AND NOT drain
           AND (allow_host OR allow_container)
-          AND isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+          AND (
+            isolation <> '{WORKER_HOST_ISOLATION_SANDBOXED}'
+            OR (allow_container AND advertised_container)
+          )
           AND status = '{WORKER_HOST_STATUS_ONLINE}'
           AND machine_token_hash IS NOT NULL
           AND last_seen_at IS NOT NULL
@@ -1481,6 +1525,7 @@ mod effective_max_concurrent_tests {
             paused: false,
             drain: false,
             isolation: "native".into(),
+            runner_kind: crate::models::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: true,
             max_concurrent,
@@ -1587,6 +1632,7 @@ mod holding_new_jobs_tests {
             paused,
             drain,
             isolation: "native".into(),
+            runner_kind: crate::models::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host,
             allow_container,
             max_concurrent: 4,
