@@ -16,7 +16,9 @@ mod tokens;
 pub mod config;
 pub mod state;
 
-pub use config::AuthConfig;
+pub use config::{
+    AuthConfig, public_url_requires_signup_token, validate_signup_policy,
+};
 pub use cookies::validate_cookie_policy;
 pub use error::{AppError, AppResult};
 pub use routes::{require_instance_admin, require_user, router};

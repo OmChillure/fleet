@@ -638,9 +638,75 @@ pub async fn publish_guest_proof(payload: &SpawnPayload, session_dir: &Path) -> 
     Ok(())
 }
 
-/// Fail-closed VM path. Hypervisor on PATH is required; execution is not implemented.
+/// Fail-closed VM path. Hypervisor on PATH is required; never falls back to host.
 pub async fn run_vm(cfg: &LocalConfig, payload: &SpawnPayload, session_dir: &Path) -> Result<()> {
     run_vm_with(cfg, payload, session_dir, hypervisor_on_path()).await
+}
+
+fn vm_kernel_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("FLEET_VM_KERNEL") {
+        let p = std::path::PathBuf::from(p.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    for cand in ["/boot/vmlinuz", "/boot/vmlinuz-linux"] {
+        let p = std::path::Path::new(cand);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+fn vm_rootfs_path() -> Option<std::path::PathBuf> {
+    let raw = std::env::var("FLEET_VM_ROOTFS").ok()?;
+    let p = std::path::PathBuf::from(raw.trim());
+    p.is_file().then_some(p)
+}
+
+fn qemu_bin() -> Option<&'static str> {
+    for b in [
+        "qemu-system-x86_64",
+        "qemu-system-aarch64",
+        "firecracker",
+    ] {
+        if command_exists(b) {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/// QEMU argv for a 9p-mounted session dir. Fail-closed: no host exec.
+pub fn qemu_vm_args(
+    qemu: &str,
+    kernel: &Path,
+    rootfs: &Path,
+    session_dir: &Path,
+    timeout_s: u64,
+) -> Vec<String> {
+    let _ = timeout_s;
+    vec![
+        qemu.into(),
+        "-nographic".into(),
+        "-no-reboot".into(),
+        "-m".into(),
+        "512".into(),
+        "-kernel".into(),
+        kernel.display().to_string(),
+        "-drive".into(),
+        format!("file={},format=raw,if=virtio", rootfs.display()),
+        "-fsdev".into(),
+        format!(
+            "local,id=fsdev0,path={},security_model=mapped",
+            session_dir.display()
+        ),
+        "-device".into(),
+        "virtio-9p-pci,fsdev=fsdev0,mount_tag=work".into(),
+        "-append".into(),
+        "console=ttyS0 root=/dev/vda rw".into(),
+    ]
 }
 
 async fn run_vm_with(
@@ -649,11 +715,42 @@ async fn run_vm_with(
     session_dir: &Path,
     hypervisor: bool,
 ) -> Result<()> {
-    let _ = (cfg, payload, session_dir);
+    let _ = cfg;
     if !hypervisor {
         bail!("vm isolation requires firecracker or qemu on PATH; will not fall back to host");
     }
-    bail!("vm isolation: run_vm is not implemented (fail-closed; will not fall back to host)");
+    let Some(qemu) = qemu_bin() else {
+        bail!("vm isolation requires firecracker or qemu on PATH; will not fall back to host");
+    };
+    let Some(kernel) = vm_kernel_path() else {
+        bail!(
+            "vm isolation requires FLEET_VM_KERNEL (or /boot/vmlinuz); will not fall back to host"
+        );
+    };
+    let Some(rootfs) = vm_rootfs_path() else {
+        bail!("vm isolation requires FLEET_VM_ROOTFS; will not fall back to host");
+    };
+    let args = qemu_vm_args(qemu, &kernel, &rootfs, session_dir, payload.timeout_s);
+    let stdout = std::fs::File::create(session_dir.join("stdout.log"))
+        .with_context(|| format!("stdout.log in {}", session_dir.display()))?;
+    let stderr = std::fs::File::create(session_dir.join("stderr.log"))
+        .with_context(|| format!("stderr.log in {}", session_dir.display()))?;
+    info!(bin = qemu, cwd = %session_dir.display(), "spawn vm worker");
+    let mut cmd = Command::new(qemu);
+    cmd.args(&args[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().with_context(|| format!("exec {qemu}"))?;
+    if let Some(pid) = child.id() {
+        live_children()
+            .insert(payload.session_id, LiveChild::Host { pid })
+            .await;
+    }
+    let result = wait_child(&mut child, payload.timeout_s, qemu).await;
+    live_children().remove(payload.session_id).await;
+    result
 }
 
 async fn wait_child(child: &mut tokio::process::Child, timeout_s: u64, name: &str) -> Result<()> {
@@ -696,6 +793,23 @@ fn tail_stdio(stdout: &[u8], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qemu_vm_args_mount_session_dir_and_never_exec_host_bin() {
+        let args = qemu_vm_args(
+            "qemu-system-x86_64",
+            Path::new("/boot/vmlinuz"),
+            Path::new("/var/lib/fleet/rootfs.img"),
+            Path::new("/tmp/session"),
+            60,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-nographic"));
+        assert!(joined.contains("mount_tag=work"));
+        assert!(joined.contains("/tmp/session"));
+        assert!(!joined.contains("fleet-driver"));
+        assert!(!joined.contains("run_host"));
+    }
 
     #[test]
     fn child_env_defaults_harness_to_mock() {
@@ -1522,8 +1636,10 @@ mod tests {
             .to_string();
         let lower = err.to_ascii_lowercase();
         assert!(
-            err.contains("not implemented") || err.contains("requires firecracker or qemu"),
-            "must fail inside run_vm (PATH or not-implemented), not the allow-gate: {err}"
+            err.contains("FLEET_VM_ROOTFS")
+                || err.contains("FLEET_VM_KERNEL")
+                || err.contains("requires firecracker or qemu"),
+            "must fail inside run_vm (missing hypervisor/kernel/rootfs), not the allow-gate: {err}"
         );
         assert!(!err.contains("not allowed"), "{err}");
         assert!(

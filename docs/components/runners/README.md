@@ -22,11 +22,11 @@ Testing (required three layers + how to run):
 
 | Kind | Who owns the machine | Isolation | Status |
 | --- | --- | --- | --- |
-| Self-hosted native | Customer PC / server / VPS | **Native** (not a sandbox) | **MR 1** — paired `fleet-host` |
-| Self-hosted sandbox | Same machine, k8s/containers on it | Sandboxed | **MR 2** toggle placeholder; executor is not v1 |
-| Public cloud | Customer AWS / GCP / Azure keys | Sandboxed | **MR 3** — placeholder |
-| Fleet Cloud | Our paid pool | Sandboxed | **MR 3** — placeholder |
-| Partners | Other people’s unused capacity | Sandboxed | **MR 3** — placeholder + [design](partners.md) |
+| Self-hosted native | Customer PC / server / VPS | **Native** (not a sandbox) | paired `fleet-host` |
+| Self-hosted sandbox | Same machine, containers/k8s on it | Sandboxed | assignable when the host advertises container |
+| Public cloud | Customer AWS / GCP / Azure keys | Sandboxed | `POST …/runners/cloud/byo` (encrypted creds + pair token) |
+| Fleet Cloud | Our paid pool | Sandboxed | `POST …/runners/cloud/fleet` (pair a Fleet-hosted box) |
+| Partners | Other people’s unused capacity | Sandboxed | offer / borrow / kill-switch; sandbox-only |
 
 Tick assigns to a paired `fleet-host`. The API process is not a runner
 and does not appear on Self-hosted. No host → the task stays ready.
@@ -43,8 +43,9 @@ isolated is the host’s process / container / vm class (workspace
 new jobs” is not isolation.
 
 Sidebar: **Runners** accordion (same rank as Monitoring and Agents).
-Children: **Self-hosted** (live), **Cloud** and **Partners**
-(placeholders). Workspace keeps Integrations + Settings.
+Children: **Self-hosted** (pair + list), **Cloud** (Fleet Cloud attach;
+BYO cards stay labeled), **Partners** (lend / borrow after disclaimer).
+Workspace keeps Integrations + Settings.
 
 ---
 
@@ -67,8 +68,8 @@ job). **Workers** as a nav section collides with the per-job
 | `/{workspace_id}/runners` | Redirect to `/runners/self-hosted` |
 | `/{workspace_id}/runners/self-hosted` | Current Workers UI (pair + list) |
 | `/{workspace_id}/workers` | Redirect to `/runners/self-hosted` |
-| `/{workspace_id}/runners/cloud` | Cloud placeholders |
-| `/{workspace_id}/runners/partners` | Partners + trust copy ([design](partners.md)) |
+| `/{workspace_id}/runners/cloud` | Fleet Cloud attach + BYO cards |
+| `/{workspace_id}/runners/partners` | Disclaimer + lend / borrow ([design](partners.md)) |
 
 ---
 

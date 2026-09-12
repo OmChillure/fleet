@@ -105,6 +105,7 @@ async fn live_state_requiring(need: &[&str]) -> (AppState, Uuid, Uuid) {
         grok: config.grok.clone(),
         openai: config.openai.clone(),
         claude: config.claude.clone(),
+        gemini: config.gemini.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
     (state, ws, user)

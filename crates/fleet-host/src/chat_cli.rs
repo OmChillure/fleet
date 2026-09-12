@@ -47,6 +47,8 @@ pub fn run_chat_turn(payload: &Value) -> Result<Value> {
     let text = match provider.as_str() {
         "grok" | "xai" => run_grok(&prompt, &model, effort.as_deref(), timeout)?,
         "claude" | "anthropic" => run_claude(&prompt, &model, effort.as_deref(), timeout)?,
+        "openai" | "codex" => run_openai(&prompt, &model, timeout)?,
+        "gemini" | "google" => run_gemini(&prompt, &model, timeout)?,
         "ollama" => run_ollama(&prompt, &model, timeout)?,
         other => bail!("provider `{other}` has no official CLI on this runner"),
     };
@@ -128,6 +130,24 @@ fn run_claude(
 ) -> Result<String> {
     let args = claude_argv(model, effort);
     run_timeout("claude", &args, Some(prompt), timeout)
+}
+
+fn run_openai(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
+    let mut args = vec!["exec".into(), "--skip-git-repo-check".into()];
+    if !model.is_empty() {
+        args.push("-m".into());
+        args.push(model.to_string());
+    }
+    run_timeout("codex", &args, Some(prompt), timeout)
+}
+
+fn run_gemini(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
+    let mut args = vec!["-p".into()];
+    if !model.is_empty() {
+        args.push("-m".into());
+        args.push(model.to_string());
+    }
+    run_timeout("gemini", &args, Some(prompt), timeout)
 }
 
 fn run_ollama(prompt: &str, model: &str, timeout: Duration) -> Result<String> {

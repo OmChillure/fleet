@@ -110,6 +110,8 @@ fn test_state(pool: fleet_db::PgPool) -> IntegrationsState {
                 github_app_slug: None,
             }),
             asana: None,
+            bitbucket: None,
+            confluence: None,
         },
     }
 }

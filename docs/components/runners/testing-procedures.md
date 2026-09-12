@@ -45,7 +45,7 @@ plus driver/host. It never talks to a browser. `fleet-runners-view`
 | `fleet-orchestrator` `tests/host_update_tick.rs` | hold ready while updating |
 | `fleet-orchestrator` `tests/plane_runner_tick.rs` | plane off → no local spawn |
 | `sandbox-lab/tests/test_install_worker.py` | script syntax + detect + `FLEET_PAIR_TOKEN` |
-| `fleet-runners-view` `placeholders.rs` | Cloud four cards + Coming soon; partners trust copy; disclaimer default-off; ack ≠ lend/assignable |
+| `fleet-runners-view` `placeholders.rs` | Cloud four cards (BYO Coming soon, Fleet Cloud attach); partners trust copy; disclaimer default-off; ack unlocks lend UI, not assignable |
 
 `fleet-ui` is WASM. Chrome is layer 2. Pure helpers run on the host in
 `fleet-runners-view` (`just test`): `routes.rs` (accordion title + child

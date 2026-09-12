@@ -172,8 +172,18 @@ pauses = ["Runners / Self-hosted", "Workers"]
 
 [[rule]]
 paths = [
+  "crates/fleet-server/src/planner.rs",
+  "crates/fleet-db/src/repos/plan_jobs.rs",
+]
+scenes = ["fleet"]
+pauses = ["Fleet"]
+
+[[rule]]
+paths = [
   "crates/fleet-ui/src/pages/runners/cloud",
   "crates/fleet-server/src/partners.rs",
+  "crates/fleet-server/src/runners.rs",
+  "crates/fleet-db/migrations/036_planner_runners.sql",
 ]
 scenes = ["cloud", "partners"]
 pauses = ["Runners / Cloud", "Runners / Partners"]

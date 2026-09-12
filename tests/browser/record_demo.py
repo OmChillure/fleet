@@ -1382,10 +1382,11 @@ class Demo:
                 "Trust",
                 "Disclaimer",
                 "unused capacity",
-                "Coming soon",
                 "Verified",
                 "verified",
                 "acknowledge",
+                "Ack required",
+                "Live",
             ),
             "Partners",
         )
@@ -1398,12 +1399,13 @@ class Demo:
             self.snap("acknowledged")
         lend = p.get_by_role("button", name=re.compile(r"Lend", re.I))
         buy = p.get_by_role("button", name=re.compile(r"Buy", re.I))
-        for btn, label in ((lend, "Lend"), (buy, "Buy")):
-            if btn.count() == 0:
-                self.bug(f"Partners missing {label} control")
-            elif btn.first.is_enabled():
-                self.bug(f"Partners {label} enabled after acknowledge (must stay disabled)")
-        self.snap("lend-buy-disabled")
+        if lend.count() == 0:
+            self.bug("Partners missing Lend control")
+        if buy.count() == 0:
+            self.bug("Partners missing Buy control")
+        elif buy.first.is_enabled():
+            self.bug("Partners Buy credits must stay disabled")
+        self.snap("lend-ready-buy-disabled")
 
     def scene_sessions(self) -> None:
         base = self.ensure_session()

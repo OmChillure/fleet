@@ -8,7 +8,7 @@ use fleet_integrations::IntegrationsConfig;
 
 use crate::chat::OllamaConfig;
 use crate::grok::GrokConfig;
-use crate::providers::{ClaudeConfig, OpenaiConfig};
+use crate::providers::{ClaudeConfig, GeminiConfig, OpenaiConfig};
 
 /// Full server configuration (bind + CORS + auth + database + integrations + LLM providers).
 #[derive(Clone, Debug)]
@@ -22,6 +22,7 @@ pub struct ServerConfig {
     pub grok: GrokConfig,
     pub openai: OpenaiConfig,
     pub claude: ClaudeConfig,
+    pub gemini: GeminiConfig,
     /// Optional prebuilt `fleet-host` / `fleet-driver` tree.
     /// First lookup for `/install/worker/bin/{platform}/{bin}`. When unset or
     /// the file is missing, the handler tries current_exe siblings and (native
@@ -80,6 +81,7 @@ impl ServerConfig {
         let grok = GrokConfig::from_env();
         let openai = OpenaiConfig::from_env();
         let claude = ClaudeConfig::from_env();
+        let gemini = GeminiConfig::from_env();
         let worker_dist_dir =
             worker_dist_dir_from_raw(env::var("FLEET_WORKER_DIST_DIR").ok().as_deref());
 
@@ -93,6 +95,7 @@ impl ServerConfig {
             grok,
             openai,
             claude,
+            gemini,
             worker_dist_dir,
         })
     }

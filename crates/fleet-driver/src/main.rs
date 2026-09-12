@@ -206,16 +206,16 @@ async fn execute_agent(
         .await
         .map_err(|e| WorkError::Failed(format!("ollama: {e:#}")));
     }
-    if spec.name == "claude" {
+    if spec.name == "claude" || spec.name == "openai" || spec.name == "gemini" {
         let out = fleet_driver::cli_session::run_cli(&spec, &agent_cwd, &prompt, cfg.timeout)
             .await
-            .map_err(|e| WorkError::Failed(format!("claude: {e:#}")))?;
+            .map_err(|e| WorkError::Failed(format!("{}: {e:#}", spec.name)))?;
         if let Err(e) = report::write_artifacts(
             &cfg.work_dir,
             &json!({
                 "worker": "fleet-driver",
                 "ok": out.ok,
-                "harness": "claude",
+                "harness": spec.name,
                 "session_id": cfg.session_id,
             }),
             &out.stdout,
@@ -226,7 +226,8 @@ async fn execute_agent(
             let _ = std::fs::write(cfg.work_dir.join("result.md"), out.stdout.trim());
         }
         return Ok(format!(
-            "claude ok chars={}",
+            "{} ok chars={}",
+            spec.name,
             out.stdout.chars().count()
         ));
     }

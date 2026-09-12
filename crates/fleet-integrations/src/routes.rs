@@ -1135,6 +1135,8 @@ mod oauth_start_unconfigured_tests {
             discord: None,
             trello: None,
             asana: None,
+            bitbucket: None,
+            confluence: None,
         }
     }
 
@@ -1404,6 +1406,8 @@ mod token_paste_tests {
             discord: None,
             trello: None,
             asana: None,
+            bitbucket: None,
+            confluence: None,
         }
     }
 

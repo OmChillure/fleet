@@ -179,7 +179,7 @@ async fn require_member(
     Ok((user, role))
 }
 
-async fn require_owner(
+pub(crate) async fn require_owner(
     state: &AppState,
     jar: &CookieJar,
     workspace_id: Uuid,
@@ -521,14 +521,14 @@ fn effective_json(host: &WorkerHost) -> Value {
     })
 }
 
-fn create_pair_material() -> (String, String, chrono::DateTime<Utc>) {
+pub(crate) fn create_pair_material() -> (String, String, chrono::DateTime<Utc>) {
     let pair_token = host_repo::generate_pair_token();
     let pair_token_hash = host_repo::hash_token(&pair_token);
     let pair_expires_at = Utc::now() + PAIR_TTL;
     (pair_token, pair_token_hash, pair_expires_at)
 }
 
-fn created_payload(
+pub(crate) fn created_payload(
     state: &AppState,
     host: &WorkerHost,
     pair_token: &str,
@@ -1067,12 +1067,11 @@ async fn http_patch(
             None => None,
         },
     };
-    let mut host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
+    let mut host =
+        host_repo::patch_cp_settings_in_workspace(&state.db, workspace_id, host_id, &patch)
+            .await?;
     if let Some(raw) = body.run_mode.as_deref() {
-        let host_now = host_repo::get(&state.db, host_id)
-            .await?
-            .ok_or_else(|| AppError::not_found("worker host not found"))?;
-        if host_now.current_jobs > 0 {
+        if host.current_jobs > 0 {
             return Err(AppError::conflict("run_mode cannot change while jobs are running"));
         }
         let mode = fleet_db::parse_worker_host_run_mode(raw)
@@ -1113,7 +1112,7 @@ async fn http_delete(
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
     let _ = require_mutable_host(&state, workspace_id, host_id).await?;
-    let host = host_repo::revoke(&state.db, host_id).await?;
+    let host = host_repo::revoke_in_workspace(&state.db, workspace_id, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
 
@@ -1667,6 +1666,7 @@ mod plane_bake_tests {
             paused: false,
             drain: false,
             isolation: "native".into(),
+            runner_kind: fleet_db::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: false,
             max_concurrent: 2,

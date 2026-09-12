@@ -16,6 +16,7 @@ use crate::chat_tools::{
 use crate::state::AppState;
 
 const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
+const GEMINI_DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 const ANTHROPIC_DEFAULT_BASE: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -59,6 +60,41 @@ pub struct ClaudeConfig {
     pub enabled: bool,
     pub api_key: Option<String>,
     pub api_base: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GeminiConfig {
+    pub enabled: bool,
+    pub api_key: Option<String>,
+    pub api_base: String,
+}
+
+impl GeminiConfig {
+    pub fn from_env() -> Self {
+        let enabled = env_flag("GEMINI_ENABLED", true);
+        let api_key = env_opt("GEMINI_API_KEY").or_else(|| env_opt("GOOGLE_API_KEY"));
+        let api_base = env::var("GEMINI_API_BASE")
+            .unwrap_or_else(|_| GEMINI_DEFAULT_BASE.into())
+            .trim_end_matches('/')
+            .to_string();
+        Self {
+            enabled,
+            api_key,
+            api_base,
+        }
+    }
+
+    pub fn available(&self) -> bool {
+        self.enabled && self.api_key.as_ref().is_some_and(|k| !k.is_empty())
+    }
+
+    fn as_openai(&self) -> OpenaiConfig {
+        OpenaiConfig {
+            enabled: self.enabled,
+            api_key: self.api_key.clone(),
+            api_base: self.api_base.clone(),
+        }
+    }
 }
 
 impl ClaudeConfig {
@@ -135,11 +171,12 @@ fn split_models(raw: Option<&str>, family: &str) -> Vec<ChatModelInfo> {
 pub fn parse_provider(raw: &str) -> AppResult<String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "openai" => Ok("openai".into()),
+        "gemini" | "google" => Ok("gemini".into()),
         "claude" | "anthropic" => Ok("claude".into()),
         "grok" | "xai" => Ok("grok".into()),
         "ollama" => Ok("ollama".into()),
         other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
         ))),
     }
 }
@@ -150,8 +187,8 @@ pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
             id: "openai".into(),
             name: "OpenAI".into(),
             available: false,
-            coming_soon: true,
-            error: Some("OpenAI is coming soon".into()),
+            coming_soon: false,
+            error: Some("OpenAI is disabled".into()),
             models: vec![],
             default_model: None,
         };
@@ -163,8 +200,10 @@ pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
             id: "openai".into(),
             name: "OpenAI".into(),
             available: false,
-            coming_soon: true,
-            error: Some("OpenAI is coming soon".into()),
+            coming_soon: false,
+            error: Some(
+                "Set OPENAI_API_KEY or pick a runner with Codex / the OpenAI CLI.".into(),
+            ),
             models,
             default_model,
         };
@@ -174,6 +213,54 @@ pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
     ChatProviderInfo {
         id: "openai".into(),
         name: "OpenAI".into(),
+        available: true,
+        coming_soon: false,
+        error: None,
+        models,
+        default_model,
+    }
+}
+
+fn gemini_models() -> Vec<ChatModelInfo> {
+    split_models(env::var("GEMINI_MODELS").ok().as_deref(), "gemini")
+}
+
+fn gemini_default_model(models: &[ChatModelInfo]) -> Option<String> {
+    models.first().map(|m| m.name.clone()).or_else(|| {
+        Some("gemini-2.5-flash".into())
+    })
+}
+
+pub fn gemini_status(cfg: &GeminiConfig) -> ChatProviderInfo {
+    if !cfg.enabled {
+        return ChatProviderInfo {
+            id: "gemini".into(),
+            name: "Gemini".into(),
+            available: false,
+            coming_soon: false,
+            error: Some("Gemini is disabled".into()),
+            models: vec![],
+            default_model: None,
+        };
+    }
+    if !cfg.available() {
+        let models = gemini_models();
+        let default_model = gemini_default_model(&models);
+        return ChatProviderInfo {
+            id: "gemini".into(),
+            name: "Gemini".into(),
+            available: false,
+            coming_soon: false,
+            error: Some("Set GEMINI_API_KEY or pick a runner with the Gemini CLI.".into()),
+            models,
+            default_model,
+        };
+    }
+    let models = gemini_models();
+    let default_model = gemini_default_model(&models);
+    ChatProviderInfo {
+        id: "gemini".into(),
+        name: "Gemini".into(),
         available: true,
         coming_soon: false,
         error: None,
@@ -348,6 +435,40 @@ async fn openai_completions_once(
         }
     }
     Ok(parsed)
+}
+
+pub async fn gemini_chat_with_tools(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    cfg: &GeminiConfig,
+    model: &str,
+    history: &[(String, String)],
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+    runner_id: Option<Uuid>,
+) -> AppResult<(String, String, Vec<ChatAction>)> {
+    if !cfg.available() {
+        return Err(AppError::bad_request(
+            "Gemini is not configured (set GEMINI_API_KEY)".to_string(),
+        ));
+    }
+    let openai = cfg.as_openai();
+    let model = if model.trim().is_empty() {
+        gemini_default_model(&gemini_models()).unwrap_or_else(|| "gemini-2.5-flash".into())
+    } else {
+        model.to_string()
+    };
+    openai_chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        &openai,
+        &model,
+        history,
+        progress,
+        runner_id,
+    )
+    .await
 }
 
 pub async fn openai_chat_with_tools(
@@ -846,12 +967,16 @@ mod tests {
         };
         let p = openai_status(&cfg);
         assert!(!p.available);
-        assert!(p.coming_soon);
-        assert!(p.error.unwrap().to_lowercase().contains("coming soon"));
+        assert!(!p.coming_soon);
+        let err = p.error.unwrap().to_lowercase();
+        assert!(
+            err.contains("openai_api_key") || err.contains("codex") || err.contains("cli"),
+            "{err}"
+        );
     }
 
     #[test]
-    fn openai_status_disabled_is_coming_soon() {
+    fn openai_status_disabled_is_not_coming_soon() {
         let cfg = OpenaiConfig {
             enabled: false,
             api_key: Some("sk-test".into()),
@@ -859,9 +984,28 @@ mod tests {
         };
         let p = openai_status(&cfg);
         assert!(!p.available);
-        assert!(p.coming_soon);
+        assert!(!p.coming_soon);
         assert!(p.models.is_empty());
         assert!(p.default_model.is_none());
+    }
+
+    #[test]
+    fn gemini_status_without_key_is_not_coming_soon() {
+        let cfg = GeminiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: GEMINI_DEFAULT_BASE.into(),
+        };
+        let p = gemini_status(&cfg);
+        assert!(!p.available);
+        assert!(!p.coming_soon);
+        assert_eq!(p.id, "gemini");
+    }
+
+    #[test]
+    fn parse_provider_accepts_gemini() {
+        assert_eq!(parse_provider("gemini").unwrap(), "gemini");
+        assert_eq!(parse_provider("Google").unwrap(), "gemini");
     }
 
     #[test]
@@ -1072,6 +1216,8 @@ mod tests {
                 discord: None,
                 trello: None,
                 asana: None,
+                bitbucket: None,
+                confluence: None,
             },
             orch,
             ollama: crate::chat::OllamaConfig {
@@ -1092,6 +1238,11 @@ mod tests {
                 api_base: "http://127.0.0.1:1".into(),
             },
             claude: ClaudeConfig {
+                enabled: true,
+                api_key: Some("sk-tool-rounds-test".into()),
+                api_base: "http://127.0.0.1:1".into(),
+            },
+            gemini: GeminiConfig {
                 enabled: true,
                 api_key: Some("sk-tool-rounds-test".into()),
                 api_base: "http://127.0.0.1:1".into(),

@@ -13,7 +13,7 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    build_http_app, AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app, AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -70,6 +70,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         discord: None,
         trello: None,
         asana: None,
+        bitbucket: None,
+        confluence: None,
     }
 }
 
@@ -137,6 +139,11 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.anthropic.com".into(),
         },
+        gemini: GeminiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+        },
         worker_dist_dir: None,
     };
 
@@ -166,6 +173,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         grok: config.grok.clone(),
         openai: config.openai.clone(),
         claude: config.claude.clone(),
+        gemini: config.gemini.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
@@ -1818,13 +1826,33 @@ async fn integrations_list_oauth_start_path_available_not_coming_soon() {
     );
     assert_eq!(
         bitbucket["oauth_start_path"],
-        Value::Null,
+        format!("/api/workspaces/{ws}/integrations/bitbucket/oauth/start"),
         "{bitbucket}"
     );
 }
 
 #[tokio::test]
-async fn integrations_coming_soon_oauth_start_is_400() {
+async fn integrations_unknown_oauth_start_is_not_found() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+
+    let start = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/integrations/not-a-provider/oauth/start"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert!(
+        start.status == StatusCode::NOT_FOUND || start.status == StatusCode::BAD_REQUEST,
+        "{}",
+        start.body
+    );
+}
+
+#[tokio::test]
+async fn integrations_bitbucket_oauth_start_is_connect_form() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
@@ -1836,7 +1864,12 @@ async fn integrations_coming_soon_oauth_start_is_400() {
         None,
     )
     .await;
-    assert_eq!(start.status, StatusCode::BAD_REQUEST, "{}", start.body);
+    assert_eq!(start.status, StatusCode::OK, "{}", start.body);
+    assert!(
+        start.raw.to_ascii_lowercase().contains("bitbucket"),
+        "{}",
+        start.raw
+    );
 }
 
 #[tokio::test]
@@ -2083,7 +2116,7 @@ async fn create_chat_conversation(
         .to_string()
 }
 
-/// GET /chat/status with no runner_id is control-plane OpenAI only.
+/// GET /chat/status with no runner_id is control-plane OpenAI + Gemini only.
 #[tokio::test]
 async fn chat_status_without_runner_id_is_openai_only() {
     let app = app().await;
@@ -2099,16 +2132,14 @@ async fn chat_status_without_runner_id_is_openai_only() {
     .await;
     assert_eq!(status.status, StatusCode::OK, "{}", status.body);
     let providers = status.body["providers"].as_array().expect("providers");
+    let ids: Vec<&str> = providers
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
     assert_eq!(
-        providers.len(),
-        1,
-        "without runner_id, inventory is exactly one control-plane OpenAI row: {}",
-        status.body
-    );
-    assert_eq!(
-        providers[0]["id"].as_str(),
-        Some("openai"),
-        "without runner_id, inventory is control-plane OpenAI only (not runner Grok/Claude/Ollama): {}",
+        ids,
+        ["openai", "gemini"],
+        "without runner_id, inventory is plane OpenAI+Gemini (not runner Grok/Claude/Ollama): {}",
         status.body
     );
     let hint = status.body["hint"].as_str().unwrap_or("");
@@ -7199,4 +7230,111 @@ async fn session_live_comes_from_worker_ingest_not_plane_file() {
     let live = detail.body["live"].as_array().cloned().unwrap_or_default();
     assert_eq!(live.len(), 1, "live: {}", detail.body);
     assert_eq!(live[0]["text"], "hello from driver");
+}
+
+#[tokio::test]
+async fn planner_goal_creates_accepted_plan_job() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/plans"),
+        Some(&jar),
+        Some(json!({ "goal": "Ship the weather app", "worker_profile": "coding" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    assert_eq!(created.body["status"], "accepted");
+    assert!(created.body["run_id"].as_str().is_some(), "{}", created.body);
+    let job_id = created.body["id"].as_str().expect("job id");
+    let got = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws}/plans/{job_id}"),
+        Some(&jar),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["status"], "accepted");
+}
+
+#[tokio::test]
+async fn planner_foreign_job_on_own_workspace_is_404() {
+    let (app, _state) = app_with_state().await;
+    let (_a, jar_a, ws_a) = signup_and_login(&app).await;
+    let (_b, jar_b, ws_b) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws_a}/plans"),
+        Some(&jar_a),
+        Some(json!({ "goal": "secret plan" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let job_id = created.body["id"].as_str().expect("job id");
+    let got = call(
+        &app,
+        "GET",
+        &format!("/api/workspaces/{ws_b}/plans/{job_id}"),
+        Some(&jar_b),
+        None,
+    )
+    .await;
+    assert_eq!(got.status, StatusCode::NOT_FOUND, "{}", got.body);
+}
+
+#[tokio::test]
+async fn fleet_cloud_attach_creates_sandboxed_host() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/runners/cloud/fleet"),
+        Some(&jar),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let host = &created.body["host"];
+    assert_eq!(host["isolation"], "sandboxed", "{}", created.body);
+    assert_eq!(host["runner_kind"], "fleet_cloud", "{}", created.body);
+    assert!(created.body["pair_token"].as_str().is_some(), "{}", created.body);
+}
+
+#[tokio::test]
+async fn byo_cloud_requires_credentials_and_stays_sandboxed() {
+    let (app, _state) = app_with_state().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let missing = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/runners/cloud/byo"),
+        Some(&jar),
+        Some(json!({ "provider": "aws" })),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST, "{}", missing.body);
+    let created = call(
+        &app,
+        "POST",
+        &format!("/api/workspaces/{ws}/runners/cloud/byo"),
+        Some(&jar),
+        Some(json!({
+            "provider": "aws",
+            "credentials": { "access_key_id": "AKIAFAKE", "secret": "x" }
+        })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    assert_eq!(created.body["host"]["isolation"], "sandboxed");
+    assert_eq!(created.body["host"]["runner_kind"], "public_cloud");
+    assert!(
+        created.body.to_string().to_ascii_lowercase().contains("akiafake") == false,
+        "credentials must not echo: {}",
+        created.body
+    );
 }

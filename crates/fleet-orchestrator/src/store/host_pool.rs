@@ -15,8 +15,8 @@ use crate::sandbox::{remote, SpawnRequest};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Isolation of a runner. Only Native is assignable.
-/// Copied from `worker_hosts.isolation` (`native` / `sandboxed`).
+/// Isolation of a runner. Copied from `worker_hosts.isolation`.
+/// Sandboxed is assignable only when the host offers container or VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunnerIsolation {
     #[default]
@@ -25,13 +25,16 @@ pub enum RunnerIsolation {
 }
 
 impl RunnerIsolation {
+    /// Native is always a picker candidate. Sandboxed is assigned only via
+    /// `host_reachable_on_plane` when the host offers container/VM.
     pub fn is_assignable(self) -> bool {
         matches!(self, Self::Native)
     }
 }
 
-/// Product execution kind. Only self-hosted native is assignable.
-/// Cloud / Partners / public-cloud stay off the picker (no k8s executor).
+/// Product execution kind. A paired host of any kind is assignable when
+/// it offers an isolation class that meets workspace `min_isolation`.
+/// Cloud / Partners / Fleet Cloud must be sandboxed (never native exec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerKind {
     SelfHostedNative,
@@ -43,7 +46,7 @@ pub enum RunnerKind {
 
 impl RunnerKind {
     pub fn is_assignable(self) -> bool {
-        matches!(self, Self::SelfHostedNative)
+        true
     }
 
     pub fn isolation(self) -> RunnerIsolation {
@@ -87,6 +90,7 @@ pub struct AssignableHost {
 pub enum HostRuntime {
     Host,
     Container,
+    Vm,
 }
 
 impl HostRuntime {
@@ -94,6 +98,7 @@ impl HostRuntime {
         match self {
             Self::Host => "host",
             Self::Container => "container",
+            Self::Vm => "vm",
         }
     }
 }
@@ -240,6 +245,8 @@ pub fn offered_classes(host: &AssignableHost) -> Vec<IsolationClass> {
     }
     if host.allow_container && host.advertised_container {
         offer.push(IsolationClass::Container);
+        // A container-capable sandboxed host can also meet a VM *need* only
+        // when the host later advertises hypervisor. Process-only stays process.
     }
     offer
 }
@@ -248,7 +255,7 @@ pub fn runtime_for_class(class: IsolationClass) -> Option<HostRuntime> {
     match class {
         IsolationClass::Process => Some(HostRuntime::Host),
         IsolationClass::Container => Some(HostRuntime::Container),
-        IsolationClass::Vm => None,
+        IsolationClass::Vm => Some(HostRuntime::Vm),
     }
 }
 
@@ -813,12 +820,17 @@ fn host_advertises_local_addr(host: &AssignableHost) -> bool {
 }
 
 fn host_reachable_on_plane(host: &AssignableHost, need: IsolationClass, loopback: bool) -> bool {
-    if !host.isolation.is_assignable() {
+    if matches!(host.isolation, RunnerIsolation::Sandboxed)
+        && !offered_classes(host)
+            .iter()
+            .any(|c| matches!(c, IsolationClass::Container | IsolationClass::Vm))
+    {
         return false;
     }
     match effective_runtime_for(host, need) {
+        Some(HostRuntime::Host) if matches!(host.isolation, RunnerIsolation::Sandboxed) => false,
         Some(HostRuntime::Host) if loopback => host_is_this_machine(host),
-        Some(HostRuntime::Host) | Some(HostRuntime::Container) => true,
+        Some(HostRuntime::Host) | Some(HostRuntime::Container) | Some(HostRuntime::Vm) => true,
         None => false,
     }
 }
@@ -1284,6 +1296,7 @@ mod tests {
             paused: false,
             drain: false,
             isolation: isolation.into(),
+            runner_kind: fleet_db::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: true,
             max_concurrent: 4,

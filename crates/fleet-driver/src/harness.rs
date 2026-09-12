@@ -105,7 +105,31 @@ pub fn resolve(
             command: "ollama".into(),
             args: Vec::new(),
         }),
-        other => bail!("unknown harness {other:?}; expected mock|grok|claude|ollama"),
+        "openai" | "codex" => {
+            let mut args = vec!["exec".into(), "--skip-git-repo-check".into()];
+            if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+                args.push("-m".into());
+                args.push(m.to_string());
+            }
+            Ok(HarnessSpec {
+                name: "openai".into(),
+                command: "codex".into(),
+                args,
+            })
+        }
+        "gemini" | "google" => {
+            let mut args = vec!["-p".into()];
+            if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+                args.push("-m".into());
+                args.push(m.to_string());
+            }
+            Ok(HarnessSpec {
+                name: "gemini".into(),
+                command: "gemini".into(),
+                args,
+            })
+        }
+        other => bail!("unknown harness {other:?}; expected mock|grok|claude|ollama|openai|gemini"),
     }
 }
 

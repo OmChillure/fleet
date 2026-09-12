@@ -1,14 +1,17 @@
-//! Partners: other people's unused capacity. Placeholder + trust copy only.
+//! Partners: lend a sandboxed host or borrow from the pool after disclaimer ack.
 
 use dioxus::prelude::*;
 use fleet_runners_view::placeholders::{
-    COMING_SOON_BADGE, DISCLAIMER_DEFAULT_ACCEPTED, PARTNERS_TRUST_COPY,
-    disclaimer_ack_enables_lend, disclaimer_ack_makes_assignable,
+    DISCLAIMER_DEFAULT_ACCEPTED, PARTNERS_TRUST_COPY,
 };
 use fleet_runners_view::routes::NAV_LABEL_PARTNERS;
 
-use super::api::{fetch_disclaimer_ack, post_disclaimer_ack};
+use super::api::{
+    borrow_partner_offer, fetch_disclaimer_ack, list_partner_offers, offer_partner_host,
+    post_disclaimer_ack, PartnerOffer,
+};
 use crate::components::toast::show_toast;
+use crate::pages::runners::self_hosted::api::list_workers_page;
 
 fn field_class() -> &'static str {
     "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)] outline-none disabled:cursor-not-allowed disabled:opacity-50"
@@ -18,7 +21,8 @@ fn btn_class() -> &'static str {
     "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-50"
 }
 
-const PARTNERS_SUBTITLE: &str = "Run work on other people's unused capacity. Coming soon.";
+const PARTNERS_SUBTITLE: &str =
+    "Run work on other people's unused capacity. Sandboxed hosts only.";
 const PARTNERS_TRUST_HEADING: &str = "Trust";
 const PARTNERS_DISCLAIMER_HEADING: &str = "Disclaimer";
 const PARTNERS_DISCLAIMER_ACK_LABEL: &str =
@@ -27,7 +31,9 @@ const PARTNERS_PARTNER_HEADING: &str = "Partner";
 const PARTNERS_PARTNER_HINT: &str =
     "Choose a named partner, any verified partner, or any open partner.";
 const PARTNERS_LEND_HEADING: &str = "Lend";
-const PARTNERS_LEND_UNAVAILABLE: &str = "Lending and buying credits are not available yet.";
+const PARTNERS_LEND_UNAVAILABLE: &str =
+    "Acknowledge the disclaimer to lend a sandboxed host or borrow from the pool.";
+const PARTNERS_LEND_READY: &str = "Offer one of this workspace's sandboxed hosts, or borrow an offer.";
 const LEND_CAPACITY_LABEL: &str = "Lend capacity";
 const BUY_CREDITS_LABEL: &str = "Buy credits";
 
@@ -59,11 +65,11 @@ struct PartnersPageModel {
     controls: [PartnersPageControl; 2],
 }
 
-/// Coming soon + trust copy. `acknowledged` records a timestamp only.
+/// Trust copy + disclaimer. Ack unlocks lend / borrow, not credits.
 fn partners_page_model(_workspace_id: &str, acknowledged: bool) -> PartnersPageModel {
     PartnersPageModel {
         heading: NAV_LABEL_PARTNERS,
-        badge: COMING_SOON_BADGE,
+        badge: if acknowledged { "Live" } else { "Ack required" },
         subtitle: PARTNERS_SUBTITLE,
         trust_heading: PARTNERS_TRUST_HEADING,
         trust_copy: PARTNERS_TRUST_COPY,
@@ -71,28 +77,36 @@ fn partners_page_model(_workspace_id: &str, acknowledged: bool) -> PartnersPageM
         disclaimer_ack_label: PARTNERS_DISCLAIMER_ACK_LABEL,
         partner_heading: PARTNERS_PARTNER_HEADING,
         partner_hint: PARTNERS_PARTNER_HINT,
-        partner_select_enabled: disclaimer_ack_makes_assignable(acknowledged),
+        partner_select_enabled: acknowledged,
         lend_heading: PARTNERS_LEND_HEADING,
-        lend_unavailable: PARTNERS_LEND_UNAVAILABLE,
+        lend_unavailable: if acknowledged {
+            PARTNERS_LEND_READY
+        } else {
+            PARTNERS_LEND_UNAVAILABLE
+        },
         balance: None,
         controls: [
             PartnersPageControl {
                 label: LEND_CAPACITY_LABEL,
-                enabled: disclaimer_ack_enables_lend(acknowledged),
+                enabled: acknowledged,
             },
             PartnersPageControl {
                 label: BUY_CREDITS_LABEL,
-                enabled: disclaimer_ack_enables_lend(acknowledged),
+                enabled: false,
             },
         ],
     }
 }
 
-/// Coming-soon Partners surface. Ack is a recorded timestamp only.
+/// Partners lend / borrow after disclaimer ack.
 #[component]
 pub fn PartnersPage(workspace_id: String) -> Element {
     let mut acknowledged = use_signal(|| DISCLAIMER_DEFAULT_ACCEPTED);
     let mut posting = use_signal(|| false);
+    let mut host_id = use_signal(String::new);
+    let mut offer_id = use_signal(String::new);
+    let mut offers = use_signal(Vec::<PartnerOffer>::new);
+    let mut hosts = use_signal(Vec::<String>::new);
 
     let ws_load = workspace_id.clone();
     use_effect(move || {
@@ -111,6 +125,17 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                         acknowledged.set(false);
                     }
                 }
+            }
+            if let Ok(list) = list_partner_offers(&ws).await {
+                offers.set(list.offers);
+            }
+            if let Ok((rows, _)) = list_workers_page(&ws).await {
+                hosts.set(
+                    rows.into_iter()
+                        .filter(|h| h.isolation.as_deref() == Some("sandboxed"))
+                        .map(|h| h.id)
+                        .collect(),
+                );
             }
         });
     });
@@ -205,9 +230,32 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                     class: field_class(),
                     disabled: !model.partner_select_enabled,
                     "aria-disabled": if model.partner_select_enabled { "false" } else { "true" },
-                    option { value: "", selected: true, "Pick a partner" }
-                    option { value: "verified", "Any verified partner" }
-                    option { value: "any", "Any partner" }
+                    onchange: move |e| offer_id.set(e.value()),
+                    option { value: "", selected: true, "Pick an offer" }
+                    for off in offers() {
+                        option { value: "{off.id}",
+                            "{off.host_id}"
+                        }
+                    }
+                }
+                button {
+                    class: "{btn_class()} mt-3",
+                    r#type: "button",
+                    disabled: !model.partner_select_enabled || offer_id().is_empty(),
+                    onclick: {
+                        let ws = workspace_id.clone();
+                        move |_| {
+                            let ws = ws.clone();
+                            let id = offer_id();
+                            spawn(async move {
+                                match borrow_partner_offer(&ws, &id, true).await {
+                                    Ok(()) => show_toast().success("Borrowed partner runner."),
+                                    Err(e) => show_toast().error(e),
+                                }
+                            });
+                        }
+                    },
+                    "Borrow"
                 }
             }
 
@@ -223,15 +271,41 @@ pub fn PartnersPage(workspace_id: String) -> Element {
                         "Balance: {amount}"
                     }
                 }
+                select {
+                    class: field_class(),
+                    disabled: !model.controls[0].enabled,
+                    onchange: move |e| host_id.set(e.value()),
+                    option { value: "", selected: true, "Sandboxed host to lend" }
+                    for id in hosts() {
+                        option { value: "{id}", "{id}" }
+                    }
+                }
                 div { class: "mt-3 flex flex-wrap items-center gap-2",
-                    for control in model.controls {
-                        button {
-                            class: btn_class(),
-                            r#type: "button",
-                            disabled: !control.enabled,
-                            "aria-disabled": if control.enabled { "false" } else { "true" },
-                            "{control.label}"
-                        }
+                    button {
+                        class: btn_class(),
+                        r#type: "button",
+                        disabled: !model.controls[0].enabled || host_id().is_empty(),
+                        onclick: {
+                            let ws = workspace_id.clone();
+                            move |_| {
+                                let ws = ws.clone();
+                                let id = host_id();
+                                spawn(async move {
+                                    match offer_partner_host(&ws, &id).await {
+                                        Ok(()) => show_toast().success("Host offered to the pool."),
+                                        Err(e) => show_toast().error(e),
+                                    }
+                                });
+                            }
+                        },
+                        "{LEND_CAPACITY_LABEL}"
+                    }
+                    button {
+                        class: btn_class(),
+                        r#type: "button",
+                        disabled: true,
+                        "aria-disabled": "true",
+                        "{BUY_CREDITS_LABEL}"
                     }
                 }
             }
@@ -243,19 +317,15 @@ pub fn PartnersPage(workspace_id: String) -> Element {
 mod tests {
     use super::*;
 
-    // catalog:unit-partners-page — Coming soon + trust copy; ack is a
-    // timestamp only and must not enable lend, assignable, or a balance.
+    // catalog:unit-partners-page — ack unlocks lend, not buy / balance.
 
     #[test]
-    fn partners_page_lend_and_buy_exist_but_stay_disabled() {
-        for acknowledged in [false, true] {
-            let model = partners_page_model("7f3a1c2e-9b04-4d55-8e11-0a6b2c4d8e90", acknowledged);
-            assert_eq!(
-                model.controls.map(|c| c.enabled),
-                [false, false],
-                "ack={acknowledged} must keep both factory lend/buy controls disabled: {:?}",
-                model.controls
-            );
-        }
+    fn partners_page_ack_enables_lend_not_buy() {
+        let before = partners_page_model("7f3a1c2e-9b04-4d55-8e11-0a6b2c4d8e90", false);
+        assert_eq!(before.controls.map(|c| c.enabled), [false, false]);
+        let after = partners_page_model("7f3a1c2e-9b04-4d55-8e11-0a6b2c4d8e90", true);
+        assert!(after.controls[0].enabled, "lend after ack");
+        assert!(!after.controls[1].enabled, "buy credits stays off");
+        assert_eq!(after.badge, "Live");
     }
 }

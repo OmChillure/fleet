@@ -61,6 +61,7 @@ pub fn catalog_provider_display_name(id: &str) -> &str {
         "grok" => "Grok",
         "claude" => "Claude",
         "openai" => "OpenAI",
+        "gemini" => "Gemini",
         "ollama" => "Private (Ollama)",
         other => other,
     }
@@ -669,6 +670,8 @@ pub fn provider_install_command(provider: &str, platform: Option<&str>) -> Strin
         ("ollama", true) => "winget install Ollama.Ollama".into(),
         ("openai", false) => "npm install -g @openai/codex".into(),
         ("openai", true) => "npm install -g @openai/codex".into(),
+        ("gemini", false) => "npm install -g @google/gemini-cli".into(),
+        ("gemini", true) => "npm install -g @google/gemini-cli".into(),
         (other, _) => format!("Install {other} with the official CLI for this OS"),
     }
 }
@@ -2318,10 +2321,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_install_command_unknown_provider_fallback() {
+    fn provider_install_command_gemini_is_official_npm() {
         assert_eq!(
             provider_install_command("gemini", Some("linux-x86_64")),
-            "Install gemini with the official CLI for this OS"
+            "npm install -g @google/gemini-cli"
         );
     }
 

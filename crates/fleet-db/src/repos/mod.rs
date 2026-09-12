@@ -7,6 +7,7 @@ pub mod control_plane_events;
 pub mod integrations;
 pub mod llm_keys;
 pub mod personas;
+pub mod plan_jobs;
 pub mod sessions;
 pub mod tickets;
 pub mod users;

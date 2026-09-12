@@ -807,7 +807,7 @@ pub fn require_runner_worker_llm(llm: &ChatLlmContext) -> AppResult<()> {
         return Ok(());
     }
     Err(AppError::bad_request(
-        "fleet workers run Grok, Claude, or Ollama on a paired runner — OpenAI is chat-only on the control plane"
+        "fleet workers run Grok, Claude, Gemini, OpenAI, or Ollama on a paired runner"
             .to_string(),
     ))
 }
@@ -817,7 +817,7 @@ pub fn require_taking_runner(llm: &ChatLlmContext) -> AppResult<()> {
     let p = llm.provider.trim().to_ascii_lowercase();
     if crate::runner_chat::runner_cli_provider(&p) && llm.runner_id.is_none() {
         return Err(AppError::bad_request(
-            "no paired runner taking jobs — pair a fleet-host for Grok / Claude / Ollama workers"
+            "no paired runner taking jobs — pair a fleet-host for Grok / Claude / Gemini / OpenAI / Ollama workers"
                 .to_string(),
         ));
     }
@@ -1834,7 +1834,15 @@ async fn resolve_chat_run(
 ) -> AppResult<Uuid> {
     ensure_project(state, workspace_id).await?;
     if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
-        return Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"));
+        let id = Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
+        return state
+            .orch
+            .store
+            .get_run(workspace_id, id)
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?
+            .map(|r| r.id)
+            .ok_or_else(|| AppError::not_found("run"));
     }
     let runs = state
         .orch
@@ -2976,6 +2984,25 @@ mod tests {
         assert!(
             require_runner_worker_llm(&ChatLlmContext {
                 provider: "openai".into(),
+                model: "any".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_ok(),
+            "OpenAI is a runner CLI; missing runner is require_taking_runner"
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "openai".into(),
+                model: "any".into(),
+                runner_id: None,
+                effort: None,
+            })
+            .is_err()
+        );
+        assert!(
+            require_taking_runner(&ChatLlmContext {
+                provider: "gemini".into(),
                 model: "any".into(),
                 runner_id: None,
                 effort: None,

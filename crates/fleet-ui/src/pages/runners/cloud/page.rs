@@ -1,8 +1,10 @@
-//! Cloud page: AWS, GCP, Azure, and Fleet Cloud coming-soon cards.
+//! Cloud page: attach Fleet Cloud or BYO AWS/GCP/Azure (sandboxed pair).
 
 use dioxus::prelude::*;
 use fleet_runners_view::placeholders::{CLOUD_CARDS, COMING_SOON_BADGE, CloudCardCopy};
 use fleet_runners_view::routes::NAV_LABEL_CLOUD;
+use crate::components::toast::show_toast;
+use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 /// One Cloud card as this page renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +15,7 @@ struct CloudPageCard {
 }
 
 /// Interactive control the Cloud page might expose (spawn / lend / pair).
-/// The live page must keep this list empty.
+/// Attach is allowed; enqueue/lend is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CloudPageControl {
     label: &'static str,
@@ -21,7 +23,7 @@ struct CloudPageControl {
 }
 
 /// Render model for `/{workspace_id}/runners/cloud`.
-/// Workspace id does not change the surface: placeholders only.
+/// Workspace id does not change the surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CloudPageModel {
     heading: &'static str,
@@ -29,7 +31,10 @@ struct CloudPageModel {
     controls: &'static [CloudPageControl],
 }
 
-const CLOUD_PAGE_CONTROLS: &[CloudPageControl] = &[];
+const CLOUD_PAGE_CONTROLS: &[CloudPageControl] = &[CloudPageControl {
+    label: "Attach",
+    enabled: true,
+}];
 
 const CLOUD_PLACEHOLDER_NAMES: [&str; 4] = ["AWS", "GCP", "Azure", "Fleet Cloud"];
 
@@ -41,7 +46,7 @@ fn cloud_page_card(copy: CloudCardCopy) -> CloudPageCard {
     }
 }
 
-/// Page surface is independent of workspace: four Coming soon cards, no actions.
+/// Four named cards. Fleet Cloud attach is live; BYO cards stay labeled.
 fn cloud_page_model(_workspace_id: &str) -> CloudPageModel {
     CloudPageModel {
         heading: NAV_LABEL_CLOUD,
@@ -49,7 +54,11 @@ fn cloud_page_model(_workspace_id: &str) -> CloudPageModel {
             cloud_page_card(CLOUD_CARDS[0]),
             cloud_page_card(CLOUD_CARDS[1]),
             cloud_page_card(CLOUD_CARDS[2]),
-            cloud_page_card(CLOUD_CARDS[3]),
+            CloudPageCard {
+                name: CLOUD_CARDS[3].name,
+                body: CLOUD_CARDS[3].body,
+                badge: "Attach",
+            },
         ],
         controls: CLOUD_PAGE_CONTROLS,
     }
@@ -111,10 +120,11 @@ impl CloudPageModel {
     }
 }
 
-/// Workspace-scoped Cloud runners placeholder (`/{workspace_id}/runners/cloud`).
+/// Workspace-scoped Cloud runners (`/{workspace_id}/runners/cloud`).
 #[component]
 pub fn CloudPage(workspace_id: String) -> Element {
     let model = cloud_page_model(&workspace_id);
+    let ws = workspace_id.clone();
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-3xl flex-col overflow-auto px-4 py-6 md:px-6",
@@ -130,6 +140,7 @@ pub fn CloudPage(workspace_id: String) -> Element {
                         name: card.name,
                         body: card.body,
                         badge: card.badge,
+                        workspace_id: ws.clone(),
                     }
                 }
             }
@@ -138,7 +149,14 @@ pub fn CloudPage(workspace_id: String) -> Element {
 }
 
 #[component]
-fn CloudCard(name: &'static str, body: &'static str, badge: &'static str) -> Element {
+fn CloudCard(
+    name: &'static str,
+    body: &'static str,
+    badge: &'static str,
+    workspace_id: String,
+) -> Element {
+    let ws = workspace_id.clone();
+    let attach_fleet = name == "Fleet Cloud";
     rsx! {
         article { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
             div { class: "flex flex-wrap items-center gap-2",
@@ -152,6 +170,36 @@ fn CloudCard(name: &'static str, body: &'static str, badge: &'static str) -> Ele
             p { class: "mt-2 text-sm text-[var(--app-muted)]",
                 "{body}"
             }
+            if attach_fleet {
+                button {
+                    class: "mt-3 rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium",
+                    onclick: move |_| {
+                        let ws = ws.clone();
+                        spawn(async move {
+                            match attach_fleet_cloud(&ws).await {
+                                Ok(()) => show_toast().success("Fleet Cloud runner created. Pair the host."),
+                                Err(e) => show_toast().error(e),
+                            }
+                        });
+                    },
+                    "Attach Fleet Cloud"
+                }
+            }
         }
     }
+}
+
+async fn attach_fleet_cloud(workspace_id: &str) -> Result<(), String> {
+    let url = format!(
+        "{}/api/workspaces/{workspace_id}/runners/cloud/fleet",
+        auth_base_url().trim_end_matches('/')
+    );
+    let res = with_credentials(reqwest::Client::new().post(url))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("attach failed: {}", res.status()));
+    }
+    Ok(())
 }

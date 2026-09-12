@@ -254,6 +254,8 @@ mod tests {
             discord: None,
             trello: None,
             asana: None,
+            bitbucket: None,
+            confluence: None,
         }
     }
 

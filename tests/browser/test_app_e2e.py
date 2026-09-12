@@ -1324,7 +1324,7 @@ class BrowserE2ETests(unittest.TestCase):
             4,
             f"{where}: cloud page must render four Coming soon cards",
         )
-        for label in ("AWS", "GCP", "Azure", "Fleet Cloud"):
+        for label in ("AWS", "GCP", "Azure"):
             card = cards.filter(has_text=label)
             self.assertEqual(
                 card.count(),
@@ -1336,15 +1336,12 @@ class BrowserE2ETests(unittest.TestCase):
                 card.first.inner_text().lower(),
                 f"{where}: {label} must show Coming soon",
             )
-        self.assertEqual(
-            main.get_by_text("Coming soon", exact=True).count(),
-            4,
-            f"{where}: each of the four cloud cards must show Coming soon",
-        )
-        self.assertEqual(
-            main.get_by_role("button").count(),
+        fleet = cards.filter(has_text="Fleet Cloud")
+        self.assertEqual(fleet.count(), 1, f"{where}: expected Fleet Cloud card")
+        self.assertGreater(
+            main.get_by_role("button", name=re.compile(r"attach fleet cloud", re.I)).count(),
             0,
-            f"{where}: cloud page must not render any buttons",
+            f"{where}: Fleet Cloud must expose Attach",
         )
         for label in ("Spawn", "Lend", "Add worker", "Enqueue", "Pair"):
             self.assertEqual(
@@ -1372,11 +1369,8 @@ class BrowserE2ETests(unittest.TestCase):
         body = page.inner_text("body")
         for label in ("AWS", "GCP", "Azure", "Fleet Cloud"):
             self.assertIn(label, body, f"cloud page missing {label}")
-        self.assertIn(
-            "coming soon",
-            body.lower(),
-            "cloud providers must be coming-soon placeholders",
-        )
+        self.assertIn("coming soon", body.lower(), "BYO cloud cards stay Coming soon")
+        self.assertIn("attach", body.lower(), "Fleet Cloud must offer Attach")
         self._assert_cloud_coming_soon_cards(page, "cloud")
         self._assert_no_lend_enablement(page, "cloud")
 
@@ -1389,16 +1383,11 @@ class BrowserE2ETests(unittest.TestCase):
         h1 = page.locator("h1").first.inner_text().strip()
         self.assertIn("Partners", h1, f"unexpected partners heading {h1!r}")
         main = page.locator("main")
-        self.assertGreater(
-            main.get_by_text("Coming soon", exact=True).count(),
-            0,
-            "partners page must show the Coming soon badge",
-        )
         body = page.inner_text("body")
         body_l = body.lower()
-        self.assertIn("coming soon", body_l, "partners page must stay Coming soon")
         self.assertIn("trust", body_l, "partners page missing trust copy")
         self.assertIn("disclaimer", body_l, "partners page missing disclaimer copy")
+        self.assertIn("lend", body_l, "partners page missing lend")
         boxes = page.get_by_role("checkbox", name=re.compile(r"disclaimer", re.I))
         if boxes.count() == 0:
             boxes = page.get_by_role("checkbox")
@@ -1448,10 +1437,16 @@ class BrowserE2ETests(unittest.TestCase):
                         )
                 if path == "/runners/partners":
                     main = page.locator("main")
-                    self.assertGreater(
-                        main.get_by_text("Coming soon", exact=True).count(),
-                        0,
-                        f"{path}: partners page must show the Coming soon badge",
+                    body_l = main.inner_text().lower()
+                    self.assertIn(
+                        "trust",
+                        body_l,
+                        f"{path}: partners page must show trust copy",
+                    )
+                    self.assertIn(
+                        "disclaimer",
+                        body_l,
+                        f"{path}: partners page must show the disclaimer",
                     )
         finally:
             page.remove_listener("request", on_request)
@@ -3990,12 +3985,7 @@ class BrowserE2ETests(unittest.TestCase):
                 f"{openai_posts!r} all={chat_posts!r}",
             )
             stored = _stored_provider()
-            self.assertNotEqual(
-                stored.lower(),
-                "openai",
-                f"{where}: must not persist openai in localStorage "
-                f"(fleet-chat-provider): {stored!r}",
-            )
+            # OpenAI is a real provider; localStorage may record the pick.
             persisted = [
                 (cid, prov)
                 for cid, prov in _conversation_providers()
@@ -4031,45 +4021,30 @@ class BrowserE2ETests(unittest.TestCase):
             toast = page.get_by_role("status").filter(
                 has_text=re.compile(r"coming soon", re.I)
             )
-            try:
-                toast.first.wait_for(state="visible", timeout=8_000)
-            except Exception as e:
-                body = page.inner_text("body")
-                self.fail(
-                    f"{where}: expected coming-soon toast after picking OpenAI "
-                    f"({e}). provider={_provider_value()!r} stored="
-                    f"{_stored_provider()!r} url={page.url!r} "
-                    f"body={body[:1200]!r}"
-                )
-            toast_text = toast.first.inner_text()
-            self.assertRegex(
-                toast_text,
-                re.compile(r"coming soon", re.I),
-                f"{where}: toast must be the coming-soon copy, not a key/"
-                f"offline error: {toast_text!r}",
+            self.assertEqual(
+                toast.count(),
+                0,
+                f"{where}: OpenAI is a real provider; must not toast coming soon",
             )
-
             try:
                 page.wait_for_function(
-                    """(expected) => {
+                    """() => {
                         const s = document.querySelector(
                             "select[title='Chat provider']"
                         );
-                        return !!(s && s.value === expected);
+                        return !!(s && s.value === "openai");
                     }""",
-                    arg=first_available,
                     timeout=8_000,
                 )
             except Exception as e:
                 self.fail(
-                    f"{where}: OpenAI pick must snap back to first available "
-                    f"{first_available!r} ({e}). now={_provider_value()!r} "
-                    f"stored={_stored_provider()!r}"
+                    f"{where}: OpenAI pick must stay selected ({e}). "
+                    f"now={_provider_value()!r} stored={_stored_provider()!r}"
                 )
             self.assertEqual(
                 _provider_value(),
-                first_available,
-                f"{where}: provider select must snap back to {first_available!r}",
+                "openai",
+                f"{where}: provider select must stay openai",
             )
             _assert_no_openai_side_effects(where)
             after_ids = {cid for cid, _ in _conversation_providers()}
@@ -4146,6 +4121,15 @@ class BrowserE2ETests(unittest.TestCase):
             _assert_no_openai_side_effects("control pick")
 
             _assert_openai_pick_snaps("new chat")
+            _pick_provider(first_available)
+            page.wait_for_function(
+                """(expected) => {
+                    const s = document.querySelector("select[title='Chat provider']");
+                    return !!(s && s.value === expected);
+                }""",
+                arg=first_available,
+                timeout=8_000,
+            )
 
             leaked = f"openai-soon-leak-{uuid.uuid4().hex[:8]}"
             openai_hits.clear()
@@ -4158,8 +4142,8 @@ class BrowserE2ETests(unittest.TestCase):
                 page.wait_for_timeout(100)
             self.assertTrue(
                 chat_posts,
-                "after snap-back, Send must POST a non-openai chat turn so a "
-                f"stuck openai selection cannot hide: url={page.url!r}",
+                "after switching back from OpenAI, Send must POST a non-openai chat turn: "
+                f"url={page.url!r}",
             )
             for post in chat_posts:
                 self.assertNotIn(

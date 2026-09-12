@@ -15,7 +15,7 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    AppState, ClaudeConfig, GrokConfig, OllamaConfig, GeminiConfig, OpenaiConfig, ServerConfig, build_http_app,
     build_router,
 };
 use http_body_util::BodyExt;
@@ -76,6 +76,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         discord: None,
         trello: None,
         asana: None,
+        bitbucket: None,
+        confluence: None,
     }
 }
 
@@ -144,6 +146,11 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.anthropic.com".into(),
         },
+        gemini: GeminiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+        },
         worker_dist_dir: None,
     };
 
@@ -173,6 +180,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         grok: config.grok.clone(),
         openai: config.openai.clone(),
         claude: config.claude.clone(),
+        gemini: config.gemini.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 

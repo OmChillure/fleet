@@ -1069,6 +1069,7 @@ const STATUS_CATALOG: &[(&str, &str)] = &[
     ("grok", "Grok"),
     ("claude", "Claude"),
     ("openai", "OpenAI"),
+    ("gemini", "Gemini"),
     ("ollama", "Private (Ollama)"),
 ];
 
@@ -1109,8 +1110,8 @@ fn providers_from_runner_agents(
                 })
                 .unwrap_or_default();
             let phrase = agent_status_phrase(id, installed, logged_in);
-            let available = if *id == "openai" {
-                openai_ready
+            let available = if *id == "openai" || *id == "gemini" {
+                openai_ready || (installed && logged_in)
             } else if *id == "ollama" {
                 installed && !models.is_empty()
             } else {
@@ -1368,15 +1369,18 @@ async fn chat_status(
 
     let Some(runner_id) = q.runner_id else {
         let openai = crate::providers::openai_status(&state.openai);
+        let gemini = crate::providers::gemini_status(&state.gemini);
+        let providers = vec![openai.clone(), gemini];
+        let any = providers.iter().any(|p| p.available);
         return Ok(Json(ChatStatusResponse {
-            available: openai.available,
+            available: any,
             enabled: true,
             base_url: state.ollama.public_base_url(),
             default_model: openai.default_model.clone(),
             models: openai.models.clone(),
-            providers: vec![openai],
+            providers,
             error: None,
-            hint: "Select a runner for Grok / Claude / Private (Ollama). OpenAI uses the control-plane API key.".into(),
+            hint: "Select a runner for Grok / Claude / Gemini / Private (Ollama). OpenAI and Gemini can also use a control-plane API key.".into(),
         }));
     };
 
@@ -1399,9 +1403,19 @@ async fn chat_status(
         }));
     }
     let public = host.as_public(Utc::now());
-    let mut providers = providers_from_runner_agents(&public.agents, state.openai.available());
+    let mut providers = providers_from_runner_agents(
+        &public.agents,
+        state.openai.available() || state.gemini.available(),
+    );
     if let Some(p) = providers.iter_mut().find(|p| p.id == "openai") {
-        *p = crate::providers::openai_status(&state.openai);
+        if state.openai.available() {
+            *p = crate::providers::openai_status(&state.openai);
+        }
+    }
+    if let Some(p) = providers.iter_mut().find(|p| p.id == "gemini") {
+        if state.gemini.available() {
+            *p = crate::providers::gemini_status(&state.gemini);
+        }
     }
     let any_available = providers.iter().any(|p| p.available);
     let ollama_models = providers
@@ -1515,7 +1529,7 @@ async fn chat_complete(
     }
 
     require_plane_chat_enabled(&state, &provider)?;
-    require_openai_configured(&state, &provider)?;
+    require_openai_configured(&state, &provider, body.runner_id)?;
 
     if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
@@ -1622,6 +1636,18 @@ async fn chat_complete(
             )
             .await
         }
+        "gemini" => {
+            chat_complete_gemini(
+                &state,
+                workspace_id,
+                user.id,
+                &body,
+                pairs_for_llm,
+                &last_user,
+                None,
+            )
+            .await
+        }
         "claude" => {
             chat_complete_claude(
                 &state,
@@ -1635,7 +1661,7 @@ async fn chat_complete(
             .await
         }
         other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
         ))),
     }
 }
@@ -1655,7 +1681,7 @@ async fn chat_stream(
     // New thread: plane flags / missing OPENAI_API_KEY 400 before NDJSON / INSERT.
     require_conversation_if_resuming(&state, workspace_id, user.id, body.conversation_id).await?;
     require_plane_chat_enabled(&state, &provider)?;
-    require_openai_configured(&state, &provider)?;
+    require_openai_configured(&state, &provider, body.runner_id)?;
     let prepared = prepare_chat_pairs(&body)?;
     // Gate before NDJSON so a revoked leftover runner_id is HTTP 400, not
     // 200 + type=error after enqueue / the 240s wait starts.
@@ -1732,16 +1758,34 @@ fn require_plane_chat_enabled(state: &AppState, provider: &str) -> AppResult<()>
         "ollama" if !state.ollama.enabled => Err(AppError::bad_request(
             "Ollama chat is disabled (OLLAMA_ENABLED=false)",
         )),
+        "openai" if !state.openai.enabled => Err(AppError::bad_request(
+            "OpenAI chat is disabled (OPENAI_ENABLED=false)",
+        )),
+        "gemini" if !state.gemini.enabled => Err(AppError::bad_request(
+            "Gemini chat is disabled (GEMINI_ENABLED=false)",
+        )),
         _ => Ok(()),
     }
 }
 
 /// Missing OPENAI_API_KEY must 400 before runner_id / ensure_conversation.
 /// Claude is runner CLI — do not require a plane ANTHROPIC_API_KEY here.
-fn require_openai_configured(state: &AppState, provider: &str) -> AppResult<()> {
+fn require_openai_configured(
+    state: &AppState,
+    provider: &str,
+    runner_id: Option<Uuid>,
+) -> AppResult<()> {
+    if runner_id.is_some() && crate::runner_chat::runner_cli_provider(provider) {
+        return Ok(());
+    }
     if provider == "openai" && !state.openai.available() {
         return Err(AppError::bad_request(
-            "OpenAI is not configured (set OPENAI_API_KEY)",
+            "OpenAI is not configured (set OPENAI_API_KEY or pick a runner with Codex)",
+        ));
+    }
+    if provider == "gemini" && !state.gemini.available() {
+        return Err(AppError::bad_request(
+            "Gemini is not configured (set GEMINI_API_KEY or pick a runner with the Gemini CLI)",
         ));
     }
     Ok(())
@@ -1861,7 +1905,7 @@ async fn run_chat_turn(
     }
 
     require_plane_chat_enabled(state, &provider)?;
-    require_openai_configured(state, &provider)?;
+    require_openai_configured(state, &provider, body.runner_id)?;
 
     if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
@@ -1986,6 +2030,25 @@ async fn run_chat_turn(
                 actions: res.actions,
             });
         }
+        "gemini" => {
+            let Json(res) = chat_complete_gemini(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
         "claude" => {
             let Json(res) = chat_complete_claude(
                 state,
@@ -2006,7 +2069,7 @@ async fn run_chat_turn(
             });
         }
         other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
         ))),
     }
 }
@@ -2183,7 +2246,7 @@ async fn chat_complete_openai(
     last_user: &str,
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
-    require_openai_configured(state, "openai")?;
+    require_openai_configured(state, "openai", body.runner_id)?;
     let model = body
         .model
         .as_ref()
@@ -2228,6 +2291,65 @@ async fn chat_complete_openai(
         },
         model: used_model,
         provider: "openai".into(),
+        actions,
+        conversation_id,
+    }))
+}
+
+async fn chat_complete_gemini(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    body: &ChatRequest,
+    pairs: Vec<(String, String)>,
+    last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<Json<ChatResponse>> {
+    require_openai_configured(state, "gemini", body.runner_id)?;
+    let model = body
+        .model
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let conversation_id = ensure_conversation(
+        state,
+        workspace_id,
+        user_id,
+        body.conversation_id,
+        "gemini",
+        &model,
+        last_user,
+    )
+    .await?;
+    let (used_model, content, actions) = crate::providers::gemini_chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        &state.gemini,
+        &model,
+        &pairs,
+        progress,
+        body.runner_id,
+    )
+    .await?;
+    persist_user_and_assistant(
+        state,
+        conversation_id,
+        last_user,
+        &content,
+        "gemini",
+        &used_model,
+        &actions,
+    )
+    .await?;
+    Ok(Json(ChatResponse {
+        message: ChatMessageOut {
+            role: "assistant".into(),
+            content,
+        },
+        model: used_model,
+        provider: "gemini".into(),
         actions,
         conversation_id,
     }))

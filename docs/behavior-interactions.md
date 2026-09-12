@@ -500,8 +500,8 @@ Custom personas: same fields. `is_default` is stored; spawn does not read it yet
 | notion | Available | yes | yes |
 | google_drive | Available | yes | yes (readonly) |
 | gitlab | Available | yes | yes (read+write) |
-| bitbucket | Coming soon (OAuth) | no | **yes** (`integration_query` — `not_connected` until OAuth) |
-| confluence | Coming soon (OAuth) | no | **yes** (`integration_query` — `not_connected` until OAuth) |
+| bitbucket | Available | yes | yes |
+| confluence | Available | yes | yes |
 | asana | Available | yes | yes |
 | trello | Available | yes | yes |
 

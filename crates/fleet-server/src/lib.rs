@@ -18,7 +18,9 @@ pub mod llm_keys;
 pub mod local_models;
 pub mod package_versions;
 pub mod partners;
+pub mod planner;
 pub mod providers;
+pub mod runners;
 pub mod retry;
 pub mod runner_chat;
 pub mod state;
@@ -33,7 +35,7 @@ mod merge_gate;
 pub use chat::OllamaConfig;
 pub use config::ServerConfig;
 pub use grok::GrokConfig;
-pub use providers::{ClaudeConfig, OpenaiConfig};
+pub use providers::{ClaudeConfig, GeminiConfig, OpenaiConfig};
 pub use state::AppState;
 
 use std::time::Duration;
@@ -70,6 +72,8 @@ pub fn build_router() -> Router<AppState> {
         .merge(llm_keys::router())
         .merge(worker_hosts::router())
         .merge(partners::router())
+        .merge(planner::router())
+        .merge(runners::router())
         .merge(install_routes::router())
         .merge(admin::router())
 }
