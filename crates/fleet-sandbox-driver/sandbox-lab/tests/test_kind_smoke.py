@@ -195,6 +195,14 @@ class KindSmokeTests(unittest.TestCase):
             )
         raise unittest.SkipTest("kind/agent-fleet namespace not available")
 
+    def setUp(self):
+        kube = Path.home() / ".kube" / "config"
+        self.assertTrue(
+            kube.is_file(),
+            f"no kubeconfig at {kube} (HOME={Path.home()}); "
+            "a prior test leaked HOME — kubectl would hit :8080 (fleet-server)",
+        )
+
     def test_control_plane_deployments_ready(self):
         try:
             require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)

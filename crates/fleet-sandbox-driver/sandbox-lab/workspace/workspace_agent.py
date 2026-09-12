@@ -236,17 +236,25 @@ def is_ssh_repo(url: str) -> bool:
     return u.startswith("git@") or u.startswith("ssh://") or u.startswith("ssh+")
 
 
+def _env_str(env: dict, key: str) -> str:
+    """Job env dict first (provision extra_env), then process environ."""
+    raw = env.get(key)
+    if raw is None or str(raw).strip() == "":
+        raw = os.environ.get(key)
+    return (str(raw) if raw is not None else "").strip()
+
+
 def git_ssh_env(env: dict) -> dict:
     """Point git at a mounted deploy key. Volume clone runs here, not in the driver."""
     out = dict(env)
-    key = (os.environ.get("GIT_SSH_KEY_PATH") or "").strip()
+    key = _env_str(out, "GIT_SSH_KEY_PATH")
     if not key:
         return out
     key_path = Path(key)
     if not key_path.is_file():
         log(f"GIT_SSH_KEY_PATH={key} missing; clone will use default ssh")
         return out
-    home = Path(out.get("HOME") or os.environ.get("HOME") or "/root")
+    home = Path(_env_str(out, "HOME") or "/root")
     ssh_dir = home / ".ssh"
     ssh_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -257,7 +265,7 @@ def git_ssh_env(env: dict) -> dict:
     shutil.copy2(key_path, ident)
     os.chmod(ident, 0o600)
     known = ssh_dir / "known_hosts"
-    kh = (os.environ.get("GIT_SSH_KNOWN_HOSTS") or "").strip()
+    kh = _env_str(out, "GIT_SSH_KNOWN_HOSTS")
     if kh and Path(kh).is_file():
         shutil.copy2(kh, known)
     config = ssh_dir / "config"

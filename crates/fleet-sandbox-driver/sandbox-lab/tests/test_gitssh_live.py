@@ -36,13 +36,6 @@ def _load_agent():
     return wa
 
 
-def _restore_env(key: str, old: str | None) -> None:
-    if old is None:
-        os.environ.pop(key, None)
-    else:
-        os.environ[key] = old
-
-
 def _clone_env(home: Path) -> dict[str, str]:
     """HOME for git_ssh_env only — do not mutate process HOME (kind kubeconfig)."""
     home.mkdir(parents=True, exist_ok=True)
@@ -71,19 +64,33 @@ class GitSshLiveTests(unittest.TestCase):
             raise unittest.SkipTest("dummy SSH key not installed (.tmp/ssh)")
         raise unittest.SkipTest("git-ssh :2222 not listening")
 
+    def setUp(self):
+        # Kind smoke (later in discover) uses $HOME/.kube/config. A leaked HOME
+        # makes kubectl default to :8080 (fleet-server), not the kind API.
+        self._saved = {k: os.environ.get(k) for k in ("HOME", "GIT_SSH_KEY_PATH")}
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     def test_workspace_agent_clones_local_gitssh(self):
         wa = _load_agent()
         tmp = Path(tempfile.mkdtemp(prefix="fleet-gitssh-test-"))
         dest = tmp / "jobs" / "j1" / "repo"
-        old_key = os.environ.get("GIT_SSH_KEY_PATH")
-        os.environ["GIT_SSH_KEY_PATH"] = str(KEY)
+        env = _clone_env(tmp / "home")
+        env["GIT_SSH_KEY_PATH"] = str(KEY)
         try:
-            wa.git_clone(HELLO, "main", dest, _clone_env(tmp / "home"))
+            wa.git_clone(HELLO, "main", dest, env)
             readme = (dest / "README").read_text(encoding="utf-8")
             self.assertIn("hello-from-local-git-ssh", readme)
+            self.assertEqual(os.environ.get("HOME"), self._saved["HOME"])
+            self.assertNotEqual(Path.home(), tmp / "home")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-            _restore_env("GIT_SSH_KEY_PATH", old_key)
 
     def test_workspace_agent_ssh_clone_rejects_wrong_key(self):
         # Unauthorized key must fail even if SSH_AUTH_SOCK holds the dummy.
@@ -91,19 +98,18 @@ class GitSshLiveTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="fleet-gitssh-wrong-"))
         dest = tmp / "jobs" / "j1" / "repo"
         bad_key = tmp / "id_ed25519"
-        old_key = os.environ.get("GIT_SSH_KEY_PATH")
         try:
             subprocess.run(
                 ["ssh-keygen", "-t", "ed25519", "-f", str(bad_key), "-N", "", "-q"],
                 check=True,
                 capture_output=True,
             )
-            os.environ["GIT_SSH_KEY_PATH"] = str(bad_key)
+            env = _clone_env(tmp / "home")
+            env["GIT_SSH_KEY_PATH"] = str(bad_key)
             with self.assertRaises(RuntimeError):
-                wa.git_clone(HELLO, "main", dest, _clone_env(tmp / "home"))
+                wa.git_clone(HELLO, "main", dest, env)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-            _restore_env("GIT_SSH_KEY_PATH", old_key)
 
 
 if __name__ == "__main__":

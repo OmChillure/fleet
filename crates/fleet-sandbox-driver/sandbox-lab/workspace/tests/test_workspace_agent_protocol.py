@@ -533,49 +533,39 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         key.write_text(key_bytes, encoding="utf-8")
         home = self.tmp / "home"
         home.mkdir()
-        old_key = os.environ.get("GIT_SSH_KEY_PATH")
-        old_home = os.environ.get("HOME")
-        os.environ["GIT_SSH_KEY_PATH"] = str(key)
-        os.environ["HOME"] = str(home)
-        try:
-            env = self.agent.git_ssh_env({})
-            ident = home / ".ssh" / "id_fleet"
-            config = home / ".ssh" / "config"
-            self.assertEqual(env.get("GIT_SSH_COMMAND"), f"ssh -F {config}")
-            self.assertTrue(ident.is_file())
-            self.assertEqual(ident.read_text(encoding="utf-8"), key_bytes)
-            self.assertEqual(ident.stat().st_mode & 0o777, 0o600)
-            cfg = config.read_text(encoding="utf-8")
-            self.assertIn(f"IdentityFile {ident}", cfg)
-            self.assertIn("IdentitiesOnly yes", cfg)
-        finally:
-            self._restore_env("GIT_SSH_KEY_PATH", old_key)
-            self._restore_env("HOME", old_home)
+        saved_home = os.environ.get("HOME")
+        env = self.agent.git_ssh_env(
+            {"GIT_SSH_KEY_PATH": str(key), "HOME": str(home)}
+        )
+        ident = home / ".ssh" / "id_fleet"
+        config = home / ".ssh" / "config"
+        self.assertEqual(env.get("GIT_SSH_COMMAND"), f"ssh -F {config}")
+        self.assertTrue(ident.is_file())
+        self.assertEqual(ident.read_text(encoding="utf-8"), key_bytes)
+        self.assertEqual(ident.stat().st_mode & 0o777, 0o600)
+        cfg = config.read_text(encoding="utf-8")
+        self.assertIn(f"IdentityFile {ident}", cfg)
+        self.assertIn("IdentitiesOnly yes", cfg)
+        self.assertEqual(os.environ.get("HOME"), saved_home)
 
     def test_git_ssh_env_missing_key_leaves_env_unchanged(self):
         home = self.tmp / "home-missing-key"
         home.mkdir()
-        old_key = os.environ.get("GIT_SSH_KEY_PATH")
-        old_home = os.environ.get("HOME")
-        os.environ["HOME"] = str(home)
-        try:
-            for label, key_val in (
-                ("unset", None),
-                ("nonexistent", str(self.tmp / "no-such-deploy-key")),
-            ):
-                with self.subTest(key=label):
-                    if key_val is None:
-                        os.environ.pop("GIT_SSH_KEY_PATH", None)
-                    else:
-                        os.environ["GIT_SSH_KEY_PATH"] = key_val
-                    incoming = {"HOME": str(home)}
-                    env = self.agent.git_ssh_env(incoming)
-                    self.assertNotIn("GIT_SSH_COMMAND", env)
-                    self.assertEqual(env, incoming)
-                    self.assertFalse((home / ".ssh" / "id_fleet").exists())
-        finally:
-            self._restore_env("GIT_SSH_KEY_PATH", old_key)
-            self._restore_env("HOME", old_home)
+        for label, incoming in (
+            ("unset", {"HOME": str(home)}),
+            (
+                "nonexistent",
+                {
+                    "HOME": str(home),
+                    "GIT_SSH_KEY_PATH": str(self.tmp / "no-such-deploy-key"),
+                },
+            ),
+        ):
+            with self.subTest(key=label):
+                env = self.agent.git_ssh_env(incoming)
+                self.assertNotIn("GIT_SSH_COMMAND", env)
+                self.assertEqual(env, incoming)
+                self.assertFalse((home / ".ssh" / "id_fleet").exists())
 
     def test_git_ssh_env_copies_known_hosts_when_set(self):
         key = self.tmp / "id_ed25519"
@@ -585,21 +575,34 @@ class WorkspaceAgentProtocolTests(unittest.TestCase):
         kh.write_text(kh_bytes, encoding="utf-8")
         home = self.tmp / "home-known-hosts"
         home.mkdir()
-        old_key = os.environ.get("GIT_SSH_KEY_PATH")
-        old_home = os.environ.get("HOME")
-        old_kh = os.environ.get("GIT_SSH_KNOWN_HOSTS")
-        os.environ["GIT_SSH_KEY_PATH"] = str(key)
-        os.environ["HOME"] = str(home)
-        os.environ["GIT_SSH_KNOWN_HOSTS"] = str(kh)
+        self.agent.git_ssh_env(
+            {
+                "GIT_SSH_KEY_PATH": str(key),
+                "HOME": str(home),
+                "GIT_SSH_KNOWN_HOSTS": str(kh),
+            }
+        )
+        dest = home / ".ssh" / "known_hosts"
+        self.assertTrue(dest.is_file())
+        self.assertEqual(dest.read_text(encoding="utf-8"), kh_bytes)
+
+    def test_git_ssh_env_key_in_process_environ_still_works(self):
+        key = self.tmp / "id_ed25519"
+        key.write_text("dummy-key\n", encoding="utf-8")
+        home = self.tmp / "home-proc"
+        home.mkdir()
+        saved = {k: os.environ.get(k) for k in ("HOME", "GIT_SSH_KEY_PATH")}
         try:
-            self.agent.git_ssh_env({})
-            dest = home / ".ssh" / "known_hosts"
-            self.assertTrue(dest.is_file())
-            self.assertEqual(dest.read_text(encoding="utf-8"), kh_bytes)
+            os.environ["GIT_SSH_KEY_PATH"] = str(key)
+            env = self.agent.git_ssh_env({"HOME": str(home)})
+            self.assertIn("GIT_SSH_COMMAND", env)
+            self.assertTrue((home / ".ssh" / "id_fleet").is_file())
         finally:
-            self._restore_env("GIT_SSH_KEY_PATH", old_key)
-            self._restore_env("HOME", old_home)
-            self._restore_env("GIT_SSH_KNOWN_HOSTS", old_kh)
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_handle_request_refuses_when_handshake_secret_unset(self):
         """verify_request refuses provision when FLEET_HANDSHAKE_SECRET is unset/blank."""
