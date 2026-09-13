@@ -1,10 +1,12 @@
 //! Runner package versions (`runner-packages.toml`).
 //!
 //! `[versions]` is what staging writes into the bins. `[verify]` is what
-//! this plane uses to decide current vs behind. File hashes still prove
-//! the bytes on one OS.
+//! this plane uses to decide current vs behind. `[release]` is the parent
+//! hash of per-OS child hashes. A hash change without a new registered
+//! version fails `scripts/check-worker-dist.sh` / deploy.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 const RAW: &str = include_str!("../../../runner-packages.toml");
 
@@ -51,6 +53,58 @@ fn section_value(section: &str, name: &str) -> &'static str {
         }
     }
     "0.0.0"
+}
+
+/// Shipped OS packages locked in `[release.*]`. Not musl / armv7 / darwin.
+pub const SHIP_RELEASE_PLATFORMS: &[&str] = &[
+    "linux-x86_64",
+    "linux-aarch64",
+    "windows-x86_64",
+];
+
+const RELEASE_BINS: &[&str] = &["fleet-host", "fleet-driver"];
+
+/// `[release].version` — one number for the parent + all children.
+pub fn release_version() -> &'static str {
+    section_value("release", "version")
+}
+
+/// `[release].parent` — sha256 of sorted `platform/bin=hex\\n` children.
+pub fn release_parent() -> &'static str {
+    section_value("release", "parent")
+}
+
+fn release_child_hash(platform: &str, bin: &str) -> &'static str {
+    section_value(&format!("release.{platform}"), bin)
+}
+
+/// Children in `[release.<platform>]` for the shipped OS set.
+pub fn release_children() -> BTreeMap<(String, String), String> {
+    let mut out = BTreeMap::new();
+    for plat in SHIP_RELEASE_PLATFORMS {
+        for bin in RELEASE_BINS {
+            let sha = release_child_hash(plat, bin).trim().to_ascii_lowercase();
+            if sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                out.insert(((*plat).to_string(), (*bin).to_string()), sha);
+            }
+        }
+    }
+    out
+}
+
+/// Parent digest of `children`. Same bytes as `scripts/runner-release.py`.
+pub fn parent_digest(children: &BTreeMap<(String, String), String>) -> String {
+    let mut blob = String::new();
+    for ((plat, bin), sha) in children {
+        blob.push_str(plat);
+        blob.push('/');
+        blob.push_str(bin);
+        blob.push('=');
+        blob.push_str(&sha.to_ascii_lowercase());
+        blob.push('\n');
+    }
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(blob.as_bytes()))
 }
 
 /// Plane `/health.git_sha` / compile-time `FLEET_GIT_SHA` (clean 40-hex or
@@ -302,5 +356,62 @@ mod tests {
             "real semver current/behind must still work"
         );
         assert!(!version_is_ahead("0.0.1", "0.0.2"));
+    }
+
+    #[test]
+    fn release_table_is_self_consistent() {
+        assert_eq!(
+            release_version(),
+            fleet_host_package_version(),
+            "[release].version must match [versions] fleet-host"
+        );
+        assert_eq!(
+            release_version(),
+            fleet_driver_package_version(),
+            "[release].version must match [versions] fleet-driver"
+        );
+        assert_eq!(
+            release_version(),
+            fleet_host_version(),
+            "[release].version must match [verify] fleet-host"
+        );
+        let kids = release_children();
+        assert_eq!(
+            kids.len(),
+            SHIP_RELEASE_PLATFORMS.len() * 2,
+            "every shipped OS must lock fleet-host and fleet-driver: {kids:?}"
+        );
+        let got = parent_digest(&kids);
+        assert_eq!(
+            got,
+            release_parent(),
+            "[release].parent must be sha256 of sorted platform/bin=hex children"
+        );
+    }
+
+    #[test]
+    fn parent_digest_changes_when_a_child_hash_changes() {
+        let mut kids = release_children();
+        let first = kids.keys().next().cloned().expect("children");
+        let old = kids.get(&first).expect("hash").clone();
+        kids.insert(first, "ab".repeat(32));
+        assert_ne!(parent_digest(&kids), parent_digest(&release_children()));
+        assert_ne!(parent_digest(&kids), old);
+    }
+
+    #[test]
+    fn runner_release_py_accepts_table_when_dist_absent() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let py = root.join("scripts/runner-release.py");
+        let status = std::process::Command::new("python3")
+            .arg(&py)
+            .arg("check")
+            .arg("/no/such/fleet-worker-dist")
+            .status()
+            .expect("python3 runner-release.py");
+        assert!(
+            status.success(),
+            "table-only check must pass: {py:?} {status}"
+        );
     }
 }

@@ -610,3 +610,6 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+# Fail closed: new bytes for a shipped OS must be a new registered version.
+python3 "$ROOT/scripts/runner-release.py" check "$DEST"

@@ -101,6 +101,8 @@ stage_one windows-x86_64 --windows
 
 log "worker darwin-arm64 / darwin-x86_64: not built here (no macOS cross from Linux)"
 
+python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
+
 log "shipping worker-dist → ${VPS_HOST}:${VPS_STACK_DIR}/worker-dist"
 vps_deploy_ssh "mkdir -p '${VPS_STACK_DIR}/worker-dist'"
 rsync -az --delete \

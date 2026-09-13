@@ -41,9 +41,11 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   (same fail-closed rule as API/UI images). Stage writes `manifest.json`
   next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
   outdated” compares against `[verify]` in `runner-packages.toml` (staging
-  writes `[versions]`). cargo warns when a package version is higher than
-  `[verify]`. File hashes still prove the bytes on one OS; not
-  `/health.git_sha`.
+  writes `[versions]`). `[release]` is the parent hash of per-OS child
+  hashes (linux-x86_64, linux-aarch64, windows-x86_64 × fleet-host /
+  fleet-driver). `scripts/check-worker-dist.sh` fails if a staged binary
+  hash is not registered for that version — bump the version and run
+  `scripts/register-runner-release.sh`. Not `/health.git_sha`.
 
 ### Worker machine
 
