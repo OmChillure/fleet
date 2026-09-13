@@ -7,7 +7,7 @@ pub enum InboxKind {
     Page,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InboxAppInfo {
     pub id: &'static str,
     pub name: &'static str,

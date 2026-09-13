@@ -798,6 +798,17 @@ class BrowserE2ETests(unittest.TestCase):
         page.wait_for_url("**/inbox", timeout=10_000)
         page.wait_for_selector("h1")
         self.assertEqual(page.locator("h1").first.inner_text().strip(), "Inbox")
+        nav = page.locator("nav")
+        self.assertGreater(
+            nav.get_by_role("link", name="Slack", exact=True).count(),
+            0,
+            "sidebar missing Slack under Inbox",
+        )
+        self.assertGreater(
+            nav.get_by_role("link", name="GitHub", exact=True).count(),
+            0,
+            "sidebar missing GitHub under Inbox",
+        )
         self.assertTrue(
             page.get_by_role("button", name="Start monitor").count() > 0,
             "Inbox page missing Start monitor",

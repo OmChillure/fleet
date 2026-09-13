@@ -349,8 +349,21 @@ pub fn Sidebar() -> Element {
                         to: Route::Cases { workspace_id: workspace_id.clone() },
                         label: "Cases",
                     }
-                    NavInbox {
-                        workspace_id: workspace_id.clone(),
+                    NavSubLink {
+                        to: Route::Inbox { workspace_id: workspace_id.clone() },
+                        label: "Inbox",
+                    }
+                    // Same accordion nest as Workforce/Cases — extra indent only.
+                    // A wrapper component + inner `for` did not paint these links.
+                    for app in INBOX_APPS.iter().copied() {
+                        NavNestedLink {
+                            key: "{app.id}",
+                            to: Route::InboxApp {
+                                workspace_id: workspace_id.clone(),
+                                provider: app.id.to_string(),
+                            },
+                            label: app.name,
+                        }
                     }
                 }
 
@@ -639,34 +652,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
     }
 }
 
-/// Inbox, then a second indent of each app (Slack, GitHub, …).
-#[component]
-fn NavInbox(workspace_id: String) -> Element {
-    rsx! {
-        div { class: "flex flex-col",
-            Link {
-                class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
-                to: Route::Inbox { workspace_id: workspace_id.clone() },
-                active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
-                "Inbox"
-            }
-            div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
-                for app in INBOX_APPS {
-                    Link {
-                        class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
-                        to: Route::InboxApp {
-                            workspace_id: workspace_id.clone(),
-                            provider: app.id.to_string(),
-                        },
-                        active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
-                        "{app.name}"
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[component]
 fn NavAccordion(
     title: &'static str,
@@ -704,6 +689,20 @@ fn NavSubLink(to: Route, label: &'static str) -> Element {
     rsx! {
         Link {
             class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+            to,
+            active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
+            "{label}"
+        }
+    }
+}
+
+/// One more indent under a section child (Inbox → Slack / GitHub / …).
+/// The sidebar accordion only has one real nest; this is CSS indent.
+#[component]
+fn NavNestedLink(to: Route, label: &'static str) -> Element {
+    rsx! {
+        Link {
+            class: "block rounded-md py-1 pl-4 pr-2 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
             to,
             active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
             "{label}"
