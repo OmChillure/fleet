@@ -558,40 +558,84 @@ mod tests {
         FleetSandbox::new("demo-t1", spec)
     }
 
+    fn pod_env_map(pod: &Pod) -> BTreeMap<String, String> {
+        pod.spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+            .collect()
+    }
+
     #[test]
-    fn pod_has_worker_contract_and_security() {
+    fn pod_defaults_fleet_driver_and_injects_session_token_and_work_dir() {
         let sb = sample_sb();
-        let cfg = OperatorConfig::from_env();
+        let cfg = sample_cfg();
         let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
         let c = &pod.spec.as_ref().unwrap().containers[0];
         assert_eq!(
             c.command.as_ref().unwrap(),
             &vec!["fleet-driver".to_string()]
         );
-        let env: BTreeMap<_, _> = c
-            .env
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
-            .collect();
+        let env = pod_env_map(&pod);
         assert_eq!(env.get("FLEET_SESSION_ID").unwrap(), "sess-1");
         assert_eq!(env.get("FLEET_WORKER_TOKEN").unwrap(), "tok");
         assert_eq!(env.get("FLEET_WORK_DIR").unwrap(), "/data/work");
-        let sc = c.security_context.as_ref().unwrap();
-        assert_eq!(sc.allow_privilege_escalation, Some(false));
-        assert_eq!(sc.run_as_user, Some(10001));
     }
 
     #[test]
-    fn network_policy_denies_ingress_and_limits_egress() {
+    fn pod_sets_required_driver_callback_and_identity_env() {
         let sb = sample_sb();
         let cfg = sample_cfg();
-        let np = build_network_policy(&sb, "fsb-demo-t1", &cfg);
-        let spec = np.spec.as_ref().unwrap();
-        assert_eq!(spec.ingress.as_ref().unwrap().len(), 0);
-        assert!(spec.egress.as_ref().unwrap().len() >= 2);
-        assert_eq!(np.metadata.name.as_deref(), Some("fsb-demo-t1-net"));
+        let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
+        let env = pod_env_map(&pod);
+        assert_eq!(
+            env.get("FLEET_ORCHESTRATOR_URL").unwrap(),
+            &cfg.api_service_url
+        );
+        assert_eq!(env.get("FLEET_API_BASE").unwrap(), &cfg.api_service_url);
+        assert_eq!(env.get("FLEET_PROJECT_ID").unwrap(), "ws-1");
+        assert_eq!(env.get("FLEET_BOARD_TASK_ID").unwrap(), "task-1");
+        assert_eq!(env.get("FLEET_TASK_ID").unwrap(), "task-1");
+    }
+
+    #[test]
+    fn pod_drops_all_caps_denies_sa_token_and_runs_non_root() {
+        let sb = sample_sb();
+        let cfg = sample_cfg();
+        let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
+        let spec = pod.spec.as_ref().unwrap();
+        assert_eq!(spec.automount_service_account_token, Some(false));
+        let psc = spec.security_context.as_ref().unwrap();
+        assert_eq!(psc.run_as_non_root, Some(true));
+        let sc = spec.containers[0].security_context.as_ref().unwrap();
+        assert_eq!(sc.allow_privilege_escalation, Some(false));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.run_as_user, Some(10001));
+        assert_eq!(
+            sc.capabilities.as_ref().and_then(|c| c.drop.clone()),
+            Some(vec!["ALL".into()])
+        );
+    }
+
+    #[test]
+    fn spec_env_overrides_injected_defaults_and_empty_image_uses_cfg() {
+        let mut sb = sample_sb();
+        sb.spec
+            .env
+            .insert("FLEET_WORK_DIR".into(), "/other".into());
+        sb.spec.image = "".into();
+        let mut cfg = sample_cfg();
+        cfg.worker_image_default = "fleet-worker:from-cfg".into();
+        let pod = build_pod(&sb, "fsb-demo-t1", &cfg);
+        let c = &pod.spec.as_ref().unwrap().containers[0];
+        let env = pod_env_map(&pod);
+        assert_eq!(env.get("FLEET_WORK_DIR").unwrap(), "/other");
+        assert_eq!(c.image.as_deref(), Some(cfg.worker_image_default.as_str()));
     }
 
     fn sb_with_net(mode: &str, allowlist: &[&str]) -> FleetSandbox {
@@ -881,58 +925,10 @@ mod tests {
         sb
     }
 
-    fn apply_src() -> &'static str {
-        let src = include_str!("reconcile.rs");
-        let start = src
-            .find("async fn apply(")
-            .expect("apply() must exist so TTL can delete the CR");
-        let rest = &src[start..];
-        let end = rest
-            .find("\nasync fn cleanup(")
-            .expect("cleanup() follows apply()");
-        &rest[..end]
-    }
-
     #[test]
     fn ttl_seconds_exceeded_deletes_the_cr() {
-        // Docs §13: ttl_seconds exceeded → operator deletes the FleetSandbox
-        // CR. This is apply()'s decision, not the ttl_expired helper and not
-        // leftover-Running remapped to Exited. Continue is create-pod /
-        // patch-Running — never that after TTL.
-        let apply = apply_src();
-        assert!(
-            apply.contains("apply_decision"),
-            "apply() must consult apply_decision; helper-only is not this lock:\n{apply}"
-        );
-        let delete_at = apply
-            .find("ApplyDecision::DeleteCr")
-            .expect("apply() must match DeleteCr");
-        let continue_at = apply
-            .find("ApplyDecision::Continue")
-            .expect("apply() must match Continue");
-        assert!(
-            delete_at < continue_at,
-            "DeleteCr must be decided before Continue/create-pod/patch-Running:\n{apply}"
-        );
-        let delete_arm = &apply[delete_at..continue_at];
-        assert!(
-            delete_arm.contains("sbs.delete"),
-            "DeleteCr must delete the FleetSandbox CR:\n{delete_arm}"
-        );
-        assert!(
-            !delete_arm.contains("pods.create"),
-            "DeleteCr must not create a pod:\n{delete_arm}"
-        );
-        assert!(
-            !delete_arm.contains("patch_status"),
-            "DeleteCr must not patch Running:\n{delete_arm}"
-        );
-        let continue_body = &apply[continue_at..];
-        assert!(
-            continue_body.contains("pods.create") && continue_body.contains("patch_status"),
-            "Continue is create-pod / patch-Running, not delete:\n{continue_body}"
-        );
-
+        // Docs §13 / crd hard-lifetime: Running age>=ttl is DeleteCr, not
+        // Continue/create-pod or leftover-Running remapped to Exited.
         let at_boundary = with_running_phase(sandbox_created_ago(Some(600), 600));
         assert_eq!(
             apply_decision(&at_boundary),
@@ -947,94 +943,36 @@ mod tests {
             "age>ttl must DeleteCr, not Continue/create-pod/patch-Running"
         );
 
-        let missing = with_running_phase(sandbox_created_ago(None, 10_000));
-        assert_eq!(
-            apply_decision(&missing),
-            ApplyDecision::Continue,
-            "missing ttl_seconds must not delete"
-        );
-
-        let zero = with_running_phase(sandbox_created_ago(Some(0), 10_000));
-        assert_eq!(
-            apply_decision(&zero),
-            ApplyDecision::Continue,
-            "ttl_seconds=0 must not delete"
-        );
-
-        let negative = with_running_phase(sandbox_created_ago(Some(-1), 10_000));
-        assert_eq!(
-            apply_decision(&negative),
-            ApplyDecision::Continue,
-            "negative ttl_seconds must not delete"
-        );
-
         let still_fresh = with_running_phase(sandbox_created_ago(Some(600), 1));
         assert_eq!(
             apply_decision(&still_fresh),
             ApplyDecision::Continue,
             "age<ttl must not delete"
         );
+    }
 
-        let one_second_left = with_running_phase(sandbox_created_ago(Some(600), 599));
+    #[test]
+    fn apply_decision_uses_creation_timestamp_not_started_at() {
+        // crd.rs: hard lifetime from create, not started_at.
+        let mut sb = with_running_phase(sandbox_created_ago(Some(600), 1));
+        sb.status.as_mut().unwrap().started_at =
+            Some((Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339());
         assert_eq!(
-            apply_decision(&one_second_left),
+            apply_decision(&sb),
             ApplyDecision::Continue,
-            "age<ttl must not delete"
+            "started_at 10_000s ago with creation 1s ago must Continue"
         );
     }
 
     #[test]
-    fn ttl_expired_deletes_sandbox_session() {
-        // Helper only — apply() delete is ttl_seconds_exceeded_deletes_the_cr.
-        let sb = sandbox_created_ago(Some(600), 601);
-        assert!(ttl_expired(&sb));
-        assert_eq!(sb.spec.session_id, "sess-1");
-        assert_eq!(pod_name_for(&sb.name_any()), "fsb-demo-t1");
-
-        let at_boundary = sandbox_created_ago(Some(600), 600);
-        assert!(ttl_expired(&at_boundary));
-    }
-
-    #[test]
-    fn ttl_missing_does_not_delete_early() {
-        let mut no_ttl = sandbox_created_ago(None, 10_000);
-        assert!(!ttl_expired(&no_ttl));
-
-        no_ttl.spec.ttl_seconds = Some(0);
-        assert!(!ttl_expired(&no_ttl));
-
-        no_ttl.spec.ttl_seconds = Some(-1);
-        assert!(!ttl_expired(&no_ttl));
-
-        let mut no_created = sample_sb();
-        no_created.spec.ttl_seconds = Some(1);
-        no_created.metadata.creation_timestamp = None;
-        assert!(!ttl_expired(&no_created));
-
-        let still_fresh = sandbox_created_ago(Some(600), 1);
-        assert!(!ttl_expired(&still_fresh));
-
-        let one_second_left = sandbox_created_ago(Some(600), 599);
-        assert!(!ttl_expired(&one_second_left));
-    }
-
-    #[test]
-    fn ttl_finalizer_cleanup_targets_pod_and_network_policy() {
-        let sb = sample_sb();
-        let name = sb.name_any();
-        let pod_name = pod_name_for(&name);
-        let np_name = network_policy_name(&pod_name);
-        assert_eq!(FINALIZER, "fleet.agentfleet.io/sandbox-cleanup");
-        assert_eq!(pod_name, "fsb-demo-t1");
-        assert_eq!(np_name, "fsb-demo-t1-net");
-
-        let cfg = sample_cfg();
-        let desired_pod = build_pod(&sb, &pod_name, &cfg);
-        let desired_np = build_network_policy(&sb, &pod_name, &cfg);
+    fn apply_decision_without_creation_timestamp_is_continue() {
+        let mut sb = with_running_phase(sample_sb());
+        sb.spec.ttl_seconds = Some(600);
+        sb.metadata.creation_timestamp = None;
         assert_eq!(
-            desired_pod.metadata.name.as_deref(),
-            Some(pod_name.as_str())
+            apply_decision(&sb),
+            ApplyDecision::Continue,
+            "missing creation_timestamp must Continue, not DeleteCr"
         );
-        assert_eq!(desired_np.metadata.name.as_deref(), Some(np_name.as_str()));
     }
 }

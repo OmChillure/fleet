@@ -188,8 +188,9 @@ pub async fn upsert_inbox(pool: &PgPool, item: &UpsertInbox) -> DbResult<TicketI
             END,
             state = CASE
                 WHEN ticket_inbox.state = 'ignored' THEN 'ignored'
+                WHEN EXCLUDED.state = 'done' THEN 'done'
                 WHEN ticket_inbox.state = 'launched' THEN 'launched'
-                ELSE EXCLUDED.state
+                ELSE ticket_inbox.state
             END,
             last_seen_at = now()
         RETURNING {INBOX_COLS}
@@ -302,17 +303,18 @@ pub async fn find_inbox_by_key(
         .map_err(map_query_err)
 }
 
-pub async fn mark_launched(
+/// CAS an open row to `launched` before a plan exists so a second Finish
+/// cannot insert another run. `run_id` is attached afterwards.
+pub async fn claim_launch(
     pool: &PgPool,
     workspace_id: Uuid,
     provider: &str,
     external_key: &str,
-    run_id: Uuid,
 ) -> DbResult<Option<TicketInboxItem>> {
     let q = format!(
         r#"
         UPDATE ticket_inbox
-        SET state = 'launched', run_id = $4
+        SET state = 'launched', last_seen_at = now()
         WHERE workspace_id = $1
           AND lower(provider) = lower($2)
           AND lower(external_key) = lower($3)
@@ -325,10 +327,54 @@ pub async fn mark_launched(
         .bind(workspace_id)
         .bind(provider)
         .bind(external_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn attach_launch_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    external_key: &str,
+    run_id: Uuid,
+) -> DbResult<Option<TicketInboxItem>> {
+    let q = format!(
+        r#"
+        UPDATE ticket_inbox
+        SET run_id = $4
+        WHERE workspace_id = $1
+          AND lower(provider) = lower($2)
+          AND lower(external_key) = lower($3)
+          AND state = 'launched'
+          AND run_id IS NULL
+        RETURNING {INBOX_COLS}
+        "#
+    );
+    sqlx::query_as::<_, TicketInboxItem>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .bind(external_key)
         .bind(run_id)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)
+}
+
+pub async fn mark_launched(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    external_key: &str,
+    run_id: Uuid,
+) -> DbResult<Option<TicketInboxItem>> {
+    if claim_launch(pool, workspace_id, provider, external_key)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    attach_launch_run(pool, workspace_id, provider, external_key, run_id).await
 }
 
 /// Run died or was cancelled — ticket goes back to open so the next poll works it again.
@@ -356,6 +402,45 @@ pub async fn reopen_ticket(
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)
+}
+
+/// Cancel/fail of a run — every inbox row still `launched` on that run reopens.
+pub async fn reopen_tickets_for_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'open', run_id = NULL, last_seen_at = now()
+        WHERE workspace_id = $1
+          AND run_id = $2
+          AND state = 'launched'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}
+
+pub async fn reopen_tickets_for_run_id(pool: &PgPool, run_id: Uuid) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        UPDATE ticket_inbox
+        SET state = 'open', run_id = NULL, last_seen_at = now()
+        WHERE run_id = $1
+          AND state = 'launched'
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
 }
 
 pub async fn mark_inbox_done(

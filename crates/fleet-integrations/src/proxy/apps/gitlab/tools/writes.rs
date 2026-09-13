@@ -13,7 +13,13 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     let title = match args.get("title").and_then(|v| v.as_str()).map(str::trim) {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
-            return ProxyResult::err("gitlab", "create_issue", "bad_args", "title is required", None);
+            return ProxyResult::err(
+                "gitlab",
+                "create_issue",
+                "bad_args",
+                "title is required",
+                None,
+            );
         }
     };
     let mut payload = json!({ "title": title });
@@ -27,13 +33,8 @@ pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Val
     if let Some(labels) = args.get("labels") {
         payload["labels"] = labels.clone();
     }
-    let (status, body) = gitlab_post(
-        http,
-        token,
-        &project_url(&project, "/issues"),
-        &payload,
-    )
-    .await;
+    let (status, body) =
+        gitlab_post(http, token, &project_url(&project, "/issues"), &payload).await;
     if !(200..300).contains(&status) {
         return upstream_err("create_issue", status, &body);
     }
@@ -57,11 +58,19 @@ pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Val
     let iid = match args
         .get("iid")
         .or_else(|| args.get("number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
         Some(n) => n,
         None => {
-            return ProxyResult::err("gitlab", "update_issue", "bad_args", "iid is required", None);
+            return ProxyResult::err(
+                "gitlab",
+                "update_issue",
+                "bad_args",
+                "iid is required",
+                None,
+            );
         }
     };
     let mut payload = json!({});
@@ -138,8 +147,10 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     let iid = match args
         .get("iid")
         .or_else(|| args.get("number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
         Some(n) => n,
         None => {
             return ProxyResult::err("gitlab", "add_comment", "bad_args", "iid is required", None);
@@ -154,7 +165,13 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     {
         Some(t) => t.to_string(),
         None => {
-            return ProxyResult::err("gitlab", "add_comment", "bad_args", "body is required", None);
+            return ProxyResult::err(
+                "gitlab",
+                "add_comment",
+                "bad_args",
+                "body is required",
+                None,
+            );
         }
     };
     let (status, body) = gitlab_post(
@@ -181,7 +198,11 @@ pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Valu
     )
 }
 
-pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+pub(crate) async fn create_branch(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
     let project = match require_project(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("gitlab", "create_branch", "bad_args", e, None),
@@ -352,7 +373,11 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
                 None,
             );
         }
-        let ref_name = if branch_exists { branch.as_str() } else { base_branch };
+        let ref_name = if branch_exists {
+            branch.as_str()
+        } else {
+            base_branch
+        };
         let file_url = format!(
             "{}/repository/files/{}?ref={}",
             project_url(&project, ""),
@@ -395,10 +420,7 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
     ProxyResult::ok_result(
         "gitlab",
         "commit_files",
-        format!(
-            "Committed {} file(s) to {project}@{branch}",
-            paths.len()
-        ),
+        format!("Committed {} file(s) to {project}@{branch}", paths.len()),
         json!({
             "project": project,
             "branch": branch,
@@ -503,8 +525,10 @@ pub(crate) async fn merge_mr(http: &reqwest::Client, token: &str, args: &Value) 
         .get("iid")
         .or_else(|| args.get("number"))
         .or_else(|| args.get("mr"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
         Some(n) => n,
         None => {
             return ProxyResult::err(

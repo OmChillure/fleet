@@ -153,15 +153,84 @@ mod tests {
     #[test]
     fn dns_label_sanitizes() {
         assert_eq!(dns_label("Demo_T1"), "demo-t1");
+    }
+
+    #[test]
+    fn dns_label_non_alnum_falls_back_to_sandbox() {
         assert_eq!(dns_label("!!!"), "sandbox");
-        assert!(dns_label(&"x".repeat(80)).len() <= 63);
+    }
+
+    #[test]
+    fn dns_label_truncates_to_exactly_63_alnum_bounded() {
+        let out = dns_label(&"x".repeat(80));
+        assert_eq!(out, "x".repeat(63));
+        assert!(out.starts_with(|c: char| matches!(c, 'a'..='z' | '0'..='9')));
+        assert!(out.ends_with(|c: char| matches!(c, 'a'..='z' | '0'..='9')));
+    }
+
+    #[test]
+    fn dns_label_truncate_does_not_end_with_dash() {
+        let out = dns_label(&("x".repeat(62) + "_" + &"y".repeat(20)));
+        assert_eq!(out, "x".repeat(62));
+        assert!(!out.ends_with('-'));
+    }
+
+    #[test]
+    fn pod_name_for_prefixes_fsb_and_caps_63() {
+        assert_eq!(pod_name_for("Demo_T1"), "fsb-demo-t1");
+        let out = pod_name_for(&"x".repeat(63));
+        assert_eq!(out.len(), 63);
+        assert!(out.starts_with("fsb-"));
+        assert!(!out.ends_with('-'));
     }
 
     #[test]
     fn crd_identity() {
         let crd = FleetSandbox::crd();
-        assert_eq!(crd.spec.group, CRD_GROUP);
-        assert_eq!(crd.spec.names.kind, CRD_KIND);
+        assert_eq!(crd.spec.group, "fleet.agentfleet.io");
+        assert_eq!(crd.spec.names.kind, "FleetSandbox");
         assert_eq!(crd.spec.names.plural, "fleetsandboxes");
+        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert_eq!(crd.spec.scope, "Namespaced");
+        assert_eq!(crd.spec.names.short_names, Some(vec!["fsb".into()]));
+        assert_eq!(
+            crd.metadata.name.as_deref(),
+            Some("fleetsandboxes.fleet.agentfleet.io")
+        );
+    }
+
+    #[test]
+    fn fleetsandbox_crd_is_namespaced_v1alpha1_shortname_fsb() {
+        let crd = FleetSandbox::crd();
+        assert_eq!(crd.spec.versions.len(), 1);
+        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert!(crd.spec.versions[0].storage);
+        assert_eq!(crd.spec.scope, "Namespaced");
+        assert_eq!(crd.spec.names.short_names, Some(vec!["fsb".into()]));
+    }
+
+    #[test]
+    fn fleetsandbox_crd_metadata_name_is_fleetsandboxes_dot_group() {
+        let crd = FleetSandbox::crd();
+        assert_eq!(
+            crd.metadata.name.as_deref(),
+            Some("fleetsandboxes.fleet.agentfleet.io")
+        );
+    }
+
+    #[test]
+    fn print_crd_gvk_matches_committed_fleetsandboxes_yaml() {
+        let crd = FleetSandbox::crd();
+        let committed: k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition =
+            serde_yaml::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../infra/crds/fleetsandboxes.yaml"
+            )))
+            .expect("committed fleetsandboxes.yaml");
+        assert_eq!(crd.spec.group, committed.spec.group);
+        assert_eq!(crd.spec.names.kind, committed.spec.names.kind);
+        assert_eq!(crd.spec.names.plural, committed.spec.names.plural);
+        assert_eq!(crd.spec.versions[0].name, committed.spec.versions[0].name);
+        assert_eq!(crd.metadata.name, committed.metadata.name);
     }
 }

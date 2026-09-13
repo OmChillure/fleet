@@ -4,20 +4,20 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{header, HeaderMap};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic, parse_worker_host_isolation,
+    parse_worker_host_isolation, HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -26,80 +26,78 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let name = obj.get("name")?.as_str()?.trim();
-                if name.is_empty() {
-                    return None;
-                }
-                let efforts: Vec<Value> = obj
-                    .get("efforts")
-                    .and_then(|e| e.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|e| {
-                                let value = e
-                                    .get("value")
-                                    .or_else(|| e.get("id"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .trim();
-                                if value.is_empty() {
-                                    return None;
-                                }
-                                Some(json!({
-                                    "value": value,
-                                    "label": e.get("label").and_then(|l| l.as_str()),
-                                }))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(json!({
-                    "name": name,
-                    "efforts": efforts,
-                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let efforts: Vec<Value> = obj
+                .get("efforts")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let value = e
+                                .get("value")
+                                .or_else(|| e.get("id"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if value.is_empty() {
+                                return None;
+                            }
+                            Some(json!({
+                                "value": value,
+                                "label": e.get("label").and_then(|l| l.as_str()),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "name": name,
+                "efforts": efforts,
+                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let id = obj.get("id")?.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                let models: Vec<String> = obj
-                    .get("models")
-                    .and_then(|m| m.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model_details = sanitize_model_details(obj.get("model_details"));
-                Some(json!({
-                    "id": id,
-                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "models": models,
-                    "model_details": model_details,
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let id = obj.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let models: Vec<String> = obj
+                .get("models")
+                .and_then(|m| m.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let model_details = sanitize_model_details(obj.get("model_details"));
+            Some(json!({
+                "id": id,
+                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                "models": models,
+                "model_details": model_details,
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 const PAIR_TTL: Duration = Duration::hours(1);
@@ -181,7 +179,7 @@ async fn require_member(
     Ok((user, role))
 }
 
-async fn require_owner(
+pub(crate) async fn require_owner(
     state: &AppState,
     jar: &CookieJar,
     workspace_id: Uuid,
@@ -191,6 +189,30 @@ async fn require_owner(
         return Err(AppError::forbidden("workspace owner required"));
     }
     Ok(user)
+}
+
+fn send_policy_rank(raw: &str) -> Option<u8> {
+    match fleet_db::parse_worker_host_send_policy(raw)? {
+        fleet_db::WORKER_HOST_SEND_OWNER_ONLY => Some(0),
+        fleet_db::WORKER_HOST_SEND_ALLOWLIST => Some(1),
+        fleet_db::WORKER_HOST_SEND_WORKSPACE => Some(2),
+        _ => None,
+    }
+}
+
+fn resolve_send_policy<'a>(wanted: &'a str, ceiling: &str) -> AppResult<&'a str> {
+    let wanted = fleet_db::parse_worker_host_send_policy(wanted).ok_or_else(|| {
+        AppError::bad_request("send_policy must be owner_only, allowlist, or workspace")
+    })?;
+    let ceil = fleet_db::parse_worker_host_send_policy(ceiling).unwrap_or(
+        fleet_db::WORKER_HOST_SEND_OWNER_ONLY,
+    );
+    if send_policy_rank(wanted).unwrap_or(99) > send_policy_rank(ceil).unwrap_or(0) {
+        return Err(AppError::bad_request(
+            "send_policy cannot be more open than the workspace default",
+        ));
+    }
+    Ok(wanted)
 }
 
 fn parse_machine_id(raw: Option<&str>) -> Option<Uuid> {
@@ -203,7 +225,7 @@ fn desired_for(state: &AppState, host: &WorkerHost) -> Option<fleet_db::WorkerSo
     // the staged tarball (different artifact, same number). When it is
     // behind, send desired so auto-update can apply — withholding it is
     // why 5700g stayed behind with auto_update on.
-    if should_withhold_desired(host, &staged, &local_hostname()) {
+    if should_withhold_desired(host, &staged, &local_hostname(), plane_git_sha()) {
         return None;
     }
     Some(staged)
@@ -214,7 +236,12 @@ fn should_withhold_desired(
     host: &WorkerHost,
     staged: &fleet_db::WorkerSoftwareManifest,
     local: &str,
+    plane: Option<&str>,
 ) -> bool {
+    // Already running this process's bake: staged tarball is often older.
+    if host_reports_plane_bake(host, plane) {
+        return true;
+    }
     host_is_this_machine(host, local)
         && host_on_manifest_versions(host.software_bins.as_ref(), staged)
 }
@@ -256,8 +283,8 @@ fn staged_pkg_version(staged: &fleet_db::WorkerSoftwareManifest, stem: &str) -> 
         .map(|s| s.to_string())
 }
 
-fn host_reports_plane_bake(host: &WorkerHost) -> bool {
-    sha_matches_plane(host.software_git_sha.as_deref(), plane_git_sha())
+fn host_reports_plane_bake(host: &WorkerHost, plane: Option<&str>) -> bool {
+    sha_matches_plane(host.software_git_sha.as_deref(), plane)
 }
 
 /// True when the host already runs this process's bake. Those boxes are
@@ -273,28 +300,74 @@ fn sha_matches_plane(got: Option<&str>, plane: Option<&str>) -> bool {
 }
 
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+    local_machine_names()
+        .into_iter()
+        .next()
         .unwrap_or_default()
 }
 
-fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
-    if !local.is_empty()
-        && host
-            .hostname
-            .as_deref()
-            .is_some_and(|h| h.eq_ignore_ascii_case(local))
-    {
+/// HOSTNAME, `/etc/hostname`, `uname -n`, `hostname` — same needles the
+/// tick picker uses so a FQDN vs short name still lists this box.
+fn local_machine_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let s = raw.trim();
+        if s.is_empty() {
+            return;
+        }
+        if !out.iter().any(|n| n.eq_ignore_ascii_case(s)) {
+            out.push(s.to_string());
+        }
+    };
+    if let Ok(s) = std::env::var("HOSTNAME") {
+        push(&mut out, &s);
+    }
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        push(&mut out, &s);
+    }
+    if let Ok(outp) = std::process::Command::new("uname").arg("-n").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    if let Ok(outp) = std::process::Command::new("hostname").output() {
+        if outp.status.success() {
+            push(&mut out, &String::from_utf8_lossy(&outp.stdout));
+        }
+    }
+    out
+}
+
+fn hostnames_match(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
         return true;
     }
+    let al = a.split('.').next().unwrap_or(a);
+    let bl = b.split('.').next().unwrap_or(b);
+    !al.is_empty() && al.eq_ignore_ascii_case(bl)
+}
+
+fn host_is_this_machine(host: &WorkerHost, local: &str) -> bool {
+    let mut names = local_machine_names();
+    if !local.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(local)) {
+        names.push(local.to_string());
+    }
+    if let Some(hn) = host
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if names.iter().any(|n| hostnames_match(hn, n)) {
+            return true;
+        }
+    }
+    host_advertises_local_ip(host)
+}
+
+/// Unscoped list/assign/lease: advertised LAN IP ∩ this plane.
+/// Hostname alone is impersonable.
+fn host_advertises_local_ip(host: &WorkerHost) -> bool {
     let mut advertised = host
         .hardware
         .as_ref()
@@ -319,24 +392,61 @@ fn local_nonloopback_ips() -> Vec<String> {
     out
 }
 
-fn origin_is_loopback(headers: &HeaderMap) -> bool {
+pub(crate) fn origin_is_loopback(headers: &HeaderMap) -> bool {
     for key in [header::ORIGIN, header::REFERER] {
         let Some(raw) = headers.get(key).and_then(|h| h.to_str().ok()) else {
             continue;
         };
-        let v = raw.to_ascii_lowercase();
-        if v.contains("localhost") || v.contains("127.0.0.1") || v.contains("[::1]") {
+        if host_is_loopback_origin(raw) {
             return true;
         }
     }
     false
 }
 
+/// Host of Origin/Referer only — not a substring in the query or a
+/// `localhost.evil` label.
+fn host_is_loopback_origin(raw: &str) -> bool {
+    // http::Uri::host() keeps brackets on IPv6 literals (`[::1]`).
+    if let Ok(uri) = raw.parse::<axum::http::Uri>() {
+        if let Some(host) = uri.host() {
+            let host = host.trim_matches(['[', ']']);
+            // Host only — a substring match would treat localhost.evil / ?next=localhost as loopback.
+            if host.eq_ignore_ascii_case("localhost")
+                || host.eq_ignore_ascii_case("127.0.0.1")
+                || host.eq_ignore_ascii_case("::1")
+                || host.to_ascii_lowercase().starts_with("127.")
+            {
+                return true;
+            }
+        }
+    }
+    let rest = raw
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(raw);
+    let hostport = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.starts_with("127.")
+}
+
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
     host_json_for_viewer(state, host, false)
 }
 
-fn host_json_for_viewer(
+pub(crate) fn host_json_for_viewer(
     state: &AppState,
     host: &WorkerHost,
     viewer_loopback: bool,
@@ -352,6 +462,11 @@ fn host_json_for_viewer(
     // Only the browser on the plane box (localhost UI) is "this machine".
     // Opening the LAN URL from another PC must not tag the plane.
     public.is_this_machine = plane_box && viewer_loopback;
+    if let Some(rt) = public.runtime_reported.as_ref() {
+        let clean = sanitize_runtime_object(rt);
+        public.runtime_reported =
+            Some(clean).filter(|v| v.as_object().is_some_and(|o| !o.is_empty()));
+    }
     public
 }
 
@@ -406,14 +521,14 @@ fn effective_json(host: &WorkerHost) -> Value {
     })
 }
 
-fn create_pair_material() -> (String, String, chrono::DateTime<Utc>) {
+pub(crate) fn create_pair_material() -> (String, String, chrono::DateTime<Utc>) {
     let pair_token = host_repo::generate_pair_token();
     let pair_token_hash = host_repo::hash_token(&pair_token);
     let pair_expires_at = Utc::now() + PAIR_TTL;
     (pair_token, pair_token_hash, pair_expires_at)
 }
 
-fn created_payload(
+pub(crate) fn created_payload(
     state: &AppState,
     host: &WorkerHost,
     pair_token: &str,
@@ -486,11 +601,12 @@ fn validate_runtime_path(key: &str, raw: &str) -> AppResult<String> {
     Ok(s.to_string())
 }
 
-fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+/// Keep only allowlisted runtime keys. Drop secrets, unknown keys, and
+/// path values that contain shell metacharacters. Used for both desired
+/// PATCH (after a 400 on unsafe paths) and reported heartbeat (never 400).
+fn sanitize_runtime_object(v: &Value) -> Value {
     let Some(obj) = v.as_object() else {
-        return Err(AppError::bad_request(
-            "runtime_settings must be an object".to_string(),
-        ));
+        return json!({});
     };
     let mut out = serde_json::Map::new();
     for (k, val) in obj {
@@ -521,12 +637,38 @@ fn validate_runtime_settings(v: Value) -> AppResult<Value> {
                 }
             }
             other => {
-                let s = val.as_str().unwrap_or("");
-                out.insert(other.to_string(), json!(validate_runtime_path(other, s)?));
+                if let Some(s) = val.as_str() {
+                    if let Ok(clean) = validate_runtime_path(other, s) {
+                        out.insert(other.to_string(), json!(clean));
+                    }
+                }
             }
         }
     }
-    Ok(Value::Object(out))
+    Value::Object(out)
+}
+
+fn validate_runtime_settings(v: Value) -> AppResult<Value> {
+    let Some(obj) = v.as_object() else {
+        return Err(AppError::bad_request(
+            "runtime_settings must be an object".to_string(),
+        ));
+    };
+    for (k, val) in obj {
+        if !RUNTIME_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        match k.as_str() {
+            "run_host" | "run_container" | "allow_privileged" | "k3d_agents"
+            | "container_backend" | "egress_mode" => {}
+            other => {
+                if let Some(s) = val.as_str() {
+                    let _ = validate_runtime_path(other, s)?;
+                }
+            }
+        }
+    }
+    Ok(sanitize_runtime_object(&v))
 }
 
 #[derive(Debug, Deserialize)]
@@ -539,6 +681,15 @@ pub struct CreateWorkerHostBody {
     pub allow_container: Option<bool>,
     #[serde(default)]
     pub max_concurrent: Option<i32>,
+    /// Rejected on create. Cloud / Partners are not worker_hosts rows.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Rejected on create. Isolation is a PATCH of a paired native box.
+    #[serde(default)]
+    pub isolation: Option<String>,
+    /// `owner_only` | `allowlist` | `workspace`. Capped by workspace default.
+    #[serde(default)]
+    pub send_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -571,6 +722,12 @@ pub struct PatchWorkerHostBody {
     pub install_model: Option<InstallModelBody>,
     #[serde(default)]
     pub runtime_settings: Option<Value>,
+    #[serde(default)]
+    pub send_policy: Option<String>,
+    #[serde(default)]
+    pub send_allowlist: Option<Vec<Uuid>>,
+    #[serde(default)]
+    pub run_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -680,17 +837,46 @@ async fn http_create(
     Json(body): Json<CreateWorkerHostBody>,
 ) -> AppResult<Json<Value>> {
     let user = require_owner(&state, &jar, workspace_id).await?;
+    if body
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request(
+            "kind is not a create field (self-hosted pair only)",
+        ));
+    }
+    if body
+        .isolation
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::bad_request("isolation must be native"));
+    }
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
+    // Name is optional. Empty pending rows take the device hostname on pair.
     let name = body
         .name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
+    if name.len() > 255 {
+        return Err(AppError::bad_request("name is too long"));
+    }
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, name, Some(user.id));
+    let ceiling = workspace_repo::default_send_policy(&state.db, workspace_id).await?;
+    let wanted = body
+        .send_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ceiling.as_str());
+    new.send_policy = resolve_send_policy(wanted, &ceiling)?.to_string();
     if let Some(v) = body.allow_host {
         new.allow_host = v;
     }
@@ -720,10 +906,17 @@ async fn http_list(
 ) -> AppResult<Json<Value>> {
     let _ = require_member(&state, &jar, workspace_id).await?;
     let viewer_loopback = origin_is_loopback(&headers);
-    let rows = host_repo::list_for_workspace(&state.db, workspace_id).await?;
-    // Paired rows in this workspace only. Do not merge other workspaces' cluster hosts.
+    // Home-workspace rows plus this-machine PCs (the CP laptop). Cluster
+    // hosts from other workspaces stay off this list and off list_assignable.
+    let names = local_machine_names();
+    let rows = host_repo::list_visible_for_workspace(&state.db, workspace_id, &names).await?;
     let hosts: Vec<_> = rows
         .iter()
+        .filter(|h| {
+            h.workspace_id == workspace_id
+                || h.is_cluster_host()
+                || host_advertises_local_ip(h)
+        })
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
@@ -756,12 +949,30 @@ pub(crate) async fn load_visible_host(
         return Ok(host);
     }
     match host_repo::get(&state.db, host_id).await? {
-        Some(host) if host.labels.iter().any(|l| l == "cluster") => Ok(host),
-        Some(host) => Err(AppError::not_found(format!(
-            "worker belongs to another workspace ({})",
-            host.workspace_id
-        ))),
+        Some(host) if host.is_cluster_host() => Ok(host),
+        Some(host) if host_advertises_local_ip(&host) => Ok(host),
+        // Do not name the other workspace — that is a tenant leak.
+        Some(_) | None => Err(AppError::not_found("worker host not found")),
+    }
+}
+
+/// Mutate only from the home workspace. Cluster hosts are visible elsewhere;
+/// a regular host in another workspace looks like it does not exist.
+async fn require_mutable_host(
+    state: &AppState,
+    workspace_id: Uuid,
+    host_id: Uuid,
+) -> AppResult<WorkerHost> {
+    match host_repo::get(&state.db, host_id).await? {
         None => Err(AppError::not_found("worker host not found")),
+        Some(h) if h.workspace_id != workspace_id => {
+            if h.is_cluster_host() {
+                Err(AppError::forbidden("home workspace"))
+            } else {
+                Err(AppError::not_found("worker host not found"))
+            }
+        }
+        Some(h) => Ok(h),
     }
 }
 
@@ -782,7 +993,7 @@ async fn http_patch(
     Json(body): Json<PatchWorkerHostBody>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     if let Some(n) = body.max_concurrent {
         validate_max_concurrent(n)?;
     }
@@ -793,11 +1004,26 @@ async fn http_patch(
         None => None,
         Some(raw) => Some(validate_isolation(raw)?.to_string()),
     };
+    let name = match body.name {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::bad_request("name is required"));
+            }
+            if trimmed.len() > 255 {
+                return Err(AppError::bad_request("name is too long"));
+            }
+            Some(trimmed.to_string())
+        }
+    };
+    let labels = body.labels.map(|ls| {
+        ls.into_iter()
+            .filter(|l| !fleet_db::label_is_cluster(l))
+            .collect()
+    });
     let patch = HostCpSettings {
-        name: body
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+        name,
         enabled: body.enabled,
         paused: body.paused,
         drain: body.drain,
@@ -806,7 +1032,7 @@ async fn http_patch(
         allow_container: body.allow_container,
         max_concurrent: body.max_concurrent,
         max_job_timeout_s: body.max_job_timeout_s,
-        labels: body.labels,
+        labels,
         auto_update: body.auto_update,
         request_update: body.request_update,
         runtime_settings: match body.runtime_settings {
@@ -841,7 +1067,41 @@ async fn http_patch(
             None => None,
         },
     };
-    let host = host_repo::patch_cp_settings(&state.db, host_id, &patch).await?;
+    let mut host =
+        host_repo::patch_cp_settings_in_workspace(&state.db, workspace_id, host_id, &patch)
+            .await?;
+    if let Some(raw) = body.run_mode.as_deref() {
+        if host.current_jobs > 0 {
+            return Err(AppError::conflict("run_mode cannot change while jobs are running"));
+        }
+        let mode = fleet_db::parse_worker_host_run_mode(raw)
+            .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?;
+        host_repo::set_run_mode(&state.db, host_id, mode).await?;
+    }
+    if let Some(raw) = body.send_policy.as_deref() {
+        let ceiling = workspace_repo::default_send_policy(&state.db, workspace_id).await?;
+        let policy = resolve_send_policy(raw, &ceiling)?;
+        host = host_repo::set_send_policy(&state.db, host_id, policy).await?;
+    }
+    if let Some(ids) = body.send_allowlist.as_ref() {
+        if host.send_policy != fleet_db::WORKER_HOST_SEND_ALLOWLIST {
+            return Err(AppError::bad_request(
+                "send_allowlist requires send_policy=allowlist",
+            ));
+        }
+        for uid in ids {
+            if !workspace_repo::is_member(&state.db, workspace_id, *uid).await? {
+                return Err(AppError::bad_request(
+                    "allowlisted user must be a workspace member",
+                ));
+            }
+        }
+        let user = require_user(&auth_state(&state), &jar).await?;
+        host_repo::replace_send_allowlist(&state.db, host_id, ids, user.id).await?;
+        host = host_repo::get(&state.db, host_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("worker host not found"))?;
+    }
     Ok(Json(host_json(&state, &host)))
 }
 
@@ -851,20 +1111,8 @@ async fn http_delete(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<WorkerHostPublic>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    match load_in_workspace(&state, workspace_id, host_id).await {
-        Ok(_) => {}
-        Err(e) => {
-            // Already gone from this workspace.
-            if let Ok(Some(existing)) = host_repo::get(&state.db, host_id).await {
-                return Err(AppError::not_found(format!(
-                    "worker belongs to another workspace ({})",
-                    existing.workspace_id
-                )));
-            }
-            return Err(e);
-        }
-    }
-    let host = host_repo::revoke(&state.db, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
+    let host = host_repo::revoke_in_workspace(&state.db, workspace_id, host_id).await?;
     Ok(Json(host_json(&state, &host)))
 }
 
@@ -874,7 +1122,7 @@ async fn http_new_pair_token(
     Path((workspace_id, host_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<Value>> {
     let _ = require_owner(&state, &jar, workspace_id).await?;
-    let _ = load_in_workspace(&state, workspace_id, host_id).await?;
+    let _ = require_mutable_host(&state, workspace_id, host_id).await?;
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     let host = host_repo::replace_pair_token(&state.db, host_id, &pair_token_hash, pair_expires_at)
         .await?;
@@ -992,6 +1240,7 @@ async fn http_bootstrap(
     new.allow_host = body.advertised_host;
     new.allow_container = body.advertised_container;
     new.labels = vec!["cluster".into()];
+    new.run_mode = fleet_db::WORKER_HOST_RUN_IN_CONTAINER.to_string();
     let (pair_token, pair_token_hash, pair_expires_at) = create_pair_material();
     host_repo::create_pending(&state.db, &new, &pair_token_hash, pair_expires_at).await?;
     let PairedWorkerHost {
@@ -1093,7 +1342,8 @@ async fn http_heartbeat(
         host
     };
     if let Some(rt) = body.runtime.clone() {
-        let _ = host_repo::set_runtime_reported(&state.db, host.id, rt).await;
+        let _ =
+            host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt)).await;
     }
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
@@ -1106,12 +1356,20 @@ async fn http_heartbeat(
 }
 
 fn host_accepts_leases(host: &WorkerHost) -> bool {
-    host.enabled
-        && !host.paused
-        && !host.drain
-        && host.is_native_isolation()
-        && host.status == fleet_db::WORKER_HOST_STATUS_ONLINE
-        && (host.effective_host() || host.effective_container())
+    if !host.enabled
+        || host.paused
+        || host.drain
+        || !host.is_native_isolation()
+        || host.status != fleet_db::WORKER_HOST_STATUS_ONLINE
+        || host.software_updating
+        || host_repo::at_job_cap(host)
+    {
+        return false;
+    }
+    match host.run_mode.as_str() {
+        fleet_db::WORKER_HOST_RUN_IN_CONTAINER => host.effective_container(),
+        _ => host.effective_host(),
+    }
 }
 
 async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -1119,7 +1377,11 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     if !host_accepts_leases(&host) {
         return Ok(Json(json!({ "claim": null })));
     }
-    let claim = if host.is_cluster_host() {
+    // Lease poll is the reclaim path. A sweeper-only helper would never run
+    // in this process; expired rows must return to ready before this claim.
+    let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
+    let claim = if host.is_cluster_host() || host_advertises_local_ip(&host) {
+        // Cluster and the CP laptop take jobs from any workspace.
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
     } else {
@@ -1252,16 +1514,110 @@ async fn http_complete(
 
 #[cfg(test)]
 mod plane_bake_tests {
-    use super::{host_on_manifest_versions, sha_matches_plane, should_withhold_desired};
+    use super::{
+        host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    fn headers(key: axum::http::HeaderName, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(key, HeaderValue::from_str(value).expect("header value"));
+        h
+    }
+
+    #[test]
+    fn origin_is_loopback_parses_host_not_substring() {
+        for origin in [
+            "http://localhost:3030",
+            "http://127.0.0.1:3030",
+            "http://[::1]:3030",
+        ] {
+            assert!(
+                origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "loopback Origin {origin}"
+            );
+        }
+        for origin in [
+            "http://localhost.evil.example.test",
+            "http://evil-127.0.0.1.example.test",
+            "http://192.168.1.50:3030",
+        ] {
+            assert!(
+                !origin_is_loopback(&headers(header::ORIGIN, origin)),
+                "non-loopback Origin {origin}"
+            );
+        }
+        assert!(
+            !origin_is_loopback(&headers(
+                header::REFERER,
+                "http://192.168.1.50:3030/?next=http://localhost:3030"
+            )),
+            "Referer query localhost must not count as loopback"
+        );
+        assert!(
+            origin_is_loopback(&headers(header::REFERER, "http://[::1]:3030")),
+            "Referer [::1] is loopback"
+        );
+        assert!(
+            !origin_is_loopback(&HeaderMap::new()),
+            "no Origin/Referer is not loopback"
+        );
+    }
+
+    #[test]
+    fn origin_host_not_substring() {
+        assert!(super::host_is_loopback_origin("http://localhost:3030"));
+        assert!(super::host_is_loopback_origin("http://127.0.0.1:3030"));
+        assert!(super::host_is_loopback_origin("http://[::1]:3030"));
+        assert!(!super::host_is_loopback_origin("http://localhost.evil.example.test"));
+        assert!(!super::host_is_loopback_origin(
+            "http://192.168.1.50:3030/?next=http://localhost:3030"
+        ));
+    }
+
     #[test]
     fn matching_sha_is_plane_bake() {
-        assert!(sha_matches_plane(Some("abc123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("ABC123"), Some("abc123")));
-        assert!(sha_matches_plane(Some("  abc123  "), Some("abc123")));
+        for (got, plane, case) in [
+            (Some("abc123"), Some("abc123"), "exact"),
+            (Some("ABC123"), Some("abc123"), "case-insensitive"),
+            (Some("  abc123  "), Some("abc123"), "trimmed"),
+        ] {
+            assert!(
+                sha_matches_plane(got, plane),
+                "{case} reported sha is this process bake: got={got:?} plane={plane:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sha_matches_plane_rejects_dirty_tree_id_suffix() {
+        // scripts/tree-id.sh: clean is 40 lowercase hex; dirty is HEAD-<12hex>.
+        let clean = "0123456789abcdef0123456789abcdef01234567";
+        let dirty = "0123456789abcdef0123456789abcdef01234567-aaaaaaaaaaaa";
+        assert!(
+            !sha_matches_plane(Some(dirty), Some(clean)),
+            "dirty host bake {dirty} is not the clean plane bake {clean}"
+        );
+    }
+
+    #[test]
+    fn should_withhold_desired_when_reported_sha_matches_plane_ignoring_case_and_trim() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some(" ABC123 ".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote host behind package versions still withholds when software_git_sha matches plane after trim+case"
+        );
     }
 
     #[test]
@@ -1310,6 +1666,7 @@ mod plane_bake_tests {
             paused: false,
             drain: false,
             isolation: "native".into(),
+            runner_kind: fleet_db::RUNNER_KIND_SELF_HOSTED.into(),
             allow_host: true,
             allow_container: false,
             max_concurrent: 2,
@@ -1340,6 +1697,8 @@ mod plane_bake_tests {
             runtime_settings: json!({}),
             runtime_reported: json!({}),
             created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
             created_at: now,
             paired_at: Some(now),
             updated_at: now,
@@ -1357,7 +1716,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&host, &staged, "viny-5700g"),
+            !should_withhold_desired(&host, &staged, "viny-5700g", None),
             "behind plane box must get desired so auto-update can apply"
         );
         assert!(!host_on_manifest_versions(
@@ -1376,7 +1735,7 @@ mod plane_bake_tests {
                 "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
             })),
         );
-        assert!(should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(should_withhold_desired(&host, &staged, "viny-5700g", None));
         let remote = plane_host(
             "x1",
             Some(json!({
@@ -1385,7 +1744,7 @@ mod plane_bake_tests {
             })),
         );
         assert!(
-            !should_withhold_desired(&remote, &staged, "viny-5700g"),
+            !should_withhold_desired(&remote, &staged, "viny-5700g", None),
             "remote hosts still receive desired"
         );
     }
@@ -1394,6 +1753,67 @@ mod plane_bake_tests {
     fn this_machine_without_report_must_receive_desired() {
         let staged = staged("0.0.2", "0.0.2");
         let host = plane_host("viny-5700g", None);
-        assert!(!should_withhold_desired(&host, &staged, "viny-5700g"));
+        assert!(!should_withhold_desired(&host, &staged, "viny-5700g", None));
+    }
+
+    #[test]
+    fn host_on_this_process_bake_withholds_even_when_remote() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host("x1", None);
+        host.software_git_sha = Some("abc123".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "a host already on this process bake must not get an older staged tarball"
+        );
+    }
+
+    #[test]
+    fn remote_other_bake_sha_still_receives_desired() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "x1",
+            Some(json!({
+                "fleet-host": {"sha256": "cargo", "version": "0.0.2"},
+                "fleet-driver": {"sha256": "cargo-d", "version": "0.0.2"}
+            })),
+        );
+        host.software_git_sha = Some("old-dist".into());
+        assert!(
+            !should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "remote on a different bake still receives desired even when package versions match"
+        );
+    }
+
+    #[test]
+    fn this_machine_behind_but_on_plane_bake_still_withholds() {
+        let staged = staged("0.0.2", "0.0.2");
+        let mut host = plane_host(
+            "viny-5700g",
+            Some(json!({
+                "fleet-host": {"sha256": null, "version": "0.0.1"},
+                "fleet-driver": {"sha256": "abc", "version": "0.0.1"}
+            })),
+        );
+        host.software_git_sha = Some("abc123".into());
+        assert!(
+            should_withhold_desired(&host, &staged, "viny-5700g", Some("abc123")),
+            "plane bake withholds even when this-machine package versions are behind"
+        );
+    }
+
+    #[test]
+    fn this_machine_matches_fqdn_vs_short_hostname() {
+        // Do not use this box's real hostname — local_machine_names()
+        // would make the negative case true.
+        let host = plane_host("unique-box-xyz.lan", None);
+        assert!(super::host_is_this_machine(&host, "unique-box-xyz"));
+        assert!(super::host_is_this_machine(&host, "UNIQUE-BOX-XYZ"));
+        let short = plane_host("unique-box-xyz", None);
+        assert!(super::host_is_this_machine(&short, "unique-box-xyz.lan"));
+        assert!(!super::host_is_this_machine(&short, "other-box"));
+        assert!(
+            !super::host_advertises_local_ip(&short),
+            "hostname-only must not unscoped-share"
+        );
     }
 }

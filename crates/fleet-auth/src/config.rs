@@ -13,6 +13,8 @@ pub struct AuthConfig {
     pub cookie_samesite: cookie::SameSite,
     /// When set, POST /api/auth/signup requires this shared token.
     pub signup_token: Option<String>,
+    /// Normalized emails that are always granted `users.instance_admin` on auth.
+    pub instance_admin_emails: Vec<String>,
 }
 
 impl AuthConfig {
@@ -62,8 +64,58 @@ impl AuthConfig {
             cookie_secure,
             cookie_samesite,
             signup_token,
+            instance_admin_emails: instance_admin_emails_from_env(),
         })
     }
+
+    pub fn email_is_env_instance_admin(&self, email_normalized: &str) -> bool {
+        self.instance_admin_emails
+            .iter()
+            .any(|e| e == email_normalized)
+    }
+}
+
+/// A public (non-loopback) API / worker / UI base requires `SIGNUP_TOKEN`.
+/// Local `fleet-dev` (`localhost`, `127/8`, `::1`) may keep open signup.
+pub fn public_url_requires_signup_token(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    !agent_fleet_contracts::url_is_loopback(url)
+}
+
+/// Fail closed when any public base is reachable from the internet and
+/// signup is unauthenticated. Empty token + loopback URLs is local dev.
+pub fn validate_signup_policy(
+    signup_token: Option<&str>,
+    public_bases: &[&str],
+) -> Result<(), String> {
+    if signup_token.map(str::trim).is_some_and(|s| !s.is_empty()) {
+        return Ok(());
+    }
+    for url in public_bases {
+        if public_url_requires_signup_token(url) {
+            return Err(format!(
+                "SIGNUP_TOKEN is required when `{url}` is not loopback \
+                 (open signup on a public URL)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Comma-separated emails. Trimmed, lowercased, must contain `@`.
+pub fn instance_admin_emails_from_env() -> Vec<String> {
+    parse_instance_admin_emails(env::var("INSTANCE_ADMIN_EMAILS").ok().as_deref())
+}
+
+pub fn parse_instance_admin_emails(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && s.contains('@'))
+        .collect()
 }
 
 #[cfg(test)]
@@ -123,21 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_config_constructs_in_struct() {
-        let cfg = AuthConfig {
-            jwt_secret: "in-struct-secret-at-least-32-chars!!!!".into(),
-            access_ttl: Duration::from_secs(60),
-            refresh_ttl: Duration::from_secs(3600),
-            cookie_secure: false,
-            cookie_samesite: cookie::SameSite::Lax,
-            signup_token: None,
-        };
-        assert!(cfg.jwt_secret.len() >= 32);
-        assert!(!cfg.cookie_secure);
-        assert!(cfg.signup_token.is_none());
-    }
-
-    #[test]
     fn from_env_reads_signup_token() {
         let _guard = env_lock().lock().expect("env lock");
         let previous = env::var("SIGNUP_TOKEN").ok();
@@ -150,5 +187,50 @@ mod tests {
             }
         }
         assert_eq!(cfg.signup_token.as_deref(), Some("invite-abc"));
+    }
+
+    #[test]
+    fn public_url_requires_signup_token_only_for_non_loopback() {
+        assert!(!public_url_requires_signup_token(""));
+        assert!(!public_url_requires_signup_token("   "));
+        assert!(!public_url_requires_signup_token("http://127.0.0.1:8080"));
+        assert!(!public_url_requires_signup_token("http://localhost:3030"));
+        assert!(!public_url_requires_signup_token("http://[::1]:8080"));
+        assert!(public_url_requires_signup_token("https://fleet.example.test"));
+        assert!(public_url_requires_signup_token("http://10.0.0.8:8080"));
+    }
+
+    #[test]
+    fn validate_signup_policy_allows_loopback_without_token() {
+        assert!(validate_signup_policy(
+            None,
+            &["http://127.0.0.1:8080", "http://localhost:3030"]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_signup_policy_requires_token_on_public_base() {
+        let err = validate_signup_policy(None, &["https://api.example.test"])
+            .expect_err("public URL without token");
+        assert!(
+            err.contains("SIGNUP_TOKEN") && err.contains("api.example.test"),
+            "{err}"
+        );
+        assert!(validate_signup_policy(
+            Some("invite-xyz"),
+            &["https://api.example.test"]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_instance_admin_emails_normalizes() {
+        assert_eq!(
+            parse_instance_admin_emails(Some("  Ada@Example.TEST ,bob@x.test,,")),
+            vec!["ada@example.test".to_string(), "bob@x.test".to_string()]
+        );
+        assert!(parse_instance_admin_emails(Some("")).is_empty());
+        assert!(parse_instance_admin_emails(Some("not-an-email")).is_empty());
     }
 }

@@ -55,6 +55,7 @@ SCENE_ORDER = (
     "agents",
     "integrations",
     "settings",
+    "admin",
     "runners",
     "cloud",
     "partners",

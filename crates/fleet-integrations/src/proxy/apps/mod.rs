@@ -117,54 +117,122 @@ mod tests {
     #[test]
     fn supported_providers_has_unique_ids() {
         let ids = supported_providers();
-        assert_eq!(ids.len(), 14);
-        let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), 14);
-        assert!(ids.contains(&"gitlab"));
-        assert!(ids.contains(&"trello"));
-        assert!(ids.contains(&"asana"));
-        assert!(ids.contains(&"bitbucket"));
-        assert!(ids.contains(&"confluence"));
-    }
-
-    #[test]
-    fn bitbucket_and_confluence_ops_registered() {
-        assert!(operations_for("bitbucket").contains(&"create_pr"));
-        assert!(operations_for("confluence").contains(&"create_page"));
-    }
-
-    #[test]
-    fn github_operations_include_commit_files_and_create_pr() {
-        let ops = operations_for("github");
-        assert!(ops.contains(&"commit_files"));
-        assert!(ops.contains(&"create_pr"));
-    }
-
-    #[test]
-    fn slack_and_notion_have_test_trio_ops() {
-        let slack = operations_for("slack");
-        assert!(slack.contains(&"list_channels"));
-        assert!(slack.contains(&"post_message"));
-        assert!(slack.contains(&"get_thread"));
-        let notion = operations_for("notion");
-        assert!(notion.contains(&"search"));
-        assert!(notion.contains(&"get_block_children"));
-        assert!(notion.contains(&"create_page"));
-        assert!(notion.contains(&"append_blocks"));
-    }
-
-    #[test]
-    fn unknown_provider_has_no_operations() {
-        assert!(operations_for("unknown").is_empty());
-    }
-
-    #[test]
-    fn operations_catalog_lists_every_provider() {
-        let text = operations_catalog_text();
-        for p in supported_providers() {
-            assert!(text.contains(&format!("{p}:")), "missing {p} in {text}");
+        let mut seen = HashSet::new();
+        for &id in ids {
+            assert!(
+                seen.insert(id),
+                "duplicate provider id `{id}` in supported_providers: {ids:?}"
+            );
         }
-        assert!(text.contains("post_message"));
-        assert!(text.contains("commit_files"));
+    }
+
+    #[test]
+    fn supported_providers_is_the_published_allowlist() {
+        assert_eq!(
+            supported_providers(),
+            &[
+                "github",
+                "gitlab",
+                "jira",
+                "linear",
+                "slack",
+                "figma",
+                "notion",
+                "google_drive",
+                "teams",
+                "discord",
+                "trello",
+                "asana",
+                "bitbucket",
+                "confluence",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_supported_provider_has_nonempty_operations_for() {
+        for p in supported_providers() {
+            assert!(
+                !operations_for(p).is_empty(),
+                "supported provider `{p}` must have a non-empty operations_for arm"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_unknown_provider_is_rejected_before_db() {
+        let pool = fleet_db::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/none")
+            .expect("lazy pool");
+        pool.close().await;
+        let key = crate::CredentialsKey::from_secret("dev-test-encryption-key-32chars!!")
+            .expect("test key");
+        let got = crate::proxy::invoke(
+            &pool,
+            &key,
+            crate::proxy::ProxyRequest {
+                workspace_id: uuid::Uuid::new_v4(),
+                provider: "notaprovider".into(),
+                operation: "list_repos".into(),
+                args: serde_json::json!({}),
+                caller: crate::proxy::ProxyCaller::System,
+            },
+        )
+        .await;
+        assert!(!got.ok, "unknown provider must be ok:false: {got:?}");
+        assert_eq!(
+            got.error_code.as_deref(),
+            Some("unknown_provider"),
+            "notaprovider must be unknown_provider and must not hit find_connected (closed pool would be internal): {got:?}"
+        );
+    }
+
+    #[test]
+    fn slack_operations_for_is_the_published_five() {
+        assert_eq!(
+            operations_for("slack"),
+            &[
+                "list_channels",
+                "list_users",
+                "post_message",
+                "get_channel_history",
+                "get_thread",
+            ]
+        );
+    }
+
+    #[test]
+    fn notion_operations_for_is_the_published_seven() {
+        assert_eq!(
+            operations_for("notion"),
+            &[
+                "search",
+                "get_page",
+                "get_database",
+                "query_database",
+                "get_block_children",
+                "create_page",
+                "append_blocks",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_unknown_slack_or_notion_op_is_unknown_op() {
+        let http = reqwest::Client::new();
+        let args = serde_json::json!({});
+        let slack = slack::invoke(&http, "token", "not_an_op", &args).await;
+        assert!(!slack.ok, "unknown slack op must be ok:false: {slack:?}");
+        assert_eq!(
+            slack.error_code.as_deref(),
+            Some("unknown_op"),
+            "slack::invoke(\"not_an_op\") must be unknown_op (match arm, not OPERATIONS-only): {slack:?}"
+        );
+        let notion = notion::invoke(&http, "token", "not_an_op", &args).await;
+        assert!(!notion.ok, "unknown notion op must be ok:false: {notion:?}");
+        assert_eq!(
+            notion.error_code.as_deref(),
+            Some("unknown_op"),
+            "notion::invoke(\"not_an_op\") must be unknown_op (match arm, not OPERATIONS-only): {notion:?}"
+        );
     }
 }

@@ -66,6 +66,7 @@ mod tests {
             cookie_secure,
             cookie_samesite: SameSite::Lax,
             signup_token: None,
+            instance_admin_emails: Vec::new(),
         }
     }
 
@@ -79,34 +80,97 @@ mod tests {
 
     #[test]
     fn set_auth_cookies_http_only_path_and_secure_follows_config() {
+        for cookie_secure in [false, true] {
+            let cfg = test_cfg(cookie_secure);
+            let mut headers = HeaderMap::new();
+            set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+            let cookies = set_cookie_values(&headers);
+            assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+
+            for raw in &cookies {
+                let has_secure = raw
+                    .split(';')
+                    .any(|part| part.trim().eq_ignore_ascii_case("secure"));
+                assert_eq!(
+                    has_secure,
+                    cookie_secure,
+                    "Secure must follow cookie_secure={cookie_secure}: {raw}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_auth_cookies_max_age_follows_access_and_refresh_ttl() {
         let cfg = test_cfg(false);
         let mut headers = HeaderMap::new();
         set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
 
         let cookies = set_cookie_values(&headers);
-        assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+        let access = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{ACCESS_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing access cookie: {cookies:?}"));
+        let refresh = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{REFRESH_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing refresh cookie: {cookies:?}"));
 
-        for raw in &cookies {
-            let lower = raw.to_ascii_lowercase();
-            assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
-            assert!(lower.contains("path=/"), "missing Path=/: {raw}");
-            assert!(
-                !lower.contains("secure"),
-                "Secure must follow config=false: {raw}"
-            );
+        assert!(
+            access
+                .split(';')
+                .any(|part| part.trim().eq_ignore_ascii_case("Max-Age=900")),
+            "access Max-Age must be access_ttl 900s: {access}"
+        );
+        assert!(
+            refresh
+                .split(';')
+                .any(|part| part.trim().eq_ignore_ascii_case("Max-Age=604800")),
+            "refresh Max-Age must be refresh_ttl 604800s: {refresh}"
+        );
+    }
+
+    #[test]
+    fn set_auth_cookies_samesite_follows_config() {
+        for samesite in [SameSite::Lax, SameSite::Strict, SameSite::None] {
+            let mut cfg = test_cfg(true);
+            cfg.cookie_samesite = samesite;
+            let mut headers = HeaderMap::new();
+            set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+            let cookies = set_cookie_values(&headers);
+            assert_eq!(cookies.len(), 2, "expected access + refresh cookies");
+
+            let expected = format!("SameSite={samesite}");
+            for raw in &cookies {
+                assert!(
+                    raw.split(';')
+                        .any(|part| part.trim().eq_ignore_ascii_case(&expected)),
+                    "SameSite must follow config={samesite}: {raw}"
+                );
+            }
         }
+    }
 
+    #[test]
+    fn set_auth_cookies_writes_provided_token_values() {
+        let cfg = test_cfg(false);
+        let mut headers = HeaderMap::new();
+        set_auth_cookies(&mut headers, &cfg, "access-token", "refresh-token");
+
+        let cookies = set_cookie_values(&headers);
         assert!(
             cookies
                 .iter()
-                .any(|c| c.starts_with(&format!("{ACCESS_COOKIE}="))),
-            "missing access cookie: {cookies:?}"
+                .any(|c| c.starts_with(&format!("{ACCESS_COOKIE}=access-token"))),
+            "missing {ACCESS_COOKIE}=access-token: {cookies:?}"
         );
         assert!(
             cookies
                 .iter()
-                .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}="))),
-            "missing refresh cookie: {cookies:?}"
+                .any(|c| c.starts_with(&format!("{REFRESH_COOKIE}=refresh-token"))),
+            "missing {REFRESH_COOKIE}=refresh-token: {cookies:?}"
         );
     }
 
@@ -117,16 +181,67 @@ mod tests {
         clear_auth_cookies(&mut headers, &cfg);
 
         let cookies = set_cookie_values(&headers);
-        assert_eq!(cookies.len(), 2, "expected access + refresh clear cookies");
+        let access = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{ACCESS_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing access cookie: {cookies:?}"));
+        let refresh = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{REFRESH_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing refresh cookie: {cookies:?}"));
 
-        for raw in &cookies {
-            let lower = raw.to_ascii_lowercase();
-            assert!(
-                lower.contains("max-age=0"),
-                "clear cookie must set Max-Age=0: {raw}"
+        for (name, raw) in [(ACCESS_COOKIE, access), (REFRESH_COOKIE, refresh)] {
+            let parsed = Cookie::parse(raw.as_str())
+                .unwrap_or_else(|e| panic!("parse {name} Set-Cookie ({e}): {raw}"));
+            assert_eq!(parsed.name(), name);
+            assert_eq!(
+                parsed.value(),
+                "",
+                "clear {name} value must be empty: {raw}"
             );
-            assert!(lower.contains("httponly"), "missing HttpOnly: {raw}");
-            assert!(lower.contains("path=/"), "missing Path=/: {raw}");
+            assert_eq!(
+                parsed.max_age(),
+                Some(TimeDuration::seconds(0)),
+                "clear {name} must set Max-Age=0: {raw}"
+            );
+            assert_eq!(
+                parsed.path(),
+                Some("/"),
+                "clear {name} must set Path=/: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_auth_cookies_secure_and_samesite_match_config() {
+        let mut cfg = test_cfg(true);
+        cfg.cookie_samesite = SameSite::None;
+        let mut headers = HeaderMap::new();
+        clear_auth_cookies(&mut headers, &cfg);
+
+        let cookies = set_cookie_values(&headers);
+        let access = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{ACCESS_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing access cookie: {cookies:?}"));
+        let refresh = cookies
+            .iter()
+            .find(|c| c.starts_with(&format!("{REFRESH_COOKIE}=")))
+            .unwrap_or_else(|| panic!("missing refresh cookie: {cookies:?}"));
+
+        for raw in [access, refresh] {
+            let has_secure = raw
+                .split(';')
+                .any(|part| part.trim().eq_ignore_ascii_case("secure"));
+            assert!(
+                has_secure,
+                "clear must emit Secure when cookie_secure=true: {raw}"
+            );
+            assert!(
+                raw.split(';')
+                    .any(|part| part.trim().eq_ignore_ascii_case("SameSite=None")),
+                "clear must emit SameSite=None when configured: {raw}"
+            );
         }
     }
 }

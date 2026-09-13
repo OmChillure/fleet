@@ -301,51 +301,107 @@ mod tests {
     }
 
     #[test]
-    fn intel_generations() {
+    fn ivy_bridge_is_hd_4000() {
         assert_eq!(
             infer_igpu_from_cpu("Intel Core i5-3320M").as_deref(),
             Some("Intel HD Graphics 4000")
         );
+    }
+
+    #[test]
+    fn coffee_lake_u_is_uhd() {
         assert_eq!(
             infer_igpu_from_cpu("Intel Core i7-8650U").as_deref(),
             Some("Intel UHD Graphics")
         );
+    }
+
+    #[test]
+    fn tiger_lake_g7_is_iris_xe() {
         assert_eq!(
             infer_igpu_from_cpu("11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz").as_deref(),
             Some("Intel Iris Xe")
         );
+    }
+
+    #[test]
+    fn thirteenth_gen_u_is_iris_xe() {
         assert_eq!(
             infer_igpu_from_cpu("Intel(R) Core(TM) i7-1355U").as_deref(),
             Some("Intel Iris Xe")
         );
+    }
+
+    #[test]
+    fn core_ultra_is_arc() {
         assert_eq!(
             infer_igpu_from_cpu("Intel(R) Core(TM) Ultra 7 155H").as_deref(),
-            Some("Intel Arc Graphics")
-        );
-        assert_eq!(
-            infer_igpu_from_cpu("Intel(R) Core(TM) Ultra 7 258V").as_deref(),
             Some("Intel Arc Graphics")
         );
     }
 
     #[test]
-    fn amd_apple_qualcomm() {
+    fn ice_lake_g7_is_iris_plus() {
+        assert_eq!(
+            infer_igpu_from_cpu("Intel Core i7-1065G7").as_deref(),
+            Some("Intel Iris Plus")
+        );
+    }
+
+    #[test]
+    fn desktop_alder_lake_is_uhd_not_iris_xe() {
+        assert_eq!(
+            infer_igpu_from_cpu("Intel Core i7-12700K").as_deref(),
+            Some("Intel UHD Graphics")
+        );
+    }
+
+    #[test]
+    fn pentium_or_celeron_is_uhd() {
+        assert_eq!(
+            infer_igpu_from_cpu("Intel Pentium Gold 7505").as_deref(),
+            Some("Intel UHD Graphics")
+        );
+        assert_eq!(
+            infer_igpu_from_cpu("Intel Celeron N4500").as_deref(),
+            Some("Intel UHD Graphics")
+        );
+    }
+
+    #[test]
+    fn ryzen_5700g_is_vega_not_generic_radeon() {
         assert_eq!(
             infer_igpu_from_cpu("AMD Ryzen 7 5700G with Radeon Graphics").as_deref(),
             Some("AMD Radeon Vega")
         );
+    }
+
+    #[test]
+    fn ryzen_7840u_is_780m() {
         assert_eq!(
             infer_igpu_from_cpu("AMD Ryzen 7 7840U").as_deref(),
             Some("AMD Radeon 780M")
         );
+    }
+
+    #[test]
+    fn ryzen_ai_hx_370_is_890m() {
         assert_eq!(
             infer_igpu_from_cpu("AMD Ryzen AI 9 HX 370").as_deref(),
             Some("AMD Radeon 890M")
         );
+    }
+
+    #[test]
+    fn apple_m3_pro_is_m3_pro_gpu() {
         assert_eq!(
             infer_igpu_from_cpu("Apple M3 Pro").as_deref(),
             Some("Apple M3 Pro GPU")
         );
+    }
+
+    #[test]
+    fn snapdragon_is_adreno() {
         assert_eq!(
             infer_igpu_from_cpu("Snapdragon X Elite").as_deref(),
             Some("Qualcomm Adreno")
@@ -353,20 +409,71 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_unknown_cpu_infers_no_igpu() {
+        assert_eq!(infer_igpu_from_cpu(""), None);
+        assert_eq!(infer_igpu_from_cpu("   "), None);
+        assert_eq!(infer_igpu_from_cpu("Some Random CPU"), None);
+    }
+
+    #[test]
+    fn arm_mali_and_immortalis_from_cpu() {
+        assert_eq!(
+            infer_igpu_from_cpu("Mali-G78").as_deref(),
+            Some("ARM Mali")
+        );
+        assert_eq!(
+            infer_igpu_from_cpu("Immortalis-G720").as_deref(),
+            Some("ARM Immortalis")
+        );
+    }
+
+    #[test]
+    fn discrete_amd_desktop_has_no_igpu() {
+        assert_eq!(infer_igpu_from_cpu("AMD EPYC 7763"), None);
+        assert_eq!(infer_igpu_from_cpu("AMD Ryzen 9 7950X"), None);
+    }
+
+    #[test]
     fn normalize_strips_trademarks() {
-        assert_eq!(
-            normalize_gpu_name("Intel(R) UHD Graphics"),
-            "Intel UHD Graphics"
-        );
-        assert_eq!(
-            normalize_gpu_name("AMD Radeon(TM) Graphics"),
-            "AMD Radeon Graphics"
-        );
-        assert_eq!(
-            normalize_gpu_name("Iris Xe Graphics"),
-            "Intel Iris Xe Graphics"
-        );
-        assert_eq!(normalize_gpu_name("UHD Graphics"), "Intel UHD Graphics");
+        for (raw, want) in [
+            ("Intel(R) UHD Graphics", "Intel UHD Graphics"),
+            ("AMD Radeon(TM) Graphics", "AMD Radeon Graphics"),
+        ] {
+            assert_eq!(normalize_gpu_name(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn normalize_qualifies_intel_family_without_vendor() {
+        for (raw, want) in [
+            ("Iris Xe Graphics", "Intel Iris Xe Graphics"),
+            ("UHD Graphics", "Intel UHD Graphics"),
+        ] {
+            assert_eq!(normalize_gpu_name(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn normalize_trademark_only_is_empty() {
+        for raw in ["(R)", "(TM)", "®"] {
+            assert_eq!(normalize_gpu_name(raw), "", "{raw}");
+        }
+    }
+
+    #[test]
+    fn normalize_strips_corporation_prefix() {
+        for (raw, want) in [
+            ("NVIDIA Corporation GeForce RTX 4090", "GeForce RTX 4090"),
+            ("Intel Corporation UHD Graphics", "Intel UHD Graphics"),
+        ] {
+            assert_eq!(normalize_gpu_name(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn normalize_qualifies_nvidia_rtx_without_vendor() {
+        let raw = "RTX 4090";
+        assert_eq!(normalize_gpu_name(raw), "NVIDIA RTX 4090", "{raw}");
     }
 
     #[test]

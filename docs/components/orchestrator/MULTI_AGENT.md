@@ -39,7 +39,7 @@ Each spawned task:
 1. Resolves `worker_profile` to a [agency-agents](https://github.com/msitarzewski/agency-agents) persona
 2. Writes `PERSONA.md` + `task.md` + live **`TEAM.md`** (who is doing what) into an isolated workdir
 3. Copies finished teammates’ `result.md` into `handoff/<id>.md` and their **files** into `handoff/<id>/` plus `work/` (shared run workspace)
-4. Runs the official CLI **on the paired runner** (`fleet-host` → `fleet-driver`, same family as chat). The control plane does not call a model. Keys stay in that box's `grok login` / Claude / Ollama. Write `result.md` when done.
+4. Runs the official CLI **on the paired runner** (`fleet-host` → `fleet-driver`, same family as chat: Grok / Claude / Ollama). The control plane does not call a model. Team context (`TEAM.md`, `work/`, handoffs) is packed into the `spawn_session` claim. Integrations and team chat go back through `POST /v1/.../workers/{id}/io` (or `./fleet-tool.sh`). Keys stay in that box's `grok login` / Claude / Ollama and never enter the claim payload. Write `result.md` when done.
 5. Writes `result.md` + `stdout.log` so the next specialist can pick up
 6. **Done gate:** process/local/docker tasks are not `done_success` until `result.md` exists and acceptance (`exists:`, `contains:`) passes. Fail → task goes back to `ready` with notes. Stub fixtures skip the file checks.
 

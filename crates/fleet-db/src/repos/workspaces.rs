@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::error::{DbError, DbResult};
 use crate::models::{
     Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole, parse_min_isolation,
+    parse_worker_host_run_mode, parse_worker_host_send_policy,
 };
 use crate::pool::map_query_err;
 
@@ -238,6 +239,93 @@ pub async fn set_min_isolation(
     stored.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
+/// Ceiling for new pairs: `owner_only` | `allowlist` | `workspace`.
+pub async fn default_send_policy(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT default_send_policy
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_default_send_policy(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    policy: &str,
+) -> DbResult<String> {
+    let policy = parse_worker_host_send_policy(policy).ok_or_else(|| {
+        DbError::Conflict("default_send_policy must be owner_only, allowlist, or workspace".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET default_send_policy = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING default_send_policy
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(policy)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn is_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
+    Ok(user_role(pool, workspace_id, user_id).await?.is_some())
+}
+
+pub async fn default_run_mode(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT default_run_mode
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_default_run_mode(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    mode: &str,
+) -> DbResult<String> {
+    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
+        DbError::Conflict("default_run_mode must be on_pc or in_container".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET default_run_mode = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING default_run_mode
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
 /// Record the partners disclaimer ack. First write wins.
 ///
 /// Does not enable lending, borrowing, enqueue, or assignable runners.
@@ -361,6 +449,7 @@ pub async fn set_member_role(
 }
 
 pub async fn remove_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> DbResult<bool> {
+    let mut tx = pool.begin().await.map_err(DbError::from)?;
     let res = sqlx::query(
         r#"
         DELETE FROM workspace_members
@@ -369,9 +458,26 @@ pub async fn remove_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> 
     )
     .bind(workspace_id)
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(map_query_err)?;
+    if res.rows_affected() == 1 {
+        sqlx::query(
+            r#"
+            DELETE FROM worker_host_send_allowlist a
+            USING worker_hosts h
+            WHERE a.host_id = h.id
+              AND h.workspace_id = $1
+              AND a.user_id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_query_err)?;
+    }
+    tx.commit().await.map_err(DbError::from)?;
     Ok(res.rows_affected() == 1)
 }
 

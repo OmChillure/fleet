@@ -1,4 +1,4 @@
-//! Workspace chat — composer with provider + model dropdowns (Grok + Ollama).
+//! Workspace chat — composer with provider + model dropdowns.
 
 use std::sync::Mutex;
 
@@ -14,9 +14,10 @@ use crate::components::toast::show_toast;
 use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
 use dioxus::prelude::*;
 use fleet_runners_view::{
-    ChatProviderCandidate, ChatProviderPick, agent_status_phrase, catalog_provider_display_name,
-    claude_cli_model_aliases, claude_effort_values, display_name, find_model_detail,
-    format_chat_elapsed, is_removed, pick_chat_provider_and_model, pick_effort_value,
+    ChatProviderCandidate, ChatProviderChoice, ChatProviderPick, agent_status_phrase,
+    catalog_provider_display_name, claude_cli_model_aliases, claude_effort_values, display_name,
+    find_model_detail, format_chat_elapsed, is_removed, ollama_empty_model_send_reason,
+    pick_chat_provider_and_model, pick_effort_value, resolve_provider_pick_after_change,
     should_apply_chat_defaults,
 };
 use gloo_timers::future::TimeoutFuture;
@@ -128,7 +129,7 @@ fn write_stored_composer(workspace_id: &str, provider: &str, model: &str) {
     write_stored_model(workspace_id, model);
 }
 
-const CATALOG_PROVIDER_IDS: &[&str] = &["grok", "claude", "openai", "ollama"];
+const CATALOG_PROVIDER_IDS: &[&str] = &["grok", "claude", "openai", "gemini", "ollama"];
 
 fn plane_openai_from_status(status: Option<&ChatStatus>) -> Option<&ChatProviderInfo> {
     status.and_then(|s| s.providers.iter().find(|p| p.id == "openai"))
@@ -154,7 +155,9 @@ fn providers_from_runner(
         .iter()
         .map(|id| {
             if *id == "openai" {
-                return plane_openai.cloned().unwrap_or_else(unavailable_openai);
+                if let Some(plane) = plane_openai.filter(|p| p.available) {
+                    return plane.clone();
+                }
             }
             let reported = host.agents.iter().find(|a| a.id == *id);
             let installed = reported.map(|a| a.installed).unwrap_or(false);
@@ -324,6 +327,8 @@ struct ChatMessage {
     actions: Vec<ChatActionDto>,
     /// Send → reply, milliseconds. Assistant turns only.
     latency_ms: Option<u64>,
+    /// Server timestamp when the turn was stored.
+    created_at: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -404,8 +409,8 @@ fn send_on_existing_session(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() && provider == "ollama" {
-        show_toast().error("Select a model first (`ollama pull …` on the runner).");
+    if let Some(reason) = ollama_empty_model_send_reason(&provider, &model) {
+        show_toast().error(reason);
         return;
     }
     write_stored_runner(&workspace_id, &runner_id);
@@ -426,6 +431,7 @@ fn send_on_existing_session(
         model: None,
         actions: vec![],
         latency_ms: None,
+        created_at: None,
     });
     messages.set(list);
     draft.set(String::new());
@@ -456,6 +462,7 @@ fn send_on_existing_session(
             model: Some(model_for_api.clone()),
             actions: vec![],
             latency_ms: None,
+            created_at: None,
         });
         messages.set(list);
     }
@@ -506,11 +513,14 @@ fn send_on_existing_session(
                     let mut list = messages();
                     if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
                         last.content = res.message.content.clone();
-                        last.model = Some(if res.model.is_empty() {
-                            model_for_api.clone()
-                        } else {
+                        last.model = Some(if !res.model.is_empty() {
                             res.model.clone()
+                        } else if !res.provider.is_empty() {
+                            res.provider.clone()
+                        } else {
+                            model_for_api.clone()
                         });
+
                         if !res.actions.is_empty() {
                             last.actions = res.actions.clone();
                         }
@@ -564,8 +574,8 @@ fn send_message(
     if text.is_empty() || sending() {
         return;
     }
-    if model.trim().is_empty() && provider == "ollama" {
-        show_toast().error("Select a model first (`ollama pull …` on the runner).");
+    if let Some(reason) = ollama_empty_model_send_reason(&provider, &model) {
+        show_toast().error(reason);
         return;
     }
 
@@ -849,13 +859,31 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                         };
                         let actions: Vec<ChatActionDto> =
                             serde_json::from_value(m.actions).unwrap_or_default();
+                        let model = m.model.filter(|s| !s.is_empty()).or_else(|| {
+                            m.provider.filter(|s| !s.is_empty())
+                        });
+                        let id = if m.id.is_empty() {
+                            nid
+                        } else {
+                            let mut h = 0xcbf29ce484222325u64;
+                            for b in m.id.bytes() {
+                                h ^= b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            if h == 0 { nid } else { h }
+                        };
                         list.push(ChatMessage {
-                            id: nid,
+                            id,
                             role,
                             content: m.content,
-                            model: m.model,
+                            model,
                             actions,
                             latency_ms: None,
+                            created_at: if m.created_at.is_empty() {
+                                None
+                            } else {
+                                Some(m.created_at)
+                            },
                         });
                         nid += 1;
                     }
@@ -1184,6 +1212,14 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                         let ws = workspace_id.clone();
                                         move |e| {
                                             let id = e.value();
+                                            let choices: Vec<ChatProviderChoice> = providers
+                                                .iter()
+                                                .map(|p| ChatProviderChoice {
+                                                    id: p.id.clone(),
+                                                    available: p.available,
+                                                    coming_soon: p.coming_soon,
+                                                })
+                                                .collect();
                                             if let Some(p) =
                                                 providers.iter().find(|p| p.id == id && p.coming_soon)
                                             {
@@ -1191,14 +1227,22 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                                                     "{} is coming soon",
                                                     p.name
                                                 ));
-                                                if let Some(live) = providers
-                                                    .iter()
-                                                    .find(|x| x.available && !x.coming_soon)
+                                                if let Some(live_id) =
+                                                    resolve_provider_pick_after_change(&choices, &id)
                                                 {
-                                                    selected_provider.set(live.id.clone());
-                                                    let model = pick_default_model(live);
-                                                    selected_model.set(model.clone());
-                                                    write_stored_composer(&ws, &live.id, &model);
+                                                    if let Some(live) = providers
+                                                        .iter()
+                                                        .find(|x| x.id == live_id)
+                                                    {
+                                                        selected_provider.set(live.id.clone());
+                                                        let model = pick_default_model(live);
+                                                        selected_model.set(model.clone());
+                                                        write_stored_composer(
+                                                            &ws,
+                                                            &live.id,
+                                                            &model,
+                                                        );
+                                                    }
                                                 }
                                                 return;
                                             }
@@ -1406,7 +1450,7 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                     }
                 }
                 p { class: "pointer-events-auto mx-auto mt-1.5 max-w-3xl px-1 text-[10px] leading-4 text-[var(--app-muted)]",
-                    "Grok, Claude, and Private (Ollama) turns run on the selected runner’s official CLI. OpenAI still uses the API key on the control plane."
+                    "Grok, Claude, Gemini, OpenAI (Codex), and Private (Ollama) run on the selected runner’s official CLI. A plane API key is a fallback when no runner CLI is logged in."
                 }
             }
         }
@@ -1495,16 +1539,31 @@ fn MessageBubble(message: ChatMessage, workspace_id: String) -> Element {
                         }
                     }
                 }
-                if message.model.is_some() || message.latency_ms.is_some() {
+                if message.model.is_some()
+                    || message.latency_ms.is_some()
+                    || message.created_at.is_some()
+                {
                     p { class: "m-0 mt-3 text-[11px] text-[var(--app-muted)]",
                         {
-                            match (&message.model, message.latency_ms) {
-                                (Some(model), Some(ms)) => {
+                            let when = message
+                                .created_at
+                                .as_deref()
+                                .map(|s| s.get(..19).unwrap_or(s).replace('T', " "));
+                            match (&message.model, message.latency_ms, when) {
+                                (Some(model), Some(ms), Some(ts)) => {
+                                    format!("{model} · {} · {ts}", format_chat_elapsed(ms))
+                                }
+                                (Some(model), Some(ms), None) => {
                                     format!("{model} · {}", format_chat_elapsed(ms))
                                 }
-                                (Some(model), None) => model.clone(),
-                                (None, Some(ms)) => format_chat_elapsed(ms),
-                                (None, None) => String::new(),
+                                (Some(model), None, Some(ts)) => format!("{model} · {ts}"),
+                                (Some(model), None, None) => model.clone(),
+                                (None, Some(ms), Some(ts)) => {
+                                    format!("{} · {ts}", format_chat_elapsed(ms))
+                                }
+                                (None, Some(ms), None) => format_chat_elapsed(ms),
+                                (None, None, Some(ts)) => ts,
+                                (None, None, None) => String::new(),
                             }
                         }
                     }
@@ -1946,7 +2005,7 @@ fn CodeBlock(lang: String, code: String) -> Element {
                         if copy_text(&code_for_copy) {
                             copied.set(true);
                         } else {
-                            show_toast().error("Copy failed. Select the code and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the code and copy it yourself.");
                         }
                     },
                     if copied() { "Copied" } else { "Copy" }
@@ -2007,5 +2066,18 @@ fn ChatBubbleIcon() -> Element {
             stroke_linejoin: "round",
             path { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" }
         }
+    }
+}
+
+#[cfg(test)]
+mod later_copy_tests {
+    use super::*;
+
+    #[test]
+    fn later_copy_overlay_skips_server_live_status() {
+        assert!(!looks_like_later_copy(
+            "Fleet `r` is live on this screen. Stay here — task status and agent activity show in the live panel. \
+I will not ask you to continue."
+        ));
     }
 }

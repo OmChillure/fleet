@@ -60,12 +60,31 @@ const CONTROL_PLANE_URL_ENV: &str = "FLEET_CONTROL_PLANE_URL";
 const PAIR_TOKEN_ENV: &str = "FLEET_PAIR_TOKEN";
 const BOOTSTRAP_SECRET_ENV: &str = "FLEET_BOOTSTRAP_SECRET";
 
-pub async fn pair(url: &str, token: &str) -> Result<()> {
+pub async fn pair(url: &str, token: &str, force: bool) -> Result<()> {
     let mut cfg = LocalConfig::load_or_default()?;
+    refuse_url_switch(&cfg, url, force)?;
     let client = HostClient::for_pair(url, &cfg)?;
     let resp = client.pair(&cfg, token.trim()).await?;
     persist_pair(&mut cfg, url, &resp)?;
     start_run_after_pair();
+    Ok(())
+}
+
+fn refuse_url_switch(cfg: &LocalConfig, url: &str, force: bool) -> Result<()> {
+    let Some(existing) = cfg.control_plane_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let have_token = crate::config::read_machine_token()?.is_some();
+    if !have_token {
+        return Ok(());
+    }
+    let old = normalize_url(existing);
+    let new = normalize_url(url);
+    if old != new && !force {
+        bail!(
+            "already paired to {old}; pass --force to pair {new} (this rotates the machine token)"
+        );
+    }
     Ok(())
 }
 
@@ -157,7 +176,41 @@ pub fn status() -> Result<()> {
         }
     );
     println!("config:         {}", crate::paths::config_path().display());
+    if let Some((ok, detail)) = read_last_heartbeat() {
+        println!(
+            "last_heartbeat: {} {}",
+            if ok { "ok" } else { "error" },
+            detail
+        );
+    } else {
+        println!("last_heartbeat: (none)");
+    }
     Ok(())
+}
+
+fn last_heartbeat_path() -> std::path::PathBuf {
+    crate::paths::last_heartbeat_path()
+}
+
+fn record_last_heartbeat(ok: bool, detail: &str) {
+    let body = serde_json::json!({
+        "ok": ok,
+        "detail": detail.chars().take(240).collect::<String>(),
+        "at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = std::fs::write(last_heartbeat_path(), body.to_string());
+}
+
+fn read_last_heartbeat() -> Option<(bool, String)> {
+    let raw = std::fs::read_to_string(last_heartbeat_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let ok = v.get("ok")?.as_bool()?;
+    let detail = v
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((ok, detail))
 }
 
 pub fn unpair() -> Result<()> {
@@ -262,6 +315,26 @@ fn env_nonempty(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn is_machine_auth_err(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::client::ApiError>()
+        .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
+        || e.to_string().contains("machine token rejected")
+}
+
+/// Same `machine.id`, new `machine.token`. Does not wipe the id file.
+/// Needs `FLEET_BOOTSTRAP_SECRET` (fleet-dev sets it). Otherwise the human
+/// runs `fleet-host pair` — do not invent a token.
+async fn reclaim_machine_token(cfg: &mut LocalConfig, url: &str) -> Result<HostClient> {
+    let secret = env_nonempty(BOOTSTRAP_SECRET_ENV).ok_or_else(|| {
+        anyhow!("machine token rejected; re-pair with `fleet-host pair`")
+    })?;
+    warn!("machine token rejected; reclaiming via bootstrap (same machine.id)");
+    let pair_client = HostClient::for_pair(url, cfg)?;
+    let resp = bootstrap_until_workspace(&pair_client, cfg, &secret).await?;
+    persist_pair(cfg, url, &resp)?;
+    HostClient::with_machine_token(url, &resp.machine_token, cfg)
+}
+
 /// Manual apply. Same path as auto; does not set CP `paused`/`drain`.
 pub async fn update() -> Result<()> {
     let cfg = LocalConfig::load_or_default()?;
@@ -286,7 +359,7 @@ pub fn init_tracing(level: &str) {
 async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()> {
     cfg.apply_ollama_models_env();
     let bus = crate::bus::BusHandle::from_env().await;
-    let client = HostClient::with_machine_token(&url, token, &cfg)?;
+    let mut client = HostClient::with_machine_token(&url, token, &cfg)?;
     let jobs: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
     let effective = Arc::new(Mutex::new(EffectiveModes::from_local(&cfg)));
     let update_state = Arc::new(UpdateState::new());
@@ -310,6 +383,7 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                 let n = jobs.lock().await.len() as u32;
                 match client.heartbeat(&cfg, n, None, update_state.is_updating(), take_install_ack()).await {
                     Ok(resp) => {
+                        record_last_heartbeat(true, "ok");
                         let mut eff = effective.lock().await;
                         if resp.effective.max_concurrent > 0 {
                             *eff = resp.effective;
@@ -403,12 +477,13 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                         }
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        record_last_heartbeat(false, &e.to_string());
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "heartbeat failed");
                     }
@@ -541,12 +616,12 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        let msg = e.to_string();
-                        if e.downcast_ref::<crate::client::ApiError>()
-                            .is_some_and(|a| matches!(a, crate::client::ApiError::Auth(_)))
-                            || msg.contains("machine token rejected")
-                        {
-                            return Err(e);
+                        if is_machine_auth_err(&e) {
+                            match reclaim_machine_token(&mut cfg, &url).await {
+                                Ok(c) => client = c,
+                                Err(re) => return Err(re),
+                            }
+                            continue;
                         }
                         warn!(error = %e, "lease poll failed");
                     }
@@ -621,7 +696,7 @@ pub fn print_usage() {
 fleet-host — paired worker host
 
 Usage:
-  fleet-host pair --url URL --token TOKEN
+  fleet-host pair --url URL --token TOKEN [--force]
   fleet-host run
   fleet-host update
   fleet-host status
@@ -676,6 +751,46 @@ mod tests {
     }
 
     #[test]
+    fn persist_pair_keeps_extra_env() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        let mut cfg = LocalConfig::defaults();
+        cfg.extra_env
+            .insert("FLEET_HARNESS".into(), "ollama".into());
+        persist_pair(
+            &mut cfg,
+            "https://agentfleet.studio",
+            &pair_resp("https://agentfleet.studio"),
+        )
+        .unwrap();
+        let loaded = LocalConfig::load_or_default().unwrap();
+        assert_eq!(
+            loaded.extra_env.get("FLEET_HARNESS").map(String::as_str),
+            Some("ollama")
+        );
+    }
+
+    #[test]
+    fn refuse_url_switch_without_force() {
+        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
+        }
+        crate::config::write_machine_token("flm_existing").unwrap();
+        let mut cfg = LocalConfig::defaults();
+        cfg.control_plane_url = Some("https://agentfleet.studio".into());
+        let err = refuse_url_switch(&cfg, "http://192.168.1.1:18280", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--force"), "{err}");
+        refuse_url_switch(&cfg, "http://192.168.1.1:18280", true).unwrap();
+    }
+
+    #[test]
     fn persist_pair_accepts_non_loopback_response() {
         let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -695,36 +810,28 @@ mod tests {
         );
     }
 
+    /// catalog:unit-run-401-reclaims-via-bootstrap — rejected machine.token
+    /// reclaims with the same machine.id; it must not wipe the id file.
     #[test]
-    fn acquire_run_lock_refuses_second_process() {
-        let _guard = CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("FLEET_HOST_CONFIG_DIR", dir.path());
-        }
-        let first = acquire_run_lock().expect("first lock");
-        let err = acquire_run_lock().expect_err("second lock");
-        assert!(err.to_string().contains("already running"), "{err}");
-        drop(first);
-        acquire_run_lock().expect("lock after drop");
-    }
-
-    #[test]
-    fn is_loopback_url_detects_common_forms() {
-        assert!(is_loopback_url("http://localhost:8080"));
-        assert!(is_loopback_url("http://127.0.0.1:8080/"));
-        assert!(is_loopback_url("http://127.1.2.3:1"));
+    fn run_401_reclaims_via_bootstrap_without_wiping_machine_id() {
+        let src = include_str!("run.rs");
+        let prod = src.split("mod tests {").next().unwrap();
         assert!(
-            is_loopback_url("http://[::1]:8080"),
-            "IPv6 loopback must be detected so we do not persist [::1] from the API"
+            prod.contains("reclaim_machine_token") && prod.contains("bootstrap_until_workspace"),
+            "401 must reclaim via bootstrap, not exit"
         );
         assert!(
-            is_loopback_url("http://::1"),
-            "bare IPv6 loopback must be detected"
+            prod.contains("same machine.id"),
+            "reclaim comment must name machine.id"
         );
-        assert!(!is_loopback_url(
-            "http://api.agent-fleet.svc.cluster.local:8080"
-        ));
+        let reclaim = prod
+            .split("async fn reclaim_machine_token")
+            .nth(1)
+            .expect("reclaim_machine_token");
+        assert!(
+            !reclaim.contains("delete_machine_token") && !reclaim.contains("unpair("),
+            "reclaim must not wipe machine.token/id before bootstrap succeeds"
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ second install guide and do not pass flags on the command line.
 
 How they are organized and run: `docs/testing.md`.
 Where to put new tests: `docs/testing-standardization.md`.
+Whether a test is good enough to merge: `docs/qa-rulebook.md`.
 
 Before you commit: check whether the install script needs updating (new deps,
 flags, OS/kind/lab behavior) and whether any tests must be added. No
@@ -126,6 +127,33 @@ install, tests, sandbox/lab, or operator scripts, it is not a small tweak
 — open an MR and ask on Slack.
 
 Do not merge unless a human asks you to merge.
+
+All tests must pass before a merge to main. `just test` and
+`just test-integration` must be green on the merge tree. Do not merge
+with a red test, an ignored failure, `|| true` around `cargo test`, or
+a skip that hides a broken path. This GitLab has no runner — the lock
+is local (and the source-scan in `fleet-server` `merge_gate`).
+
+All tests must be relevant. A test locks a live contract, not error-string
+copy, a removed product fiction, or a tautology.
+If a test is not relevant, decide whether the test or the code should change.
+Do not keep a stale assertion to stay green, and do not delete a live
+contract because the code fails it.
+
+The last compile and test pass before you open the MR must run **in the
+ship image**, not only on the host. VPS and Kind build
+`Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`). Host `cargo` /
+`just test` can be green while that image does not compile (OpenSSL,
+glibc, sqlx migration versions, locked bins). That is how a tree that
+cannot ship reached `main`.
+
+```bash
+docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile .
+docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile.ui .
+```
+
+`./scripts/run-every-test.sh --prepare-kind` already does those builds.
+A host-only green is not enough to open the MR.
 
 ## Demo video (agent records it)
 

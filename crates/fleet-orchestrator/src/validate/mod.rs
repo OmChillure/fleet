@@ -191,70 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn ok() {
-        validate_plan(&valid_plan()).unwrap();
-    }
-
-    #[test]
     fn missing_dependency() {
         let mut p = valid_plan();
         p.tasks[1].depends_on = vec!["missing".into()];
         let e = validate_plan(&p).unwrap_err().to_string();
         assert!(e.contains("depends_on"), "{e}");
-    }
-
-    #[test]
-    fn cycle() {
-        let mut p = valid_plan();
-        p.tasks = vec![
-            PlanTask {
-                plan_task_id: "a".into(),
-                title: "A".into(),
-                summary: String::new(),
-                spec_md: String::new(),
-                depends_on: vec!["b".into()],
-                worker_profile: "coding".into(),
-                acceptance: vec![],
-                priority: 0,
-                external_ref: None,
-                timeout_s: None,
-                max_retries: None,
-            },
-            PlanTask {
-                plan_task_id: "b".into(),
-                title: "B".into(),
-                summary: String::new(),
-                spec_md: String::new(),
-                depends_on: vec!["a".into()],
-                worker_profile: "coding".into(),
-                acceptance: vec![],
-                priority: 0,
-                external_ref: None,
-                timeout_s: None,
-                max_retries: None,
-            },
-        ];
-        let e = validate_plan(&p).unwrap_err().to_string().to_lowercase();
-        assert!(e.contains("cycle"), "{e}");
-    }
-
-    #[test]
-    fn self_cycle() {
-        let mut p = valid_plan();
-        p.tasks = vec![PlanTask {
-            plan_task_id: "a".into(),
-            title: "A".into(),
-            summary: String::new(),
-            spec_md: String::new(),
-            depends_on: vec!["a".into()],
-            worker_profile: "coding".into(),
-            acceptance: vec![],
-            priority: 0,
-            external_ref: None,
-            timeout_s: None,
-            max_retries: None,
-        }];
-        assert!(validate_plan(&p).is_err());
     }
 
     #[test]
@@ -284,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn max_tasks() {
+    fn validate_plan_rejects_over_max_tasks() {
         let mut p = valid_plan();
         p.tasks = (0..=MAX_TASKS_PER_PLAN)
             .map(|i| PlanTask {
@@ -301,27 +242,18 @@ mod tests {
                 max_retries: None,
             })
             .collect();
-        assert!(validate_plan(&p).is_err());
+        assert_eq!(p.tasks.len(), 1001);
+        let e = validate_plan(&p).unwrap_err().to_string();
+        assert!(e.contains("1000"), "{e}");
     }
 
     #[test]
-    fn max_spec_md() {
+    fn validate_plan_accepts_exactly_max_tasks() {
         let mut p = valid_plan();
-        p.tasks[0].spec_md = "x".repeat(MAX_SPEC_MD_BYTES + 1);
-        assert!(validate_plan(&p).is_err());
-    }
-
-    #[test]
-    fn max_fan_in() {
-        let mut p = valid_plan();
-        let mut tasks = Vec::new();
-        let mut deps = Vec::new();
-        for i in 0..=MAX_DEPENDENCY_FAN_IN {
-            let id = format!("d{i}");
-            deps.push(id.clone());
-            tasks.push(PlanTask {
-                plan_task_id: id,
-                title: "d".into(),
+        p.tasks = (0..MAX_TASKS_PER_PLAN)
+            .map(|i| PlanTask {
+                plan_task_id: format!("task-{i}"),
+                title: "T".into(),
                 summary: String::new(),
                 spec_md: String::new(),
                 depends_on: vec![],
@@ -331,22 +263,16 @@ mod tests {
                 external_ref: None,
                 timeout_s: None,
                 max_retries: None,
-            });
-        }
-        tasks.push(PlanTask {
-            plan_task_id: "leaf".into(),
-            title: "leaf".into(),
-            summary: String::new(),
-            spec_md: String::new(),
-            depends_on: deps,
-            worker_profile: "coding".into(),
-            acceptance: vec![],
-            priority: 0,
-            external_ref: None,
-            timeout_s: None,
-            max_retries: None,
-        });
-        p.tasks = tasks;
+            })
+            .collect();
+        assert_eq!(p.tasks.len(), 1000);
+        validate_plan(&p).unwrap();
+    }
+
+    #[test]
+    fn max_spec_md() {
+        let mut p = valid_plan();
+        p.tasks[0].spec_md = "x".repeat(MAX_SPEC_MD_BYTES + 1);
         assert!(validate_plan(&p).is_err());
     }
 
@@ -358,17 +284,100 @@ mod tests {
     }
 
     #[test]
-    fn json_roundtrip() {
-        let p = valid_plan();
-        let raw = serde_json::to_vec(&p).unwrap();
-        let back: WorkPlanBody = serde_json::from_slice(&raw).unwrap();
-        validate_plan(&back).unwrap();
-    }
-
-    #[test]
     fn body_size() {
         let mut p = valid_plan();
         p.tasks[0].summary = "y".repeat(MAX_PLAN_BODY_BYTES);
+        assert!(validate_plan(&p).is_err());
+    }
+
+    fn task(id: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            plan_task_id: id.into(),
+            title: id.into(),
+            summary: String::new(),
+            spec_md: String::new(),
+            depends_on: deps.iter().map(|s| (*s).to_string()).collect(),
+            worker_profile: "coding".into(),
+            acceptance: vec![],
+            priority: 0,
+            external_ref: None,
+            timeout_s: None,
+            max_retries: None,
+        }
+    }
+
+    fn plan_with(tasks: Vec<PlanTask>) -> WorkPlanBody {
+        let mut p = valid_plan();
+        p.tasks = tasks;
+        p
+    }
+
+    #[test]
+    fn validate_plan_accepts_diamond_dag() {
+        let p = plan_with(vec![
+            task("a", &[]),
+            task("b", &[]),
+            task("c", &["a", "b"]),
+            task("d", &["a", "b"]),
+        ]);
+        validate_plan(&p).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_rejects_three_cycle() {
+        let p = plan_with(vec![
+            task("a", &["c"]),
+            task("b", &["a"]),
+            task("c", &["b"]),
+        ]);
+        assert!(validate_plan(&p).is_err());
+    }
+
+    #[test]
+    fn validate_plan_rejects_cycle_plus_independent_root() {
+        let p = plan_with(vec![
+            task("a", &["b"]),
+            task("b", &["a"]),
+            task("c", &[]),
+        ]);
+        assert!(validate_plan(&p).is_err());
+    }
+
+    #[test]
+    fn validate_plan_rejects_at_cap_join_with_back_edge() {
+        let n = MAX_DEPENDENCY_FAN_IN;
+        let mut tasks: Vec<PlanTask> = (0..n).map(|i| task(&format!("p{i}"), &[])).collect();
+        let deps: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
+        let dep_refs: Vec<&str> = deps.iter().map(String::as_str).collect();
+        tasks.push(task("join", &dep_refs));
+        tasks[0].depends_on = vec!["join".into()];
+        assert!(validate_plan(&plan_with(tasks)).is_err());
+    }
+
+    #[test]
+    fn validate_plan_accepts_fan_out_33_children() {
+        let mut tasks = vec![task("root", &[])];
+        for i in 0..=MAX_DEPENDENCY_FAN_IN {
+            tasks.push(task(&format!("c{i}"), &["root"]));
+        }
+        validate_plan(&plan_with(tasks)).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_accepts_chain_longer_than_fan_in_cap() {
+        let mut tasks = vec![task("t0", &[])];
+        for i in 1..=40 {
+            let pred = format!("t{}", i - 1);
+            tasks.push(task(&format!("t{i}"), &[pred.as_str()]));
+        }
+        validate_plan(&plan_with(tasks)).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_fan_in_counts_depends_on_len_including_duplicate_ids() {
+        let deps = vec!["p0"; MAX_DEPENDENCY_FAN_IN + 1];
+        let p = plan_with(vec![task("p0", &[]), task("join", &deps)]);
+        assert_eq!(p.tasks[1].depends_on.len(), MAX_DEPENDENCY_FAN_IN + 1);
         assert!(validate_plan(&p).is_err());
     }
 }

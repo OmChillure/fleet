@@ -3,20 +3,22 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
+    accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
     identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    not_taking_reason, provider_install_command, runtime_line, settings_draft_dirty,
+    is_home_workspace, not_taking_reason, provider_install_command, runtime_line,
+    settings_draft_dirty,
     shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
-    status_label, update_now_label, update_requested, widgets_locked, worker_id_label,
+    status_label, trimmed_host_name, update_now_label, update_requested, widgets_locked,
+    worker_id_label, BEHAVIOR_LABEL,
 };
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTag,
-    LocalModelTags, PackageInventory, create_host, fetch_local_model_tags, fetch_local_models,
-    install_commands, list_workers_page, patch_host, revoke_host, windows_install_command,
+    create_host, fetch_local_model_tags, fetch_local_models, install_commands, list_workers_page,
+    patch_host, revoke_host, windows_install_command, CreateHostBody, CreateHostResponse,
+    HostPatch, HostPublic, LocalModelCatalog, LocalModelTags, PackageInventory,
 };
 use crate::clipboard::copy_text;
 use crate::components::side_panel::SidePanel;
@@ -48,10 +50,65 @@ fn replace_host(list: &mut Vec<HostPublic>, updated: HostPublic) {
     }
 }
 
+fn send_policy_line(host: &HostPublic) -> String {
+    if host.run_mode == "in_container" {
+        return "Run in a container · jobs are guests, not this desktop".into();
+    }
+    match host.send_policy.as_str() {
+        "workspace" => "Run on a PC · anyone in this workspace can send work".into(),
+        "allowlist" => "Run on a PC · only people you allow can send work".into(),
+        _ => "Run on a PC · only you can send work".into(),
+    }
+}
+
+fn request_create_host(
+    workspace_id: String,
+    send_policy: String,
+    mut creating: Signal<bool>,
+    mut hosts: Signal<Vec<HostPublic>>,
+    mut pair_result: Signal<Option<CreateHostResponse>>,
+    mut selected_id: Signal<Option<String>>,
+    mut error: Signal<Option<String>>,
+) {
+    if creating() {
+        return;
+    }
+    creating.set(true);
+    spawn(async move {
+        match create_host(
+            &workspace_id,
+            &CreateHostBody {
+                name: Some("worker".into()),
+                send_policy: Some(send_policy),
+            },
+        )
+        .await {
+            Ok(created) => {
+                let mut list = hosts();
+                if !list.iter().any(|h| h.id == created.host.id) {
+                    list.insert(0, created.host.clone());
+                    hosts.set(list);
+                }
+                write_runner_query(Some(&created.host.id));
+                selected_id.set(Some(created.host.id.clone()));
+                pair_result.set(Some(created));
+                error.set(None);
+                show_toast().success("Worker created. Copy the pair token now.");
+            }
+            Err(e) => {
+                error.set(Some(e.clone()));
+                show_toast().error(e);
+            }
+        }
+        creating.set(false);
+    });
+}
+
 #[component]
 pub fn SelfHosted(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
     let mut creating = use_signal(|| false);
+    let mut send_policy = use_signal(|| "owner_only".to_string());
     let mut error = use_signal(|| None::<String>);
     let mut hosts = use_signal(Vec::<HostPublic>::new);
     let mut pair_result = use_signal(|| None::<CreateHostResponse>);
@@ -88,32 +145,6 @@ pub fn SelfHosted(workspace_id: String) -> Element {
     });
 
     let ws_create = workspace_id.clone();
-    let on_add = move |_| {
-        if creating() {
-            return;
-        }
-        creating.set(true);
-        let ws = ws_create.clone();
-        spawn(async move {
-            match create_host(&ws, &CreateHostBody::default()).await {
-                Ok(created) => {
-                    let mut list = hosts();
-                    if !list.iter().any(|h| h.id == created.host.id) {
-                        list.insert(0, created.host.clone());
-                        hosts.set(list);
-                    }
-                    pair_result.set(Some(created));
-                    error.set(None);
-                    show_toast().success("Worker created. Copy the pair token now.");
-                }
-                Err(e) => {
-                    error.set(Some(e.clone()));
-                    show_toast().error(e);
-                }
-            }
-            creating.set(false);
-        });
-    };
 
     let all = hosts();
     let mut active: Vec<HostPublic> = all.iter().filter(|h| !is_removed(h)).cloned().collect();
@@ -138,7 +169,36 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         "{NAV_LABEL_SELF_HOSTED}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine as a self-hosted worker. It phones home; the API never dials inbound. Jobs run on that machine, not in this process."
+                        "Pair a machine to Run on a PC. The agent is a program on that computer. Anyone you allow can send work there — that is not isolated."
+                    }
+                    fieldset { class: "mt-3 flex flex-col gap-1.5 text-sm text-[var(--app-fg)]",
+                        legend { class: "text-xs font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                            "Who can send work to this computer"
+                        }
+                        label { class: "flex items-start gap-2",
+                            input {
+                                r#type: "radio",
+                                name: "send_policy",
+                                value: "owner_only",
+                                checked: send_policy() == "owner_only",
+                                onchange: move |_| send_policy.set("owner_only".into()),
+                            }
+                            span {
+                                "Only me — my laptop or dedicated AI box"
+                            }
+                        }
+                        label { class: "flex items-start gap-2",
+                            input {
+                                r#type: "radio",
+                                name: "send_policy",
+                                value: "workspace",
+                                checked: send_policy() == "workspace",
+                                onchange: move |_| send_policy.set("workspace".into()),
+                            }
+                            span {
+                                "Anyone in this workspace — this is a shared PC, not someone's laptop"
+                            }
+                        }
                     }
                     if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
@@ -161,7 +221,20 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                     class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
                     r#type: "button",
                     disabled: creating() || loading(),
-                    onclick: on_add,
+                    onclick: {
+                        let ws = ws_create.clone();
+                        move |_| {
+                            request_create_host(
+                                ws.clone(),
+                                send_policy(),
+                                creating,
+                                hosts,
+                                pair_result,
+                                selected_id,
+                                error,
+                            );
+                        }
+                    },
                     if creating() { "Adding…" } else { "Add worker" }
                 }
             }
@@ -178,6 +251,8 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         }
                         hosts.set(list);
                         pair_result.set(None);
+                        write_runner_query(None);
+                        selected_id.set(None);
                     },
                 }
             }
@@ -372,7 +447,7 @@ fn PairPanel(
                         if copy_text(&unix_copy) {
                             show_toast().success("Command copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -397,7 +472,7 @@ fn PairPanel(
                         if copy_text(&windows_copy) {
                             show_toast().success("Command copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the command and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -422,7 +497,7 @@ fn PairPanel(
                         if copy_text(&token) {
                             show_toast().success("Token copied.");
                         } else {
-                            show_toast().error("Copy failed. Select the token and copy it yourself.");
+                            show_toast().warn("Copy failed. Select the token and copy it yourself.");
                         }
                     },
                     "Copy"
@@ -477,6 +552,23 @@ fn btn_class() -> &'static str {
 }
 
 #[component]
+fn PencilIcon() -> Element {
+    rsx! {
+        svg {
+            class: "h-3.5 w-3.5",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M12 20h9" }
+            path { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" }
+        }
+    }
+}
+
+#[component]
 fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) -> Element {
     let extra_pills = extra_status_pills(&host);
     let runtime = runtime_line(&host);
@@ -524,6 +616,7 @@ fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) 
                     p { class: "m-0", "{specs}" }
                 }
                 p { class: "m-0", "{jobs_line(&host)}" }
+                p { class: "m-0", "{send_policy_line(&host)}" }
                 p { class: "m-0", "{runtime}" }
             }
         }
@@ -544,27 +637,27 @@ fn HostDetailPanel(
     let mut d_accepting = use_signal(|| accepting_jobs(&host) && !host.paused && !host.drain);
     let mut d_auto = use_signal(|| host.auto_update);
     let mut d_max = use_signal(|| host.max_concurrent);
-    let mut d_allow_host = use_signal(|| host.allow_host);
-    let mut d_allow_container = use_signal(|| host.allow_container);
-    let mut d_timeout = use_signal(|| host.max_job_timeout_s);
-    let mut d_work_dir = use_signal(|| filled_work_dir(&host));
-    let mut d_models_dir = use_signal(|| filled_models_dir(&host));
-    let mut d_backend = use_signal(|| filled_runtime(&host, "container_backend", "k3d"));
-    let mut d_image = use_signal(|| filled_runtime(&host, "docker_image", "agent-fleet-api:local"));
-    let mut d_network = use_signal(|| filled_runtime(&host, "docker_network", "bridge"));
-    let mut d_namespace = use_signal(|| filled_runtime(&host, "k8s_namespace", "agent-fleet"));
-    let mut d_k3d_cluster = use_signal(|| filled_runtime(&host, "k3d_cluster", "agent-fleet"));
-    let mut d_k3d_memory = use_signal(|| filled_runtime(&host, "k3d_memory", "4g"));
-    let mut d_k3d_agents = use_signal(|| {
+    let d_allow_host = use_signal(|| host.allow_host);
+    let d_allow_container = use_signal(|| host.allow_container);
+    let d_timeout = use_signal(|| host.max_job_timeout_s);
+    let d_work_dir = use_signal(|| filled_work_dir(&host));
+    let d_models_dir = use_signal(|| filled_models_dir(&host));
+    let d_backend = use_signal(|| filled_runtime(&host, "container_backend", "k3d"));
+    let d_image = use_signal(|| filled_runtime(&host, "docker_image", "agent-fleet-api:local"));
+    let d_network = use_signal(|| filled_runtime(&host, "docker_network", "bridge"));
+    let d_namespace = use_signal(|| filled_runtime(&host, "k8s_namespace", "agent-fleet"));
+    let d_k3d_cluster = use_signal(|| filled_runtime(&host, "k3d_cluster", "agent-fleet"));
+    let d_k3d_memory = use_signal(|| filled_runtime(&host, "k3d_memory", "4g"));
+    let d_k3d_agents = use_signal(|| {
         runtime_value(&host, "k3d_agents")
             .and_then(|v| v.as_i64())
             .unwrap_or(0)
     });
-    let mut d_privileged = use_signal(|| runtime_bool(&host, "allow_privileged", false));
-    let mut d_cpu = use_signal(|| filled_runtime(&host, "k8s_cpu", "250m"));
-    let mut d_memory = use_signal(|| filled_runtime(&host, "k8s_memory", "256Mi"));
-    let mut d_ephemeral = use_signal(|| filled_runtime(&host, "k8s_ephemeral", "1Gi"));
-    let mut d_egress = use_signal(|| filled_runtime(&host, "egress_mode", "none"));
+    let d_privileged = use_signal(|| runtime_bool(&host, "allow_privileged", false));
+    let d_cpu = use_signal(|| filled_runtime(&host, "k8s_cpu", "250m"));
+    let d_memory = use_signal(|| filled_runtime(&host, "k8s_memory", "256Mi"));
+    let d_ephemeral = use_signal(|| filled_runtime(&host, "k8s_ephemeral", "1Gi"));
+    let d_egress = use_signal(|| filled_runtime(&host, "egress_mode", "none"));
     let plane = is_control_plane(&host);
     let sandbox_dirty = !plane
         && (d_allow_host() != host.allow_host
@@ -593,6 +686,7 @@ fn HostDetailPanel(
     let draft_holding = draft_holding_new_jobs(d_accepting());
     let runtime = runtime_line(&host);
     let revoked = host.status == "disabled";
+    let home = is_home_workspace(&host, &workspace_id);
     let pill = status_pill_class(&host.status);
     let last_seen = last_seen_label(&host, js_sys::Date::now());
     let title = display_name(&host);
@@ -624,8 +718,11 @@ fn HostDetailPanel(
                                         name_draft.set(host.name.clone());
                                         renaming.set(false);
                                     } else if key == Key::Enter {
-                                        let next = name_draft().trim().to_string();
-                                        if next.is_empty() || next == host.name {
+                                        let Some(next) = trimmed_host_name(&name_draft()) else {
+                                            renaming.set(false);
+                                            return;
+                                        };
+                                        if next == host.name {
                                             renaming.set(false);
                                             return;
                                         }
@@ -654,19 +751,29 @@ fn HostDetailPanel(
                             },
                         }
                     } else {
-                        button {
-                            class: "m-0 border-0 bg-transparent p-0 text-left text-sm font-semibold text-[var(--app-fg)] hover:underline disabled:no-underline disabled:opacity-70",
-                            r#type: "button",
-                            disabled: revoked,
-                            title: "Rename",
-                            onclick: {
-                                let name = host.name.clone();
-                                move |_| {
-                                    name_draft.set(name.clone());
-                                    renaming.set(true);
-                                }
-                            },
+                        span { class: "text-sm font-semibold text-[var(--app-fg)]",
                             "{title}"
+                        }
+                        if !revoked && home {
+                            button {
+                                class: "inline-flex h-7 w-7 items-center justify-center rounded-lg border border-transparent text-[var(--app-muted)] hover:border-[var(--app-border)] hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)] disabled:opacity-50",
+                                r#type: "button",
+                                title: "Rename",
+                                aria_label: "Rename",
+                                disabled: busy(),
+                                onclick: {
+                                    let name = if host.name.trim().is_empty() {
+                                        host.hostname.clone().unwrap_or_default()
+                                    } else {
+                                        host.name.clone()
+                                    };
+                                    move |_| {
+                                        name_draft.set(name.clone());
+                                        renaming.set(true);
+                                    }
+                                },
+                                PencilIcon {}
+                            }
                         }
                     }
                     span {
@@ -726,7 +833,12 @@ fn HostDetailPanel(
                 p { class: "mt-2 text-xs text-red-400", "{last_error}" }
             }
 
-            if !revoked {
+            if !revoked && !home {
+                p { class: "mt-3 text-xs text-[var(--app-muted)]",
+                    "Settings live in the home workspace. This card is visible because the box is on this machine."
+                }
+            }
+            if !revoked && home {
                 div { class: "mt-3 space-y-3 border-t border-[var(--app-border)] pt-3",
                     div { class: "flex flex-col gap-1",
                     span {
@@ -1035,7 +1147,7 @@ fn AgentLoginBlock(
                                 }
                                 if !installed {
                                     div { class: "mt-0.5 flex flex-wrap items-center gap-1",
-                                        code { class: "min-w-0 flex-1 break-all text-[11px] text-[var(--app-muted)]",
+                                        code { class: "min-w-0 flex-1 overflow-x-auto whitespace-pre text-[11px] text-[var(--app-muted)]",
                                             "{cmd}"
                                         }
                                         button {
@@ -1188,7 +1300,7 @@ fn OllamaInstallPicker(
 ) -> Element {
     let mut pull_draft = use_signal(|| String::new());
     let mut filter = use_signal(|| String::new());
-    let mut installing = use_signal(|| false);
+    let installing = use_signal(|| false);
     let mut catalog = use_signal(|| None::<LocalModelCatalog>);
     let mut tags = use_signal(|| None::<LocalModelTags>);
     let mut tags_loading = use_signal(|| false);
@@ -1332,7 +1444,16 @@ fn OllamaInstallPicker(
             div { class: "mt-1 space-y-1",
                 span {
                     class: "text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                    "Tags for {selected_slug}"
+                    {
+                        let tg = tags();
+                        let slug = selected_slug();
+                        let name = tg
+                            .as_ref()
+                            .map(|t| t.name.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(slug.as_str());
+                        format!("Tags for {name}")
+                    }
                 }
                 if tags_loading() {
                     p { class: "m-0 text-[11px] text-[var(--app-muted)]", "Loading tags…" }
@@ -1665,7 +1786,7 @@ fn SandboxBlock(
     ephemeral: Signal<String>,
     egress: Signal<String>,
 ) -> Element {
-    let mut work_dir = work_dir;
+    let work_dir = work_dir;
     let mut allow_host = allow_host;
     let mut allow_container = allow_container;
     let mut timeout = timeout;

@@ -92,11 +92,12 @@ test-integration: _require-env db-up
       --test tick_integration \
       --test api_integration \
       --test e2e_matrix \
-      --test process_sandbox \
       --test host_pool_spawn \
       --test host_update_tick \
-      --test plane_runner_tick \
-      --test assignable_runner
+      --test assignable_runner \
+      --test git_config_patch \
+      --test host_picker_product \
+      --test mock_runner
     cargo test -p fleet-auth --locked --tests
     cargo test -p fleet-server --locked --tests
     cargo test -p fleet-db --locked --tests

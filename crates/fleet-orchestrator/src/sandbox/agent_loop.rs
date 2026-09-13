@@ -2,6 +2,7 @@
 //!
 //! The control plane is not a runner. Completions run on a paired
 //! `fleet-host` via the official CLI. This module must not call xAI/Ollama.
+//! Do not start an in-process agent job on the control plane.
 
 /// Resolved worker LLM after combining env (Grok only) + workspace settings (Ollama).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,28 @@ pub fn normalize_provider(provider: &str) -> Option<String> {
         "ollama" => Some("ollama".into()),
         "claude" | "anthropic" => Some("claude".into()),
         other => Some(other.to_string()),
+    }
+}
+
+/// Guest harness on a paired runner. Unknown stays mock — callers that
+/// launch fleet work must refuse those providers instead of silently mocking.
+pub fn harness_for_backend(backend: Option<&str>) -> &'static str {
+    match backend.map(str::trim).map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("grok" | "xai") => "grok",
+        Some("claude" | "anthropic") => "claude",
+        Some("openai" | "codex") => "openai",
+        Some("gemini" | "google") => "gemini",
+        Some("ollama") => "ollama",
+        _ => "mock",
+    }
+}
+
+/// @deprecated use [`resolve_worker_llm`]. Kept for callers that only check env Grok.
+pub fn agent_backend() -> Option<String> {
+    if grok_env_enabled() {
+        Some("grok".into())
+    } else {
+        None
     }
 }
 
@@ -156,6 +179,13 @@ mod tests {
     }
 
     #[test]
+    fn plan_xai_alias_wins_over_settings_off() {
+        let w = resolve_worker_llm(Some("xai"), Some("grok-4.5"), "off", "");
+        assert_eq!(w.backend.as_deref(), Some("grok"));
+        assert_eq!(w.model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
     fn normalize_provider_maps_aliases_and_off() {
         assert_eq!(normalize_provider(""), None);
         assert_eq!(normalize_provider("off"), None);
@@ -164,6 +194,14 @@ mod tests {
         assert_eq!(normalize_provider("xai").as_deref(), Some("grok"));
         assert_eq!(normalize_provider("GROK").as_deref(), Some("grok"));
         assert_eq!(normalize_provider("ollama").as_deref(), Some("ollama"));
+        assert_eq!(harness_for_backend(Some("grok")), "grok");
+        assert_eq!(harness_for_backend(Some("xai")), "grok");
+        assert_eq!(harness_for_backend(Some("claude")), "claude");
+        assert_eq!(harness_for_backend(Some("ollama")), "ollama");
+        assert_eq!(harness_for_backend(Some("openai")), "openai");
+        assert_eq!(harness_for_backend(Some("gemini")), "gemini");
+        assert_eq!(harness_for_backend(Some("off")), "mock");
+        assert_eq!(harness_for_backend(None), "mock");
     }
 
     #[test]
@@ -171,5 +209,6 @@ mod tests {
         assert!(!grok_env_enabled());
         let w = resolve_workspace_llm("off", "ignored");
         assert!(!w.is_llm());
+        assert!(agent_backend().is_none());
     }
 }

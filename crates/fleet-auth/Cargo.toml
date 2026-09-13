@@ -12,6 +12,7 @@ name = "fleet_auth"
 path = "src/lib.rs"
 
 [dependencies]
+agent-fleet-contracts = { path = "../agent-fleet-contracts" }
 anyhow = { workspace = true }
 argon2 = { workspace = true }
 axum = { workspace = true }

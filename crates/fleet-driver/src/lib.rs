@@ -15,9 +15,12 @@ pub fn pkg_version() -> &'static str {
 }
 
 pub mod acp;
+pub mod cli_session;
 pub mod config;
 pub mod harness;
+pub mod mock_ollama;
 pub mod official_cli;
+pub mod ollama_loop;
 pub mod orch;
 pub mod prompt;
 pub mod provision;

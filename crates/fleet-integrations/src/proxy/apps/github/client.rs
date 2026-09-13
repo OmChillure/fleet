@@ -1,6 +1,6 @@
 //! GitHub HTTP client helpers (control plane only).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::proxy::types::ProxyResult;
 
@@ -117,6 +117,20 @@ pub(crate) fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn github_api_origin() -> String {
+    #[cfg(test)]
+    if let Some(base) = TEST_GITHUB_API_BASE.with(|c| c.borrow().clone()) {
+        return base;
+    }
+    "https://api.github.com".into()
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_GITHUB_API_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn github_headers(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {

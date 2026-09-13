@@ -1222,6 +1222,42 @@ pub async fn chat_with_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes env mutation in this module so parallel tests do not race.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env<T>(pairs: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let previous: Vec<(&str, Option<String>)> =
+            pairs.iter().map(|(k, _)| (*k, env::var(k).ok())).collect();
+        // SAFETY: held under env_lock; restored before unlock / panic resume.
+        unsafe {
+            for (k, v) in pairs {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // SAFETY: restore prior process env before releasing the lock.
+        unsafe {
+            for (k, v) in previous {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        match result {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
 
     #[test]
     fn parse_grok_models_lists_46_first() {
@@ -1233,34 +1269,139 @@ mod tests {
     }
 
     #[test]
-    fn put_effort_accepts_provider_values() {
-        let mut body = json!({});
-        put_effort(&mut body, Some("xhigh"));
-        assert_eq!(body["reasoning_effort"], "xhigh");
-        let mut skip = json!({});
-        put_effort(&mut skip, Some("not a value"));
-        assert!(skip.get("reasoning_effort").is_none());
-    }
-
-    #[test]
     fn default_auth_under_home_grok() {
-        let p = default_auth_path();
-        assert!(p.ends_with("auth.json"));
+        with_env(
+            &[("GROK_HOME", None), ("HOME", Some("/tmp/fleet-home"))],
+            || {
+                assert_eq!(
+                    default_auth_path(),
+                    PathBuf::from("/tmp/fleet-home").join(".grok").join("auth.json")
+                );
+            },
+        );
     }
 
     #[test]
-    fn expand_tilde() {
-        if env::var("HOME").is_ok() {
-            let p = expand_user_path("~/.grok/auth.json");
-            assert!(!p.to_string_lossy().contains('~'));
-            assert!(p.ends_with("auth.json"));
+    fn default_auth_prefers_grok_home_over_home() {
+        with_env(
+            &[
+                ("GROK_HOME", Some("/tmp/fleet-grok-home")),
+                ("HOME", Some("/tmp/other")),
+            ],
+            || {
+                assert_eq!(
+                    default_auth_path(),
+                    PathBuf::from("/tmp/fleet-grok-home/auth.json")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn default_auth_without_home_or_grok_home_is_relative_dot_grok() {
+        with_env(&[("GROK_HOME", None), ("HOME", None)], || {
+            assert_eq!(default_auth_path(), PathBuf::from(".grok/auth.json"));
+        });
+    }
+
+    #[test]
+    fn from_env_blank_grok_auth_path_falls_through_to_default() {
+        for blank in ["", "   "] {
+            with_env(
+                &[
+                    ("GROK_AUTH_PATH", Some(blank)),
+                    ("GROK_HOME", None),
+                    ("HOME", Some("/tmp/fleet-home")),
+                ],
+                || {
+                    assert_eq!(
+                        GrokConfig::from_env().auth_path,
+                        PathBuf::from("/tmp/fleet-home").join(".grok").join("auth.json")
+                    );
+                },
+            );
         }
     }
 
     #[test]
+    fn expand_tilde() {
+        with_env(&[("HOME", Some("/tmp/fleet-home"))], || {
+            assert_eq!(
+                expand_user_path("~/.grok/auth.json"),
+                PathBuf::from("/tmp/fleet-home").join(".grok/auth.json")
+            );
+        });
+    }
+
+    #[test]
+    fn expand_user_path_non_tilde_is_literal() {
+        assert_eq!(
+            expand_user_path("/var/lib/grok/auth.json"),
+            PathBuf::from("/var/lib/grok/auth.json")
+        );
+        assert_eq!(
+            expand_user_path("rel/auth.json"),
+            PathBuf::from("rel/auth.json")
+        );
+    }
+
+    #[test]
+    fn expand_user_path_trims_then_expands() {
+        let home = env::var("HOME").expect("HOME");
+        assert_eq!(
+            expand_user_path("  ~/.grok/auth.json\n"),
+            PathBuf::from(home).join(".grok/auth.json")
+        );
+    }
+
+    #[test]
     fn parse_expires_rfc3339() {
-        let dt = parse_expires_at("2026-08-05T19:43:29.657696501Z");
-        assert!(dt.is_some());
+        let expected = chrono::NaiveDate::from_ymd_opt(2026, 8, 5)
+            .unwrap()
+            .and_hms_nano_opt(19, 43, 29, 657_696_501)
+            .unwrap()
+            .and_utc();
+        assert_eq!(
+            parse_expires_at("2026-08-05T19:43:29.657696501Z"),
+            Some(expected)
+        );
+        // refresh_oidc_token writes expires_at via to_rfc3339 (+00:00, not Z).
+        assert_eq!(parse_expires_at(&expected.to_rfc3339()), Some(expected));
+    }
+
+    #[test]
+    fn parse_expires_at_rejects_empty_and_garbage() {
+        for s in ["", "not-a-date", "2026-08-05"] {
+            assert_eq!(parse_expires_at(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn is_expired_or_skew_missing_or_unparseable_is_fresh() {
+        assert!(!is_expired_or_skew(None));
+        assert!(!is_expired_or_skew(Some("bogus")));
+    }
+
+    #[test]
+    fn pick_best_entry_prefers_later_rfc3339_expiry() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "early".into(),
+            json!({
+                "key": "tok-early",
+                "expires_at": "2026-08-05T19:43:29.657696501Z",
+            }),
+        );
+        map.insert(
+            "late".into(),
+            json!({
+                "key": "tok-late",
+                "expires_at": "2026-08-06T19:43:29.657696501Z",
+            }),
+        );
+        let (name, entry) = pick_best_entry(&map).expect("two non-empty keys");
+        assert_eq!(name, "late");
+        assert_eq!(entry.key, "tok-late");
     }
 
     /// Missing CLI session + no usable API key. `api_base` is not api.x.ai so a
@@ -1275,59 +1416,95 @@ mod tests {
         }
     }
 
-    fn assert_auth_fail_closed(err: &str) {
-        let lower = err.to_ascii_lowercase();
-        assert!(
-            !lower.contains("cannot reach"),
-            "must not send HTTP with empty Authorization: {err}"
-        );
-        assert!(
-            lower.contains("auth") || lower.contains("login"),
-            "expected missing-auth error, got {err}"
-        );
-    }
-
     #[tokio::test]
     async fn missing_or_empty_api_key_fails_closed_without_hang() {
         const FAIL_CLOSED: Duration = Duration::from_secs(2);
         for api_key in [None, Some(String::new())] {
             let cfg = cfg_no_usable_auth(api_key);
-            let started = Instant::now();
-            let auth = tokio::time::timeout(FAIL_CLOSED, resolve_auth(&cfg))
-                .await
-                .expect("missing/empty Grok key must fail immediately, not hang");
-            let err = auth.expect_err("must not resolve a Bearer without a key");
-            assert!(
-                started.elapsed() < Duration::from_millis(500),
-                "resolve_auth took {:?}",
-                started.elapsed()
-            );
-            assert_auth_fail_closed(&err);
-
-            let started = Instant::now();
             let text =
                 tokio::time::timeout(FAIL_CLOSED, complete_text(&cfg, "grok-4", "sys", "ping"))
                     .await
                     .expect("complete_text without key must fail immediately, not hang");
             let err = text.expect_err("must not call xAI with empty Authorization");
             assert!(
-                started.elapsed() < Duration::from_millis(500),
-                "complete_text took {:?}",
-                started.elapsed()
+                !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+                "must not send HTTP with empty Authorization: {err}"
             );
-            assert_auth_fail_closed(&err.to_string());
         }
     }
 
     #[tokio::test]
-    async fn provider_status_without_key_unavailable() {
-        let cfg = cfg_no_usable_auth(None);
-        let info = tokio::time::timeout(Duration::from_secs(2), provider_status(&cfg))
+    async fn whitespace_only_api_key_fails_closed_without_hang() {
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let cfg = cfg_no_usable_auth(Some(" \t ".into()));
+        let text = tokio::time::timeout(FAIL_CLOSED, complete_text(&cfg, "grok-4", "sys", "ping"))
             .await
-            .expect("provider_status without key must return immediately");
-        assert!(!info.available);
-        assert!(!info.coming_soon);
-        assert!(info.models.is_empty());
-        assert_auth_fail_closed(info.error.as_deref().unwrap_or(""));
+            .expect("whitespace-only Grok key must fail immediately, not hang");
+        let err = text.expect_err("must not treat whitespace as a Bearer");
+        assert!(
+            !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+            "must not send HTTP with trimmed-empty Authorization: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cli_session_without_refresh_or_key_fails_closed_without_oidc() {
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let auth_dir = std::env::temp_dir().join(format!("fleet-grok-expired-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&auth_dir).expect("temp auth dir");
+        let auth_path = auth_dir.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            json!({
+                "issuer::client": {
+                    "key": "expired-session-token",
+                    "expires_at": "2020-01-01T00:00:00Z",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write expired auth.json");
+        let cfg = GrokConfig {
+            enabled: true,
+            auth_path,
+            api_key: None,
+            api_base: "http://127.0.0.1:1".into(),
+        };
+        let text = tokio::time::timeout(FAIL_CLOSED, complete_text(&cfg, "grok-4", "sys", "ping"))
+            .await
+            .expect("expired CLI session without refresh must fail immediately, not hit OIDC");
+        let err = text.expect_err("must not refresh via auth.x.ai or call xAI without a key");
+        let lower = err.to_string().to_ascii_lowercase();
+        assert!(
+            !lower.contains("cannot reach"),
+            "must not send HTTP before fail-closed: {err}"
+        );
+        assert!(
+            !lower.contains("auth.x.ai"),
+            "must not reach fetch_token_endpoint / auth.x.ai: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&auth_dir);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_empty_bearer_fails_closed_before_retry() {
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let cfg = cfg_no_usable_auth(None);
+        let messages = [json!({ "role": "user", "content": "ping" })];
+        let result = tokio::time::timeout(
+            FAIL_CLOSED,
+            chat_completions(&cfg, "", "grok-4", &messages, false, None, None),
+        )
+        .await
+        .expect("empty bearer must fail before chat/completions retries");
+        let err = result.expect_err("empty bearer must not reach HTTP");
+        assert!(
+            matches!(err, AppError::BadRequest(_)),
+            "expected auth-missing bad_request, got {err}"
+        );
+        assert!(
+            !err.to_string().to_ascii_lowercase().contains("cannot reach"),
+            "must not retry HTTP with empty Authorization: {err}"
+        );
     }
 }

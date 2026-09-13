@@ -4,16 +4,16 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult};
-use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
+use fleet_db::TicketInboxItem;
 use fleet_integrations::proxy::{ProxyCaller, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::inbox_sources::{self, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT, InboxKind};
+use crate::inbox_sources::{self, InboxKind, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT};
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -59,6 +59,10 @@ pub struct FinishTicketArgs {
     pub provider: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// When true, a pasted provider+key that is not in this workspace is
+    /// inserted as an open stub. Default is look-up only.
+    #[serde(default)]
+    pub create_if_missing: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,12 +121,9 @@ fn github_key_from_url_or_slash(raw: &str) -> Option<String> {
     }
     if let Some((repo, num)) = s.split_once('#') {
         let repo = repo.trim();
-        let num = num
-            .trim()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .unwrap_or("");
-        if repo.contains('/') && !num.is_empty() {
+        let num = num.trim();
+        // Whole suffix must be digits. `stack#5cc319fa` is not issue 5.
+        if repo.contains('/') && !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
             return Some(format!("{repo}#{num}"));
         }
     }
@@ -372,8 +373,14 @@ pub async fn prepare_finish(
 ) -> AppResult<PreparedFinish> {
     let item = resolve_ticket(state, workspace_id, &args).await?;
     require_ticket_workspace(&item, workspace_id)?;
-    if item.state != "open" || item.run_id.is_some() {
-        return Err(AppError::conflict("ticket is not open"));
+    if item.state == "launched" || item.run_id.is_some() {
+        return Err(AppError::conflict_code(
+            "already_launched",
+            "ticket already launched",
+        ));
+    }
+    if item.state != "open" {
+        return Err(AppError::conflict_code("not_open", "ticket is not open"));
     }
     let live = fetch_ticket_details(state, workspace_id, user_id, &item).await;
     let spec = format!(
@@ -581,6 +588,7 @@ pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -
                     workspace_id,
                     &caller,
                     item_limit,
+                    target_limit,
                     &inbox_sources::gitlab_projects(filters),
                 )
                 .await
@@ -700,16 +708,19 @@ async fn drive_inbox(
         };
         for item in launched_rows {
             let Some(run_id) = item.run_id else {
-                if ticket_repo::reopen_ticket(
-                    &state.db,
-                    workspace_id,
-                    &item.provider,
-                    &item.external_key,
-                )
-                .await
-                .ok()
-                .flatten()
-                .is_some()
+                let stale = Utc::now().signed_duration_since(item.last_seen_at)
+                    > chrono::Duration::minutes(2);
+                if stale
+                    && ticket_repo::reopen_ticket(
+                        &state.db,
+                        workspace_id,
+                        &item.provider,
+                        &item.external_key,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
                 {
                     out.reopened += 1;
                 }
@@ -739,7 +750,15 @@ async fn drive_inbox(
                         out.reopened += 1;
                     }
                 }
-                "completed" => {}
+                "completed" => {
+                    let _ = ticket_repo::mark_inbox_done(
+                        &state.db,
+                        workspace_id,
+                        &item.provider,
+                        &item.external_key,
+                    )
+                    .await;
+                }
                 _ => {}
             }
         }
@@ -773,6 +792,7 @@ async fn drive_inbox(
                 ticket: None,
                 provider: Some(item.provider.clone()),
                 key: Some(item.external_key.clone()),
+                create_if_missing: None,
             },
         )
         .await
@@ -1147,18 +1167,44 @@ async fn poll_gitlab(
     workspace_id: Uuid,
     caller: &ProxyCaller,
     item_limit: usize,
+    target_limit: usize,
     projects: &[String],
 ) -> Result<usize, String> {
-    let projects: Vec<String> = projects
+    let mut targets: Vec<String> = projects
         .iter()
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    if projects.is_empty() {
-        return Err("gitlab project is required".into());
+    if targets.is_empty() {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "gitlab",
+            "list_repos",
+            json!({ "per_page": target_limit }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        if let Some(arr) = listed.data.get("items").and_then(|v| v.as_array()) {
+            for r in arr {
+                if let Some(name) = r
+                    .get("path_with_namespace")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    targets.push(name.to_string());
+                }
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Ok(0);
     }
     let mut n = 0usize;
-    for project in &projects {
+    for project in targets.iter().take(target_limit) {
         let listed = proxy_op(
             state,
             workspace_id,
@@ -1487,13 +1533,7 @@ async fn poll_trello(
         if board_id.is_empty() {
             continue;
         }
-        if !board_allow.is_empty()
-            && !inbox_sources::item_matches_filters(
-                &json!({ "trello": { "boards": board_allow } }),
-                "trello",
-                &board_id,
-            )
-        {
+        if !inbox_sources::listed_hit(board_allow, &board_id) {
             continue;
         }
         let cards = proxy_op(
@@ -1802,11 +1842,13 @@ async fn resolve_ticket(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let parsed = raw.and_then(parse_ticket_ref);
-    let provider = args
+    let explicit_provider = args
         .provider
         .as_deref()
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    let provider = explicit_provider
+        .clone()
         .or_else(|| parsed.as_ref().and_then(|p| p.provider.clone()));
     if let Some(p) = provider.as_deref() {
         if !inbox_sources::is_inbox_provider(p) {
@@ -1815,7 +1857,16 @@ async fn resolve_ticket(
             )));
         }
     }
-    let key = parsed.as_ref().map(|p| p.key.clone());
+    let key = if explicit_provider.is_some() {
+        args.key
+            .as_deref()
+            .or(args.ticket.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        parsed.as_ref().map(|p| p.key.clone())
+    };
 
     if let (Some(provider), Some(key)) = (provider.as_deref(), key.as_deref()) {
         if let Some(hit) = ticket_repo::find_inbox(&state.db, workspace_id, provider, key)
@@ -1824,21 +1875,25 @@ async fn resolve_ticket(
         {
             return Ok(hit);
         }
-        // Not seen yet — seed a stub so finish still works from a pasted key.
-        return ticket_repo::upsert_inbox(
-            &state.db,
-            &UpsertInbox {
-                workspace_id,
-                provider: provider.to_string(),
-                external_key: key.to_string(),
-                title: key.to_string(),
-                url: None,
-                summary: String::new(),
-                provider_closed: false,
-            },
-        )
-        .await
-        .map_err(|e| AppError::internal(e.to_string()));
+        if args.create_if_missing.unwrap_or(false) {
+            return ticket_repo::upsert_inbox(
+                &state.db,
+                &UpsertInbox {
+                    workspace_id,
+                    provider: provider.to_string(),
+                    external_key: key.to_string(),
+                    title: key.to_string(),
+                    url: None,
+                    summary: String::new(),
+                    provider_closed: false,
+                },
+            )
+            .await
+            .map_err(|e| AppError::internal(e.to_string()));
+        }
+        return Err(AppError::not_found(format!(
+            "no inbox item `{provider}:{key}` in this workspace"
+        )));
     }
 
     if let Some(key) = key.as_deref() {
@@ -1919,7 +1974,11 @@ async fn fetch_ticket_details(
         _ => return None,
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
-    if result.ok { Some(result.data) } else { None }
+    if result.ok {
+        Some(result.data)
+    } else {
+        None
+    }
 }
 
 fn ticket_spec_md(item: &TicketInboxItem, live: Option<&Value>) -> String {
@@ -1985,7 +2044,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{AuthState, require_user};
+use fleet_auth::{require_user, AuthState};
 use fleet_db::repos::workspaces as workspace_repo;
 
 pub fn router() -> Router<AppState> {
@@ -2072,7 +2131,20 @@ pub async fn finish_and_launch(
     args: FinishTicketArgs,
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
+    let llm = crate::chat_tools::composer_or_fallback_for(state, workspace_id, Some(user_id)).await;
+    crate::chat_tools::require_taking_runner(&llm)?;
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
+    let claimed = ticket_repo::claim_launch(
+        &state.db,
+        workspace_id,
+        &prep.item.provider,
+        &prep.item.external_key,
+    )
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    if claimed.is_none() {
+        return Err(AppError::conflict("ticket already launched"));
+    }
     state
         .orch
         .store
@@ -2087,13 +2159,46 @@ pub async fn finish_and_launch(
     let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = true;
-    stamp_inbox_llm(&mut plan, state, workspace_id).await;
-    let (run, _) = state
+    crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
+    plan.policy.requested_by = Some(user_id);
+    let (run, _) = match state
         .orch
         .store
         .insert_accepted_plan(workspace_id, plan)
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = ticket_repo::reopen_ticket(
+                &state.db,
+                workspace_id,
+                &prep.item.provider,
+                &prep.item.external_key,
+            )
+            .await;
+            return Err(AppError::bad_request(e.to_string()));
+        }
+    };
+    let attached = ticket_repo::attach_launch_run(
+        &state.db,
+        workspace_id,
+        &prep.item.provider,
+        &prep.item.external_key,
+        run.id,
+    )
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    if attached.is_none() {
+        let _ = state.orch.store.request_cancel(workspace_id, run.id).await;
+        let _ = ticket_repo::reopen_ticket(
+            &state.db,
+            workspace_id,
+            &prep.item.provider,
+            &prep.item.external_key,
+        )
+        .await;
+        return Err(AppError::conflict("ticket already launched"));
+    }
     let _ = crate::workforce::attach_run_to_goal(
         state,
         workspace_id,
@@ -2104,14 +2209,6 @@ pub async fn finish_and_launch(
         None,
     )
     .await;
-    mark_ticket_launched(
-        state,
-        workspace_id,
-        &prep.item.provider,
-        &prep.item.external_key,
-        run.id,
-    )
-    .await?;
     let _ = state.orch.tick.tick_project(workspace_id).await;
     Ok(json!({
         "ok": true,
@@ -2125,19 +2222,7 @@ pub async fn finish_and_launch(
     }))
 }
 
-async fn stamp_inbox_llm(
-    plan: &mut fleet_orchestrator::domain::WorkPlanBody,
-    state: &AppState,
-    workspace_id: Uuid,
-) {
-    let llm = crate::chat_tools::composer_or_fallback(state, workspace_id).await;
-    if !llm.provider.is_empty() {
-        plan.policy.llm_provider = Some(llm.provider);
-    }
-    if !llm.model.is_empty() {
-        plan.policy.llm_model = Some(llm.model);
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -2145,23 +2230,90 @@ mod tests {
 
     #[test]
     fn parses_linear_and_jira_keys() {
+        // Unprefixed TEAM-N: resolve_ticket uses find_inbox_by_key, not a provider seed.
         let p = parse_ticket_ref("ENG-123").unwrap();
         assert_eq!(p.key, "ENG-123");
         assert!(p.provider.is_none());
-        let p = parse_ticket_ref("jira:PROJ-9").unwrap();
-        assert_eq!(p.provider.as_deref(), Some("jira"));
-        assert_eq!(p.key, "PROJ-9");
+    }
+
+    #[test]
+    fn parse_ticket_ref_linear_colon_prefix() {
+        let p = parse_ticket_ref("linear:ENG-123").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("linear"));
+        assert_eq!(p.key, "ENG-123");
+    }
+
+    #[test]
+    fn parse_ticket_ref_blank_or_provider_without_key_is_none() {
+        for raw in ["", "  ", "jira:"] {
+            assert!(
+                parse_ticket_ref(raw).is_none(),
+                "expected None for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ticket_ref_unknown_prefix_keeps_full_key() {
+        let p = parse_ticket_ref("foo:BAR-1").unwrap();
+        assert!(p.provider.is_none());
+        assert_eq!(p.key, "foo:BAR-1");
     }
 
     #[test]
     fn parses_github_hash_and_url() {
+        // Pasted owner/repo#N: resolve_ticket infers provider=github and seeds find_inbox.
         let p = parse_ticket_ref("acme/app#42").unwrap();
         assert_eq!(p.provider.as_deref(), Some("github"));
         assert_eq!(p.key, "acme/app#42");
+    }
+
+    #[test]
+    fn parse_ticket_ref_hex_suffix_is_not_github_issue_5() {
+        let p = parse_ticket_ref("live-sim/stack#5cc319fa").unwrap();
+        assert!(p.provider.is_none(), "{p:?}");
+        assert_eq!(p.key, "live-sim/stack#5cc319fa");
+        assert!(github_key_from_url_or_slash("live-sim/stack#5cc319fa").is_none());
+    }
+
+    #[test]
+    fn parse_ticket_ref_github_issues_url() {
         let p = parse_ticket_ref("https://github.com/acme/app/issues/7").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
         assert_eq!(p.key, "acme/app#7");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_num_splits_key() {
         let (o, r, n) = parse_github_owner_repo_num("acme/app#7").unwrap();
         assert_eq!((o, r, n), ("acme".into(), "app".into(), 7));
+    }
+
+    #[test]
+    fn github_colon_prefix_normalizes_hash_and_url() {
+        let p = parse_ticket_ref("github:acme/app#12").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#12");
+        let p = parse_ticket_ref("github:https://github.com/acme/app/issues/7").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#7");
+    }
+
+    #[test]
+    fn github_pull_and_http_urls_normalize_like_issues() {
+        let p = parse_ticket_ref("http://github.com/acme/app/pull/9").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("github"));
+        assert_eq!(p.key, "acme/app#9");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_num_rejects_empty_owner_or_repo() {
+        for raw in ["/app#1", "acme/#1"] {
+            assert!(
+                parse_github_owner_repo_num(raw).is_none(),
+                "expected None for {raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -2180,8 +2332,8 @@ mod tests {
     }
 
     #[test]
-    fn inbox_message_and_page_are_single_ops_tasks() {
-        let slack = inbox_plan_tasks(
+    fn inbox_slack_message_is_single_handle_ops() {
+        let tasks = inbox_plan_tasks(
             "hello",
             "please look",
             ExternalRef {
@@ -2189,11 +2341,15 @@ mod tests {
                 key: "C1:1".into(),
             },
         );
-        assert_eq!(slack.len(), 1);
-        assert_eq!(slack[0].plan_task_id, "handle");
-        assert_eq!(slack[0].worker_profile, "ops");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "ops");
+        assert!(tasks[0].depends_on.is_empty());
+    }
 
-        let page = inbox_plan_tasks(
+    #[test]
+    fn inbox_notion_page_is_single_handle_analysis() {
+        let tasks = inbox_plan_tasks(
             "spec",
             "read this",
             ExternalRef {
@@ -2201,18 +2357,82 @@ mod tests {
                 key: "page-1".into(),
             },
         );
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].worker_profile, "analysis");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "analysis");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn inbox_teams_message_is_single_handle_ops() {
+        let tasks = inbox_plan_tasks(
+            "hello",
+            "please look",
+            ExternalRef {
+                provider: "teams".into(),
+                key: "T1:1".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "ops");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn inbox_confluence_page_is_single_handle_analysis() {
+        let tasks = inbox_plan_tasks(
+            "spec",
+            "read this",
+            ExternalRef {
+                provider: "confluence".into(),
+                key: "page-2".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].plan_task_id, "handle");
+        assert_eq!(tasks[0].worker_profile, "analysis");
+        assert!(tasks[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn unknown_inbox_provider_defaults_to_ticket_work_review() {
+        let tasks = inbox_plan_tasks(
+            "foo:1",
+            "unknown provider",
+            ExternalRef {
+                provider: "foo".into(),
+                key: "1".into(),
+            },
+        );
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].plan_task_id, "work");
+        assert_eq!(tasks[0].worker_profile, "coding");
+        assert_eq!(tasks[1].plan_task_id, "review");
+        assert_eq!(tasks[1].worker_profile, "reviewer");
+        assert_eq!(tasks[1].depends_on, vec!["work".to_string()]);
     }
 
     #[test]
     fn parses_slack_and_notion_keys() {
+        // Extra-colon slack key: poll stores external_key as {channel}:{ts}.
         let p = parse_ticket_ref("slack:C123:171.1").unwrap();
         assert_eq!(p.provider.as_deref(), Some("slack"));
         assert_eq!(p.key, "C123:171.1");
-        let p = parse_ticket_ref("notion:page-abc").unwrap();
-        assert_eq!(p.provider.as_deref(), Some("notion"));
-        assert_eq!(p.key, "page-abc");
+    }
+
+    #[test]
+    fn parse_ticket_ref_slack_prefix_folds_case_and_trims_key() {
+        let p = parse_ticket_ref("Slack: C123:171.1").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("slack"));
+        assert_eq!(p.key, "C123:171.1");
+    }
+
+    #[test]
+    fn parse_ticket_ref_teams_colon_prefix_keeps_extra_colon_key() {
+        let p = parse_ticket_ref("teams:19:msg-1").unwrap();
+        assert_eq!(p.provider.as_deref(), Some("teams"));
+        assert_eq!(p.key, "19:msg-1");
     }
 
     /// Inbox poll marks Jira/Bitbucket items closed via `status_done`.
@@ -2261,5 +2481,76 @@ mod tests {
         ] {
             assert!(!status_done(open), "expected open: {open:?}");
         }
+    }
+
+    fn sample_inbox_ticket(workspace_id: Uuid) -> TicketInboxItem {
+        let now = Utc::now();
+        TicketInboxItem {
+            id: Uuid::new_v4(),
+            workspace_id,
+            provider: "github".into(),
+            external_key: "acme/app#1".into(),
+            title: "secret from A".into(),
+            url: None,
+            state: "open".into(),
+            summary: String::new(),
+            run_id: None,
+            last_seen_at: now,
+            created_at: now,
+        }
+    }
+
+    fn assert_inbox_cross_ws_denied(err: AppError) {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let status = err.into_response().status();
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+            "finish/monitor of another workspace's ticket must be 403/404, got {status}"
+        );
+    }
+
+    /// Knowing a ticket id from workspace A must not finish or monitor it via
+    /// workspace B. Denied before launch; the A row is not mutated.
+    #[test]
+    fn finish_or_monitor_ticket_in_another_workspace_is_403() {
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let item = sample_inbox_ticket(ws_a);
+        let ticket_id = item.id;
+        assert_ne!(ws_a, ws_b);
+        assert!(item.run_id.is_none());
+
+        // Finish: route B + inbox row from A.
+        let finish_err = require_ticket_workspace(&item, ws_b)
+            .expect_err("ticket from A must not finish via B");
+        assert_inbox_cross_ws_denied(finish_err);
+        assert!(
+            require_ticket_workspace(&item, ws_a).is_ok(),
+            "same-workspace finish must still be allowed"
+        );
+
+        // Monitor: not a member of A's workspace (B's session on A's route).
+        let monitor_err = require_workspace_role(None)
+            .expect_err("monitor on another workspace must 403");
+        assert_inbox_cross_ws_denied(monitor_err);
+        assert!(
+            require_workspace_role(Some("member".into())).is_ok(),
+            "member of the route workspace may monitor that workspace"
+        );
+
+        // Exposed id is not a cross-workspace handle: parse treats it as a key
+        // with no provider, so resolve stays scoped to the route workspace.
+        let parsed = parse_ticket_ref(&ticket_id.to_string()).unwrap();
+        assert!(
+            parsed.provider.is_none(),
+            "inbox row id must not imply a provider for finish via B"
+        );
+        assert_eq!(parsed.key, ticket_id.to_string());
+
+        // Denied path must not look like a launched finish.
+        assert!(item.run_id.is_none());
+        assert_eq!(item.workspace_id, ws_a);
+        assert_eq!(item.state, "open");
     }
 }

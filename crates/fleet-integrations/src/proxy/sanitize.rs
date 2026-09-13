@@ -1,6 +1,6 @@
 //! Sanitize proxy responses so secrets never reach chat / agents / logs.
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use super::types::MAX_PROXY_DATA_BYTES;
 
@@ -119,30 +119,106 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn keeps_pagination_tokens() {
-        let raw = json!({
-            "nextPageToken": "abc",
-            "pageToken": "def",
-            "access_token": "nope"
-        });
-        let clean = sanitize_value(&raw);
-        assert_eq!(clean["nextPageToken"], "abc");
-        assert_eq!(clean["pageToken"], "def");
-        assert!(clean.get("access_token").is_none());
-    }
-
+    /// Nested-object `refresh_token` is dropped; `nested.name` stays.
     #[test]
     fn strips_tokens() {
+        const ACCESS: &str = "gho_SANITIZE_MUST_NOT_ECHO_aa11";
+        const REFRESH: &str = "refresh_SANITIZE_NESTED_x";
         let raw = json!({
             "title": "ok",
-            "access_token": "secret",
-            "nested": { "refresh_token": "x", "name": "y" }
+            "access_token": ACCESS,
+            "nested": { "refresh_token": REFRESH, "name": "y" }
         });
         let clean = sanitize_value(&raw);
-        assert!(!contains_secret_keys(&clean));
+        assert!(
+            clean.get("access_token").is_none(),
+            "top-level access_token must not reach chat: {clean}"
+        );
+        assert!(
+            clean["nested"].get("refresh_token").is_none(),
+            "nested refresh_token must not reach chat: {clean}"
+        );
         assert_eq!(clean["title"], "ok");
         assert_eq!(clean["nested"]["name"], "y");
+        let clean_s = serde_json::to_string(&clean).expect("serialize");
+        assert!(
+            !clean_s.contains(ACCESS) && !clean_s.contains(REFRESH),
+            "sanitized body must not echo token values: {clean_s}"
+        );
+        assert!(!contains_secret_keys(&clean));
+    }
+
+    /// Drive-style nested pagination keys stay; nested `access_token` is dropped.
+    #[test]
+    fn keeps_nested_pagination_tokens() {
+        const ACCESS: &str = "gho_NESTED_PAGE_MUST_NOT_ECHO";
+        let raw = json!({
+            "files": {
+                "nextPageToken": "abc",
+                "pageToken": "def",
+                "access_token": ACCESS
+            }
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["files"]["nextPageToken"], "abc");
+        assert_eq!(clean["files"]["pageToken"], "def");
+        assert!(
+            clean["files"].get("access_token").is_none(),
+            "nested access_token must not reach chat: {clean}"
+        );
+        let clean_s = serde_json::to_string(&clean).expect("serialize");
+        assert!(
+            !clean_s.contains(ACCESS),
+            "sanitized body must not echo token values: {clean_s}"
+        );
+    }
+
+    /// camelCase `apiKey` lowercases to `apikey`, not hyphen-normalized `api_key`.
+    #[test]
+    fn strips_camelcase_api_key() {
+        let raw = json!({
+            "name": "keep",
+            "apiKey": "camel-api-secret",
+            "ApiKey": "pascal-api-secret"
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["name"], "keep");
+        for key in ["apiKey", "ApiKey"] {
+            assert!(
+                clean.get(key).is_none(),
+                "camelCase apiKey `{key}` must not reach chat: {clean}"
+            );
+        }
+        let clean_s = serde_json::to_string(&clean).expect("serialize");
+        assert!(
+            !clean_s.contains("camel-api-secret") && !clean_s.contains("pascal-api-secret"),
+            "sanitized body must not echo apiKey values: {clean_s}"
+        );
+    }
+
+    /// Suffix `_refresh_token` must strip provider-prefixed refresh tokens.
+    #[test]
+    fn strips_suffixed_refresh_token() {
+        const GOOGLE: &str = "refresh_GOOGLE_MUST_NOT_ECHO";
+        const GITHUB: &str = "refresh_GITHUB_MUST_NOT_ECHO";
+        let raw = json!({
+            "ok": 1,
+            "google_refresh_token": GOOGLE,
+            "github_refresh_token": GITHUB
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["ok"], 1);
+        for key in ["google_refresh_token", "github_refresh_token"] {
+            assert!(
+                clean.get(key).is_none(),
+                "suffixed refresh_token `{key}` must not reach chat: {clean}"
+            );
+        }
+        let clean_s = serde_json::to_string(&clean).expect("serialize");
+        assert!(
+            !clean_s.contains(GOOGLE) && !clean_s.contains(GITHUB),
+            "sanitized body must not echo refresh token values: {clean_s}"
+        );
     }
 
     #[test]
@@ -224,6 +300,7 @@ mod tests {
         assert!(!contains_secret_keys(&clean));
     }
 
+    /// Huge provider `items` lists shrink to a prefix under 64KiB and keep `count`.
     #[test]
     fn caps_large_item_lists() {
         let items: Vec<Value> = (0..5000)
@@ -231,7 +308,115 @@ mod tests {
             .collect();
         let raw = json!({ "items": items, "count": 5000 });
         let clean = sanitize_value(&raw);
-        let bytes = serde_json::to_vec(&clean).unwrap();
-        assert!(bytes.len() <= MAX_PROXY_DATA_BYTES + 256);
+        let bytes = serde_json::to_vec(&clean).expect("serialize");
+        assert!(
+            bytes.len() <= MAX_PROXY_DATA_BYTES,
+            "sanitized proxy data must fit 64KiB: {} > {MAX_PROXY_DATA_BYTES}",
+            bytes.len()
+        );
+        assert_eq!(
+            clean["truncated"],
+            true,
+            "over-max items list must set truncated"
+        );
+        assert_eq!(
+            clean["count"],
+            5000,
+            "items-prefix shrink must keep the original count"
+        );
+        let kept = clean["items"].as_array().expect("items array");
+        let original = raw["items"].as_array().expect("fixture items");
+        assert!(
+            !kept.is_empty(),
+            "prefix shrink must keep some items, not the note-only fallback"
+        );
+        assert!(
+            kept.len() < 5000,
+            "5000 oversized titles must not all reach chat: {}",
+            kept.len()
+        );
+        assert_eq!(
+            &kept[..],
+            &original[..kept.len()],
+            "kept items must be the original prefix"
+        );
+        assert!(
+            clean.get("note").is_none(),
+            "items-prefix path must not swap in the note fallback"
+        );
+    }
+
+    /// Over-max object without an `items` array uses the note fallback, not prefix shrink.
+    #[test]
+    fn oversized_object_without_items_returns_truncated_note() {
+        let raw = json!({ "content": "x".repeat(70_000) });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["truncated"], true);
+        let note = clean["note"]
+            .as_str()
+            .expect("fallback note must be a string");
+        assert!(
+            note.contains(&MAX_PROXY_DATA_BYTES.to_string()),
+            "fallback note must name the 64KiB cap: {note}"
+        );
+        assert!(
+            clean.get("content").is_none(),
+            "oversize content must not reach chat: {clean}"
+        );
+        let bytes = serde_json::to_vec(&clean).expect("serialize");
+        assert!(
+            bytes.len() <= MAX_PROXY_DATA_BYTES,
+            "fallback note must itself fit the cap: {}",
+            bytes.len()
+        );
+    }
+
+    /// Cap must not fire on list_prs-sized payloads.
+    #[test]
+    fn items_under_max_are_not_marked_truncated() {
+        let raw = json!({
+            "items": [
+                { "id": 1, "title": "first" },
+                { "id": 2, "title": "second" }
+            ]
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["items"][0], json!({ "id": 1, "title": "first" }));
+        assert_eq!(clean["items"][1], json!({ "id": 2, "title": "second" }));
+        assert_eq!(clean["items"].as_array().map(Vec::len), Some(2));
+        assert!(
+            clean.get("truncated").is_none(),
+            "small items list must not be marked truncated: {clean}"
+        );
+        let in_bytes = serde_json::to_vec(&raw).expect("serialize input");
+        let out_bytes = serde_json::to_vec(&clean).expect("serialize");
+        assert_eq!(
+            out_bytes.len(),
+            in_bytes.len(),
+            "under-max items must keep the input byte length"
+        );
+    }
+
+    /// Prefix loop pops the only item that cannot fit; a note-only fallback would drop count.
+    #[test]
+    fn single_item_over_max_returns_empty_items_and_truncated() {
+        let raw = json!({
+            "items": [{ "blob": "x".repeat(70_000) }],
+            "count": 1
+        });
+        let clean = sanitize_value(&raw);
+        assert_eq!(clean["items"], json!([]));
+        assert_eq!(clean["truncated"], true);
+        assert_eq!(clean["count"], 1);
+        let bytes = serde_json::to_vec(&clean).expect("serialize");
+        assert!(
+            bytes.len() <= MAX_PROXY_DATA_BYTES,
+            "empty-items shrink must fit the cap: {}",
+            bytes.len()
+        );
+        assert!(
+            clean.get("note").is_none(),
+            "items path must keep count, not replace the object with a note: {clean}"
+        );
     }
 }

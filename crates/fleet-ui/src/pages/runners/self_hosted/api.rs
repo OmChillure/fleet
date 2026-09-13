@@ -2,18 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
-#[allow(unused_imports)] // HostGpu/HostHardware/HostSoftware stay on the api surface
 pub use fleet_runners_view::{
-    CreateHostResponse, HostDesiredSoftware, HostGpu, HostHardware, HostPatch, HostPublic,
-    HostSoftware, PackageInventory, PackageVersions,
+    CreateHostResponse, HostDesiredSoftware, HostPatch, HostPublic, PackageInventory,
+    PackageVersions,
 };
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CreateHostBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,14 +46,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
     let first = with_credentials(client().get(api_url(path)))
@@ -150,11 +143,6 @@ fn apply_patch(host: HostPublic, patch: &HostPatch) -> HostPublic {
     fleet_runners_view::apply_patch(host, patch)
 }
 
-/// `GET /api/workspaces/{id}/worker-hosts`
-pub async fn list_hosts(workspace_id: &str) -> Result<Vec<HostPublic>, String> {
-    Ok(list_workers_page(workspace_id).await?.0)
-}
-
 pub async fn list_workers_page(
     workspace_id: &str,
 ) -> Result<(Vec<HostPublic>, PackageInventory), String> {
@@ -237,11 +225,6 @@ pub async fn revoke_host(workspace_id: &str, host_id: &str) -> Result<(), String
 /// Install + pair commands from `install_hint`, or a same-origin fallback.
 pub fn install_commands(created: &CreateHostResponse) -> String {
     fleet_runners_view::install_commands(created, &auth_base_url())
-}
-
-/// Control-plane URL the install command will call (from hint, else page origin).
-pub fn install_api_url(created: &CreateHostResponse) -> String {
-    fleet_runners_view::install_api_url(created, &auth_base_url())
 }
 
 /// PowerShell one-liner: download, pair, start (Windows).

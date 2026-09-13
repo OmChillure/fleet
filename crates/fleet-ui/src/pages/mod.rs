@@ -11,9 +11,9 @@
 //!     api.rs       → client fetch helpers for this page
 //!   sessions/      → route /{workspace_id}/sessions
 //!   …
-//!   shared/        → EmptyPage and other cross-page UI
 //! ```
 
+pub mod admin;
 pub mod agents;
 pub mod auth;
 pub mod cases;
@@ -27,5 +27,4 @@ pub mod runners;
 pub mod sandboxes;
 pub mod sessions;
 pub mod settings;
-pub mod shared;
 pub mod workers;

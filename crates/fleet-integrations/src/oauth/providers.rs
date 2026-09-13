@@ -89,6 +89,16 @@ pub fn authorize_url(
                 "workspaces:read projects:read projects:write tasks:read tasks:write stories:read stories:write users:read"
             ),
         ),
+        "bitbucket" => format!(
+            "https://bitbucket.org/site/oauth2/authorize?client_id={client_id}&response_type=code&redirect_uri={redirect_enc}&state={state_enc}&scope={scope}",
+            scope = urlencoding("repository account pullrequest"),
+        ),
+        "confluence" => format!(
+            "https://auth.atlassian.com/authorize?audience=api.atlassian.com&client_id={client_id}&scope={scope}&redirect_uri={redirect_enc}&state={state_enc}&response_type=code&prompt=consent",
+            scope = urlencoding(
+                "read:confluence-content.all write:confluence-content read:confluence-space.summary offline_access"
+            ),
+        ),
         "trello" => {
             // Trello's authorize flow returns the user token in the URL fragment.
             // Callback HTML lifts `#token=` into `?code=` for the shared exchange path.
@@ -129,6 +139,8 @@ pub async fn exchange_code(
         "discord" => exchange_discord(cfg, client, code).await,
         "trello" => exchange_trello(client, code).await,
         "asana" => exchange_asana(cfg, client, code).await,
+        "bitbucket" => exchange_bitbucket(cfg, client, code).await,
+        "confluence" => exchange_confluence(cfg, client, code).await,
         _ => Err(AppError::bad_request(format!(
             "OAuth is not supported for {provider}"
         ))),
@@ -993,6 +1005,93 @@ async fn fetch_trello_username(
         .or_else(|| body.get("fullName"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+async fn exchange_bitbucket(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://bitbucket.org/site/oauth2/access_token")
+        .basic_auth(&client.client_id, Some(&client.client_secret))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &cfg.callback_url("bitbucket")),
+        ])
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("Bitbucket token request failed: {e}")))?;
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("Bitbucket token parse failed: {e}")))?;
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        return Err(AppError::bad_request(format!("Bitbucket OAuth: {err}")));
+    }
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("Bitbucket did not return an access token"))?
+        .to_string();
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": body.get("refresh_token"),
+            "token_type": body.get("token_type").and_then(|v| v.as_str()).unwrap_or("Bearer"),
+        }),
+        config: json!({ "provider": "bitbucket" }),
+        account_label: Some("Bitbucket".into()),
+    })
+}
+
+async fn exchange_confluence(
+    cfg: &IntegrationsConfig,
+    client: &OAuthClientConfig,
+    code: &str,
+) -> AppResult<TokenBundle> {
+    let http = http_client()?;
+    let res = http
+        .post("https://auth.atlassian.com/oauth/token")
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "code": code,
+            "redirect_uri": cfg.callback_url("confluence"),
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::internal(format!("Confluence token request failed: {e}")))?;
+    let body: Value = res
+        .json()
+        .await
+        .map_err(|e| AppError::internal(format!("Confluence token parse failed: {e}")))?;
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        return Err(AppError::bad_request(format!("Confluence OAuth: {err}")));
+    }
+    let access_token = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_request("Confluence did not return an access token"))?
+        .to_string();
+    let site = fetch_atlassian_site(&http, &access_token).await;
+    let (cloud_id, site_name) = match site {
+        Some((id, name)) => (Some(id), Some(name)),
+        None => (None, None),
+    };
+    Ok(TokenBundle {
+        credentials: json!({
+            "access_token": access_token,
+            "refresh_token": body.get("refresh_token"),
+            "token_type": "Bearer",
+            "cloud_id": cloud_id,
+        }),
+        config: json!({ "provider": "confluence", "cloud_id": cloud_id }),
+        account_label: site_name.or_else(|| Some("Confluence".into())),
+    })
 }
 
 fn http_client() -> AppResult<reqwest::Client> {

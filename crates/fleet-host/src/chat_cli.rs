@@ -47,6 +47,8 @@ pub fn run_chat_turn(payload: &Value) -> Result<Value> {
     let text = match provider.as_str() {
         "grok" | "xai" => run_grok(&prompt, &model, effort.as_deref(), timeout)?,
         "claude" | "anthropic" => run_claude(&prompt, &model, effort.as_deref(), timeout)?,
+        "openai" | "codex" => run_openai(&prompt, &model, timeout)?,
+        "gemini" | "google" => run_gemini(&prompt, &model, timeout)?,
         "ollama" => run_ollama(&prompt, &model, timeout)?,
         other => bail!("provider `{other}` has no official CLI on this runner"),
     };
@@ -128,6 +130,24 @@ fn run_claude(
 ) -> Result<String> {
     let args = claude_argv(model, effort);
     run_timeout("claude", &args, Some(prompt), timeout)
+}
+
+fn run_openai(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
+    let mut args = vec!["exec".into(), "--skip-git-repo-check".into()];
+    if !model.is_empty() {
+        args.push("-m".into());
+        args.push(model.to_string());
+    }
+    run_timeout("codex", &args, Some(prompt), timeout)
+}
+
+fn run_gemini(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
+    let mut args = vec!["-p".into()];
+    if !model.is_empty() {
+        args.push("-m".into());
+        args.push(model.to_string());
+    }
+    run_timeout("gemini", &args, Some(prompt), timeout)
 }
 
 fn run_ollama(prompt: &str, model: &str, timeout: Duration) -> Result<String> {
@@ -252,7 +272,39 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "--reasoning-effort" && w[1] == "xhigh")
         );
-        assert!(args.contains(&"--prompt-file".into()));
+    }
+
+    #[test]
+    fn grok_argv_omits_blank_model_and_none_effort() {
+        let args = grok_argv(Path::new("/tmp/p.txt"), "", None);
+        assert!(!args.iter().any(|a| a == "-m"));
+        assert!(!args.iter().any(|a| a == "--reasoning-effort"));
+    }
+
+    #[test]
+    fn grok_argv_prompt_file_path_and_noninteractive_flags() {
+        let path = Path::new("/tmp/p.txt");
+        let args = grok_argv(path, "", None);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--prompt-file" && w[1] == path.display().to_string())
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "plain")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk")
+        );
+        assert!(args.windows(2).any(|w| w[0] == "--max-turns" && w[1] == "1"));
+    }
+
+    #[test]
+    fn grok_argv_model_without_effort() {
+        let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", None);
+        assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "grok-4.6"));
+        assert!(!args.iter().any(|a| a == "--reasoning-effort"));
     }
 
     #[test]
@@ -267,15 +319,23 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk")
         );
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--model" && w[1] == "sonnet")
-        );
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--effort" && w[1] == "high")
-        );
-        assert!(!args.iter().any(|a| a == "hello"));
         assert!(!args.iter().any(|a| a == "models"));
+    }
+
+    #[test]
+    fn claude_argv_omits_model_and_effort_when_absent() {
+        let args = claude_argv("", None);
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(!args.iter().any(|a| a == "--effort"));
+    }
+
+    #[test]
+    fn claude_argv_text_output_and_no_session_persistence() {
+        let args = claude_argv("sonnet", Some("high"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "text")
+        );
+        assert!(args.iter().any(|a| a == "--no-session-persistence"));
     }
 }

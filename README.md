@@ -78,11 +78,14 @@ dx serve --package fleet-ui --port 3030
    **integration_query** (tokens stay on the control plane). Plan `outputs`
    write back when the run ends.
    Live workers
-   message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
+   message each other mid-run (`send_message` / `ask_teammate`, or
+   `./fleet-tool.sh chat-post` / `chat-list`), share `work/`,
    and reviewers can `request_changes` to bounce work back. Worker models run on
-   the paired runner's official CLI (same as chat). Fleet LLM in **Settings**
-   (Ollama) or env `FLEET_AGENT_BACKEND=grok` only selects the harness. Without
-   either, sandboxes use the mock harness.
+   the paired runner's official CLI (same as chat), using the **Chat composer**
+   provider (Grok / Claude / Ollama). Settings Ollama /
+   `FLEET_AGENT_BACKEND=grok` only select the harness when a run has no chat
+   model. Without a paired runner the task stays ready; without a harness,
+   sandboxes use mock.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`) leased to a
@@ -136,6 +139,13 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
+| `GET` | `/api/admin/overview` | Instance counts (instance admin) |
+| `GET` | `/api/admin/users` | All users (instance admin) |
+| `PATCH` | `/api/admin/users/{id}` | Promote / disable (`instance_admin`, `status`) |
+| `GET` | `/api/admin/workspaces` | All workspaces |
+| `GET` | `/api/admin/runners` | All paired hosts |
+| `GET` | `/api/admin/instance` | Health, public URLs, provider flags, staged packages |
+| `GET` | `/api/admin/work` | Cross-workspace session/claim/case totals |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -154,6 +164,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/cases/{case_id}` | Case detail, observe, cancel |
 | `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
+| `/admin` | Instance admin (users, all runners, health). Not workspace-scoped |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 | `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |
 | `/{workspace_id}/runners/cloud` | Cloud runners placeholder |

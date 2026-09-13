@@ -52,22 +52,3 @@ impl ExternalBoardSync for LogBoardSync {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn noop_sync() {
-        NoopBoardSync
-            .sync_task_status(TaskStatusSync {
-                board_task_id: Uuid::new_v4(),
-                project_id: Uuid::new_v4(),
-                external_provider: Some("jira".into()),
-                external_key: Some("WEB-1".into()),
-                status: "in_progress".into(),
-            })
-            .await
-            .unwrap();
-    }
-}

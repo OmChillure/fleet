@@ -295,6 +295,7 @@ Type=simple
 ExecStart=${BIN_DIR}/fleet-host run
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=60
 
 [Install]
 WantedBy=default.target

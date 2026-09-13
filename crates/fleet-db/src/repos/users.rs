@@ -8,7 +8,7 @@ use crate::pool::map_query_err;
 
 const USER_COLS: &str = r#"
     id, email, email_normalized, display_name, password_hash,
-    status, created_at, updated_at, version
+    status, instance_admin, created_at, updated_at, version
 "#;
 
 pub async fn find_by_id(pool: &PgPool, id: Uuid) -> DbResult<Option<User>> {
@@ -57,9 +57,9 @@ pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewUser) -> DbR
         r#"
         INSERT INTO users (
             id, email, email_normalized, display_name, password_hash,
-            status, created_at, updated_at
+            status, instance_admin, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        VALUES ($1, $2, $3, $4, $5, 'active', FALSE, $6, $6)
         RETURNING {USER_COLS}
         "#
     );
@@ -84,4 +84,64 @@ pub async fn insert_tx(tx: &mut Transaction<'_, Postgres>, new: &NewUser) -> DbR
             }
             map_query_err(e)
         })
+}
+
+pub async fn set_instance_admin(
+    pool: &PgPool,
+    user_id: Uuid,
+    instance_admin: bool,
+) -> DbResult<Option<User>> {
+    let q = format!(
+        r#"
+        UPDATE users
+        SET instance_admin = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING {USER_COLS}
+        "#
+    );
+    sqlx::query_as::<_, User>(&q)
+        .bind(user_id)
+        .bind(instance_admin)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn set_status(pool: &PgPool, user_id: Uuid, status: &str) -> DbResult<Option<User>> {
+    let q = format!(
+        r#"
+        UPDATE users
+        SET status = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING {USER_COLS}
+        "#
+    );
+    sqlx::query_as::<_, User>(&q)
+        .bind(user_id)
+        .bind(status)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn count_instance_admins(pool: &PgPool) -> DbResult<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE instance_admin = TRUE AND status = 'active'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(map_query_err)
+}
+
+pub async fn count_by_status(pool: &PgPool) -> DbResult<Vec<(String, i64)>> {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT status, COUNT(*)::bigint FROM users GROUP BY status",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)
 }

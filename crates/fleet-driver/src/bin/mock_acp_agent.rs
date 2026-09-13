@@ -3,7 +3,7 @@
 //! Flags / env:
 //!   --fail / MOCK_ACP_FAIL=1         RPC error on session/prompt
 //!   --permission / MOCK_ACP_PERMISSION=1
-//!       request permission during prompt, then continue
+//!       request permission during prompt; continue only on selected allow-*
 //!   --hang / MOCK_ACP_HANG=1         never complete session/prompt
 //!   --terminal / MOCK_ACP_TERMINAL=1  exercise client terminal/* methods
 //!   --slow-ms N / MOCK_ACP_SLOW_MS   delay before prompt result
@@ -164,12 +164,29 @@ fn main() -> io::Result<()> {
                         }
                     }),
                 )?;
-                // Wait until the client answers id 9001 (or we see another request).
+                // Wait for the client reply to id 9001. Only selected allow-* continues.
+                let mut allowed = false;
+                let mut selected_option = String::new();
                 loop {
                     match read_msg(&mut stdin)? {
                         None => return Ok(()),
                         Some(resp) => {
                             if resp.get("id") == Some(&json!(9001)) {
+                                let outcome = resp
+                                    .pointer("/result/outcome/outcome")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let option_id = resp
+                                    .pointer("/result/outcome/optionId")
+                                    .or_else(|| resp.pointer("/result/outcome/option_id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if outcome == "selected"
+                                    && option_id.to_ascii_lowercase().contains("allow")
+                                {
+                                    allowed = true;
+                                    selected_option = option_id.to_string();
+                                }
                                 break;
                             }
                             // Reply to unexpected client requests so the session does not stall.
@@ -184,6 +201,34 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
+                if !allowed {
+                    write_msg(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": { "stopReason": "cancelled" }
+                        }),
+                    )?;
+                    continue;
+                }
+                write_msg(
+                    &mut stdout,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "sess-mock-1",
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": format!("permission selected: {selected_option}")
+                                }
+                            }
+                        }
+                    }),
+                )?;
             }
             if terminal {
                 write_msg(

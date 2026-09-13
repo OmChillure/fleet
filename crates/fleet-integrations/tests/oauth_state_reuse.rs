@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, header};
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
 use fleet_auth::ACCESS_COOKIE;
@@ -10,11 +12,12 @@ use fleet_db::NewAuthSession;
 use fleet_db::repos::{integrations as integ_repo, sessions as session_repo, users, workspaces};
 use fleet_integrations::{
     CredentialsKey, IntegrationsConfig, IntegrationsState, OAuthCallbackError, OAuthCallbackQuery,
-    OAuthClientConfig, credentials_for, issue_oauth_state, oauth_callback_inner,
+    OAuthClientConfig, credentials_for, issue_oauth_state, oauth_callback_inner, router,
     verify_oauth_state,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -144,6 +147,8 @@ fn test_state(pool: fleet_db::PgPool) -> IntegrationsState {
                 github_app_slug: None,
             }),
             asana: None,
+            bitbucket: None,
+            confluence: None,
         },
     }
 }
@@ -231,51 +236,38 @@ fn replay_rejected(err: &OAuthCallbackError) {
     );
 }
 
-/// Trello treats `code` as the token (no live provider). First Connect
-/// must consume the state nonce so a replay cannot attach or replace it.
+/// First Trello Connect. Returns (state JWT, nonce, stored access_token).
+async fn connect_trello(
+    state: &IntegrationsState,
+    jar: &CookieJar,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> (String, String, String) {
+    let secret = &state.config.state_secret;
+    let jwt = issue_oauth_state(secret, user_id, workspace_id, "trello").unwrap();
+    let nonce = verify_oauth_state(secret, &jwt)
+        .expect("signature check is not consume")
+        .nonce;
+    let tok = format!("tok_first_{}", Uuid::now_v7());
+    let provider = oauth_callback_inner(state, "trello", callback_query(&tok, &jwt), jar)
+        .await
+        .expect("first Connect must succeed");
+    assert_eq!(provider, "trello");
+    (jwt, nonce, tok)
+}
+
+/// 029 PK(nonce): a new JWT carrying a used nonce must 409 and not replace.
 #[tokio::test]
-async fn oauth_state_nonce_must_not_complete_connect_twice() {
+async fn oauth_callback_forged_jwt_same_nonce_is_409() {
     let pool = connect_and_migrate().await;
-    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "once").await;
+    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "forged").await;
     let state = test_state(pool.clone());
     let secret = state.config.state_secret.clone();
     let key = state.config.credentials_key.clone();
     let jar = session_jar(&state, user_id, &email).await;
+    let (jwt, nonce, first_tok) = connect_trello(&state, &jar, user_id, workspace_id).await;
 
-    let jwt = issue_oauth_state(&secret, user_id, workspace_id, "trello").unwrap();
-    let claims = verify_oauth_state(&secret, &jwt).expect("signature check is not consume");
-    assert!(!claims.nonce.trim().is_empty());
-
-    // GitHub App manifest verifies the same JWT, then user-oauth completes.
-    // Verify-only must not burn the nonce.
-    let first_tok = format!("tok_first_{}", Uuid::now_v7());
-    let first = oauth_callback_inner(&state, "trello", callback_query(&first_tok, &jwt), &jar)
-        .await
-        .expect("first Connect must succeed after a prior verify");
-    assert_eq!(first, "trello");
-
-    assert_eq!(
-        stored_access_token(&pool, workspace_id, &key)
-            .await
-            .as_deref(),
-        Some(first_tok.as_str()),
-        "first callback must store that access_token"
-    );
-
-    let replay_tok = format!("tok_replay_{}", Uuid::now_v7());
-    let replay = oauth_callback_inner(&state, "trello", callback_query(&replay_tok, &jwt), &jar)
-        .await
-        .expect_err("same state JWT must not complete Connect a second time");
-    replay_rejected(&replay);
-    assert_eq!(
-        stored_access_token(&pool, workspace_id, &key)
-            .await
-            .as_deref(),
-        Some(first_tok.as_str()),
-        "replaying the same state JWT must not replace the first token"
-    );
-
-    let forged = encode_state_with_nonce(&secret, user_id, workspace_id, "trello", &claims.nonce);
+    let forged = encode_state_with_nonce(&secret, user_id, workspace_id, "trello", &nonce);
     assert_ne!(forged, jwt);
     let forged_tok = format!("tok_forged_{}", Uuid::now_v7());
     let forged_err =
@@ -290,6 +282,17 @@ async fn oauth_state_nonce_must_not_complete_connect_twice() {
         Some(first_tok.as_str()),
         "a new JWT carrying the same nonce must not replace the first token"
     );
+}
+
+/// Disconnect does not delete the nonce row; the used JWT stays dead.
+#[tokio::test]
+async fn oauth_callback_consumed_nonce_stays_dead_after_disconnect() {
+    let pool = connect_and_migrate().await;
+    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "disc").await;
+    let state = test_state(pool.clone());
+    let key = state.config.credentials_key.clone();
+    let jar = session_jar(&state, user_id, &email).await;
+    let (jwt, _nonce, _first_tok) = connect_trello(&state, &jar, user_id, workspace_id).await;
 
     integ_repo::disconnect(&pool, workspace_id, "trello")
         .await
@@ -317,10 +320,26 @@ async fn oauth_state_nonce_must_not_complete_connect_twice() {
             .is_none(),
         "consumed nonce must not reconnect; credentials stay None"
     );
+}
+
+/// A new nonce after disconnect must Connect again.
+#[tokio::test]
+async fn oauth_callback_fresh_nonce_reconnects() {
+    let pool = connect_and_migrate().await;
+    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "recon").await;
+    let state = test_state(pool.clone());
+    let secret = state.config.state_secret.clone();
+    let key = state.config.credentials_key.clone();
+    let jar = session_jar(&state, user_id, &email).await;
+    let (_jwt, old_nonce, _first_tok) = connect_trello(&state, &jar, user_id, workspace_id).await;
+
+    integ_repo::disconnect(&pool, workspace_id, "trello")
+        .await
+        .expect("disconnect");
 
     let fresh = issue_oauth_state(&secret, user_id, workspace_id, "trello").unwrap();
     let fresh_claims = verify_oauth_state(&secret, &fresh).expect("fresh state");
-    assert_ne!(fresh_claims.nonce, claims.nonce);
+    assert_ne!(fresh_claims.nonce, old_nonce);
     let reconnect_tok = format!("tok_reconnect_{}", Uuid::now_v7());
     let reconnect = oauth_callback_inner(
         &state,
@@ -337,6 +356,150 @@ async fn oauth_state_nonce_must_not_complete_connect_twice() {
             .as_deref(),
         Some(reconnect_tok.as_str()),
         "a fresh nonce must store the new access_token"
+    );
+}
+
+/// Manifest callback verifies the state JWT but must not insert the nonce.
+#[tokio::test]
+async fn github_manifest_callback_does_not_consume_state_nonce() {
+    let pool = connect_and_migrate().await;
+    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "manif").await;
+    let state = test_state(pool.clone());
+    let secret = state.config.state_secret.clone();
+    let jar = session_jar(&state, user_id, &email).await;
+    let cookie = jar
+        .get(ACCESS_COOKIE)
+        .expect("access cookie")
+        .value()
+        .to_string();
+
+    let jwt = issue_oauth_state(&secret, user_id, workspace_id, "github").unwrap();
+    let claims = verify_oauth_state(&secret, &jwt).expect("signature check is not consume");
+    let code = format!("manifest-noconsume-{}", Uuid::now_v7());
+    let app = router().with_state(state);
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/integrations/oauth/github/manifest/callback?code={code}&state={jwt}"
+        ))
+        .header(header::COOKIE, format!("{ACCESS_COOKIE}={cookie}"))
+        .body(Body::empty())
+        .expect("manifest request");
+    let res = app.oneshot(req).await.expect("manifest oneshot");
+    let status = res.status();
+    let _ = to_bytes(res.into_body(), 1024 * 1024).await.expect("body");
+    assert_ne!(
+        status,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "matching session must pass bind before convert, got {status}"
+    );
+    assert_ne!(
+        status,
+        axum::http::StatusCode::FORBIDDEN,
+        "matching session must pass bind before convert, got {status}"
+    );
+    assert_ne!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "manifest must not consume-then-409, got {status}"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM integration_oauth_state_nonces WHERE nonce = $1",
+    )
+    .bind(&claims.nonce)
+    .fetch_one(&pool)
+    .await
+    .expect("count oauth nonce");
+    assert_eq!(count, 0, "manifest verify-only must not insert a nonce row");
+    let still = integ_repo::consume_oauth_state_nonce(&pool, &claims.nonce, workspace_id, "github")
+        .await
+        .expect("consume after manifest");
+    assert!(
+        still,
+        "consume_oauth_state_nonce must still win after manifest verify"
+    );
+}
+
+/// Consume happens before exchange: exchange Err must not upsert, replay is 409.
+#[tokio::test]
+async fn oauth_callback_failed_exchange_still_consumes_nonce() {
+    let pool = connect_and_migrate().await;
+    let (user_id, email, workspace_id) = seed_user_with_workspace(&pool, "xfail").await;
+    let state = test_state(pool.clone());
+    let secret = state.config.state_secret.clone();
+    let key = state.config.credentials_key.clone();
+    let jar = session_jar(&state, user_id, &email).await;
+
+    // Non-empty so the callback passes the missing-code gate; trim is empty
+    // so Trello exchange fails after consume and never hits the provider.
+    let jwt = issue_oauth_state(&secret, user_id, workspace_id, "trello").unwrap();
+    let first = oauth_callback_inner(&state, "trello", callback_query("   ", &jwt), &jar)
+        .await
+        .expect_err("trimmed-empty Trello code must fail exchange");
+    assert_ne!(
+        first.status(),
+        Some(axum::http::StatusCode::CONFLICT),
+        "first callback must consume then fail exchange, not 409: {}",
+        first.message()
+    );
+    assert!(
+        stored_access_token(&pool, workspace_id, &key)
+            .await
+            .is_none(),
+        "failed exchange must not upsert credentials"
+    );
+
+    let replay_tok = format!("tok_after_xfail_{}", Uuid::now_v7());
+    let replay = oauth_callback_inner(&state, "trello", callback_query(&replay_tok, &jwt), &jar)
+        .await
+        .expect_err("nonce consumed by the failed exchange must 409");
+    replay_rejected(&replay);
+    assert!(
+        stored_access_token(&pool, workspace_id, &key)
+            .await
+            .is_none(),
+        "replay after failed exchange must not upsert credentials"
+    );
+}
+
+/// Nonce PK is global: a used nonce on workspace B must 409 and leave B empty.
+#[tokio::test]
+async fn oauth_callback_same_nonce_on_other_workspace_is_409() {
+    let pool = connect_and_migrate().await;
+    let (user_id, email, ws_a) = seed_user_with_workspace(&pool, "xws-a").await;
+    let ws_b = Uuid::now_v7();
+    workspaces::create_owned(
+        &pool,
+        ws_b,
+        user_id,
+        &format!("osr-xws-b-{}", ws_b.as_simple()),
+        "OAuth state reuse B",
+        Utc::now(),
+    )
+    .await
+    .expect("create workspace B");
+
+    let state = test_state(pool.clone());
+    let secret = state.config.state_secret.clone();
+    let key = state.config.credentials_key.clone();
+    let jar = session_jar(&state, user_id, &email).await;
+    let (_jwt, nonce, first_tok) = connect_trello(&state, &jar, user_id, ws_a).await;
+
+    let forged_b = encode_state_with_nonce(&secret, user_id, ws_b, "trello", &nonce);
+    let tok_b = format!("tok_ws_b_{}", Uuid::now_v7());
+    let err = oauth_callback_inner(&state, "trello", callback_query(&tok_b, &forged_b), &jar)
+        .await
+        .expect_err("used nonce on workspace B must not complete Connect");
+    replay_rejected(&err);
+    assert!(
+        stored_access_token(&pool, ws_b, &key).await.is_none(),
+        "used nonce must not store credentials on workspace B"
+    );
+    assert_eq!(
+        stored_access_token(&pool, ws_a, &key).await.as_deref(),
+        Some(first_tok.as_str()),
+        "cross-workspace replay must not replace A's token"
     );
 }
 

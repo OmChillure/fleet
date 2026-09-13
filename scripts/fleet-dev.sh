@@ -86,12 +86,18 @@ compose() {
 }
 
 # Load KEY=VAL from .env without executing it (simple export).
+# host-urls.env is written after port remap and must win so a stale
+# WORKER_PUBLIC_BASE in .env cannot keep pointing at :8080.
 load_dotenv() {
   local f="$ROOT/.env"
   [[ -f "$f" ]] || return 0
   set -a
   # shellcheck disable=SC1090
   source <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$f" | sed 's/\r$//')
+  if [[ -f "$URLS_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$URLS_FILE" | sed 's/\r$//')
+  fi
   set +a
 }
 
@@ -371,13 +377,71 @@ choose_host_ports() {
   export PORT="$API_PORT"
   export FLEET_API_URL="http://127.0.0.1:${API_PORT}"
   export FLEET_UI_URL="http://localhost:${UI_PORT}"
+  derive_local_urls
   {
     echo "FLEET_API_PORT=${API_PORT}"
     echo "FLEET_UI_PORT=${UI_PORT}"
     echo "PORT=${API_PORT}"
     echo "FLEET_API_URL=${FLEET_API_URL}"
     echo "FLEET_UI_URL=${FLEET_UI_URL}"
+    echo "WORKER_PUBLIC_BASE=${WORKER_PUBLIC_BASE}"
+    echo "ORCHESTRATOR_PUBLIC_URL=${WORKER_PUBLIC_BASE}"
+    [[ -n "${API_PUBLIC_BASE:-}" ]] && echo "API_PUBLIC_BASE=${API_PUBLIC_BASE}"
+    [[ -n "${UI_PUBLIC_BASE:-}" ]] && echo "UI_PUBLIC_BASE=${UI_PUBLIC_BASE}"
+    [[ -n "${CORS_ORIGINS:-}" ]] && echo "CORS_ORIGINS=${CORS_ORIGINS}"
   } >"$URLS_FILE"
+}
+
+# Pair/install URL: this box's LAN IPv4 + the live API port.
+# Leave a public WORKER_PUBLIC_BASE (https://… / a real hostname) alone.
+# Unset or loopback/LAN in .env is not a pin — it goes stale when Kind
+# steals :8080.
+lan_ipv4() {
+  local ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+  fi
+  if [[ -z "$ip" ]] && command -v hostname >/dev/null 2>&1; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  printf '%s' "$ip"
+}
+
+worker_base_is_local() {
+  case "${1:-}" in
+    ""|http://127.0.0.1:*|http://localhost:*|http://\[::1\]:*|http://192.168.*:*|http://10.*:*|http://172.1[6-9].*:*|http://172.2[0-9].*:*|http://172.3[0-1].*:*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# One listen port → every local URL. Public hosts (https://studio) stay set.
+derive_local_urls() {
+  if worker_base_is_local "${WORKER_PUBLIC_BASE:-}"; then
+    local ip
+    ip="$(lan_ipv4)"
+    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
+      WORKER_PUBLIC_BASE="http://127.0.0.1:${API_PORT}"
+    else
+      WORKER_PUBLIC_BASE="http://${ip}:${API_PORT}"
+    fi
+  fi
+  export WORKER_PUBLIC_BASE
+  if worker_base_is_local "${API_PUBLIC_BASE:-}"; then
+    API_PUBLIC_BASE="http://localhost:${API_PORT}"
+    export API_PUBLIC_BASE
+  fi
+  if worker_base_is_local "${UI_PUBLIC_BASE:-}"; then
+    UI_PUBLIC_BASE="http://localhost:${UI_PORT}"
+    export UI_PUBLIC_BASE
+  fi
+  if [[ -z "${CORS_ORIGINS:-}" ]] || worker_base_is_local "${CORS_ORIGINS%%,*}"; then
+    CORS_ORIGINS="http://localhost:${UI_PORT},http://127.0.0.1:${UI_PORT}"
+    export CORS_ORIGINS
+  fi
 }
 
 write_ui_git_sha() {
@@ -435,6 +499,11 @@ start_server() {
     FLEET_GIT_SHA="${FLEET_GIT_SHA}" \
     PORT="$port" \
     HOST="${HOST:-0.0.0.0}" \
+    WORKER_PUBLIC_BASE="${WORKER_PUBLIC_BASE:-}" \
+    ORCHESTRATOR_PUBLIC_URL="${ORCHESTRATOR_PUBLIC_URL:-${WORKER_PUBLIC_BASE:-}}" \
+    API_PUBLIC_BASE="${API_PUBLIC_BASE:-}" \
+    UI_PUBLIC_BASE="${UI_PUBLIC_BASE:-}" \
+    CORS_ORIGINS="${CORS_ORIGINS:-}" \
     cargo run -p fleet-server \
     >>"$LOG_SERVER" 2>&1 &
   echo $! >"$PID_SERVER"

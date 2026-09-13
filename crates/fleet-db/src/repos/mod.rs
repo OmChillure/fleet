@@ -1,10 +1,13 @@
 //! Query helpers / repositories. Services should call these instead of raw SQL.
 
+pub mod admin;
 pub mod cases;
 pub mod chats;
 pub mod control_plane_events;
 pub mod integrations;
+pub mod llm_keys;
 pub mod personas;
+pub mod plan_jobs;
 pub mod sessions;
 pub mod tickets;
 pub mod users;

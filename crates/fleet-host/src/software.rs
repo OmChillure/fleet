@@ -24,8 +24,11 @@ static HOST_PKG_STAMP: &[u8] =
 /// `build.rs` reruns rustc when the env changes so a cached object without
 /// the sha cannot be reused. A 64-hex file hash is never a bake id.
 pub fn baked_git_sha() -> Option<&'static str> {
-    option_env!("FLEET_GIT_SHA")
-        .map(str::trim)
+    option_env!("FLEET_GIT_SHA").and_then(bake_id_from_raw)
+}
+
+fn bake_id_from_raw(raw: &str) -> Option<&str> {
+    Some(raw.trim())
         .filter(|s| !s.is_empty())
         .filter(|s| !is_file_sha256(s))
 }
@@ -156,90 +159,168 @@ mod tests {
             pkg_version_from_bytes(blob, DRIVER_PKG_STAMP_PREFIX).as_deref(),
             Some("9.9.9")
         );
+    }
+
+    #[test]
+    fn pkg_stamp_prefixes_are_published_ascii() {
+        assert_eq!(HOST_PKG_STAMP_PREFIX, b"FLEET_HOST_PKG=");
+        assert_eq!(DRIVER_PKG_STAMP_PREFIX, b"FLEET_DRIVER_PKG=");
+    }
+
+    #[test]
+    fn pkg_version_from_bytes_empty_value_is_none() {
         assert_eq!(
-            pkg_version_from_bytes(b"no stamp here", DRIVER_PKG_STAMP_PREFIX),
+            pkg_version_from_bytes(b"FLEET_DRIVER_PKG=\0", DRIVER_PKG_STAMP_PREFIX),
             None
         );
-        let host_blob = format!(
-            "pad{}end",
-            std::str::from_utf8(HOST_PKG_STAMP).expect("ascii stamp")
-        );
+    }
+
+    #[test]
+    fn pkg_version_from_bytes_stops_at_ascii_whitespace() {
         assert_eq!(
-            pkg_version_from_bytes(host_blob.as_bytes(), HOST_PKG_STAMP_PREFIX).as_deref(),
-            Some(host_pkg_version())
+            pkg_version_from_bytes(b"FLEET_DRIVER_PKG=1.2.3\nrest", DRIVER_PKG_STAMP_PREFIX)
+                .as_deref(),
+            Some("1.2.3")
         );
     }
 
     #[test]
-    fn driver_version_prefers_on_disk_stamp() {
-        let dir = std::env::temp_dir().join(format!("fleet-host-ver-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let p = dir.join("fleet-driver");
-        fs::write(&p, b"header\nFLEET_DRIVER_PKG=0.2.3\0tail").unwrap();
-        assert_eq!(
-            pkg_version_from_file(&p, DRIVER_PKG_STAMP_PREFIX).as_deref(),
-            Some("0.2.3")
-        );
-        let _ = fs::remove_file(&p);
-    }
-
-    #[test]
-    fn heartbeat_software_always_sends_git_sha_key() {
-        let v = heartbeat_software(&LocalConfig::default(), false);
-        assert!(v.get("git_sha").is_some(), "git_sha key must be present");
-        assert!(v.get("bins").is_some());
-        assert_eq!(
-            v["bins"]["fleet-host"]["version"].as_str(),
-            Some(host_pkg_version())
-        );
-        assert_eq!(v.get("updating"), Some(&json!(false)));
-        let updating = heartbeat_software(&LocalConfig::default(), true);
-        assert_eq!(updating.get("updating"), Some(&json!(true)));
-        match baked_git_sha() {
-            Some(s) => {
-                assert!(!s.is_empty());
-                assert_eq!(v.get("git_sha"), Some(&json!(s)));
-            }
-            None => assert!(v.get("git_sha").unwrap().is_null()),
+    fn bake_id_from_raw_drops_empty_whitespace_and_64_hex() {
+        let file_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let tree_id = "0123456789abcdef0123456789abcdef01234567";
+        let cases = [
+            ("", None),
+            ("  ", None),
+            (file_hash, None),
+            (tree_id, Some(tree_id)),
+            ("abc123", Some("abc123")),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(bake_id_from_raw(raw), want, "bake_id_from_raw({raw:?})");
         }
     }
 
     #[test]
-    fn heartbeat_driver_version_only_from_on_disk_stamp() {
-        let dir = std::env::temp_dir().join(format!("fleet-host-hb-drv-{}", std::process::id()));
+    fn heartbeat_software_updating_true_keeps_git_sha_and_bins() {
+        let v = heartbeat_software(&LocalConfig::default(), true);
+        assert_eq!(v.get("updating"), Some(&json!(true)));
+        assert!(v.get("git_sha").is_some(), "git_sha key must be present");
+        assert!(
+            v["bins"]["fleet-host"]["version"].as_str().is_some(),
+            "bins.fleet-host.version must stay set while updating: {v}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_software_host_version_is_compile_time_not_on_disk_driver_stamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-host-hb-hostver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         let _ = fs::create_dir_all(&dir);
+        let driver = dir.join("fleet-driver");
+        fs::write(&driver, b"header\nFLEET_DRIVER_PKG=planted-drv-stamp\0tail").unwrap();
         let mut cfg = LocalConfig::default();
+        cfg.fleet_driver_bin = driver.display().to_string();
 
-        cfg.fleet_driver_bin = dir.join("missing-driver").display().to_string();
-        let missing = heartbeat_software(&cfg, false);
-        assert!(
-            missing["bins"]["fleet-driver"]["version"].is_null(),
-            "omit driver version when the file is missing: {}",
-            missing
-        );
+        let v = heartbeat_software(&cfg, false);
 
-        let p = dir.join("fleet-driver");
-        fs::write(&p, b"no stamp in this blob").unwrap();
-        cfg.fleet_driver_bin = p.display().to_string();
-        let unstamped = heartbeat_software(&cfg, false);
-        assert!(
-            unstamped["bins"]["fleet-driver"]["version"].is_null(),
-            "omit driver version when the on-disk stamp is missing: {}",
-            unstamped
-        );
-
-        fs::write(&p, b"header\nFLEET_DRIVER_PKG=1.2.3\0tail").unwrap();
-        let stamped = heartbeat_software(&cfg, false);
         assert_eq!(
-            stamped["bins"]["fleet-driver"]["version"].as_str(),
-            Some("1.2.3")
+            v["bins"]["fleet-host"]["version"].as_str(),
+            Some(host_pkg_version())
         );
         assert_ne!(
-            stamped["bins"]["fleet-driver"]["version"].as_str(),
+            v["bins"]["fleet-host"]["version"].as_str(),
+            Some("planted-drv-stamp"),
+            "host version must not come from the on-disk driver stamp: {v}"
+        );
+
+        let _ = fs::remove_file(&driver);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn heartbeat_driver_version_omitted_when_bin_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = LocalConfig::default();
+        cfg.fleet_driver_bin = dir.path().join("missing-driver").display().to_string();
+
+        let v = heartbeat_software(&cfg, false);
+
+        assert!(
+            v["bins"]["fleet-driver"]["version"].is_null(),
+            "omit driver version when the file is missing: {v}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_driver_version_omitted_when_unstamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fleet-driver");
+        fs::write(&p, b"no stamp in this blob").unwrap();
+        let mut cfg = LocalConfig::default();
+        cfg.fleet_driver_bin = p.display().to_string();
+
+        let v = heartbeat_software(&cfg, false);
+
+        assert!(
+            v["bins"]["fleet-driver"]["version"].is_null(),
+            "omit driver version when the on-disk stamp is missing: {v}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_driver_version_only_from_on_disk_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fleet-driver");
+        fs::write(&p, b"header\nFLEET_DRIVER_PKG=planted-not-bake\0tail").unwrap();
+        let mut cfg = LocalConfig::default();
+        cfg.fleet_driver_bin = p.display().to_string();
+
+        let v = heartbeat_software(&cfg, false);
+
+        assert_eq!(
+            v["bins"]["fleet-driver"]["version"].as_str(),
+            Some("planted-not-bake")
+        );
+        assert_ne!(
+            v["bins"]["fleet-driver"]["version"].as_str(),
             Some(driver_pkg_version()),
             "must not invent the host bake version"
         );
-        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn resolve_bin_relative_name_uses_sibling_of_host_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let host_exe = dir.path().join("fake-host");
+        let sibling = dir.path().join("fleet-driver");
+        fs::write(&host_exe, b"host").unwrap();
+        fs::write(&sibling, b"driver").unwrap();
+
+        let got = resolve_bin("fleet-driver", Some(&host_exe));
+
+        assert_eq!(got.as_deref(), Some(sibling.as_path()));
+    }
+
+    #[test]
+    fn resolve_bin_absolute_existing_file_wins_over_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let host_exe = dir.path().join("fake-host");
+        let sibling = dir.path().join("fleet-driver");
+        let configured = dir.path().join("configured-driver");
+        fs::write(&host_exe, b"host").unwrap();
+        fs::write(&sibling, b"header\nFLEET_DRIVER_PKG=sibling-stamp\0tail").unwrap();
+        fs::write(&configured, b"header\nFLEET_DRIVER_PKG=abs-stamp\0tail").unwrap();
+
+        let got = resolve_bin(&configured.display().to_string(), Some(&host_exe));
+
+        assert_eq!(got.as_deref(), Some(configured.as_path()));
+        assert_ne!(got.as_deref(), Some(sibling.as_path()));
     }
 
     #[test]
@@ -253,72 +334,5 @@ mod tests {
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         let _ = fs::remove_file(&p);
-    }
-
-    #[test]
-    fn heartbeat_software_build_id_is_never_file_hash() {
-        let dir = std::env::temp_dir().join(format!(
-            "fleet-host-sw-build-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = fs::create_dir_all(&dir);
-        let driver = dir.join("fleet-driver");
-        fs::write(&driver, b"driver-bytes-for-software-build-id").unwrap();
-        let driver_hash = file_sha256(&driver).expect("driver hash");
-
-        let mut cfg = LocalConfig::default();
-        cfg.fleet_driver_bin = driver.display().to_string();
-        let v = heartbeat_software(&cfg, false);
-
-        assert!(v.get("git_sha").is_some(), "git_sha key must be present");
-        match baked_git_sha() {
-            Some(s) => {
-                assert!(!s.is_empty());
-                assert_eq!(
-                    v.get("git_sha"),
-                    Some(&json!(s)),
-                    "git_sha is the compile-time bake id, not a bin SHA"
-                );
-            }
-            None => assert!(
-                v.get("git_sha").unwrap().is_null(),
-                "unset bake must be JSON null, never a file hash: {}",
-                v["git_sha"]
-            ),
-        }
-
-        let host_hash = std::env::current_exe()
-            .ok()
-            .as_deref()
-            .and_then(file_sha256);
-        if let Some(ref hash) = host_hash {
-            assert_ne!(
-                v.get("git_sha"),
-                Some(&json!(hash)),
-                "current_exe sha256 is bins.fleet-host.sha256, not software_build_id"
-            );
-        }
-        assert_ne!(
-            v.get("git_sha"),
-            Some(&json!(driver_hash)),
-            "driver file hash is not the bake id"
-        );
-        assert_eq!(
-            v["bins"]["fleet-driver"]["sha256"].as_str(),
-            Some(driver_hash.as_str())
-        );
-        if let Some(reported_host) = v["bins"]["fleet-host"]["sha256"].as_str() {
-            assert_ne!(v.get("git_sha"), Some(&json!(reported_host)));
-            if let Some(ref hash) = host_hash {
-                assert_eq!(reported_host, hash.as_str());
-            }
-        }
-
-        let _ = fs::remove_file(&driver);
-        let _ = fs::remove_dir(&dir);
     }
 }

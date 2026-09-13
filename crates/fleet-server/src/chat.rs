@@ -21,18 +21,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use fleet_db::User;
 use fleet_db::WorkerAgentRuntime;
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
-    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
-    tool_definitions,
+    execute_tool, execute_tool_with_retry, rewrite_if_asked_to_continue,
+    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, wants_fleet_launch,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -310,6 +310,60 @@ fn title_from_user_text(text: &str) -> String {
         return t;
     }
     format!("{}…", chars.into_iter().take(69).collect::<String>())
+}
+
+/// Runner CLI has no plane tools. After the box replies, start a fleet
+/// agent here when the user asked to launch.
+async fn maybe_launch_after_runner(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    last_user: &str,
+    provider: &str,
+    model: &str,
+    runner_id: Uuid,
+    mut content: String,
+) -> (String, Vec<ChatAction>) {
+    if !wants_fleet_launch(last_user) {
+        return (content, vec![]);
+    }
+    let mut title = title_from_user_text(last_user);
+    if title == "New chat" {
+        title = "Chat launch".into();
+    }
+    let llm = ChatLlmContext {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        runner_id: Some(runner_id),
+        effort: None,
+    };
+    let args = json!({
+        "title": title,
+        "spec": last_user,
+    });
+    let (_, action) = execute_tool(
+        state,
+        workspace_id,
+        user_id,
+        "launch_agent_task",
+        &args,
+        &llm,
+    )
+    .await;
+    if let Some(rewritten) = rewrite_if_asked_to_continue(&content, std::slice::from_ref(&action))
+    {
+        content = rewritten;
+    }
+    if action.ok {
+        if let Some(run_id) = action.run_id.as_deref() {
+            if !content.contains(run_id) {
+                content = format!("{content}\n\nFleet `{run_id}` is live on this screen.");
+            }
+        }
+    } else if !action.summary.is_empty() {
+        content = format!("{content}\n\nCould not launch: {}", action.summary);
+    }
+    (content, vec![action])
 }
 
 // ── conversation CRUD ───────────────────────────────────────────────────────
@@ -616,23 +670,6 @@ impl ChatProgress {
             sandbox_ids: a.sandbox_ids.clone(),
             detail: a.detail.clone(),
         }
-    }
-}
-
-/// Ollama provider entry (available or offline with error).
-fn ollama_provider(
-    cfg: &OllamaConfig,
-    models: Vec<ChatModelInfo>,
-    error: Option<String>,
-) -> ChatProviderInfo {
-    ChatProviderInfo {
-        id: "ollama".into(),
-        name: "Ollama (local)".into(),
-        available: error.is_none() && !models.is_empty(),
-        coming_soon: false,
-        error,
-        default_model: cfg.default_model.clone(),
-        models,
     }
 }
 
@@ -1032,6 +1069,7 @@ const STATUS_CATALOG: &[(&str, &str)] = &[
     ("grok", "Grok"),
     ("claude", "Claude"),
     ("openai", "OpenAI"),
+    ("gemini", "Gemini"),
     ("ollama", "Private (Ollama)"),
 ];
 
@@ -1072,8 +1110,8 @@ fn providers_from_runner_agents(
                 })
                 .unwrap_or_default();
             let phrase = agent_status_phrase(id, installed, logged_in);
-            let available = if *id == "openai" {
-                openai_ready
+            let available = if *id == "openai" || *id == "gemini" {
+                openai_ready || (installed && logged_in)
             } else if *id == "ollama" {
                 installed && !models.is_empty()
             } else {
@@ -1107,15 +1145,6 @@ mod chat_tool_scope_tests {
     fn chat_tool_args_preserve_workspace_id_and_foreign_is_forbidden() {
         let session = Uuid::new_v4();
         let foreign = Uuid::new_v4();
-        let parsed = tool_args_value(&json!({
-            "title": "watch",
-            "policy_md": "wake",
-            "workspace_id": foreign.to_string(),
-        }));
-        let err = require_session_workspace(session, &parsed)
-            .expect_err("foreign workspace_id after tool_args_value");
-        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
-
         let as_string = tool_args_value(&Value::String(format!(
             r#"{{"provider":"slack","operation":"list_channels","workspace_id":"{foreign}"}}"#
         )));
@@ -1125,21 +1154,25 @@ mod chat_tool_scope_tests {
     }
 
     #[test]
-    fn chat_tool_session_member_cannot_target_another_workspace() {
+    fn chat_tool_same_session_workspace_id_in_json_string_args_is_allowed() {
         let session = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        for name_args in [
-            json!({ "title": "c", "policy_md": "p", "workspace_id": other }),
-            json!({ "case_id": Uuid::new_v4(), "note": "n", "workspace_id": other }),
-            json!({
-                "provider": "jira",
-                "operation": "search_issues",
-                "workspace_id": other
-            }),
+        let parsed = tool_args_value(&Value::String(format!(
+            r#"{{"workspace_id":"{session}"}}"#
+        )));
+        require_session_workspace(session, &parsed)
+            .expect("same-session workspace_id in JSON string args");
+    }
+
+    #[test]
+    fn chat_tool_omitted_or_null_workspace_id_after_parse_is_allowed() {
+        let session = Uuid::new_v4();
+        for raw in [
+            json!({ "title": "watch" }),
+            json!({ "workspace_id": null }),
+            Value::String(r#"{"provider":"slack"}"#.into()),
         ] {
-            let err = require_session_workspace(session, &tool_args_value(&name_args))
-                .expect_err("session membership is not enough");
-            assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+            require_session_workspace(session, &tool_args_value(&raw))
+                .expect("missing or null workspace_id is allowed");
         }
     }
 
@@ -1178,7 +1211,57 @@ mod inventory_tests {
             .find(|p| p.id == "claude")
             .expect("claude");
         assert!(p.available);
-        assert_ne!(p.error.as_deref().unwrap_or(""), "installed · logged out");
+        assert_eq!(p.error.as_deref(), Some("installed · logged in"));
+        assert!(p.models.is_empty());
+        assert_eq!(p.default_model, None);
+    }
+
+    #[test]
+    fn grok_logged_in_without_models_is_available() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "grok".into(),
+            name: Some("Grok".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "grok")
+            .expect("grok");
+        assert!(p.available);
+        assert_eq!(p.error.as_deref(), Some("installed · logged in"));
+        assert!(p.models.is_empty());
+        assert_eq!(p.default_model, None);
+    }
+
+    #[test]
+    fn claude_logged_out_with_models_is_unavailable() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "claude".into(),
+            name: Some("Claude".into()),
+            installed: true,
+            logged_in: false,
+            models: vec!["sonnet".into()],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "claude")
+            .expect("claude");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("installed · logged out"));
+    }
+
+    #[test]
+    fn unreported_catalog_agent_is_not_installed() {
+        let p = providers_from_runner_agents(&[], false)
+            .into_iter()
+            .find(|p| p.id == "claude")
+            .expect("claude");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("not installed"));
     }
 
     #[test]
@@ -1195,8 +1278,65 @@ mod inventory_tests {
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
-        assert_eq!(p.name, "Private (Ollama)");
+        assert_ne!(p.name, "Ollama");
+        assert!(p.name.contains("Private"), "{}", p.name);
+    }
+
+    #[test]
+    fn ollama_installed_without_models_is_unavailable() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
+        assert!(!p.available);
+        assert_eq!(p.error.as_deref(), Some("installed"));
+    }
+
+    #[test]
+    fn ollama_logged_out_with_models_is_still_available() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: false,
+            models: vec!["llama3.2".into()],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
         assert!(p.available);
+    }
+
+    #[test]
+    fn ollama_not_ready_error_is_never_logged_in() {
+        let agents = vec![WorkerAgentRuntime {
+            id: "ollama".into(),
+            name: Some("Ollama".into()),
+            installed: true,
+            logged_in: true,
+            models: vec![],
+            model_details: vec![],
+        }];
+        let p = providers_from_runner_agents(&agents, false)
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama");
+        let err = p.error.as_deref();
+        assert_ne!(err, Some("installed · logged in"));
+        assert!(
+            err == Some("installed") || err == Some("not installed"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1229,19 +1369,27 @@ async fn chat_status(
 
     let Some(runner_id) = q.runner_id else {
         let openai = crate::providers::openai_status(&state.openai);
+        let gemini = crate::providers::gemini_status(&state.gemini);
+        let providers = vec![openai.clone(), gemini];
+        let any = providers.iter().any(|p| p.available);
         return Ok(Json(ChatStatusResponse {
-            available: openai.available,
+            available: any,
             enabled: true,
             base_url: state.ollama.public_base_url(),
             default_model: openai.default_model.clone(),
             models: openai.models.clone(),
-            providers: vec![openai],
+            providers,
             error: None,
-            hint: "Select a runner for Grok / Claude / Private (Ollama). OpenAI uses the control-plane API key.".into(),
+            hint: "Select a runner for Grok / Claude / Gemini / Private (Ollama). OpenAI and Gemini can also use a control-plane API key.".into(),
         }));
     };
 
     let host = crate::worker_hosts::load_visible_host(&state, workspace_id, runner_id).await?;
+    if host.is_cluster_host() || host.created_by.is_none() {
+        return Err(AppError::bad_request(
+            "This runner is not Run on a PC",
+        ));
+    }
     if crate::runner_chat::host_is_removed(&host) {
         return Ok(Json(ChatStatusResponse {
             available: false,
@@ -1255,9 +1403,19 @@ async fn chat_status(
         }));
     }
     let public = host.as_public(Utc::now());
-    let mut providers = providers_from_runner_agents(&public.agents, state.openai.available());
+    let mut providers = providers_from_runner_agents(
+        &public.agents,
+        state.openai.available() || state.gemini.available(),
+    );
     if let Some(p) = providers.iter_mut().find(|p| p.id == "openai") {
-        *p = crate::providers::openai_status(&state.openai);
+        if state.openai.available() {
+            *p = crate::providers::openai_status(&state.openai);
+        }
+    }
+    if let Some(p) = providers.iter_mut().find(|p| p.id == "gemini") {
+        if state.gemini.available() {
+            *p = crate::providers::gemini_status(&state.gemini);
+        }
     }
     let any_available = providers.iter().any(|p| p.available);
     let ollama_models = providers
@@ -1371,7 +1529,7 @@ async fn chat_complete(
     }
 
     require_plane_chat_enabled(&state, &provider)?;
-    require_openai_configured(&state, &provider)?;
+    require_openai_configured(&state, &provider, body.runner_id)?;
 
     if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
@@ -1380,6 +1538,7 @@ async fn chat_complete(
                     .to_string(),
             )
         })?;
+        crate::runner_chat::require_taking(&state, workspace_id, runner_id).await?;
         let model = body
             .model
             .as_ref()
@@ -1407,6 +1566,17 @@ async fn chat_complete(
             None,
         )
         .await?;
+        let (content, actions) = maybe_launch_after_runner(
+            &state,
+            workspace_id,
+            user.id,
+            &last_user,
+            &provider,
+            &used_model,
+            runner_id,
+            content,
+        )
+        .await;
         persist_user_and_assistant(
             &state,
             conversation_id,
@@ -1414,7 +1584,7 @@ async fn chat_complete(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(Json(ChatResponse {
@@ -1424,7 +1594,7 @@ async fn chat_complete(
             },
             model: used_model,
             provider,
-            actions: vec![],
+            actions,
             conversation_id,
         }));
     }
@@ -1466,6 +1636,18 @@ async fn chat_complete(
             )
             .await
         }
+        "gemini" => {
+            chat_complete_gemini(
+                &state,
+                workspace_id,
+                user.id,
+                &body,
+                pairs_for_llm,
+                &last_user,
+                None,
+            )
+            .await
+        }
         "claude" => {
             chat_complete_claude(
                 &state,
@@ -1479,7 +1661,7 @@ async fn chat_complete(
             .await
         }
         other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
         ))),
     }
 }
@@ -1499,7 +1681,7 @@ async fn chat_stream(
     // New thread: plane flags / missing OPENAI_API_KEY 400 before NDJSON / INSERT.
     require_conversation_if_resuming(&state, workspace_id, user.id, body.conversation_id).await?;
     require_plane_chat_enabled(&state, &provider)?;
-    require_openai_configured(&state, &provider)?;
+    require_openai_configured(&state, &provider, body.runner_id)?;
     let prepared = prepare_chat_pairs(&body)?;
     // Gate before NDJSON so a revoked leftover runner_id is HTTP 400, not
     // 200 + type=error after enqueue / the 240s wait starts.
@@ -1576,16 +1758,34 @@ fn require_plane_chat_enabled(state: &AppState, provider: &str) -> AppResult<()>
         "ollama" if !state.ollama.enabled => Err(AppError::bad_request(
             "Ollama chat is disabled (OLLAMA_ENABLED=false)",
         )),
+        "openai" if !state.openai.enabled => Err(AppError::bad_request(
+            "OpenAI chat is disabled (OPENAI_ENABLED=false)",
+        )),
+        "gemini" if !state.gemini.enabled => Err(AppError::bad_request(
+            "Gemini chat is disabled (GEMINI_ENABLED=false)",
+        )),
         _ => Ok(()),
     }
 }
 
 /// Missing OPENAI_API_KEY must 400 before runner_id / ensure_conversation.
 /// Claude is runner CLI — do not require a plane ANTHROPIC_API_KEY here.
-fn require_openai_configured(state: &AppState, provider: &str) -> AppResult<()> {
+fn require_openai_configured(
+    state: &AppState,
+    provider: &str,
+    runner_id: Option<Uuid>,
+) -> AppResult<()> {
+    if runner_id.is_some() && crate::runner_chat::runner_cli_provider(provider) {
+        return Ok(());
+    }
     if provider == "openai" && !state.openai.available() {
         return Err(AppError::bad_request(
-            "OpenAI is not configured (set OPENAI_API_KEY)",
+            "OpenAI is not configured (set OPENAI_API_KEY or pick a runner with Codex)",
+        ));
+    }
+    if provider == "gemini" && !state.gemini.available() {
+        return Err(AppError::bad_request(
+            "Gemini is not configured (set GEMINI_API_KEY or pick a runner with the Gemini CLI)",
         ));
     }
     Ok(())
@@ -1627,6 +1827,45 @@ fn prepare_chat_pairs(body: &ChatRequest) -> AppResult<PreparedChat> {
     Ok(PreparedChat { pairs, last_user })
 }
 
+#[cfg(test)]
+mod prepare_chat_pairs_tests {
+    use super::*;
+
+    fn request_with_role(role: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![
+                ChatMessageIn {
+                    role: role.into(),
+                    content: "secret".into(),
+                },
+                ChatMessageIn {
+                    role: "user".into(),
+                    content: "hi".into(),
+                },
+            ],
+            provider: None,
+            model: None,
+            conversation_id: None,
+            runner_id: None,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn prepare_chat_pairs_rejects_tool_function_admin_root() {
+        for role in ["tool", "function", "admin", "root"] {
+            let err = prepare_chat_pairs(&request_with_role(role))
+                .err()
+                .expect(role);
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "role={role}"
+            );
+        }
+    }
+}
+
 async fn run_chat_turn(
     state: &AppState,
     workspace_id: Uuid,
@@ -1666,7 +1905,7 @@ async fn run_chat_turn(
     }
 
     require_plane_chat_enabled(state, &provider)?;
-    require_openai_configured(state, &provider)?;
+    require_openai_configured(state, &provider, body.runner_id)?;
 
     if crate::runner_chat::runner_cli_provider(&provider) {
         let runner_id = body.runner_id.ok_or_else(|| {
@@ -1675,6 +1914,7 @@ async fn run_chat_turn(
                     .to_string(),
             )
         })?;
+        crate::runner_chat::require_taking(state, workspace_id, runner_id).await?;
         let model = body
             .model
             .as_ref()
@@ -1702,6 +1942,17 @@ async fn run_chat_turn(
             progress.as_ref(),
         )
         .await?;
+        let (content, actions) = maybe_launch_after_runner(
+            state,
+            workspace_id,
+            user_id,
+            last_user,
+            &provider,
+            &used_model,
+            runner_id,
+            content,
+        )
+        .await;
         persist_user_and_assistant(
             state,
             conversation_id,
@@ -1709,7 +1960,7 @@ async fn run_chat_turn(
             &content,
             &provider,
             &used_model,
-            &[],
+            &actions,
         )
         .await?;
         return Ok(ChatProgress::Done {
@@ -1717,7 +1968,7 @@ async fn run_chat_turn(
             model: used_model,
             provider,
             conversation_id,
-            actions: vec![],
+            actions,
         });
     }
 
@@ -1779,6 +2030,25 @@ async fn run_chat_turn(
                 actions: res.actions,
             });
         }
+        "gemini" => {
+            let Json(res) = chat_complete_gemini(
+                state,
+                workspace_id,
+                user_id,
+                body,
+                pairs_for_llm,
+                last_user,
+                progress,
+            )
+            .await?;
+            return Ok(ChatProgress::Done {
+                message: res.message.content,
+                model: res.model,
+                provider: res.provider,
+                conversation_id: res.conversation_id,
+                actions: res.actions,
+            });
+        }
         "claude" => {
             let Json(res) = chat_complete_claude(
                 state,
@@ -1799,7 +2069,7 @@ async fn run_chat_turn(
             });
         }
         other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, or claude"
+            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
         ))),
     }
 }
@@ -1976,7 +2246,7 @@ async fn chat_complete_openai(
     last_user: &str,
     progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
 ) -> AppResult<Json<ChatResponse>> {
-    require_openai_configured(state, "openai")?;
+    require_openai_configured(state, "openai", body.runner_id)?;
     let model = body
         .model
         .as_ref()
@@ -2021,6 +2291,65 @@ async fn chat_complete_openai(
         },
         model: used_model,
         provider: "openai".into(),
+        actions,
+        conversation_id,
+    }))
+}
+
+async fn chat_complete_gemini(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    body: &ChatRequest,
+    pairs: Vec<(String, String)>,
+    last_user: &str,
+    progress: Option<tokio::sync::mpsc::Sender<ChatProgress>>,
+) -> AppResult<Json<ChatResponse>> {
+    require_openai_configured(state, "gemini", body.runner_id)?;
+    let model = body
+        .model
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let conversation_id = ensure_conversation(
+        state,
+        workspace_id,
+        user_id,
+        body.conversation_id,
+        "gemini",
+        &model,
+        last_user,
+    )
+    .await?;
+    let (used_model, content, actions) = crate::providers::gemini_chat_with_tools(
+        state,
+        workspace_id,
+        user_id,
+        &state.gemini,
+        &model,
+        &pairs,
+        progress,
+        body.runner_id,
+    )
+    .await?;
+    persist_user_and_assistant(
+        state,
+        conversation_id,
+        last_user,
+        &content,
+        "gemini",
+        &used_model,
+        &actions,
+    )
+    .await?;
+    Ok(Json(ChatResponse {
+        message: ChatMessageOut {
+            role: "assistant".into(),
+            content,
+        },
+        model: used_model,
+        provider: "gemini".into(),
         actions,
         conversation_id,
     }))

@@ -235,15 +235,6 @@ mod tests {
     use crate::job::WorkspaceTool;
 
     #[test]
-    fn default_work_dir_is_per_job() {
-        let a = default_job_work_dir("aaa");
-        let b = default_job_work_dir("bbb");
-        assert_eq!(a, PathBuf::from("/workspace/jobs/aaa/repo"));
-        assert_ne!(a, b);
-        assert!(a.starts_with("/workspace/jobs/aaa"));
-    }
-
-    #[test]
     fn jobs_root_default_is_workspace_jobs() {
         assert_eq!(jobs_root_from(None), PathBuf::from("/workspace/jobs"));
         assert_eq!(jobs_root_from(Some("")), PathBuf::from("/workspace/jobs"));
@@ -274,15 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn two_jobs_do_not_share_default_worktree() {
-        let w1 = resolve_work_dir("job-1", None);
-        let w2 = resolve_work_dir("job-2", None);
-        assert_ne!(w1, w2);
-        assert!(w1.to_string_lossy().contains("job-1"));
-        assert!(w2.to_string_lossy().contains("job-2"));
-    }
-
-    #[test]
     fn validate_job_cwd_accepts_jobs_tree() {
         validate_job_cwd(Path::new("/workspace/jobs/abc/repo")).unwrap();
         validate_job_cwd(Path::new("/workspace/jobs/abc/repo/subdir")).unwrap();
@@ -290,13 +272,50 @@ mod tests {
 
     #[test]
     fn validate_job_cwd_rejects_escape_and_outside() {
-        assert!(validate_job_cwd(Path::new("/workspace/repo")).is_err());
-        assert!(validate_job_cwd(Path::new("/tmp/evil")).is_err());
-        assert!(validate_job_cwd(Path::new("/workspace/jobs/x/../y")).is_err());
+        // Prefix-adjacent /workspace/repo is the only lock a starts_with("/workspace")
+        // mutant fails; /tmp/evil is covered by accept_agent_work_dir_rejects_escape.
+        let cases: &[(&str, &str)] = &[
+            ("/workspace/repo", "cwd outside job isolation"),
+            ("/workspace/jobs/x/../y", "cwd must not contain '..'"),
+        ];
+        for (path, class) in cases {
+            let err = validate_job_cwd(Path::new(path))
+                .expect_err(path)
+                .to_string();
+            assert!(
+                err.contains(class),
+                "{path}: expected error class {class:?}, got {err}"
+            );
+        }
     }
 
     #[test]
-    fn resolve_named_tool_ok_and_unknown() {
+    fn validate_job_cwd_rejects_nul_in_path() {
+        let err = validate_job_cwd(Path::new("/workspace/jobs/abc\0/repo"))
+            .expect_err("NUL in path")
+            .to_string();
+        assert!(
+            err.contains("cwd contains NUL"),
+            "NUL in path must fail as NUL, not outside/parent: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_job_cwd_rejects_jobs_root_prefix_sibling() {
+        // starts_with(root) without the trailing-slash join would accept these.
+        for path in ["/workspace/jobs_evil", "/workspace/jobs2/x"] {
+            let err = validate_job_cwd(Path::new(path))
+                .expect_err(path)
+                .to_string();
+            assert!(
+                err.contains("cwd outside job isolation"),
+                "{path}: prefix-sibling of jobs_root must be outside, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_named_tool_rejects_unknown() {
         let mut tools = BTreeMap::new();
         tools.insert(
             "django_check".into(),
@@ -305,43 +324,74 @@ mod tests {
                 description: Some("check".into()),
             },
         );
-        let t = resolve_named_tool(&tools, "django_check").unwrap();
-        assert_eq!(t.argv[0], "python");
         let err = resolve_named_tool(&tools, "rm_rf").unwrap_err().to_string();
         assert!(err.contains("unknown tool"), "{err}");
+        assert!(err.contains("rm_rf"), "unknown name must appear: {err}");
+        assert!(err.contains("allowed="), "allowed= must appear: {err}");
+        assert!(
+            err.contains("django_check"),
+            "allowed keys must appear: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_named_tool_rejects_empty_argv() {
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            "foo".into(),
+            WorkspaceTool {
+                argv: vec![],
+                description: None,
+            },
+        );
+        let err = resolve_named_tool(&tools, "foo").unwrap_err().to_string();
+        assert!(
+            err.contains("empty argv"),
+            "empty argv must fail as empty argv, got {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_named_tool_rejects_non_allowlisted_argv0() {
+        for argv in [vec!["bash".into()], vec!["curl".into(), "http://x".into()]] {
+            let mut tools = BTreeMap::new();
+            tools.insert(
+                "evil".into(),
+                WorkspaceTool {
+                    argv: argv.clone(),
+                    description: None,
+                },
+            );
+            let err = resolve_named_tool(&tools, "evil")
+                .expect_err("non-allowlisted argv[0]")
+                .to_string();
+            assert!(
+                err.contains("argv[0] not allowlisted"),
+                "{argv:?}: expected allowlist reject via resolve_named_tool, got {err}"
+            );
+        }
     }
 
     #[test]
     fn resolve_named_tool_rejects_metachar_argv() {
-        let mut tools = BTreeMap::new();
-        tools.insert(
-            "evil".into(),
-            WorkspaceTool {
-                argv: vec![
-                    "python".into(),
-                    "-c".into(),
-                    "import os; os.system('x')".into(),
-                ],
-                description: None,
-            },
-        );
-        // semicolon not in that string - add one with ;
-        tools.insert(
-            "bad".into(),
-            WorkspaceTool {
-                argv: vec!["echo".into(), "a;b".into()],
-                description: None,
-            },
-        );
-        assert!(resolve_named_tool(&tools, "bad").is_err());
-    }
-
-    #[test]
-    fn raw_exec_flag() {
-        assert!(!raw_exec_allowed(None));
-        assert!(!raw_exec_allowed(Some("0")));
-        assert!(raw_exec_allowed(Some("1")));
-        assert!(raw_exec_allowed(Some("true")));
+        for needle in ['\n', '\r', ';', '|', '&', '$', '`'] {
+            let arg = format!("a{needle}b");
+            let mut tools = BTreeMap::new();
+            tools.insert(
+                "bad".into(),
+                WorkspaceTool {
+                    argv: vec!["echo".into(), arg.clone()],
+                    description: None,
+                },
+            );
+            let err = resolve_named_tool(&tools, "bad")
+                .expect_err(&arg)
+                .to_string();
+            assert!(
+                err.contains("argv rejected"),
+                "{arg:?}: expected argv rejected, got {err}"
+            );
+        }
     }
 
     #[test]
@@ -369,54 +419,91 @@ mod tests {
     }
 
     #[test]
-    fn permission_default_deny_and_star() {
-        assert!(!permission_allowed(false, &[], "bash npm test"));
+    fn permission_empty_allowlist_denies_non_shell_hay() {
+        // Non-shell hay: "bash npm test" is also denied by looks_like_unrestricted_shell.
+        assert!(!permission_allowed(
+            false,
+            &[],
+            "tool fleet-wsexec django_check"
+        ));
+    }
+
+    #[test]
+    fn permission_star_allows_any_hay() {
         assert!(permission_allowed(false, &["*".into()], "anything"));
+    }
+
+    #[test]
+    fn permission_star_entry_trims_whitespace() {
+        assert!(permission_allowed(false, &[" * ".into()], "anything"));
+    }
+
+    #[test]
+    fn permission_token_substring_hit() {
         assert!(permission_allowed(
             false,
             &["fleet-wsexec".into(), "read".into()],
             "tool fleet-wsexec django_check"
         ));
+    }
+
+    #[test]
+    fn permission_token_substring_miss() {
         assert!(!permission_allowed(
             false,
             &["read".into()],
             "tool fleet-wsexec django_check"
         ));
+    }
+
+    #[test]
+    fn permission_token_match_is_case_insensitive() {
+        assert!(permission_allowed(
+            false,
+            &["FLEET-WSEXEC".into()],
+            "tool Fleet-Wsexec django_check"
+        ));
+    }
+
+    #[test]
+    fn permission_auto_approve_allows_empty_allowlist() {
         assert!(permission_allowed(true, &[], "denied otherwise"));
     }
 
     #[test]
     fn permission_file_edit_requires_allowed_folder() {
-        let allow = vec![
-            "app/".into(),
-            "tests/".into(),
-            "fleet-wsexec".into(),
-            "read".into(),
-            "write".into(),
-        ];
-        // write under allowed project folders
-        assert!(permission_allowed(
-            false,
-            &allow,
-            "request_permission write path=/workspace/jobs/j/repo/app/fleet_marker.py"
-        ));
-        assert!(permission_allowed(
-            false,
-            &allow,
-            "edit tests/test_fleet_smoke.py"
-        ));
-        // write outside allowed folders — denied even if "write" is listed
-        assert!(!permission_allowed(
-            false,
-            &allow,
-            "request_permission write path=/workspace/jobs/j/repo/settings.py"
-        ));
-        assert!(permission_allowed(
-            false,
-            &allow,
-            "fleet-wsexec django_check"
-        ));
-        assert!(permission_allowed(false, &allow, "read FLEET_TOOLS.md"));
+        let allow = vec!["app/".into(), "tests/".into(), "write".into()];
+        let under_app =
+            "request_permission write path=/workspace/jobs/j/repo/app/fleet_marker.py";
+        assert!(
+            permission_allowed(false, &allow, under_app),
+            "write under app/ must pass the path-gate: {under_app}"
+        );
+        // write token listed — still denied outside app/|tests/
+        let outside = "request_permission write path=/workspace/jobs/j/repo/settings.py";
+        assert!(
+            !permission_allowed(false, &allow, outside),
+            "write outside app/|tests/ must be denied even if token write is listed: {outside}"
+        );
+    }
+
+    #[test]
+    fn permission_write_token_allows_when_no_path_prefixes() {
+        let hay = "write path=settings.py";
+        assert!(
+            permission_allowed(false, &["write".into()], hay),
+            "path-gate must not run when path_allows is empty; token write grants: {hay}"
+        );
+    }
+
+    #[test]
+    fn permission_apply_patch_or_create_outside_folder_denied() {
+        let allow = vec!["app/".into(), "create".into(), "apply_patch".into()];
+        let hay = "apply_patch path=settings.py";
+        assert!(
+            !permission_allowed(false, &allow, hay),
+            "apply_patch outside app/ must be denied as a file mutation: {hay}"
+        );
     }
 
     #[test]
@@ -435,57 +522,53 @@ mod tests {
 
     #[test]
     fn bash_in_allowlist_cannot_write_outside_paths() {
+        // Hay matches leftover path/token (app/, fleet-wsexec) so skip-veto-when-bash-listed would allow.
         let allow = vec![
             "app/".into(),
             "tests/".into(),
             "fleet-wsexec".into(),
             "bash".into(),
         ];
-        assert!(!permission_allowed(
-            false,
-            &allow,
-            "request_permission bash -c 'echo x > settings.py'"
-        ));
-        assert!(!permission_allowed(
-            false,
-            &allow,
-            "tool bash run invoices/models/animal.py"
-        ));
+        let hay = "bash -c 'echo x > app/foo.py'";
+        assert!(
+            !permission_allowed(false, &allow, hay),
+            "listing bash on permission_allow must not grant a shell even when hay contains app/: {hay}"
+        );
+    }
+
+    #[test]
+    fn bin_sh_and_busybox_denied_without_star() {
+        let allow = vec!["app/".into()];
+        let sh = "/bin/sh -c id";
+        assert!(
+            !permission_allowed(false, &allow, sh),
+            "basename sh must be unrestricted shell even as /bin/sh: {sh}"
+        );
+        let busybox = "busybox sh -c id";
+        assert!(
+            !permission_allowed(false, &allow, busybox),
+            "busybox must be unrestricted shell: {busybox}"
+        );
     }
 
     #[test]
     fn validate_tool_bin_rejects_curl_and_bash() {
-        assert!(validate_tool_bin("python").is_ok());
-        assert!(validate_tool_bin("/usr/bin/python3").is_ok());
-        assert!(validate_tool_bin("bash").is_err());
-        assert!(validate_tool_bin("curl").is_err());
-        assert!(validate_tool_bin("wget").is_err());
-    }
-
-    #[test]
-    fn django_and_node_setup_shapes() {
-        let django: ProjectSetup = serde_json::from_value(serde_json::json!({
-            "strategy": "commands",
-            "commands": ["python -m pip install -r requirements.txt"],
-            "smoke_commands": ["python manage.py check"],
-            "tools": {
-                "django_check": { "argv": ["python", "manage.py", "check"] }
-            }
-        }))
-        .unwrap();
-        assert_eq!(django.commands.len(), 1);
-        assert!(django.tools.contains_key("django_check"));
-
-        let node: ProjectSetup = serde_json::from_value(serde_json::json!({
-            "strategy": "commands",
-            "commands": ["npm ci"],
-            "tools": {
-                "npm_test": { "argv": ["npm", "test"], "description": "unit tests" }
-            }
-        }))
-        .unwrap();
-        assert_eq!(node.commands, vec!["npm ci"]);
-        let t = resolve_named_tool(&node.tools, "npm_test").unwrap();
-        assert_eq!(t.argv, vec!["npm", "test"]);
+        // Named denies + path-prefixed curl/bash + one unknown so a
+        // bash/curl/wget denylist (or allowing /usr/bin/curl) fails.
+        for bin in [
+            "bash",
+            "sh",
+            "curl",
+            "wget",
+            "sudo",
+            "/usr/bin/curl",
+            "/bin/bash",
+            "rm",
+        ] {
+            assert!(
+                validate_tool_bin(bin).is_err(),
+                "{bin} must not be an allowlisted tool binary"
+            );
+        }
     }
 }

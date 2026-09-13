@@ -54,6 +54,14 @@ pub fn compose_prompt(title: &str, summary: &str, spec_md: &str, acceptance: &[S
     if out.trim().is_empty() {
         return "Inspect this workspace and complete the assigned task.".into();
     }
+    out.push_str(
+        "\n## Plane I/O\n\n\
+         You are on a paired runner. Tokens stay on the control plane.\n\
+         `./fleet-tool.sh integration PROVIDER OPERATION [ARGS_JSON]`\n\
+         `./fleet-tool.sh chat-post TO BODY` / `chat-list`\n\
+         `./fleet-tool.sh request-changes REASON`\n\
+         Put artifacts in `work/` and finish with `result.md`.\n",
+    );
     out
 }
 
@@ -247,6 +255,7 @@ pub fn pass_through_driver_env(env: &mut std::collections::HashMap<String, Strin
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -318,16 +327,146 @@ mod tests {
         assert!(p.contains("- file exists"));
     }
 
+    /// Serializes env mutation in this module so parallel tests do not race.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env<T>(pairs: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let previous: Vec<(&str, Option<String>)> = pairs
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        // SAFETY: held under env_lock; restored before unlock / panic resume.
+        unsafe {
+            for (k, v) in pairs {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // SAFETY: restore prior process env before releasing the lock.
+        unsafe {
+            for (k, v) in previous {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        match result {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     #[test]
     fn pass_through_does_not_copy_fleet_harness() {
-        unsafe {
-            std::env::set_var("FLEET_HARNESS", "mock");
-        }
-        let mut env = std::collections::HashMap::new();
-        pass_through_driver_env(&mut env);
-        assert!(
-            !env.contains_key("FLEET_HARNESS"),
-            "plane FLEET_HARNESS must not override spawn LLM choice: {env:?}"
+        with_env(&[("FLEET_HARNESS", Some("mock"))], || {
+            let mut env = std::collections::HashMap::new();
+            pass_through_driver_env(&mut env);
+            assert!(
+                !env.contains_key("FLEET_HARNESS"),
+                "plane FLEET_HARNESS must not override spawn LLM choice: {env:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn pass_through_copies_nonempty_allowlisted_keys() {
+        with_env(
+            &[
+                ("FLEET_MODEL", Some("grok-4")),
+                ("FLEET_AUTO_APPROVE", Some("1")),
+                ("FLEET_HARNESS_CMD", Some("/opt/mock-acp-agent")),
+                ("FLEET_MOCK_ACP_BIN", Some("/opt/mock-acp-agent")),
+                ("FLEET_GROK_BIN", Some("/opt/grok")),
+                ("FLEET_REASONING_EFFORT", Some("high")),
+                ("FLEET_GROK_DEBUG", Some("1")),
+            ],
+            || {
+                let mut env = std::collections::HashMap::new();
+                pass_through_driver_env(&mut env);
+                assert_eq!(
+                    env,
+                    std::collections::HashMap::from([
+                        ("FLEET_MODEL".into(), "grok-4".into()),
+                        ("FLEET_AUTO_APPROVE".into(), "1".into()),
+                        ("FLEET_HARNESS_CMD".into(), "/opt/mock-acp-agent".into()),
+                        ("FLEET_MOCK_ACP_BIN".into(), "/opt/mock-acp-agent".into()),
+                        ("FLEET_GROK_BIN".into(), "/opt/grok".into()),
+                        ("FLEET_REASONING_EFFORT".into(), "high".into()),
+                        ("FLEET_GROK_DEBUG".into(), "1".into()),
+                    ])
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn pass_through_skips_blank_or_whitespace_allowlisted_values() {
+        let keys = [
+            "FLEET_MODEL",
+            "FLEET_AUTO_APPROVE",
+            "FLEET_HARNESS_CMD",
+            "FLEET_MOCK_ACP_BIN",
+            "FLEET_GROK_BIN",
+            "FLEET_REASONING_EFFORT",
+            "FLEET_GROK_DEBUG",
+        ];
+        let empty: Vec<(&str, Option<&str>)> = keys.iter().map(|k| (*k, Some(""))).collect();
+        with_env(&empty, || {
+            let mut env = std::collections::HashMap::new();
+            pass_through_driver_env(&mut env);
+            for key in keys {
+                assert!(
+                    !env.contains_key(key),
+                    "blank {key} must not be copied: {env:?}"
+                );
+            }
+        });
+        let whitespace: Vec<(&str, Option<&str>)> =
+            keys.iter().map(|k| (*k, Some(" \t "))).collect();
+        with_env(&whitespace, || {
+            let mut env = std::collections::HashMap::new();
+            pass_through_driver_env(&mut env);
+            for key in keys {
+                assert!(
+                    !env.contains_key(key),
+                    "whitespace {key} must not be copied: {env:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn pass_through_does_not_copy_unlisted_fleet_keys() {
+        with_env(
+            &[
+                ("FLEET_WORKER_TOKEN", Some("tok")),
+                ("FLEET_ORCHESTRATOR_URL", Some("http://orch.test")),
+                ("FLEET_REPO_URL", Some("https://git.test/repo.git")),
+                ("FLEET_WORK_CMD", Some("echo hi")),
+            ],
+            || {
+                let mut env = std::collections::HashMap::new();
+                pass_through_driver_env(&mut env);
+                for key in [
+                    "FLEET_WORKER_TOKEN",
+                    "FLEET_ORCHESTRATOR_URL",
+                    "FLEET_REPO_URL",
+                    "FLEET_WORK_CMD",
+                ] {
+                    assert!(
+                        !env.contains_key(key),
+                        "unlisted {key} must not be copied: {env:?}"
+                    );
+                }
+            },
         );
     }
 
@@ -353,37 +492,100 @@ mod tests {
     }
 
     #[test]
-    fn write_files_includes_repo() {
+    fn run_context_names_every_task() {
         let dir = tempdir().unwrap();
-        let task = sample_task(json!(["ok"]));
-        let repo = crate::domain::ProjectGitRemote {
-            url: "https://github.com/acme/app.git".into(),
-            git_ref: "develop".into(),
-        };
-        write_session_context(dir.path(), &task, 90, Some(&repo)).unwrap();
-        let tj: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("task.json")).unwrap())
-                .unwrap();
-        assert_eq!(tj["repo_url"], "https://github.com/acme/app.git");
-        assert_eq!(tj["git_ref"], "develop");
-        let ws: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("workspace.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(ws["repo"]["url"], "https://github.com/acme/app.git");
-        assert_eq!(ws["repo"]["ref"], "develop");
-        assert_eq!(ws["repo"]["auth_via"], "proxy");
+        let t1 = sample_task(json!(["ok"]));
+        let mut t2 = sample_task(json!(["ok"]));
+        t2.plan_task_id = "t2".into();
+        write_run_context(dir.path(), "t1", &[&t1, &t2], &[]).unwrap();
+        let md = std::fs::read_to_string(dir.path().join("RUN.md")).unwrap();
+        let board = md
+            .split_once("## Board")
+            .map(|(_, rest)| rest.split("\n## ").next().unwrap_or(rest))
+            .unwrap_or("");
+        assert!(
+            board.contains("| `t1` |"),
+            "board table must name t1 (You are `t1` is not enough): {md}"
+        );
+        assert!(
+            board.contains("| `t2` |"),
+            "board table must name t2: {md}"
+        );
+        assert_eq!(
+            md.matches("← you").count(),
+            1,
+            "exactly one ← you mark: {md}"
+        );
+        let you_row = board.lines().find(|l| l.contains("| `t1` |")).unwrap_or("");
+        assert!(
+            you_row.contains("← you"),
+            "← you must sit on the t1 board row: {md}"
+        );
     }
 
     #[test]
-    fn run_context_names_every_task() {
+    fn run_context_empty_acceptance_defaults_result_md() {
         let dir = tempdir().unwrap();
-        let t = sample_task(json!(["ok"]));
-        write_run_context(dir.path(), "t1", &[&t], &["hello.txt".into()]).unwrap();
+        let t = sample_task(json!([]));
+        write_run_context(dir.path(), "t1", &[&t], &[]).unwrap();
         let md = std::fs::read_to_string(dir.path().join("RUN.md")).unwrap();
-        assert!(md.contains("`t1`"));
-        assert!(md.contains("← you"));
-        assert!(md.contains("hello.txt"));
-        assert!(md.contains("Do not stop in the middle"));
+        let yours = md
+            .split_once("## Your acceptance")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        assert!(
+            yours.contains("- result.md exists and is non-empty"),
+            "empty you-task acceptance must list result.md exists and is non-empty: {md}"
+        );
+    }
+
+    #[test]
+    fn run_context_depends_on_renders_plan_task_ids() {
+        let dir = tempdir().unwrap();
+        let t1 = sample_task(json!(["ok"]));
+        let mut t2 = sample_task(json!(["ok"]));
+        t2.plan_task_id = "t2".into();
+        t2.depends_on = vec![t1.id];
+        write_run_context(dir.path(), "t1", &[&t1, &t2], &[]).unwrap();
+        let md = std::fs::read_to_string(dir.path().join("RUN.md")).unwrap();
+        let t2_row = md.lines().find(|l| l.contains("| `t2` |")).unwrap_or("");
+        let cells: Vec<&str> = t2_row
+            .split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            cells.get(3).copied().unwrap_or(""),
+            "t1",
+            "t2 depends cell must be plan id t1, not UUID {}: {md}",
+            t1.id
+        );
+        assert!(
+            !md.contains(&t1.id.to_string()),
+            "board must not leak task UUID {}: {md}",
+            t1.id
+        );
+    }
+
+    #[test]
+    fn list_shared_files_skips_meta_and_caps_at_40() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("TEAM.md"), "meta").unwrap();
+        for i in 0..41 {
+            std::fs::write(dir.path().join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let files = list_shared_files(dir.path());
+        assert_eq!(
+            files.len(),
+            40,
+            "list_shared_files must cap at 40: {files:?}"
+        );
+        assert!(
+            files.iter().all(|f| f != "TEAM.md"),
+            "TEAM.md must be omitted: {files:?}"
+        );
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted, "shared files must be sorted: {files:?}");
     }
 }

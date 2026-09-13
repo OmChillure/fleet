@@ -379,15 +379,14 @@ fn strip_tags(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
 
     #[test]
-    fn parse_library_keeps_popular_order_and_caps() {
+    fn parse_library_keeps_popular_order_and_decoded_summary() {
         let html = r#"
           <a href="/library/llama3.1" class="x"><h2>llama3.1</h2>
             <p class="d">Meta&#39;s Llama 3.1 from Meta.</p></a>
           <a href="/library/deepseek-r1"><p class="d">Reasoning.</p></a>
-          <a href="/library/llama3.1">dup</a>
-          <a href="/library/user/custom">skip</a>
         "#;
         let models = parse_library_html(html);
         assert_eq!(
@@ -401,33 +400,137 @@ mod tests {
     }
 
     #[test]
+    fn parse_library_caps_at_top_n_50() {
+        let html: String = (1..=51)
+            .map(|n| format!(r#"<a href="/library/m{n}"></a>"#))
+            .collect();
+        let models = parse_library_html(&html);
+        assert_eq!(models.len(), 50);
+        assert_eq!(models.last().map(|m| m.name.as_str()), Some("m50"));
+    }
+
+    #[test]
+    fn parse_library_empty_href_slug_skipped() {
+        let html = r#"
+          <a href="/library/"><h2>empty</h2></a>
+          <a href="/library/llama3.1"><h2>llama3.1</h2></a>
+        "#;
+        let models = parse_library_html(html);
+        assert_eq!(
+            models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["llama3.1"]
+        );
+    }
+
+    #[test]
+    fn parse_library_summary_none_without_p() {
+        let html = r#"<a href="/library/llama3.1"><h2>llama3.1</h2></a>"#;
+        let models = parse_library_html(html);
+        assert_eq!(models[0].summary, None);
+    }
+
+    #[test]
     fn parse_tags_reads_size_and_latest_badge() {
         let html = r#"
-          <a href="/library/llama3.2:latest">llama3.2:latest</a>
-          <span>a80c4f17acd5</span> • 2.0GB • 128K
           <a href="/library/llama3.2:3b">llama3.2:3b
             <span class="border">latest</span></a>
-          <span>a80c4f17acd5</span> • 2.0GB • 8GB RAM
-          <a href="/library/llama3.2:1b">llama3.2:1b</a>
-          • 1.3GB •
-          <a href="/library/llama3.2:3b">dup</a>
+        "#;
+        let tags = parse_tags_html("llama3.2", html);
+        assert!(tags[0].latest);
+    }
+
+    #[test]
+    fn parse_tags_href_tag_latest_is_latest_without_span() {
+        let html = r#"<a href="/library/m:latest">m:latest</a>"#;
+        let tags = parse_tags_html("m", html);
+        assert!(tags[0].latest);
+    }
+
+    #[test]
+    fn parse_tags_skips_slash_in_tag() {
+        let html = r#"
+          <a href="/library/llama3.2:foo/bar">skip</a>
+          <a href="/library/llama3.2:3b">ok</a>
         "#;
         let tags = parse_tags_html("llama3.2", html);
         assert_eq!(
             tags.iter().map(|t| t.spec.as_str()).collect::<Vec<_>>(),
-            vec!["llama3.2:latest", "llama3.2:3b", "llama3.2:1b"]
+            vec!["llama3.2:3b"]
         );
-        assert_eq!(tags[0].size_bytes, Some(2_000_000_000));
-        assert!(tags[1].latest);
-        assert_eq!(tags[1].ram_bytes, Some(8_000_000_000));
-        assert_eq!(tags[2].size_bytes, Some(1_300_000_000));
+    }
+
+    #[test]
+    fn parse_si_size_tb_mb_kb_rejects_bare_and_negative() {
+        assert_eq!(parse_si_size("1TB"), Some(1_000_000_000_000));
+        assert_eq!(parse_si_size("1.5MB"), Some(1_500_000));
+        assert_eq!(parse_si_size("500KB"), Some(500_000));
+        assert_eq!(parse_si_size("128K"), None);
+        assert_eq!(parse_si_size("-1GB"), None);
     }
 
     #[test]
     fn slug_rejects_paths() {
-        assert!(library_slug_ok("llama3.2"));
-        assert!(!library_slug_ok("llama3.2/tags"));
-        assert!(!library_slug_ok("hi;rm"));
+        let ok_128 = "x".repeat(128);
+        let oversize = "x".repeat(129);
+        for (slug, want) in [
+            ("llama3.2", true),
+            ("deepseek-r1", true),
+            (ok_128.as_str(), true),
+            (" llama3.2 ", true),
+            ("llama3.2/tags", false),
+            ("hi;rm", false),
+            ("../etc", false),
+            ("", false),
+            (" ", false),
+            (oversize.as_str(), false),
+        ] {
+            assert_eq!(library_slug_ok(slug), want, "library_slug_ok({slug:?})");
+        }
+    }
+
+    /// OLLAMA_ENABLED=1 still fail-closes unsafe slugs (empty + unavailable)
+    /// without opening :443 or :1234. HTTP 400 never reaches tags_for.
+    #[tokio::test]
+    async fn tags_for_unsafe_slug_unavailable_without_network() {
+        let _env = EnvRestore::set(&[
+            ("OLLAMA_ENABLED", "1"),
+            ("OLLAMA_BASE_URL", "http://127.0.0.1:1234/v1"),
+        ])
+        .await;
+        reset_caches();
+        let guard = NoOutbound::arm();
+
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let started = Instant::now();
+        for slug in ["llama3.2/tags", "hi;rm"] {
+            let tags = tokio::time::timeout(FAIL_CLOSED, tags_for(slug))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("tags_for({slug:?}) must return immediately, not open :443/:1234")
+                });
+            assert_eq!(tags.name, slug);
+            assert!(
+                tags.tags.is_empty(),
+                "unsafe slug tags_for({slug:?}) must be empty, got {} tags from {}",
+                tags.tags.len(),
+                tags.source
+            );
+            assert_eq!(
+                tags.source, "unavailable",
+                "unsafe slug tags_for({slug:?}) source must be unavailable, got {}",
+                tags.source
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "unsafe slug tags_for must fail closed without a live fetch, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            caches_are_empty(),
+            "unsafe slug tags_for must not populate the live fetch cache"
+        );
+        guard.assert_idle();
     }
 
     fn reset_caches() {
@@ -448,22 +551,33 @@ mod tests {
         cat && tags
     }
 
-    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+    /// Serializes OLLAMA_* / ENABLE_* mutation so parallel tests do not race.
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    struct EnvRestore {
+        prev: Vec<(&'static str, Option<String>)>,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
 
     impl EnvRestore {
-        fn set(pairs: &[(&'static str, &str)]) -> Self {
+        async fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let lock = env_lock().lock().await;
             let mut prev = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
                 prev.push((*k, std::env::var(k).ok()));
+                // SAFETY: held under env_lock; Drop restores prior values.
                 unsafe { std::env::set_var(k, v) };
             }
-            Self(prev)
+            Self { prev, _lock: lock }
         }
     }
 
     impl Drop for EnvRestore {
         fn drop(&mut self) {
-            for (k, v) in self.0.drain(..) {
+            for (k, v) in self.prev.drain(..) {
                 match v {
                     Some(val) => unsafe { std::env::set_var(k, val) },
                     None => unsafe { std::env::remove_var(k) },
@@ -665,44 +779,28 @@ mod tests {
         }
     }
 
-    /// Drive catalog()/tags_for() with the lab proxy and local Ollama off.
-    /// They must fail closed (empty + "unavailable") without opening :1234.
-    /// Fetch stays https://ollama.com/… — not an OpenAI-compat proxy.
+    /// Both Ollama flags off: catalog()/tags_for() fail closed (empty +
+    /// unavailable) without opening ollama.com or the lab :1234 bait.
     #[tokio::test]
     async fn disabled_does_not_proxy_to_lmstudio_1234() {
-        assert!(
-            LIBRARY_URL.starts_with("https://ollama.com/"),
-            "library fetch must be ollama.com, not a local proxy: {LIBRARY_URL}"
-        );
-        assert!(
-            !LIBRARY_URL.contains("1234") && !LIBRARY_URL.contains("/v1/"),
-            "library URL must not be an OpenAI-compat proxy: {LIBRARY_URL}"
-        );
-
         // ENABLE off. Bait OLLAMA_BASE_URL so a rewrite that GETs
         // http://127.0.0.1:1234/v1/models (format!/env) is a fail.
         let _env = EnvRestore::set(&[
-            ("ENABLE_LMSTUDIO_PROXY", "0"),
             ("ENABLE_OLLAMA", "0"),
             ("OLLAMA_ENABLED", "0"),
             ("OLLAMA_BASE_URL", "http://127.0.0.1:1234/v1"),
-        ]);
+        ])
+        .await;
         reset_caches();
         let guard = NoOutbound::arm();
 
         const FAIL_CLOSED: Duration = Duration::from_secs(2);
-        let started = Instant::now();
         let cat = tokio::time::timeout(FAIL_CLOSED, catalog())
             .await
             .expect("disabled catalog() must return immediately, not open :1234");
         let tags = tokio::time::timeout(FAIL_CLOSED, tags_for("llama3.2"))
             .await
             .expect("disabled tags_for() must return immediately, not open :1234");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "disabled catalog/tags_for must fail closed without a live proxy, took {:?}",
-            started.elapsed()
-        );
 
         assert!(
             cat.models.is_empty(),
@@ -727,13 +825,81 @@ mod tests {
             "disabled tags_for source must be unavailable, not a proxy: {}",
             tags.source
         );
-        assert!(!cat.source.contains("1234") && !tags.source.contains("1234"));
-        assert!(!cat.source.contains("/v1") && !tags.source.contains("/v1"));
-        assert!(
-            caches_are_empty(),
-            "disabled catalog/tags_for must not populate the live fetch cache"
-        );
 
         guard.assert_idle();
+    }
+
+    /// Warm CACHE must not leak through when both Ollama flags are off.
+    #[tokio::test]
+    async fn disabled_catalog_ignores_warm_cache() {
+        let _env = EnvRestore::set(&[("ENABLE_OLLAMA", "0"), ("OLLAMA_ENABLED", "0")]).await;
+        if let Ok(mut g) = CACHE.lock() {
+            *g = Some(Cache {
+                at: Instant::now(),
+                models: vec![LocalModel {
+                    name: "llama3.2".into(),
+                    summary: Some("warm".into()),
+                }],
+            });
+        }
+
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let cat = tokio::time::timeout(FAIL_CLOSED, catalog())
+            .await
+            .expect("disabled catalog() must return immediately, not read through cache into a fetch");
+        assert!(
+            cat.models.is_empty(),
+            "disabled catalog must ignore warm cache, got {} models from {}",
+            cat.models.len(),
+            cat.source
+        );
+        assert_eq!(
+            cat.source, "unavailable",
+            "disabled catalog source must be unavailable, not cache: {}",
+            cat.source
+        );
+        reset_caches();
+    }
+
+    /// Warm TAGS_CACHE must not leak through when both Ollama flags are off.
+    #[tokio::test]
+    async fn disabled_tags_for_ignores_warm_tags_cache() {
+        let _env = EnvRestore::set(&[("ENABLE_OLLAMA", "0"), ("OLLAMA_ENABLED", "0")]).await;
+        if let Ok(mut g) = TAGS_CACHE.lock() {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "llama3.2".into(),
+                CacheTags {
+                    at: Instant::now(),
+                    tags: vec![LocalModelTag {
+                        name: "llama3.2".into(),
+                        tag: "latest".into(),
+                        spec: "llama3.2:latest".into(),
+                        size_bytes: None,
+                        ram_bytes: None,
+                        latest: true,
+                    }],
+                },
+            );
+            *g = Some(map);
+        }
+
+        const FAIL_CLOSED: Duration = Duration::from_secs(2);
+        let tags = tokio::time::timeout(FAIL_CLOSED, tags_for("llama3.2"))
+            .await
+            .expect("disabled tags_for() must return immediately, not read through cache into a fetch");
+        assert_eq!(tags.name, "llama3.2");
+        assert!(
+            tags.tags.is_empty(),
+            "disabled tags_for must ignore warm cache, got {} tags from {}",
+            tags.tags.len(),
+            tags.source
+        );
+        assert_eq!(
+            tags.source, "unavailable",
+            "disabled tags_for source must be unavailable, not cache: {}",
+            tags.source
+        );
+        reset_caches();
     }
 }

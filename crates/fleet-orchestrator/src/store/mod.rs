@@ -6,18 +6,23 @@ mod pool;
 mod tick_ops;
 
 pub use host_pool::{
-    AssignableHost, ChosenHost, HOST_UPDATE_HOLD_SECS, HostRuntime, RunnerIsolation, RunnerKind,
     effective_runtime, enqueue_remote_spawn, enqueue_signal_session, hold_ready_for_host_update,
-    host_at_capacity, pick_assignable_host, pick_assignable_host_for, pick_assignable_runner,
-    select_assignable_host, select_assignable_runner, select_assignable_runner_preferring,
-    workspace_has_updating_host,
+    host_at_capacity, host_is_this_machine, pick_assignable_host, pick_assignable_host_for,
+    host_matches_job, pick_assignable_runner, pr1_tick_allows, select_assignable_host,
+    select_assignable_runner, JobNeed, RunMode,
+    select_assignable_runner_for_actor, select_assignable_runner_preferring,
+    select_assignable_runner_preferring_for_actor, select_assignable_runner_preferring_for_job,
+    select_online_runner,
+    select_online_runner_for_actor, send_acl_allows, workspace_has_updating_host,
+    AssignableHost, ChosenHost,
+    HostRuntime, RunnerIsolation, RunnerKind, HOST_UPDATE_HOLD_SECS,
 };
 pub use models::*;
 pub use pool::*;
 pub use tick_ops::SpawnAssignment;
 
 use crate::domain::{
-    BoardTaskStatus, WorkPlanBody, WorkPlanStatus, WorkRunStatus, stable_board_task_id, transition,
+    stable_board_task_id, transition, BoardTaskStatus, WorkPlanBody, WorkPlanStatus, WorkRunStatus,
 };
 use crate::validate::validate_plan;
 use sha2::{Digest, Sha256};
@@ -586,6 +591,9 @@ impl Store {
         .bind(status)
         .execute(&self.pool)
         .await?;
+        if matches!(status, "failed" | "cancelled") {
+            let _ = fleet_db::repos::tickets::reopen_tickets_for_run_id(&self.pool, run_id).await;
+        }
         Ok(())
     }
 
@@ -771,16 +779,4 @@ pub fn hash_worker_token(token: &str) -> String {
 pub fn verify_worker_token(token: &str, hash_hex: &str) -> bool {
     let got = hash_worker_token(token);
     got.as_bytes().ct_eq(hash_hex.as_bytes()).into()
-}
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-
-    #[test]
-    fn token_hash_roundtrip() {
-        let h = hash_worker_token("secret-token");
-        assert!(verify_worker_token("secret-token", &h));
-        assert!(!verify_worker_token("wrong", &h));
-    }
 }

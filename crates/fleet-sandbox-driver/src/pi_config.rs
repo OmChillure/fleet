@@ -216,8 +216,8 @@ mod tests {
             "provider": {
                 "id": "lmstudio",
                 "name": "LM Studio",
-                "base_url": "http://host.docker.internal:1234/v1",
-                "api_key": "lm-studio",
+                "base_url": "http://lmstudio.example.test:1234/v1",
+                "api_key": "test-lm-key",
                 "models": { "google/gemma-4-e4b": { "name": "Gemma" } }
             }
         }))
@@ -226,10 +226,68 @@ mod tests {
         let v = build_pi_models_json(&job, &mut env).unwrap();
         assert_eq!(
             v["providers"]["lmstudio"]["baseUrl"],
-            "http://host.docker.internal:1234/v1"
+            "http://lmstudio.example.test:1234/v1"
         );
         assert_eq!(v["providers"]["lmstudio"]["api"], "openai-completions");
         let models = v["providers"]["lmstudio"]["models"].as_array().unwrap();
-        assert!(models.iter().any(|m| m["id"] == "google/gemma-4-e4b"));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "google/gemma-4-e4b");
+        assert_eq!(
+            env.get("OPENCODE_API_KEY").map(String::as_str),
+            Some("test-lm-key")
+        );
+    }
+
+    #[test]
+    fn build_pi_models_json_empty_providers_when_no_spec() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "harness": "pi",
+            "repo_url": "https://example.com/r.git"
+        }))
+        .unwrap();
+        let mut env = HashMap::new();
+        let v = build_pi_models_json(&job, &mut env).unwrap();
+        assert_eq!(v, serde_json::json!({ "providers": {} }));
+    }
+
+    #[test]
+    fn build_pi_models_json_appends_job_model_after_first_slash() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "harness": "pi",
+            "repo_url": "https://example.com/r.git",
+            "model": "lmstudio/google/gemma-4-e4b",
+            "provider": {
+                "id": "lmstudio",
+                "name": "LM Studio",
+                "base_url": "http://lmstudio.example.test:1234/v1",
+                "api_key": "test-lm-key",
+                "models": {}
+            }
+        }))
+        .unwrap();
+        let mut env = HashMap::new();
+        let v = build_pi_models_json(&job, &mut env).unwrap();
+        let models = v["providers"]["lmstudio"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "google/gemma-4-e4b");
+    }
+
+    #[test]
+    fn build_pi_models_json_injects_api_key_into_child_env() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "harness": "pi",
+            "repo_url": "https://example.com/r.git",
+            "provider": {
+                "id": "lmstudio",
+                "name": "LM Studio",
+                "base_url": "http://lmstudio.example.test:1234/v1",
+                "api_key": "k",
+                "api_key_env": "OPENCODE_API_KEY"
+            }
+        }))
+        .unwrap();
+        let mut env = HashMap::new();
+        let _v = build_pi_models_json(&job, &mut env).unwrap();
+        assert_eq!(env.get("OPENCODE_API_KEY").map(String::as_str), Some("k"));
     }
 }

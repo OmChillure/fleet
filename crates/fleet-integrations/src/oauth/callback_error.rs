@@ -86,7 +86,9 @@ impl OAuthCallbackError {
             AppError::Unauthorized(msg) => Self::invalid_state(workspace_hint, msg),
             AppError::Forbidden(_) => Self::not_a_member(workspace_hint),
             AppError::BadRequest(msg) => Self::client(workspace_hint, msg),
-            AppError::Conflict(_) => Self::nonce_reuse(workspace_hint),
+            AppError::Conflict(_) | AppError::ConflictCoded(_, _) => {
+                Self::nonce_reuse(workspace_hint)
+            }
             other => Self::other(workspace_hint, other.to_string()),
         }
     }
@@ -134,35 +136,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_is_derived_from_variant_not_message_text() {
+    fn user_mismatch_is_403() {
         assert_eq!(
-            OAuthCallbackError::unauthenticated(None).status(),
-            Some(StatusCode::UNAUTHORIZED)
+            OAuthCallbackError::user_mismatch(None).status(),
+            Some(StatusCode::FORBIDDEN)
         );
-        assert_eq!(
-            OAuthCallbackError::invalid_state(None, "invalid or expired OAuth state").status(),
-            Some(StatusCode::UNAUTHORIZED)
-        );
-        let user = OAuthCallbackError::user_mismatch(None);
-        assert_eq!(user.status(), Some(StatusCode::FORBIDDEN));
-        assert_eq!(user.message(), "OAuth state user mismatch");
+    }
+
+    #[test]
+    fn not_a_member_is_403() {
         assert_eq!(
             OAuthCallbackError::not_a_member(None).status(),
             Some(StatusCode::FORBIDDEN)
         );
-        let mismatch = OAuthCallbackError::provider_mismatch(None);
-        assert_eq!(mismatch.status(), Some(StatusCode::BAD_REQUEST));
-        assert_eq!(mismatch.message(), "OAuth state provider mismatch");
-        let reuse = OAuthCallbackError::nonce_reuse(None);
-        assert_eq!(reuse.status(), Some(StatusCode::CONFLICT));
-        assert_eq!(reuse.message(), "OAuth state nonce already used");
+    }
+
+    #[test]
+    fn provider_mismatch_is_400() {
         assert_eq!(
-            OAuthCallbackError::client(None, "missing OAuth code").status(),
-            None
+            OAuthCallbackError::provider_mismatch(None).status(),
+            Some(StatusCode::BAD_REQUEST)
         );
+    }
+
+    #[test]
+    fn nonce_reuse_is_409() {
+        assert_eq!(
+            OAuthCallbackError::nonce_reuse(None).status(),
+            Some(StatusCode::CONFLICT)
+        );
+    }
+
+    #[test]
+    fn other_has_no_status() {
         assert_eq!(
             OAuthCallbackError::other(None, "failed to encrypt credentials").status(),
             None
+        );
+    }
+
+    #[test]
+    fn client_or_other_with_401_or_403_wording_still_has_no_status() {
+        assert_eq!(
+            OAuthCallbackError::client(None, "not authenticated").status(),
+            None
+        );
+        assert_eq!(
+            OAuthCallbackError::other(None, "OAuth state user mismatch").status(),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_state_with_nonce_reuse_wording_stays_401() {
+        assert_eq!(
+            OAuthCallbackError::invalid_state(None, "OAuth state nonce already used").status(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn from_app_error_conflict_is_409() {
+        assert_eq!(
+            OAuthCallbackError::from_app_error(AppError::conflict("anything"), None).status(),
+            Some(StatusCode::CONFLICT)
         );
     }
 
@@ -174,16 +211,42 @@ mod tests {
         );
         assert_eq!(unauth.status(), Some(StatusCode::UNAUTHORIZED));
         assert_eq!(unauth.message(), "invalid or expired OAuth state");
+        assert!(unauth.is_expected());
+    }
 
-        let forbidden = OAuthCallbackError::from_app_error(
-            AppError::forbidden("not a member of this workspace"),
+    #[test]
+    fn from_app_error_forbidden_is_not_a_member_even_when_app_error_text_differs() {
+        let err = OAuthCallbackError::from_app_error(AppError::forbidden("nope"), None);
+        assert_eq!(err.status(), Some(StatusCode::FORBIDDEN));
+        assert_eq!(err.message(), "not a member of this workspace");
+        assert!(err.is_expected());
+    }
+
+    #[test]
+    fn from_app_error_bad_request_is_expected_client() {
+        let err =
+            OAuthCallbackError::from_app_error(AppError::bad_request("GitHub: Not Found"), None);
+        assert_eq!(err.status(), None);
+        assert_eq!(err.message(), "GitHub: Not Found");
+        assert!(err.is_expected());
+    }
+
+    #[test]
+    fn from_app_error_conflict_is_409_nonce_reuse() {
+        let err = OAuthCallbackError::from_app_error(AppError::conflict("anything"), None);
+        assert_eq!(err.status(), Some(StatusCode::CONFLICT));
+        assert_eq!(err.message(), "OAuth state nonce already used");
+        assert!(err.is_expected());
+    }
+
+    #[test]
+    fn from_app_error_internal_is_unexpected_other() {
+        let err = OAuthCallbackError::from_app_error(
+            AppError::internal("failed to encrypt credentials"),
             None,
         );
-        assert_eq!(forbidden.status(), Some(StatusCode::FORBIDDEN));
-
-        let denied =
-            OAuthCallbackError::from_app_error(AppError::bad_request("GitHub: Not Found"), None);
-        assert_eq!(denied.status(), None);
-        assert!(denied.message().contains("GitHub"));
+        assert_eq!(err.status(), None);
+        assert!(!err.is_expected());
+        assert_eq!(err.message(), "failed to encrypt credentials");
     }
 }

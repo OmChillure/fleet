@@ -595,6 +595,8 @@ pub struct SpawnPayload {
     pub orchestrator_url: String,
     #[serde(default)]
     pub runtime: JobRuntime,
+    #[serde(default)]
+    pub run_mode: Option<String>,
     /// Isolation class (`process` | `container` | `vm`). When set, maps onto `runtime`.
     /// Placement words (`k8s`) are rejected — a pod is still container isolation.
     #[serde(default)]
@@ -615,6 +617,11 @@ pub struct SpawnPayload {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub privileged: bool,
+    #[serde(default)]
+    pub persona_md: Option<String>,
+    /// Relative text files from the plane (TEAM.md, work/, handoffs).
+    #[serde(default)]
+    pub workspace_files: HashMap<String, String>,
 }
 
 impl SpawnPayload {
@@ -660,8 +667,7 @@ mod tests {
     #[test]
     fn heartbeat_parses_desired_and_auto_update() {
         let raw = r#"{
-            "host": { "auto_update": true, "paused": false, "drain": false },
-            "effective": { "host": true, "container": false, "max_concurrent": 4 },
+            "host": {},
             "desired": {
                 "git_sha": "abc123",
                 "platform": "windows-x86_64",
@@ -672,11 +678,43 @@ mod tests {
             }
         }"#;
         let resp: HeartbeatResponse = serde_json::from_str(raw).expect("parse");
-        assert!(resp.host.auto_update_or_default());
         let d = resp.desired.expect("desired");
         assert_eq!(d.git_sha, "abc123");
         assert_eq!(d.platform, "windows-x86_64");
         assert_eq!(d.bins["fleet-host.exe"].size, Some(1));
+    }
+
+    #[test]
+    fn heartbeat_auto_update_false_disables_or_default() {
+        let resp: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{"auto_update":false}}"#).expect("parse");
+        assert!(!resp.host.auto_update_or_default());
+    }
+
+    #[test]
+    fn heartbeat_parses_desired_bin_sha256() {
+        let raw = r#"{
+            "desired": {
+                "bins": {
+                    "fleet-host.exe": { "sha256": "aa", "size": 1 },
+                    "fleet-driver.exe": { "sha256": "cc", "size": 3 }
+                }
+            }
+        }"#;
+        let resp: HeartbeatResponse = serde_json::from_str(raw).expect("parse");
+        let d = resp.desired.expect("desired");
+        assert_eq!(d.bins["fleet-host.exe"].sha256, "aa");
+        assert_eq!(d.bins["fleet-driver.exe"].sha256, "cc");
+    }
+
+    #[test]
+    fn accepts_leases_false_when_paused_or_drain() {
+        let paused: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{"paused":true}}"#).expect("parse");
+        assert!(!paused.host.accepts_leases());
+        let drain: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{"drain":true}}"#).expect("parse");
+        assert!(!drain.host.accepts_leases());
     }
 
     #[test]
@@ -685,7 +723,24 @@ mod tests {
             serde_json::from_str(r#"{"host":{},"effective":{}}"#).expect("parse");
         assert!(resp.desired.is_none());
         assert!(resp.host.auto_update_or_default());
-        assert!(resp.host.update_requested_at.is_none());
+    }
+
+    #[test]
+    fn heartbeat_desired_explicit_null_is_none() {
+        let resp: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{},"effective":{},"desired":null}"#).expect("parse");
+        assert!(resp.desired.is_none());
+    }
+
+    #[test]
+    fn heartbeat_update_requested_at_parses_stamp() {
+        let resp: HeartbeatResponse =
+            serde_json::from_str(r#"{"host":{"update_requested_at":"2026-01-01T00:00:00Z"}}"#)
+                .expect("parse");
+        assert_eq!(
+            resp.host.update_requested_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 
     #[test]
@@ -716,55 +771,105 @@ mod tests {
         );
         assert_eq!(JobRuntime::parse_isolation("vm").unwrap(), JobRuntime::Vm);
         assert_eq!(
+            JobRuntime::parse_isolation("virtual_machine").unwrap(),
+            JobRuntime::Vm
+        );
+        assert_eq!(
             JobRuntime::parse_isolation("firecracker").unwrap(),
             JobRuntime::Vm
         );
         assert_eq!(JobRuntime::parse_isolation("qemu").unwrap(), JobRuntime::Vm);
+    }
+
+    #[test]
+    fn parse_isolation_trims_and_is_ascii_case_insensitive() {
         assert_eq!(
-            JobRuntime::from_isolation(IsolationClass::Process),
+            JobRuntime::parse_isolation(" Process ").unwrap(),
             JobRuntime::Host
         );
         assert_eq!(
-            JobRuntime::from_isolation(IsolationClass::Container),
+            JobRuntime::parse_isolation("DOCKER").unwrap(),
             JobRuntime::Container
         );
-        assert_eq!(
-            JobRuntime::from_isolation(IsolationClass::Vm),
-            JobRuntime::Vm
-        );
-        assert_eq!(JobRuntime::Host.isolation(), IsolationClass::Process);
-        assert_eq!(JobRuntime::Container.isolation(), IsolationClass::Container);
-        assert_eq!(JobRuntime::Vm.isolation(), IsolationClass::Vm);
+        assert_eq!(JobRuntime::parse_isolation("VM").unwrap(), JobRuntime::Vm);
+    }
+
+    #[test]
+    fn parse_isolation_whitespace_only_is_unknown() {
+        let err = JobRuntime::parse_isolation("   ").unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
+        assert!(!err.contains("placement"), "{err}");
     }
 
     #[test]
     fn isolation_parse_rejects_k8s_placement() {
         let k8s = JobRuntime::parse_isolation("k8s").unwrap_err().to_string();
         assert!(k8s.contains("placement"), "{k8s}");
-        assert!(JobRuntime::parse_isolation("kubernetes").is_err());
-        assert!(JobRuntime::parse_isolation("nonsense").is_err());
-        assert!(JobRuntime::parse_isolation("").is_err());
+        let kubernetes = JobRuntime::parse_isolation("kubernetes")
+            .unwrap_err()
+            .to_string();
+        assert!(kubernetes.contains("placement"), "{kubernetes}");
+    }
+
+    #[test]
+    fn parse_isolation_unknown_is_not_placement() {
+        let err = JobRuntime::parse_isolation("nonsense").unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
+        assert!(!err.contains("placement"), "{err}");
+    }
+
+    #[test]
+    fn parse_isolation_k8s_is_case_insensitive_and_trimmed() {
+        let k8s = JobRuntime::parse_isolation("K8S").unwrap_err().to_string();
+        assert!(k8s.contains("placement"), "{k8s}");
+        let kubernetes = JobRuntime::parse_isolation(" Kubernetes ")
+            .unwrap_err()
+            .to_string();
+        assert!(kubernetes.contains("placement"), "{kubernetes}");
+    }
+
+    #[test]
+    fn resolved_runtime_blank_isolation_keeps_runtime() {
+        let none: SpawnPayload = serde_json::from_str(r#"{"runtime":"vm"}"#).unwrap();
+        assert_eq!(none.resolved_runtime().unwrap(), JobRuntime::Vm);
+        let empty: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"vm","isolation":""}"#).unwrap();
+        assert_eq!(empty.resolved_runtime().unwrap(), JobRuntime::Vm);
+        let blank: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"vm","isolation":"  "}"#).unwrap();
+        assert_eq!(blank.resolved_runtime().unwrap(), JobRuntime::Vm);
+    }
+
+    #[test]
+    fn spawn_payload_omitted_privileged_deserializes_false() {
+        let p: SpawnPayload = serde_json::from_str(r#"{"runtime":"container"}"#).expect("parse");
+        assert!(
+            !p.privileged,
+            "plane JSON without privileged must default false so docker cannot emit --privileged"
+        );
     }
 
     #[test]
     fn payload_isolation_overrides_runtime() {
-        let raw = r#"{"runtime":"host","isolation":"vm"}"#;
-        let p: SpawnPayload = serde_json::from_str(raw).expect("parse");
+        let p: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"host","isolation":"vm"}"#).expect("parse");
         assert_eq!(p.runtime, JobRuntime::Host);
         assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Vm);
-        let container: SpawnPayload =
-            serde_json::from_str(r#"{"runtime":"host","isolation":"container"}"#).unwrap();
-        assert_eq!(container.resolved_runtime().unwrap(), JobRuntime::Container);
-        let process: SpawnPayload = serde_json::from_str(r#"{"isolation":"process"}"#).unwrap();
-        assert_eq!(process.resolved_runtime().unwrap(), JobRuntime::Host);
-        let k8s: SpawnPayload =
-            serde_json::from_str(r#"{"runtime":"container","isolation":"k8s"}"#).unwrap();
-        assert!(
-            k8s.resolved_runtime()
-                .unwrap_err()
-                .to_string()
-                .contains("placement")
-        );
+    }
+
+    #[test]
+    fn payload_weaker_isolation_still_overrides_runtime() {
+        let p: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"vm","isolation":"process"}"#).expect("parse");
+        assert_eq!(p.runtime, JobRuntime::Vm);
+        assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Host);
+    }
+
+    #[test]
+    fn payload_trimmed_alias_overrides_runtime() {
+        let p: SpawnPayload =
+            serde_json::from_str(r#"{"runtime":"host","isolation":" docker "}"#).expect("parse");
+        assert_eq!(p.resolved_runtime().unwrap(), JobRuntime::Container);
     }
 
     #[test]
@@ -837,6 +942,15 @@ mod tests {
     }
 
     fn spawn_install_mock(files: HashMap<String, Vec<u8>>) -> MockInstall {
+        spawn_install_replies(
+            files
+                .into_iter()
+                .map(|(path, body)| (path, (200_u16, body)))
+                .collect(),
+        )
+    }
+
+    fn spawn_install_replies(files: HashMap<String, (u16, Vec<u8>)>) -> MockInstall {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -860,12 +974,18 @@ mod tests {
                 let method = it.next().unwrap_or("").to_string();
                 let path = it.next().unwrap_or("").to_string();
                 log2.lock().unwrap().push((method, path.clone()));
-                let (status, payload) = match files.get(&path) {
-                    Some(b) => ("200 OK", b.clone()),
-                    None => ("404 Not Found", Vec::new()),
+                let (code, payload) = match files.get(&path) {
+                    Some((code, b)) => (*code, b.clone()),
+                    None => (404, Vec::new()),
+                };
+                let reason = match code {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "Error",
                 };
                 let header = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {code} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     payload.len()
                 );
                 let _ = s.write_all(header.as_bytes());
@@ -1022,32 +1142,28 @@ mod tests {
         );
     }
 
+    /// HTTP 200 garbage `{bin}.sha256` hard-fails apply (not QuietNoPrebuilt).
+    /// Bake-id / JSON parse-None stays in parse_sha256_sidecar_rejects_bake_id.
     #[tokio::test]
-    async fn fetch_install_sha256_sidecar_match_reuses_bins() {
+    async fn fetch_install_sha256_invalid_sidecar_fails_closed() {
         let platform = detect_platform();
         let host_name = bin_name("fleet-host", &platform);
         let driver_name = bin_name("fleet-driver", &platform);
-        let host = b"host-keep";
-        let old_d = b"driver-v1";
-        let new_d = b"driver-v2";
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
         let dir = tempfile::tempdir().unwrap();
         write_bin(dir.path(), &host_name, host);
         write_bin(dir.path(), &driver_name, old_d);
-
         let mock = spawn_install_mock(HashMap::from([
             (
-                format!("{}.sha256", install_path(&platform, &host_name)),
-                format!("{}  {host_name}\n", sha256_hex(host)).into_bytes(),
+                format!("{}.sha256", install_path(&platform, &driver_name)),
+                b"not-a-hash\n".to_vec(),
             ),
             (
-                install_path(&platform, &host_name),
+                install_path(&platform, &driver_name),
                 b"must-not-be-fetched".to_vec(),
             ),
-            (
-                format!("{}.sha256", install_path(&platform, &driver_name)),
-                format!("{}  {driver_name}\n", sha256_hex(new_d)).into_bytes(),
-            ),
-            (install_path(&platform, &driver_name), new_d.to_vec()),
         ]));
         let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
         let desired = desired_for(
@@ -1057,38 +1173,39 @@ mod tests {
                 (driver_name.as_str(), new_d.as_slice()),
             ],
         );
-        apply_dir(&client, dir.path(), &desired)
-            .await
-            .expect("match is reuse, not an error");
-        let paths = paths_hit(&mock);
+        let result = apply_dir(&client, dir.path(), &desired).await;
         assert!(
-            !paths
-                .iter()
-                .any(|p| p == &install_path(&platform, &host_name)),
-            "reuse must not GET the matching bin, got {paths:?}"
+            result.is_err(),
+            "invalid sidecar must hard-fail apply, not QuietNoPrebuilt, got {result:?}"
         );
-        assert_eq!(std::fs::read(dir.path().join(&host_name)).unwrap(), host);
+        let paths = paths_hit(&mock);
+        assert_eq!(
+            paths,
+            vec![format!("{}.sha256", install_path(&platform, &driver_name))],
+            "invalid sidecar must not GET the bin, got {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&driver_name)).unwrap(),
+            old_d,
+            "on-disk bin must stay put"
+        );
     }
 
     #[tokio::test]
-    async fn fetch_install_sha256_sidecar_mismatch_refetches() {
+    async fn apply_desired_missing_sidecar_is_quiet_no_prebuilt() {
         let platform = detect_platform();
         let host_name = bin_name("fleet-host", &platform);
         let driver_name = bin_name("fleet-driver", &platform);
-        let host = b"host-keep";
-        let old_d = b"stale-driver";
-        let new_d = b"fresh-driver";
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
         let dir = tempfile::tempdir().unwrap();
         write_bin(dir.path(), &host_name, host);
         write_bin(dir.path(), &driver_name, old_d);
-
-        let mock = spawn_install_mock(HashMap::from([
-            (
-                format!("{}.sha256", install_path(&platform, &driver_name)),
-                format!("{}  {driver_name}\n", sha256_hex(new_d)).into_bytes(),
-            ),
-            (install_path(&platform, &driver_name), new_d.to_vec()),
-        ]));
+        let mock = spawn_install_mock(HashMap::from([(
+            install_path(&platform, &driver_name),
+            new_d.to_vec(),
+        )]));
         let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
         let desired = desired_for(
             &platform,
@@ -1099,81 +1216,113 @@ mod tests {
         );
         let out = apply_dir(&client, dir.path(), &desired)
             .await
-            .expect("mismatch refetches");
-        assert_eq!(out, ApplyOutcome::ChildrenSwapped);
-        assert_eq!(std::fs::read(dir.path().join(&driver_name)).unwrap(), new_d);
+            .expect("404 sidecar is QuietNoPrebuilt, not a hard fail");
+        assert_eq!(out, ApplyOutcome::QuietNoPrebuilt);
         let paths = paths_hit(&mock);
         assert_eq!(
             paths,
-            vec![
-                format!("{}.sha256", install_path(&platform, &driver_name)),
-                install_path(&platform, &driver_name),
-            ],
-            "mismatch must GET sidecar then bin, got {paths:?}"
+            vec![format!("{}.sha256", install_path(&platform, &driver_name))],
+            "404 sidecar must not GET the bin, got {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&driver_name)).unwrap(),
+            old_d,
+            "on-disk child must stay put"
         );
     }
 
+    /// Sidecar HTTP 500 is apply Err, not QuietNoPrebuilt; only `no prebuilt` stays quiet.
     #[tokio::test]
-    async fn fetch_install_sha256_invalid_sidecar_fails_closed() {
+    async fn apply_desired_sidecar_http_500_is_error_not_quiet() {
         let platform = detect_platform();
         let host_name = bin_name("fleet-host", &platform);
         let driver_name = bin_name("fleet-driver", &platform);
         let host = b"host-same";
         let old_d = b"driver-old";
         let new_d = b"driver-new";
-        for (label, body) in [
-            ("garbage", b"not-a-hash\n".as_slice()),
-            ("bake-id-7", b"abc1234\n".as_slice()),
-            ("bake-id-12", b"0123456789ab\n".as_slice()),
-            (
-                "git-sha-40",
-                b"0123456789abcdef0123456789abcdef01234567\n".as_slice(),
-            ),
-            ("manifest-json", br#"{"git_sha":"abc1234"}"#.as_slice()),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            write_bin(dir.path(), &host_name, host);
-            write_bin(dir.path(), &driver_name, old_d);
-            let mock = spawn_install_mock(HashMap::from([
-                (
-                    format!("{}.sha256", install_path(&platform, &driver_name)),
-                    body.to_vec(),
-                ),
-                (
-                    install_path(&platform, &driver_name),
-                    b"must-not-be-fetched".to_vec(),
-                ),
-            ]));
-            let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
-            let desired = desired_for(
-                &platform,
-                &[
-                    (host_name.as_str(), host.as_slice()),
-                    (driver_name.as_str(), new_d.as_slice()),
-                ],
-            );
-            let err = apply_dir(&client, dir.path(), &desired)
-                .await
-                .expect_err(label);
-            let msg = err.to_string();
-            assert!(
-                msg.contains("invalid sha256 sidecar"),
-                "{label}: expected fail-closed, got {msg}"
-            );
-            let paths = paths_hit(&mock);
-            assert_eq!(
-                paths,
-                vec![format!("{}.sha256", install_path(&platform, &driver_name))],
-                "{label}: invalid/bake-id sidecar must not GET the bin, got {paths:?}"
-            );
-            assert_eq!(
-                std::fs::read(dir.path().join(&driver_name)).unwrap(),
-                old_d,
-                "{label}: on-disk bin must stay put"
-            );
-        }
+        let dir = tempfile::tempdir().unwrap();
+        write_bin(dir.path(), &host_name, host);
+        write_bin(dir.path(), &driver_name, old_d);
+        let sidecar = format!("{}.sha256", install_path(&platform, &driver_name));
+        let mock = spawn_install_replies(HashMap::from([
+            (sidecar.clone(), (500, Vec::new())),
+            (install_path(&platform, &driver_name), (200, new_d.to_vec())),
+        ]));
+        let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                (host_name.as_str(), host.as_slice()),
+                (driver_name.as_str(), new_d.as_slice()),
+            ],
+        );
+        let result = apply_dir(&client, dir.path(), &desired).await;
+        assert!(
+            result.is_err(),
+            "sidecar 500 must hard-fail apply, not QuietNoPrebuilt, got {result:?}"
+        );
+        let paths = paths_hit(&mock);
+        assert_eq!(
+            paths,
+            vec![sidecar],
+            "sidecar 500 must not GET the bin, got {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&driver_name)).unwrap(),
+            old_d,
+            "on-disk child must stay put"
+        );
     }
 
+    #[tokio::test]
+    async fn apply_desired_sidecar_disagrees_with_desired_does_not_fetch_bin() {
+        let platform = detect_platform();
+        let host_name = bin_name("fleet-host", &platform);
+        let driver_name = bin_name("fleet-driver", &platform);
+        let host = b"host-same";
+        let old_d = b"driver-old";
+        let new_d = b"driver-new";
+        let other_sha = sha256_hex(b"driver-other");
+        let dir = tempfile::tempdir().unwrap();
+        write_bin(dir.path(), &host_name, host);
+        write_bin(dir.path(), &driver_name, old_d);
+        let mock = spawn_install_mock(HashMap::from([
+            (
+                format!("{}.sha256", install_path(&platform, &driver_name)),
+                format!("{other_sha}  {driver_name}\n").into_bytes(),
+            ),
+            (
+                install_path(&platform, &driver_name),
+                b"must-not-be-fetched".to_vec(),
+            ),
+        ]));
+        let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
+        let desired = desired_for(
+            &platform,
+            &[
+                (host_name.as_str(), host.as_slice()),
+                (driver_name.as_str(), new_d.as_slice()),
+            ],
+        );
+        let result = apply_dir(&client, dir.path(), &desired).await;
+        assert!(
+            result.is_err(),
+            "sidecar != desired must hard-fail apply, got {result:?}"
+        );
+        let paths = paths_hit(&mock);
+        assert_eq!(
+            paths,
+            vec![format!("{}.sha256", install_path(&platform, &driver_name))],
+            "disagreeing sidecar must not GET the bin, got {paths:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&driver_name)).unwrap(),
+            old_d,
+            "on-disk child must stay put"
+        );
+    }
+
+    /// 404 `{name}.sha256` is the `no prebuilt` token (apply remaps that to QuietNoPrebuilt).
     #[tokio::test]
     async fn fetch_install_sha256_missing_sidecar_fails_closed() {
         let platform = detect_platform();
@@ -1189,14 +1338,51 @@ mod tests {
             .expect_err("missing sidecar");
         let msg = err.to_string();
         assert!(
-            msg.contains("no prebuilt") || msg.contains("invalid sha256 sidecar"),
-            "missing sidecar must fail closed, got {msg}"
+            msg.contains("no prebuilt"),
+            "404 sidecar must be no prebuilt (QuietNoPrebuilt remap), got {msg}"
         );
         let paths = paths_hit(&mock);
         assert_eq!(
             paths,
             vec![format!("{}.sha256", install_path(&platform, &name))],
             "must request the sidecar, not fall back to hashing the bin: {paths:?}"
+        );
+    }
+
+    /// Sidecar HTTP 200 empty body is parse-fail, not the 404-quiet token.
+    #[tokio::test]
+    async fn fetch_install_sha256_empty_200_is_invalid_not_no_prebuilt() {
+        let platform = detect_platform();
+        let name = bin_name("fleet-host", &platform);
+        let mock = spawn_install_mock(HashMap::from([
+            (
+                format!("{}.sha256", install_path(&platform, &name)),
+                Vec::new(),
+            ),
+            (
+                install_path(&platform, &name),
+                b"bin-must-not-be-fetched".to_vec(),
+            ),
+        ]));
+        let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
+        let err = client
+            .fetch_install_sha256(&platform, &name)
+            .await
+            .expect_err("empty 200 sidecar");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid sha256 sidecar"),
+            "empty 200 must be parse-fail, got {msg}"
+        );
+        assert!(
+            !msg.contains("no prebuilt"),
+            "empty 200 must not be the QuietNoPrebuilt token, got {msg}"
+        );
+        let paths = paths_hit(&mock);
+        assert_eq!(
+            paths,
+            vec![format!("{}.sha256", install_path(&platform, &name))],
+            "empty 200 sidecar must not GET the bin, got {paths:?}"
         );
     }
 }

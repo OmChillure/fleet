@@ -1,6 +1,6 @@
 //! Slack Web API helpers (control plane only).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::proxy::types::ProxyResult;
 
@@ -11,6 +11,20 @@ pub(crate) fn req_str(args: &Value, key: &str) -> Result<String, String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .ok_or_else(|| format!("{key} is required"))
+}
+
+pub(crate) fn slack_api_origin() -> String {
+    #[cfg(test)]
+    if let Some(base) = TEST_SLACK_API_BASE.with(|c| c.borrow().clone()) {
+        return base;
+    }
+    "https://slack.com/api".into()
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_SLACK_API_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) async fn slack_get(http: &reqwest::Client, token: &str, url: &str) -> (u16, Value) {

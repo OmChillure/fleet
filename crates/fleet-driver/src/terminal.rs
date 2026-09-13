@@ -306,10 +306,89 @@ fn resolve_cwd(session_cwd: &Path, requested: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn shell_line_detect() {
-        assert!(looks_like_shell_line("echo hello && cargo fmt"));
-        assert!(!looks_like_shell_line("cargo"));
+        // Empty-args create wraps sh -c when any of these fire. A space-only
+        // pair would stay green if | & ; > < $ ` were dropped.
+        for (cmd, want) in [
+            ("echo hello && cargo fmt", true),
+            ("echo|cat", true),
+            ("cmd;cmd", true),
+            ("cmd&cmd", true),
+            (">out", true),
+            ("<in", true),
+            ("$HOME", true),
+            ("`date`", true),
+            ("cargo", false),
+        ] {
+            assert_eq!(looks_like_shell_line(cmd), want, "{cmd:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_create_empty_args_shell_line_runs_via_sh_c() {
+        let hub = TerminalHub::new();
+        let dir = tempdir().unwrap();
+        let created = hub
+            .handle(
+                "create",
+                &json!({ "command": "echo hello-from-sh" }),
+                dir.path(),
+            )
+            .await
+            .expect("empty-args shell line must spawn via sh -c, not as a binary name");
+        let id = created
+            .get("terminalId")
+            .and_then(|v| v.as_str())
+            .expect("terminal/create returns terminalId")
+            .to_string();
+        let id_params = json!({ "terminalId": id });
+        let exit = hub
+            .handle("wait_for_exit", &id_params, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(exit.get("exitCode"), Some(&json!(0)), "{exit}");
+        let mut output = String::new();
+        for _ in 0..50 {
+            let out = hub.handle("output", &id_params, dir.path()).await.unwrap();
+            output = out
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if output.contains("hello-from-sh") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(
+            output.contains("hello-from-sh"),
+            "sh -c must run the shell line; output={output:?}"
+        );
+        let _ = hub.handle("release", &id_params, dir.path()).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_create_nonempty_args_does_not_sh_wrap() {
+        let hub = TerminalHub::new();
+        let dir = tempdir().unwrap();
+        // command looks like a shell line, but args are present: must exec that
+        // argv (spawn fails -- no binary named "echo hello"), not sh -c which
+        // would drop args and print "hello".
+        let err = hub
+            .handle(
+                "create",
+                &json!({ "command": "echo hello", "args": ["x"] }),
+                dir.path(),
+            )
+            .await
+            .expect_err("nonempty args must not sh -c the command string");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("spawn"),
+            "expected spawn of argv[0]=\"echo hello\", got {msg}"
+        );
     }
 }

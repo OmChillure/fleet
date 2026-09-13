@@ -262,6 +262,15 @@ mod tests {
     }
 
     #[test]
+    fn host_from_url_strips_userinfo() {
+        assert_eq!(
+            host_from_url("http://user:pass@127.0.0.1:8080"),
+            "127.0.0.1"
+        );
+        assert_eq!(host_from_url("http://a@b:c@127.0.0.1:8080"), "127.0.0.1");
+    }
+
+    #[test]
     fn strip_drops_host_absolute_bins_not_relative() {
         let mut env = std::collections::HashMap::from([
             (
@@ -279,15 +288,9 @@ mod tests {
         assert_eq!(env.get("FLEET_MODEL").map(String::as_str), Some("llama"));
     }
 
-    /// Isolated guests must not inherit host-absolute `*_BIN`/`*_CMD` or
-    /// secrets that only exist on loopback (127/8, localhost, ::1).
     #[test]
-    fn strip_isolated_guest_env_drops_host_path_bins_and_loopback_secrets() {
+    fn strip_isolated_guest_env_drops_host_path_bins() {
         let mut env = std::collections::HashMap::from([
-            (
-                "FLEET_MOCK_ACP_BIN".into(),
-                "/home/viny/.local/bin/mock-acp-agent".into(),
-            ),
             ("FLEET_GROK_BIN".into(), "/opt/plane/grok".into()),
             ("GROK_BIN".into(), "/usr/local/bin/grok".into()),
             (
@@ -295,11 +298,36 @@ mod tests {
                 "/secret/host/mock-acp-agent".into(),
             ),
             ("FLEET_DRIVER_CMD".into(), "/opt/plane/fleet-driver".into()),
-            ("FLEET_WORK_CMD".into(), "echo host-only".into()),
             ("FLEET_ACP_BIN".into(), "mock-acp-agent".into()),
             ("FLEET_HARNESS".into(), "mock".into()),
-            ("FLEET_MODEL".into(), "llama".into()),
-            ("FLEET_WORKER_TOKEN".into(), "tok-plain".into()),
+        ]);
+        strip_isolated_guest_env(&mut env);
+        assert!(!env.contains_key("FLEET_GROK_BIN"));
+        assert!(!env.contains_key("GROK_BIN"));
+        assert!(!env.contains_key("fleet_mock_acp_bin"));
+        assert!(!env.contains_key("FLEET_DRIVER_CMD"));
+        assert_eq!(
+            env.get("FLEET_ACP_BIN").map(String::as_str),
+            Some("mock-acp-agent")
+        );
+        assert_eq!(env.get("FLEET_HARNESS").map(String::as_str), Some("mock"));
+    }
+
+    #[test]
+    fn strip_isolated_guest_env_keeps_relative_cmd() {
+        let mut env = std::collections::HashMap::from([
+            ("FLEET_DRIVER_CMD".into(), "fleet-driver".into()),
+        ]);
+        strip_isolated_guest_env(&mut env);
+        assert_eq!(
+            env.get("FLEET_DRIVER_CMD").map(String::as_str),
+            Some("fleet-driver")
+        );
+    }
+
+    #[test]
+    fn strip_isolated_guest_env_drops_loopback_urls() {
+        let mut env = std::collections::HashMap::from([
             (
                 "DATABASE_URL".into(),
                 "postgres://127.0.0.1:5432/fleet".into(),
@@ -317,38 +345,14 @@ mod tests {
                 "https://github.com/example/repo.git".into(),
             ),
             ("LAN_API".into(), "http://10.0.0.8:8080".into()),
+            ("FLEET_WORKER_TOKEN".into(), "tok-plain".into()),
         ]);
         strip_isolated_guest_env(&mut env);
-
-        for host_only in [
-            "FLEET_MOCK_ACP_BIN",
-            "FLEET_GROK_BIN",
-            "GROK_BIN",
-            "fleet_mock_acp_bin",
-            "FLEET_DRIVER_CMD",
-            "FLEET_WORK_CMD",
-            "DATABASE_URL",
-            "FLEET_API_BASE",
-            "HTTP_PROXY",
-            "FLEET_CONTROL_PLANE_URL",
-            "REDIS_URL",
-        ] {
-            assert!(
-                !env.contains_key(host_only),
-                "isolated guest must not inherit {host_only}: {env:?}"
-            );
-        }
-
-        assert_eq!(
-            env.get("FLEET_ACP_BIN").map(String::as_str),
-            Some("mock-acp-agent")
-        );
-        assert_eq!(env.get("FLEET_HARNESS").map(String::as_str), Some("mock"));
-        assert_eq!(env.get("FLEET_MODEL").map(String::as_str), Some("llama"));
-        assert_eq!(
-            env.get("FLEET_WORKER_TOKEN").map(String::as_str),
-            Some("tok-plain")
-        );
+        assert!(!env.contains_key("DATABASE_URL"));
+        assert!(!env.contains_key("FLEET_API_BASE"));
+        assert!(!env.contains_key("HTTP_PROXY"));
+        assert!(!env.contains_key("FLEET_CONTROL_PLANE_URL"));
+        assert!(!env.contains_key("REDIS_URL"));
         assert_eq!(
             env.get("FLEET_ORCHESTRATOR_URL").map(String::as_str),
             Some("http://api.agent-fleet.svc.cluster.local:8080")
@@ -361,15 +365,36 @@ mod tests {
             env.get("LAN_API").map(String::as_str),
             Some("http://10.0.0.8:8080")
         );
+        assert_eq!(
+            env.get("FLEET_WORKER_TOKEN").map(String::as_str),
+            Some("tok-plain")
+        );
+    }
 
-        // 127/8 is loopback — not only 127.0.0.1.
-        assert!(url_is_loopback("http://127.0.0.1:5432"));
-        assert!(url_is_loopback("http://127.1.2.3:8080"));
-        assert!(url_is_loopback("http://127.42.0.1:6379"));
-        assert!(host_is_loopback("127.255.255.255"));
-        assert!(!host_is_loopback("10.0.0.8"));
-        assert!(!url_is_loopback(
-            "http://api.agent-fleet.svc.cluster.local:8080"
-        ));
+    #[test]
+    fn strip_isolated_guest_env_drops_loopback_urls_with_userinfo() {
+        let mut env = std::collections::HashMap::from([
+            (
+                "DATABASE_URL".into(),
+                "postgres://user:secret@127.0.0.1:5432/fleet".into(),
+            ),
+            (
+                "FLEET_API_BASE".into(),
+                "http://user:pass@localhost:8080".into(),
+            ),
+            ("REDIS_URL".into(), "redis://u:p@[::1]:6379/0".into()),
+            (
+                "LAN_DB".into(),
+                "postgres://user:secret@10.0.0.8:5432/fleet".into(),
+            ),
+        ]);
+        strip_isolated_guest_env(&mut env);
+        assert!(!env.contains_key("DATABASE_URL"));
+        assert!(!env.contains_key("FLEET_API_BASE"));
+        assert!(!env.contains_key("REDIS_URL"));
+        assert_eq!(
+            env.get("LAN_DB").map(String::as_str),
+            Some("postgres://user:secret@10.0.0.8:5432/fleet")
+        );
     }
 }

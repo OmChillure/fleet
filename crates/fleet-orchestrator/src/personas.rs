@@ -19,6 +19,9 @@ pub struct Persona {
     pub division: String,
     pub emoji: String,
     pub vibe: String,
+    /// Workspace catalog `model_preference`. Empty for roster personas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_preference: String,
     /// Full markdown body (frontmatter stripped + original).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub body: String,
@@ -129,6 +132,49 @@ pub async fn list_personas(data_dir: &Path) -> Vec<PersonaSummary> {
     let mut out: Vec<PersonaSummary> = all.into_iter().map(|p| p.summary()).collect();
     out.sort_by(|a, b| a.division.cmp(&b.division).then(a.name.cmp(&b.name)));
     out
+}
+
+/// Workspace catalog first (role_prompt + model_preference), then the
+/// agency-agents roster. The personas HTTP API never invokes an LLM;
+/// this is consumption at spawn.
+pub async fn resolve_for_workspace(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    profile: &str,
+    data_dir: &Path,
+) -> Persona {
+    match fleet_db::repos::personas::find_by_slug(pool, workspace_id, profile).await {
+        Ok(Some(row)) => return persona_from_workspace_row(&row),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                workspace_id = %workspace_id,
+                profile,
+                "workspace persona lookup failed; using roster"
+            );
+        }
+    }
+    resolve(profile, data_dir).await
+}
+
+fn persona_from_workspace_row(row: &fleet_db::Persona) -> Persona {
+    let role = row.role_prompt.trim();
+    let body = if role.is_empty() {
+        format!("# {}\n", row.name.trim())
+    } else {
+        format!("# {}\n\n{}\n", row.name.trim(), role)
+    };
+    Persona {
+        slug: row.slug.clone(),
+        name: row.name.clone(),
+        description: row.description.clone(),
+        division: "workspace".into(),
+        emoji: row.icon.clone(),
+        vibe: String::new(),
+        model_preference: row.model_preference.clone().unwrap_or_default(),
+        body,
+    }
 }
 
 /// Resolve `worker_profile` to a full persona (body included).
@@ -263,6 +309,7 @@ fn parse_file(root: &Path, path: &Path) -> Option<Persona> {
         division,
         emoji: meta.get("emoji").cloned().unwrap_or_else(|| "•".into()),
         vibe: meta.get("vibe").cloned().unwrap_or_default(),
+        model_preference: String::new(),
         body: if body.trim().is_empty() { raw } else { body },
     })
 }
@@ -312,6 +359,7 @@ fn fallback_persona() -> Persona {
         division: "specialized".into(),
         emoji: "•".into(),
         vibe: "Does the job, stays in lane, hands off clearly.".into(),
+        model_preference: String::new(),
         body: BUILTIN_GENERALIST.into(),
     }
 }
@@ -326,6 +374,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Ships durable APIs and clear module boundaries.".into(),
+            model_preference: String::new(),
             body: BUILTIN_CODING.into(),
         },
         Persona {
@@ -335,6 +384,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Finds the three issues that actually matter.".into(),
+            model_preference: String::new(),
             body: BUILTIN_REVIEWER.into(),
         },
         Persona {
@@ -344,6 +394,7 @@ fn builtin_personas() -> Vec<Persona> {
             division: "engineering".into(),
             emoji: "•".into(),
             vibe: "Pixel-aware, accessibility-first.".into(),
+            model_preference: String::new(),
             body: BUILTIN_FRONTEND.into(),
         },
     ]
@@ -389,38 +440,129 @@ markup, sensible structure, and no unnecessary dependencies. Write `result.md`.
 mod tests {
     use super::*;
 
-    #[test]
-    fn frontmatter_parse() {
-        let (m, body) = split_frontmatter(
-            "---\nname: Frontend Developer\ndescription: UI\nemoji: x\nvibe: fast\n---\n\n# Hello\n",
-        );
-        assert_eq!(m.get("name").unwrap(), "Frontend Developer");
-        assert!(body.contains("# Hello"));
+    fn resolve_from(all: &[Persona], profile: &str) -> Persona {
+        pick(all, profile).unwrap_or_else(fallback_persona)
     }
 
     #[test]
-    fn pick_aliases() {
+    fn reviewer_code_reviewer_review_resolve_to_code_reviewer() {
         let all = builtin_personas();
-        assert!(pick(&all, "reviewer").unwrap().slug.contains("reviewer"));
-        assert!(pick(&all, "frontend").unwrap().slug.contains("frontend"));
-        assert!(pick(&all, "coding").is_some());
-        assert_eq!(pick(&all, "default").unwrap().slug, "generalist");
-        assert_eq!(pick(&all, "").unwrap().slug, "generalist");
-        assert_eq!(pick(&all, "generalist").unwrap().slug, "generalist");
-        assert_eq!(
-            pick(&all, "engineering-code-reviewer").unwrap().slug,
-            "engineering-code-reviewer"
-        );
-        assert!(pick(&all, "no-such-persona").is_none());
+        for alias in ["reviewer", "code-reviewer", "review"] {
+            let got = resolve_from(&all, alias);
+            assert_eq!(got.slug, "engineering-code-reviewer", "{alias:?}");
+        }
     }
 
     #[test]
-    fn title_case_slug() {
-        assert_eq!(
-            title_case("engineering-backend-architect"),
-            "Engineering Backend Architect"
-        );
-        assert_eq!(title_case(""), "");
+    fn frontend_ui_resolve_to_frontend_developer() {
+        let all = builtin_personas();
+        for alias in ["frontend", "ui"] {
+            let got = resolve_from(&all, alias);
+            assert_eq!(got.slug, "engineering-frontend-developer", "{alias:?}");
+        }
+    }
+
+    #[test]
+    fn default_empty_worker_generalist_specialist_resolve_to_generalist() {
+        let all = builtin_personas();
+        for alias in ["default", "", "worker", "generalist", "specialist"] {
+            let got = resolve_from(&all, alias);
+            assert_eq!(got.slug, "generalist", "{alias:?}");
+        }
+    }
+
+    #[test]
+    fn exact_roster_slug_selects_that_persona() {
+        let all = builtin_personas();
+        let got = resolve_from(&all, "engineering-code-reviewer");
+        assert_eq!(got.slug, "engineering-code-reviewer");
+    }
+
+    #[test]
+    fn coding_engineer_backend_resolve_to_backend_architect() {
+        let all = builtin_personas();
+        for alias in ["coding", "engineer", "backend"] {
+            let got = resolve_from(&all, alias);
+            assert_eq!(got.slug, "engineering-backend-architect", "{alias:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_profile_resolve_is_fallback_generalist() {
+        let all = builtin_personas();
+        let got = resolve_from(&all, "no-such-persona");
+        assert_eq!(got.slug, "generalist");
+    }
+
+    #[test]
+    fn tester_qa_testing_picks_first_testing_division() {
+        let mut all = builtin_personas();
+        all.push(Persona {
+            slug: "e2e-specialist".into(),
+            name: "E2E Specialist".into(),
+            description: "Runs the planted checks".into(),
+            division: "testing".into(),
+            emoji: "•".into(),
+            vibe: String::new(),
+            model_preference: String::new(),
+            body: String::new(),
+        });
+        for alias in ["tester", "qa", "testing"] {
+            let got = resolve_from(&all, alias);
+            assert_eq!(got.slug, "e2e-specialist", "{alias:?}");
+            assert_eq!(got.division, "testing", "{alias:?}");
+        }
+    }
+
+    #[test]
+    fn scan_dir_omitted_name_is_title_cased_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = dir.path().join("engineering");
+        std::fs::create_dir_all(&eng).unwrap();
+        std::fs::write(
+            eng.join("engineering-backend-architect.md"),
+            "---\ndescription: APIs\n---\n\n# Body\n",
+        )
+        .unwrap();
+
+        let all = scan_dir(dir.path());
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].slug, "engineering-backend-architect");
+        assert_eq!(all[0].name, "Engineering Backend Architect");
+    }
+
+    #[test]
+    fn scan_dir_empty_frontmatter_name_is_title_cased_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = dir.path().join("engineering");
+        std::fs::create_dir_all(&eng).unwrap();
+        std::fs::write(
+            eng.join("engineering-backend-architect.md"),
+            "---\nname: \"\"\ndescription: APIs\n---\n\n# Body\n",
+        )
+        .unwrap();
+
+        let all = scan_dir(dir.path());
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].slug, "engineering-backend-architect");
+        assert_eq!(all[0].name, "Engineering Backend Architect");
+    }
+
+    #[test]
+    fn title_case_drops_empty_hyphen_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let testing = dir.path().join("testing");
+        std::fs::create_dir_all(&testing).unwrap();
+        std::fs::write(
+            testing.join("--qa-specialist-.md"),
+            "---\ndescription: QA\n---\n\n# Body\n",
+        )
+        .unwrap();
+
+        let all = scan_dir(dir.path());
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].slug, "--qa-specialist-");
+        assert_eq!(all[0].name, "Qa Specialist");
     }
 
     #[test]
@@ -445,28 +587,108 @@ mod tests {
         assert!(all[0].body.contains("# Body"));
     }
 
-    #[tokio::test]
-    async fn resolve_uses_personas_dir_without_network() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
-        let testing = dir.path().join("testing");
-        std::fs::create_dir_all(&testing).unwrap();
+    fn plant_roster_persona(root: &Path, division: &str, slug: &str, body: &str) {
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let dir = root.join(division);
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            testing.join("qa-specialist.md"),
-            "---\nname: QA Specialist\n---\n\nTest everything.\n",
+            dir.join(format!("{slug}.md")),
+            format!("---\nname: {slug}\n---\n\n{body}\n"),
         )
         .unwrap();
+    }
 
-        let prev = std::env::var("FLEET_PERSONAS_DIR").ok();
-        // SAFETY: test-only env; restored below.
-        unsafe { std::env::set_var("FLEET_PERSONAS_DIR", dir.path()) };
-        let p = resolve("tester", dir.path()).await;
-        match prev {
-            Some(v) => unsafe { std::env::set_var("FLEET_PERSONAS_DIR", v) },
-            None => unsafe { std::env::remove_var("FLEET_PERSONAS_DIR") },
+    fn personas_dir_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    struct PersonasDirEnv {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl PersonasDirEnv {
+        async fn lock_and_set(value: Option<&Path>) -> Self {
+            let lock = personas_dir_env_lock().lock().await;
+            let prev = std::env::var("FLEET_PERSONAS_DIR").ok();
+            set_personas_dir_env(value);
+            Self { _lock: lock, prev }
         }
+    }
+
+    impl Drop for PersonasDirEnv {
+        fn drop(&mut self) {
+            set_personas_dir_env(self.prev.as_deref().map(Path::new));
+        }
+    }
+
+    fn set_personas_dir_env(value: Option<&Path>) {
+        // SAFETY: caller holds personas_dir_env_lock; Drop restores prior value.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("FLEET_PERSONAS_DIR", v),
+                None => std::env::remove_var("FLEET_PERSONAS_DIR"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_personas_dir_without_network() {
+        let env_dir = tempfile::tempdir().unwrap();
+        plant_roster_persona(
+            env_dir.path(),
+            "testing",
+            "qa-specialist",
+            "from-FLEET_PERSONAS_DIR",
+        );
+
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_roster_persona(
+            &data_dir.path().join("agency-agents"),
+            "testing",
+            "data-dir-decoy",
+            "from-data_dir",
+        );
+
+        let _env = PersonasDirEnv::lock_and_set(Some(env_dir.path())).await;
+        assert_eq!(personas_dir(data_dir.path()).as_path(), env_dir.path());
+        let p = resolve("tester", data_dir.path()).await;
         assert_eq!(p.slug, "qa-specialist");
         assert_eq!(p.division, "testing");
-        assert!(p.body.contains("Test everything"));
+        assert!(p.body.contains("from-FLEET_PERSONAS_DIR"));
+        assert!(!p.body.contains("from-data_dir"));
+    }
+
+    #[tokio::test]
+    async fn resolve_without_env_reads_data_dir_agency_agents() {
+        let data_dir = tempfile::tempdir().unwrap();
+        plant_roster_persona(
+            &data_dir.path().join("agency-agents"),
+            "testing",
+            "qa-specialist",
+            "from-data_dir-agency-agents",
+        );
+
+        let _env = PersonasDirEnv::lock_and_set(None).await;
+        assert_eq!(
+            personas_dir(data_dir.path()),
+            data_dir.path().join("agency-agents")
+        );
+        let p = resolve("tester", data_dir.path()).await;
+        assert_eq!(p.slug, "qa-specialist");
+        assert_eq!(p.division, "testing");
+        assert!(p.body.contains("from-data_dir-agency-agents"));
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_or_empty_scan_falls_back_to_generalist() {
+        let data_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(data_dir.path().join("agency-agents").join(".git")).unwrap();
+
+        let _env = PersonasDirEnv::lock_and_set(None).await;
+        let p = resolve("no-such-persona", data_dir.path()).await;
+        assert_eq!(p.slug, "generalist");
+        assert_eq!(p.body, BUILTIN_GENERALIST);
     }
 }

@@ -1,11 +1,9 @@
 //! Browser client for workspace integrations (OAuth connect / disconnect).
 
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
 fn api_url(path: &str) -> String {
     format!(
@@ -19,14 +17,6 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 /// GET with credentials; silent refresh once on 401.
 async fn authorized_get(path: &str) -> Result<reqwest::Response, IntegrationsError> {
@@ -179,26 +169,6 @@ pub fn oauth_start_url(workspace_id: &str, provider: &str) -> String {
     ))
 }
 
-async fn authorized_put_json(
-    path: &str,
-    body: &serde_json::Value,
-) -> Result<reqwest::Response, IntegrationsError> {
-    let first = with_credentials(client().put(api_url(path)).json(body))
-        .send()
-        .await
-        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))?;
-    if first.status().as_u16() != 401 {
-        return Ok(first);
-    }
-    refresh_session()
-        .await
-        .map_err(|e| IntegrationsError::Message(e.message()))?;
-    with_credentials(client().put(api_url(path)).json(body))
-        .send()
-        .await
-        .map_err(|e| IntegrationsError::Network(format!("could not reach API: {e}")))
-}
-
 async fn authorized_patch_json(
     path: &str,
     body: &serde_json::Value,
@@ -233,29 +203,6 @@ pub async fn patch_integration_defaults(
             "default_runner_id": runner_id,
             "default_provider": llm_provider,
             "default_model": model,
-        }),
-    )
-    .await?;
-    if res.status().is_success() {
-        return Ok(());
-    }
-    parse_json_or_error::<ErrorBody>(res).await?;
-    Ok(())
-}
-
-/// Save workspace OAuth app credentials, then start the provider consent flow.
-pub async fn save_oauth_app(
-    workspace_id: &str,
-    provider: &str,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<(), IntegrationsError> {
-    let path = format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth-app");
-    let res = authorized_put_json(
-        &path,
-        &json!({
-            "client_id": client_id,
-            "client_secret": client_secret,
         }),
     )
     .await?;

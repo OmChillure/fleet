@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runners_e2e_helpers import UI, wait_dx_ready  # noqa: E402
+from runners_e2e_helpers import UI, click_add_worker, wait_dx_ready  # noqa: E402
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
 API = os.environ.get("FLEET_API_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -183,7 +183,7 @@ def _open_pair_panel(page, workspace_url: str, replacement: str) -> str:
                     panel = heading.first.locator("xpath=ancestor::section[1]")
                     return panel.inner_text()
                 if add.count() and add.first.is_visible():
-                    add.first.click(force=True)
+                    click_add_worker(page)
                     heading.wait_for(state="visible", timeout=20_000)
                     panel = heading.locator("xpath=ancestor::section[1]")
                     return panel.inner_text()

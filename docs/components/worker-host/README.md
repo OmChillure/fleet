@@ -5,6 +5,11 @@ reachable (IP or domain). Workers only make outbound HTTPS. This is
 **create-then-pair** (GitLab 17 / GitHub Actions style), not a shared
 registration token and not inbound SSH.
 
+How a guest runs is **Run on a PC** (host process) vs **Run in a
+container** (KubePod / in-cluster, or Docker). Same pair, lease, and
+`work_claims` path — do not invent a second spawn. See
+[`../runners/run-on-pc-vs-container.md`](../runners/run-on-pc-vs-container.md).
+
 Do not replace `fleet-driver`, `fleet-operator`,
 `FleetSandbox`, `work_claims`, or session `FLEET_*` tokens. This layer
 is a durable **machine** in front of them. The API is not a runner.
@@ -46,17 +51,21 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   local `http://127.0.0.1:8080`).
 - Disk for `work_dir` (default `~/.local/share/fleet-host/work`).
 - Clock within a few minutes (pair token TTL is 1 hour).
-- **Host mode (v1):** `fleet-driver` on PATH (installed
-  by the same script). This is the only supported executor.
-- **Container mode:** not supported in v1 (`run_container` / k3d). Do not treat
-  Docker/`k3d` on the box as a working job runtime.
+- **Run on a PC** (host process): `fleet-driver` on PATH (installed
+  by the same script). The agent is a normal process on this box.
+- **Run in a container** (KubePod / in-cluster, or Docker): same
+  `fleet-host` lease loop; the guest is a container. In-cluster
+  `fleet-host` creates `FleetSandbox` CRs (`KubePod`). Local `k3d` on
+  a paired PC is not a second spawn path.
 - A pair token created by a workspace **owner** (1 hour, single use).
 
 ### Network / security
 
 - No inbound port on the worker.
 - OAuth tokens and integration secrets never leave the control plane.
-  Hosts receive only `FLEET_*` job env + task files (same as today).
+  Hosts receive `FLEET_*` job env + task files. **Run in a container**
+  may also receive a workspace vendor API key (`XAI_API_KEY` /
+  `ANTHROPIC_API_KEY`). Never `auth.json` or session files.
 - Machine token stored only on the box (`0600`). Hashed (SHA-256 hex) in
   Postgres. Revoke disables the host.
 - Pair token hashed at rest; plaintext shown once in the UI.
@@ -73,9 +82,11 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
 Effective value is always the **intersection / min**. The plane can only
 restrict. The machine can only restrict further.
 
-**v1 is host mode only.** `run_container` / k3d is not supported. Create-host
-defaults may leave `allow_container=true` as a plane restriction; container
-execution is not validated.
+A machine is **Run on a PC** or **Run in a container** — never both, never
+a silent fallback. Plane `allow_host` / `allow_container` still intersect
+with the box’s advertised executor. Create-host defaults may leave
+`allow_container=true` as a plane restriction; that flag is not the use
+case. See [`../runners/run-on-pc-vs-container.md`](../runners/run-on-pc-vs-container.md).
 
 ### Control plane (UI + `PATCH`, stored on `worker_hosts`)
 
@@ -85,8 +96,8 @@ execution is not validated.
 | `enabled` | bool | true | False = refuse leases; treat as revoked-lite |
 | `paused` | bool | false | Online but do not assign new jobs |
 | `drain` | bool | false | Like paused; UI copy says “finish current, take no new” |
-| `allow_host` | bool | true | Plane permits **host** (non-container) jobs |
-| `allow_container` | bool | true | Plane restriction only. Container / k3d execution is **not validated** in v1 |
+| `allow_host` | bool | true | Plane permits host-process jobs (**Run on a PC**) |
+| `allow_container` | bool | true | Plane permits container guests (**Run in a container**). Not the use-case stamp |
 | `max_concurrent` | int 1–256 | 4 | Cap on in-flight sessions on this host |
 | `max_job_timeout_s` | int ≥ 60 | 3600 | Cap; job timeout is min(task, this) |
 | `labels` | string[] | [] | Informational (gpu, linux, …). Not a scheduler in v1 |
@@ -101,15 +112,15 @@ Never accepted from the control plane. Editing requires shell on the box.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `run_host` | bool | true | This box will exec agents on the host (**v1 path**) |
-| `run_container` | bool | false | **Not supported in v1.** Would spawn container/k3d jobs |
-| `container_backend` | `k3d` \| `docker` | `k3d` | **Not supported in v1.** How container jobs would run |
+| `run_host` | bool | true | This box will exec agents as a host process (**Run on a PC**) |
+| `run_container` | bool | false | This box will exec container guests (**Run in a container**: Docker or KubePod) |
+| `container_backend` | `k3d` \| `docker` | `k3d` | Local container backend. In-cluster uses KubePod, not this k3d path |
 | `work_dir` | path | `~/.local/share/fleet-host/work` | Session dirs |
 | `max_concurrent` | int | 8 | Local hard cap (min with CP) |
-| `k3d_cluster` | string | `agent-fleet` | **Not supported in v1.** `k3d cluster create --config` name |
-| `k3d_memory` | string | `4g` | **Not supported in v1.** passed through when creating a cluster |
-| `k3d_agents` | int | 0 | **Not supported in v1.** k3d agents (match `infra/k3d.yaml`) |
-| `docker_image` | string | `agent-fleet-api:local` | **Not supported in v1.** Image for docker/k3d worker pods |
+| `k3d_cluster` | string | `agent-fleet` | Local k3d cluster name if used. Not a second spawn path |
+| `k3d_memory` | string | `4g` | passed through when creating a local k3d cluster |
+| `k3d_agents` | int | 0 | k3d agents (match `infra/k3d.yaml`) |
+| `docker_image` | string | `agent-fleet-api:local` | Image for Docker / KubePod guests |
 | `docker_network` | string | `bridge` | Docker network for container jobs. `none` blocks heartbeats to the plane |
 | `allow_privileged` | bool | false | Refuse privileged container specs |
 | `use_host_git_credentials` | bool | true | Child sees host `~/.git-credentials` / ssh |
@@ -123,25 +134,27 @@ Never accepted from the control plane. Editing requires shell on the box.
 | `host_id` | uuid | from pair | Written at pair time |
 | `auto_update` | bool | **true** | This box will apply CP-served updates. Intersected with plane `auto_update` |
 
-`run_host` / `run_container` is the worker-side “run agents containerized
-and/or directly on the host” switch. Advertised on every heartbeat as
-`advertised_host` / `advertised_container`. In v1 only `run_host` is a
-working executor; `run_container` is not supported.
+`run_host` / `run_container` is the worker-side executor switch
+(process vs container). Advertised on every heartbeat as
+`advertised_host` / `advertised_container`. The product use case is
+separate: **Run on a PC** needs effective host; **Run in a container**
+needs effective container (Docker or KubePod). A PC with
+`run_container=true` still does not take in-container jobs unless the
+host row is stamped that way.
 
 **Effective run modes**
 
 ```
 host       = cp.allow_host       && local.run_host       && advertised_host
 container  = cp.allow_container  && local.run_container  && advertised_container
-             && (k3d or docker actually healthy)
+             && (docker or kube actually healthy)
 max_jobs   = min(cp.max_concurrent, local.max_concurrent)
 ```
 
 If both effective modes are false, the host stays online but never
-receives leases (UI shows a warning). **v1 assigns host only.** A box
-that advertises container (or only container) does not receive jobs —
-`run_container` / k3d is not a working executor. Do not prefer container
-when both flags are true.
+receives leases (UI shows a warning). Tick assigns by use case
+(`run_mode`): **Run on a PC** → `runtime=host`; **Run in a container**
+→ `runtime=container`. No silent fallback either way.
 
 ---
 
@@ -429,10 +442,11 @@ token **unchanged**):
 1. List worker_hosts for `project_id` (= workspace_id) that are
    `enabled`, not `paused`, not `drain`, `status` stored `online`,
    `last_seen_at` within 90s, `machine_token_hash` set.
-2. Compute effective modes; skip hosts that cannot run **host**. v1 is
-   host-only (container / k3d is not a working executor). Do not enqueue
-   `runtime=container`. Planned later: prefer container if the host can
-   do both (isolation); otherwise host.
+2. Compute effective modes; skip hosts that do not match the job’s
+   use case. **Run on a PC** needs effective host; **Run in a container**
+   needs effective container (KubePod in-cluster, or Docker). Same
+   `work_claims` path. Do not enqueue the other runtime. No silent
+   fallback.
 3. Count in-flight sessions for that host
    (`runtime_backend = 'remote'` and `runtime_handle = 'host:{id}'`
    and status in `spawning`/`healthy`). Skip if ≥ effective max.
@@ -473,16 +487,16 @@ and `~/.config/fleet-host/machine.token` (`0600`).
 `run` loop: heartbeat every `heartbeat_interval_s`; `POST …/lease`;
 on claim, spawn child:
 
-- `runtime=host`: `fleet_driver_bin` (ACP; `FLEET_HARNESS` mock|grok),
-  cwd = `{work_dir}/{session_id}`, env = payload.env + extra_env.
-  Same HTTP contract as `ProcessRuntime`.
-- `runtime=container` + `k3d`: **not supported in v1** (not a working
-  executor). Planned: ensure cluster (`k3d cluster list` / `k3d cluster
-  create` using the same shape as `infra/k3d.yaml`: 1 server, 0 agents,
-  Traefik disabled). Apply a `FleetSandbox`-like pod **or** `docker run`
-  with `docker_image` and the same `FLEET_*` env if the operator is not
-  installed. Do not document or ship this as validated.
-- Refuse if effective mode does not allow the payload runtime.
+- `runtime=host` (**Run on a PC**): `fleet_driver_bin` (ACP;
+  `FLEET_HARNESS` mock|grok), cwd = `{work_dir}/{session_id}`, env =
+  payload.env + extra_env. Same HTTP contract as `ProcessRuntime`.
+- `runtime=container` (**Run in a container**): same lease loop.
+  In-cluster / kubeconfig → `KubePod` (`FleetSandbox` CR). Docker →
+  `docker run` with `docker_image` and the same `FLEET_*` env.
+  Never fall back KubePod → Exec. Local k3d on a paired PC is not a
+  second spawn path.
+- Refuse if the host’s use case or effective mode does not match
+  the payload runtime.
 
 Job child still POSTs `/v1/.../heartbeat|status` with the **job** token.
 
@@ -549,11 +563,12 @@ New route `/{workspace_id}/workers` (sidebar: Workspace → Workers).
   card (git bake vs file hash are not the same id).
   `updating` replaces outdated while a swap is in progress. Outdated is
   amber. Desired bits come from the staged dist, not the API compile sha.
-- **Add worker**: POST, show pair token **once** + install commands
+- **Add worker**: POST (name optional; hostname on pair), show pair token **once** + install commands
   (copy). Token is not shown again.
 - Everyday: Stop taking new jobs / Take jobs again, Auto-update (on by default), Update now if auto is off and the box is outdated. Rename by clicking the name. Each box has a durable `machine_id` (`~/.config/fleet-host/machine.id`, or the first pair’s row id if the binary is too old to send one). Re-pair of the same `machine_id` or the same hostname+platform reclaims that row. Removed clones of a live box are hidden.
-- Remove worker (revoke). Do not expose allow_host / allow_container on the card
-  (v1 is host-only; container is not shipped).
+- Remove worker (revoke). Card badge is the use case (**On a PC** /
+  **In a container**). `allow_host` / `allow_container` stay advanced
+  technical, not the product name.
 
 Human-test + `record_demo.py` scene `workers` in the same change.
 

@@ -8,7 +8,7 @@ use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
-use crate::theme::{Theme, use_theme};
+use crate::theme::use_theme;
 use fleet_runners_view::routes::{
     RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
 };
@@ -21,12 +21,13 @@ enum NavSection {
     Agents,
     Runners,
     Workspace,
+    Instance,
 }
 
 #[component]
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
-    let workspace_id = route.workspace_id().unwrap_or("").to_string();
+    let route_ws = route.workspace_id().unwrap_or("").to_string();
 
     // Full-width when true; collapsed rail with only the toggle when false.
     let mut sidebar_open = use_signal(|| true);
@@ -64,6 +65,7 @@ pub fn Sidebar() -> Element {
             | Route::RunnersIndex { .. }
             | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
             Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
+            Route::Admin {} => Some(NavSection::Instance),
             _ => None,
         };
         if let Some(section) = section {
@@ -92,6 +94,14 @@ pub fn Sidebar() -> Element {
     });
 
     let list_snapshot = workspaces();
+    let workspace_id = if route_ws.is_empty() {
+        list_snapshot
+            .first()
+            .map(|w| w.id.clone())
+            .unwrap_or_default()
+    } else {
+        route_ws.clone()
+    };
     let current = list_snapshot
         .iter()
         .find(|w| w.id == workspace_id)
@@ -416,6 +426,25 @@ pub fn Sidebar() -> Element {
                         label: "Settings",
                     }
                 }
+
+                if user().is_some_and(|u| u.instance_admin) {
+                    NavAccordion {
+                        title: "Instance",
+                        expanded: expanded().contains(&NavSection::Instance),
+                        on_toggle: move |_| {
+                            let mut set = expanded();
+                            if !set.remove(&NavSection::Instance) {
+                                set.insert(NavSection::Instance);
+                            }
+                            expanded.set(set);
+                        },
+                        icon: rsx! { IconMonitor {} },
+                        NavSubLink {
+                            to: Route::Admin {},
+                            label: "Overview",
+                        }
+                    }
+                }
             }
 
             UserFooter {
@@ -433,7 +462,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
     let mut menu_open = use_signal(|| false);
     let navigator = use_navigator();
     let mut theme = use_theme();
-    let is_black = matches!(theme(), Theme::Black);
 
     let email = user
         .as_ref()
@@ -512,7 +540,7 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                         },
                         span { "Appearance" }
                         span { class: "text-xs text-[var(--app-muted)]",
-                            if is_black { "Dark" } else { "Light" }
+                            {theme().label()}
                         }
                     }
 
@@ -530,6 +558,18 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                                 },
                                 "Settings"
                             }
+                        }
+                    }
+
+                    if user.as_ref().is_some_and(|u| u.instance_admin) {
+                        button {
+                            class: "flex w-full items-center px-3 py-2 text-left text-sm text-[var(--app-fg)] transition hover:bg-[var(--app-bg-hover)]",
+                            r#type: "button",
+                            onclick: move |_| {
+                                menu_open.set(false);
+                                navigator.push(Route::Admin {});
+                            },
+                            "Instance admin"
                         }
                     }
 
@@ -756,20 +796,5 @@ fn IconSettings() -> Element {
             path { d: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" }
             path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn user_menu_overlay_dismisses_and_opener_stays_clickable() {
-        let src = include_str!("sidebar.rs");
-        let prod = src.split("#[cfg(test)]").next().expect("prod");
-        assert!(prod.contains("id: \"user-menu-dismiss\""), "overlay needs an id");
-        assert!(prod.contains("Key::Escape"), "Escape must close the menu");
-        assert!(
-            prod.contains("relative z-50"),
-            "opener must sit above the overlay so a second click closes"
-        );
     }
 }

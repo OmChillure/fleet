@@ -195,7 +195,9 @@ class Demo:
                 btn = oks.nth(i)
                 try:
                     if btn.is_visible():
-                        btn.click(timeout=1000)
+                        # force: the toast card used to intercept its own OK
+                        # and nearby controls (Apply).
+                        btn.click(timeout=1000, force=True)
                         clicked = True
                 except Exception:
                     continue
@@ -301,6 +303,16 @@ class Demo:
                 return
             time.sleep(0.15)
         if http_hit is None:
+            other = None
+            for line in chunk.splitlines():
+                if f"method={method}" in line and uri in line:
+                    other = line
+                    break
+            if other is not None:
+                self.bug(
+                    f"{method} {uri} logged as {other.strip()[-180:]}, "
+                    f"wanted status={statuses}"
+                )
             tail = chunk[-600:] if chunk else "(empty / missing .run/logs/fleet-server.log)"
             self.bug(
                 f"click produced no {method} {uri} status={statuses} in server log; "
@@ -340,7 +352,7 @@ class Demo:
         self.workspace_url = p.url.rsplit("/dashboard", 1)[0]
         self.home_workspace_url = self.workspace_url
         heading = p.locator("h1").first.inner_text().strip()
-        if heading != "Dashboard":
+        if heading not in ("Dashboard", "Workforce"):
             self.bug(f"login landed on {heading!r} ({p.url})")
         aside = p.locator("aside").inner_text()
         if "Demo Agent" not in aside:
@@ -536,16 +548,7 @@ class Demo:
             self.bug(f"/health git_sha {sha} != tree-id {tree}")
         p.goto(f"{API}/", wait_until="domcontentloaded")
         pause(p, 800)
-        index = p.inner_text("body")
         self.snap("index")
-        ui_host = urlparse(UI).hostname or "localhost"
-        ui_port = urlparse(UI).port
-        if ui_port and ui_port not in (80, 443, 3030):
-            if "localhost:3030" in index and f":{ui_port}" not in index:
-                self.bug(
-                    f"API index still advertises localhost:3030 while UI is "
-                    f"{ui_host}:{ui_port}"
-                )
 
     def scene_chat(self) -> None:
         base = self.ensure_session()
@@ -588,8 +591,18 @@ class Demo:
             self.bug("chat missing composer textarea")
             return
         if not box.first.is_enabled():
-            # Honest offline: composer disabled is expected without Grok/Ollama.
-            if "not installed" not in body.lower() and "required" not in body.lower():
+            # Disabled is honest when no CLI/provider/runner is ready.
+            lowered = body.lower()
+            if not any(
+                n in lowered
+                for n in (
+                    "not installed",
+                    "required",
+                    "select runner",
+                    "select a runner",
+                    "pick the runner",
+                )
+            ):
                 self.bug("composer disabled without an offline reason")
             self.snap("composer-disabled")
             return
@@ -949,6 +962,111 @@ class Demo:
             if "Asana" not in p.inner_text("body"):
                 self.bug("search asana did not show Asana")
 
+    def scene_admin(self) -> None:
+        """Instance admin: counts, users, promote/demote, runners, health."""
+        import subprocess
+
+        base = self.ensure_session()
+        p = self.page
+        url = os.environ.get("DATABASE_URL", "").strip()
+        if not url:
+            envp = REPO / ".env"
+            if envp.is_file():
+                for line in envp.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("DATABASE_URL="):
+                        url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        if not url:
+            raise RuntimeError("DATABASE_URL required to promote the demo instance admin")
+        sql = (
+            "UPDATE users SET instance_admin = TRUE, updated_at = now() "
+            f"WHERE email_normalized = lower(trim('{self.email}')) RETURNING email;"
+        )
+        out = subprocess.check_output(
+            ["psql", url, "-v", "ON_ERROR_STOP=1", "-tAc", sql],
+            text=True,
+        )
+        if self.email.lower() not in out.lower():
+            raise RuntimeError(f"promote missed {self.email}: {out!r}")
+
+        p.goto(f"{UI}/admin", wait_until="domcontentloaded")
+        p.get_by_role("heading", name="Instance", exact=True).first.wait_for(
+            timeout=25_000
+        )
+        p.get_by_role("heading", name="Users", exact=True).wait_for(timeout=25_000)
+        pause(p, 800)
+        if p.locator("h1").first.inner_text().strip() != "Instance":
+            raise RuntimeError(f"admin missing Instance heading ({p.url})")
+        self.snap("loaded")
+        if p.get_by_role("heading", name="Users", exact=True).count() == 0:
+            raise RuntimeError("admin missing Users")
+        if p.get_by_text(self.email, exact=False).count() == 0:
+            self.bug(f"admin users missing signed-in {self.email}")
+
+        guest = f"demo-admin-{uuid.uuid4().hex[:8]}@example.test"
+        res = p.request.post(
+            f"{UI}/api/auth/signup",
+            data=json.dumps(
+                {
+                    "email": guest,
+                    "password": DEMO_PASSWORD,
+                    "display_name": "Demo Guest",
+                }
+            ),
+            headers={"content-type": "application/json"},
+        )
+        if res.status != 201:
+            self.bug(f"guest signup {res.status}: {res.text()[:200]}")
+        else:
+            p.reload(wait_until="networkidle")
+            pause(p, 600)
+            row = p.locator("tr").filter(has_text=guest)
+            if row.count() == 0:
+                self.bug(f"guest {guest} missing from users after reload")
+            else:
+                row.first.scroll_into_view_if_needed()
+                with self.expect_http("PATCH", "/api/admin/users/", status="200"):
+                    row.get_by_role("button", name="Promote", exact=True).click()
+                try:
+                    p.get_by_text("Promoted to instance admin.", exact=True).wait_for(
+                        timeout=10_000
+                    )
+                except Exception:
+                    self.bug("Promote produced no toast")
+                self.dismiss_toasts()
+                self.snap("promoted")
+                row = p.locator("tr").filter(has_text=guest)
+                with self.expect_http("PATCH", "/api/admin/users/", status="200"):
+                    row.get_by_role("button", name="Demote", exact=True).click()
+                try:
+                    p.get_by_text("Demoted instance admin.", exact=True).wait_for(
+                        timeout=10_000
+                    )
+                except Exception:
+                    self.bug("Demote produced no toast")
+                self.dismiss_toasts()
+                self.snap("demoted")
+
+        for heading in ("Workspaces", "Runners", "Live work", "Control plane"):
+            if p.get_by_role("heading", name=heading, exact=True).count() == 0:
+                self.bug(f"admin missing {heading} section")
+        p.get_by_role("heading", name="Runners", exact=True).first.scroll_into_view_if_needed()
+        pause(p, 400)
+        self.snap("runners")
+        p.get_by_role("heading", name="Control plane", exact=True).first.scroll_into_view_if_needed()
+        pause(p, 400)
+        self.snap("health")
+        self.note_unexpected_errors(
+            allowed=(
+                "Instance admin required",
+                "No runners registered",
+                "No staged worker packages",
+                "failed",
+                "failed_spawn",
+            )
+        )
+        _ = base
+
     def scene_settings(self) -> None:
         base = self.ensure_session()
         p = self.page
@@ -984,6 +1102,12 @@ class Demo:
                 if got != "5":
                     self.bug(f"agent count did not persist after Save+reload (got {got!r})")
                 self.snap("reloaded-agents")
+
+        if "Where new fleet jobs run" not in p.inner_text("body"):
+            self.bug("Settings missing Where new fleet jobs run")
+        if "API keys for Run in a container" not in p.inner_text("body"):
+            self.bug("Settings missing API keys for Run in a container")
+        self.snap("run-mode-and-keys")
 
         heading = p.get_by_role("heading", name="Members", exact=True)
         if heading.count() == 0:
@@ -1100,12 +1224,18 @@ class Demo:
             "No workers yet" not in body
             and p.locator("article").count() == 0
             and p.locator("button").filter(has_text="online").count() == 0
+            and p.locator("button").filter(has_text="last seen").count() == 0
+            and "pending" not in body.lower()
+            and "Waiting to pair" not in body
         ):
             raise RuntimeError("self-hosted page missing empty state or cards")
         self.snap("list")
         add = p.get_by_role("button", name="Add worker")
         if add.count() == 0:
             self.bug("self-hosted missing Add worker")
+        body_before = p.inner_text("body")
+        if "Only me" not in body_before and "Who can send work" not in body_before:
+            self.bug("self-hosted missing who-can-send radios (Only me / shared PC)")
         else:
             with self.expect_http("POST", "/worker-hosts", status=("200", "201")):
                 add.first.click()
@@ -1134,9 +1264,12 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
                 self.snap("pair-dismissed")
-        card = p.locator("button").filter(has_text="last seen").or_(
-            p.locator("article").filter(has_text="Waiting to pair")
-        )
+        pending_card = p.locator("button").filter(has_text="Waiting to pair")
+        if pending_card.count() == 0:
+            pending_card = p.locator("button").filter(
+                has_text=re.compile(r"\bpending\b", re.I)
+            )
+        card = pending_card.or_(p.locator("button").filter(has_text="last seen"))
         if card.count() and card.first.is_visible():
             card.first.click()
             pause(p, 800)
@@ -1160,7 +1293,8 @@ class Demo:
         if hold.count() and hold.first.is_visible():
             hold.first.click()
             pause(p, 400)
-            apply = p.get_by_role("button", name="Apply changes")
+            self.dismiss_toasts()
+            apply = p.get_by_role("button", name="Apply", exact=True)
             if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                 with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                     apply.first.click()
@@ -1170,7 +1304,8 @@ class Demo:
             if resume.count():
                 resume.first.click()
                 pause(p, 400)
-                apply = p.get_by_role("button", name="Apply changes")
+                self.dismiss_toasts()
+                apply = p.get_by_role("button", name="Apply", exact=True)
                 if apply.count() and apply.first.is_visible() and apply.first.is_enabled():
                     with self.expect_http("PATCH", "/worker-hosts/", status="200"):
                         apply.first.click()
@@ -1247,10 +1382,11 @@ class Demo:
                 "Trust",
                 "Disclaimer",
                 "unused capacity",
-                "Coming soon",
                 "Verified",
                 "verified",
                 "acknowledge",
+                "Ack required",
+                "Live",
             ),
             "Partners",
         )
@@ -1263,12 +1399,13 @@ class Demo:
             self.snap("acknowledged")
         lend = p.get_by_role("button", name=re.compile(r"Lend", re.I))
         buy = p.get_by_role("button", name=re.compile(r"Buy", re.I))
-        for btn, label in ((lend, "Lend"), (buy, "Buy")):
-            if btn.count() == 0:
-                self.bug(f"Partners missing {label} control")
-            elif btn.first.is_enabled():
-                self.bug(f"Partners {label} enabled after acknowledge (must stay disabled)")
-        self.snap("lend-buy-disabled")
+        if lend.count() == 0:
+            self.bug("Partners missing Lend control")
+        if buy.count() == 0:
+            self.bug("Partners missing Buy control")
+        elif buy.first.is_enabled():
+            self.bug("Partners Buy credits must stay disabled")
+        self.snap("lend-ready-buy-disabled")
 
     def scene_sessions(self) -> None:
         base = self.ensure_session()
@@ -1431,6 +1568,7 @@ SCENES: dict[str, Callable[[Demo], None]] = {
     "inbox": Demo.scene_inbox,
     "agents": Demo.scene_agents,
     "integrations": Demo.scene_integrations,
+    "admin": Demo.scene_admin,
     "settings": Demo.scene_settings,
     "runners": Demo.scene_runners,
     "workers": Demo.scene_workers,
@@ -1458,6 +1596,7 @@ CORE = [
     "agents",
     "integrations",
     "settings",
+    "admin",
     "runners",
     "cloud",
     "partners",

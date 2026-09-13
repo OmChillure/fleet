@@ -1,11 +1,12 @@
 //! Capacity schedule + spawn protocol.
 
-use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
+use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
 use crate::sandbox::remote::{self, RemoteHostHandle};
-use crate::sandbox::{SpawnRequest, fleet_worker_env};
+use crate::sandbox::{fleet_worker_env, SpawnRequest};
 use crate::store::{
-    BoardSnapshot, Store, enqueue_remote_spawn, hold_ready_for_host_update,
-    select_assignable_runner_preferring, workspace_has_updating_host,
+    enqueue_remote_spawn, hold_ready_for_host_update, JobNeed, RunMode,
+    select_assignable_runner_preferring_for_job,
+    workspace_has_updating_host, BoardSnapshot, Store,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -69,7 +70,45 @@ pub async fn schedule_and_spawn(
         // Missing worker_hosts must not fail the tick.
         let plan_hint = store.get_plan_body(task.plan_id).await.ok().flatten();
         let preferred = plan_hint.as_ref().and_then(|p| p.policy.preferred_host_id);
-        let remote_host = select_assignable_runner_preferring(store, project_id, preferred).await;
+        let actor = plan_hint.as_ref().and_then(|p| p.policy.requested_by);
+        let run_mode = plan_hint
+            .as_ref()
+            .and_then(|p| RunMode::parse(&p.policy.run_mode))
+            .unwrap_or(RunMode::OnPc);
+        let min_isolation = match fleet_db::repos::workspaces::min_isolation(store.pool(), project_id)
+            .await
+        {
+            Ok(raw) => crate::domain::IsolationClass::parse(&raw)
+                .unwrap_or(crate::domain::IsolationClass::Process),
+            Err(_) => crate::domain::IsolationClass::Process,
+        };
+        let provider = plan_hint
+            .as_ref()
+            .and_then(|p| p.policy.llm_provider.clone());
+        let vendor_key_ok = match run_mode {
+            RunMode::OnPc => true,
+            RunMode::InContainer => match provider.as_deref() {
+                None | Some("mock") | Some("off") | Some("ollama") => true,
+                Some(p) => fleet_db::repos::llm_keys::has_active(store.pool(), project_id, p)
+                    .await
+                    .unwrap_or(false),
+            },
+        };
+        let job = JobNeed {
+            run_mode,
+            actor,
+            min_isolation,
+            provider,
+            vendor_key_ok,
+        };
+        let remote_host = select_assignable_runner_preferring_for_job(
+            store,
+            project_id,
+            preferred,
+            orchestrator_url,
+            &job,
+        )
+        .await;
         let updating = workspace_has_updating_host(store, project_id).await;
         if hold_ready_for_host_update(remote_host.is_some(), updating) {
             tracing::info!(
@@ -119,7 +158,13 @@ pub async fn schedule_and_spawn(
         crate::sandbox::team::prepare_agent_workspace(data_dir, &session_work, task, snap).await;
 
         let timeout_s = task.timeout_s.unwrap_or(default_timeout_s).max(1) as u64;
-        let persona = crate::personas::resolve(&task.worker_profile, data_dir).await;
+        let persona = crate::personas::resolve_for_workspace(
+            store.pool(),
+            project_id,
+            &task.worker_profile,
+            data_dir,
+        )
+        .await;
         let llm = if let Some(cached) = plan_llms.get(&task.plan_id) {
             cached.clone()
         } else {
@@ -158,18 +203,30 @@ pub async fn schedule_and_spawn(
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
-        // Guest is fleet-driver. Real models use the official CLI on the
-        // paired host (same family as chat_turn). mock is tests/fixtures.
+        // Guest is fleet-driver on the paired runner. Real models use the
+        // official CLI (same family as chat_turn). Harness follows the
+        // plan/chat provider (grok / claude / ollama). Unknown → mock.
         if req
             .env
             .get("FLEET_HARNESS")
             .map(|s| s.trim().is_empty())
             .unwrap_or(true)
         {
-            req.env.insert(
-                "FLEET_HARNESS".into(),
-                harness_for_backend(req.agent_backend.as_deref()).into(),
+            let harness = crate::sandbox::agent_loop::harness_for_backend(
+                req.agent_backend.as_deref(),
             );
+            req.env.insert("FLEET_HARNESS".into(), harness.into());
+        }
+        if req
+            .agent_model
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|s| s.is_empty())
+        {
+            let pref = persona.model_preference.trim();
+            if !pref.is_empty() && !pref.eq_ignore_ascii_case("auto") {
+                req.agent_model = Some(pref.to_string());
+            }
         }
         if let Some(model) = req.agent_model.as_deref().filter(|s| !s.is_empty()) {
             req.env
@@ -184,6 +241,15 @@ pub async fn schedule_and_spawn(
             req.env
                 .entry("FLEET_REASONING_EFFORT".into())
                 .or_insert(effort);
+        }
+        if job.run_mode == RunMode::InContainer {
+            inject_workspace_vendor_key(
+                &mut req.env,
+                store.pool(),
+                project_id,
+                job.provider.as_deref(),
+            )
+            .await;
         }
         if let Some(notes) = task.hitl_notes.as_ref() {
             req.env.insert("FLEET_HITL_NOTES".into(), notes.clone());
@@ -269,21 +335,6 @@ pub async fn schedule_and_spawn(
     Ok(outcome)
 }
 
-/// `FLEET_HARNESS` for a plan/chat backend. Unknown → mock (no plane LLM).
-pub fn harness_for_backend(backend: Option<&str>) -> &'static str {
-    match backend
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("grok" | "xai") => "grok",
-        Some("claude" | "anthropic") => "claude",
-        Some("ollama") => "ollama",
-        _ => "mock",
-    }
-}
-
 fn worker_url_is_loopback(url: &str) -> bool {
     agent_fleet_contracts::url_is_loopback(url)
 }
@@ -310,6 +361,7 @@ pub async fn signal_retired_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::agent_loop::harness_for_backend;
 
     #[test]
     fn harness_maps_runner_clis_and_defaults_mock() {
@@ -348,7 +400,7 @@ pub async fn apply_retry_after_failure(
     cancel_requested: bool,
     exit_reason: crate::domain::ExitReason,
 ) -> Result<(), TickError> {
-    use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
+    use crate::domain::{should_retry, BoardTaskStatus, RetryAction};
 
     if store.live_claim_is_other_attempt(task_id, attempt).await? {
         return Ok(());
@@ -383,4 +435,47 @@ pub async fn apply_retry_after_failure(
         RetryAction::None => {}
     }
     Ok(())
+}
+
+async fn inject_workspace_vendor_key(
+    env: &mut HashMap<String, String>,
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    provider: Option<&str>,
+) {
+    let Some(provider) = provider.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let p = provider.to_ascii_lowercase();
+    let env_name = match p.as_str() {
+        "grok" | "xai" => "XAI_API_KEY",
+        "claude" | "anthropic" => "ANTHROPIC_API_KEY",
+        _ => return,
+    };
+    if env.contains_key(env_name) {
+        return;
+    }
+    let Ok(Some(ct)) = fleet_db::repos::llm_keys::active_ciphertext(pool, workspace_id, &p).await
+    else {
+        return;
+    };
+    let secret = std::env::var("INTEGRATIONS_ENCRYPTION_KEY")
+        .or_else(|_| std::env::var("JWT_SECRET"))
+        .ok();
+    let Some(secret) = secret else {
+        tracing::warn!("in-container vendor key present but no INTEGRATIONS_ENCRYPTION_KEY/JWT_SECRET");
+        return;
+    };
+    let Ok(key) = fleet_integrations::CredentialsKey::from_secret(&secret) else {
+        tracing::warn!("in-container vendor key: bad encryption secret");
+        return;
+    };
+    let Ok(plain) = key.decrypt(&ct) else {
+        tracing::warn!("in-container vendor key decrypt failed");
+        return;
+    };
+    let Some(api_key) = plain.get("api_key").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    env.insert(env_name.into(), api_key.to_string());
 }

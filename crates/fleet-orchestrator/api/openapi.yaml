@@ -394,6 +394,36 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
 
+  /v1/projects/{project_id}/workers/{session_id}/io:
+    post:
+      tags: [workers]
+      summary: Runner I/O — integrations, team chat, request_changes
+      operationId: postWorkerIo
+      security:
+        - WorkerBearer: []
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [op]
+              properties:
+                op:
+                  type: string
+                  enum:
+                    [integration, team_chat_post, team_chat_list, request_changes]
+      responses:
+        "200":
+          description: Result
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+
   /v1/projects/{project_id}/admin/tick:
     post:
       tags: [admin]

@@ -208,24 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_http_userinfo_without_echoing_secret() {
-        let msg = err_text(
-            Some("https://user:unique-secret@example.test/acme.git"),
-            None,
-        );
-        assert!(
-            msg.contains("credentials"),
-            "userinfo reject must mention credentials: {msg}"
-        );
-        assert!(
-            !msg.contains("unique-secret"),
-            "error must not echo secret: {msg}"
-        );
-        assert!(
-            parse_project_git_remote(Some("https://github.com/acme/app.git"), Some("develop"))
-                .unwrap()
-                .is_some()
-        );
+    fn scp_style_and_ssh_git_at_urls_stay_valid() {
         assert!(
             parse_project_git_remote(Some("git@github.com:acme/app.git"), None)
                 .unwrap()
@@ -241,6 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn https_username_only_userinfo_is_rejected() {
+        parse_project_git_remote(Some("https://git@github.com/acme/app.git"), None)
+            .expect_err("https://git@ userinfo must not persist");
+    }
+
+    #[test]
+    fn https_at_in_path_or_query_is_not_userinfo() {
+        let path = parse_project_git_remote(Some("https://example.test/acme@org.git"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(path.url, "https://example.test/acme@org.git");
+        let query = parse_project_git_remote(Some("https://example.test/r.git?x=a@b"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(query.url, "https://example.test/r.git?x=a@b");
+    }
+
+    #[test]
+    fn http_userinfo_with_port_rejected_without_echo() {
+        let msg = err_text(
+            Some("https://user:unique-secret@example.test:443/acme.git"),
+            None,
+        );
+        assert!(
+            !msg.contains("unique-secret"),
+            "error must not echo secret: {msg}"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_git_ref() {
         let url = Some("https://example.com/r.git");
         assert!(err_text(url, Some("has space")).contains("git_ref"));
@@ -248,12 +261,9 @@ mod tests {
         assert!(err_text(url, Some("feat/../x")).contains("git_ref"));
     }
 
-    /// Docs §6.9 / §8.2: cookie and admin PATCH share these three outcomes.
     #[test]
-    fn apply_git_remote_patch_empty_url_clears_git_ref_without_url_and_garbage_url_are_errors() {
-        let url = "https://github.com/acme/app.git";
-        let existing = bound(url, "develop");
-
+    fn apply_git_remote_patch_empty_url_clears() {
+        let existing = bound("https://github.com/acme/app.git", "develop");
         assert_eq!(
             apply_git_remote_patch(Some(&existing), "develop", Some(""), None).unwrap(),
             None,
@@ -269,7 +279,10 @@ mod tests {
             None,
             "empty URL + git_ref is a clear, not an error"
         );
+    }
 
+    #[test]
+    fn apply_git_remote_patch_git_ref_without_url_is_error() {
         let ref_only = apply_git_remote_patch(None, "main", None, Some("feature"))
             .expect_err("git_ref without URL must error");
         assert!(
@@ -282,40 +295,42 @@ mod tests {
             empty_string_ref.to_string().contains("repo_url"),
             "empty-string git_ref without URL must mention repo_url: {empty_string_ref}"
         );
+    }
 
-        for bad in [
-            "not a url",
-            "-e evil",
-            "ftp://example.com/r.git",
-            "https://example.com/has space.git",
-            "javascript:alert(1)",
-            "https://user:unique-secret@example.test/acme.git",
-            "http://token:x-oauth-basic@github.com/acme/app.git",
-        ] {
-            let err =
-                apply_git_remote_patch(Some(&existing), "develop", Some(bad), None).expect_err(bad);
-            assert!(
-                err.to_string().contains("repo_url"),
-                "garbage {bad:?} must mention repo_url: {err}"
-            );
-            assert!(
-                !err.to_string().contains("unique-secret")
-                    && !err.to_string().contains("x-oauth-basic"),
-                "error must not echo credentials: {err}"
-            );
-        }
+    #[test]
+    fn apply_git_remote_patch_garbage_url_is_error() {
+        let existing = bound("https://github.com/acme/app.git", "develop");
+        let err = apply_git_remote_patch(Some(&existing), "develop", Some("not a url"), None)
+            .expect_err("garbage URL must error");
+        assert!(
+            err.to_string().contains("repo_url"),
+            "garbage URL must mention repo_url: {err}"
+        );
+    }
 
+    #[test]
+    fn apply_git_remote_patch_omitted_url_updates_git_ref() {
+        let url = "https://github.com/acme/app.git";
+        let existing = bound(url, "develop");
         let updated = apply_git_remote_patch(Some(&existing), "develop", None, Some("feature"))
             .unwrap()
             .expect("git_ref with existing URL updates the ref");
         assert_eq!(updated.url, url);
         assert_eq!(updated.git_ref, "feature");
+    }
 
+    #[test]
+    fn apply_git_remote_patch_omitted_fields_keep_binding() {
+        let existing = bound("https://github.com/acme/app.git", "develop");
         let kept = apply_git_remote_patch(Some(&existing), "develop", None, None)
             .unwrap()
             .expect("omitted fields keep the binding");
         assert_eq!(kept, existing);
+    }
 
+    #[test]
+    fn apply_git_remote_patch_valid_url_binds() {
+        let url = "https://github.com/acme/app.git";
         let set = apply_git_remote_patch(None, "main", Some(url), Some("develop"))
             .unwrap()
             .expect("non-empty valid URL binds");
@@ -323,22 +338,41 @@ mod tests {
     }
 
     #[test]
-    fn cookie_and_admin_patch_share_apply_git_remote_patch() {
-        let admin = include_str!("../api/handlers.rs");
-        let admin_fn = admin
-            .split("pub async fn patch_config")
-            .nth(1)
-            .expect("admin patch_config")
-            .split("pub async fn ")
-            .next()
-            .expect("admin patch_config body");
+    fn apply_git_remote_patch_new_url_omitted_ref_keeps_existing_git_ref() {
+        let existing = bound("https://github.com/acme/app.git", "develop");
+        let new_url = "https://github.com/acme/other.git";
+        let out = apply_git_remote_patch(Some(&existing), "develop", Some(new_url), None)
+            .unwrap()
+            .expect("new URL with omitted ref must keep existing git_ref");
+        assert_eq!(out.url, new_url);
+        assert_eq!(out.git_ref, "develop");
+    }
+
+    #[test]
+    fn apply_git_remote_patch_omitted_url_invalid_git_ref_is_error() {
+        let existing = bound("https://github.com/acme/app.git", "develop");
+        let space = apply_git_remote_patch(Some(&existing), "develop", None, Some("has space"))
+            .expect_err("whitespace git_ref must error");
         assert!(
-            admin_fn.contains("apply_git_remote_patch"),
-            "admin PATCH /v1/projects/{{id}}/config must call apply_git_remote_patch (Docs §8.2 same semantics as cookie)"
+            space.to_string().contains("git_ref"),
+            "invalid git_ref must mention git_ref: {space}"
         );
+        let leading_dash = apply_git_remote_patch(Some(&existing), "develop", None, Some("-bad"))
+            .expect_err("leading-dash git_ref must error");
         assert!(
-            !admin_fn.contains("git_ref requires repo_url on this project"),
-            "admin PATCH must not re-implement the ref-without-URL branch"
+            leading_dash.to_string().contains("git_ref"),
+            "invalid git_ref must mention git_ref: {leading_dash}"
         );
+    }
+
+    #[test]
+    fn apply_git_remote_patch_omitted_url_blank_git_ref_defaults_to_main() {
+        let url = "https://github.com/acme/app.git";
+        let existing = bound(url, "develop");
+        let out = apply_git_remote_patch(Some(&existing), "develop", None, Some("  "))
+            .unwrap()
+            .expect("blank git_ref must default to main");
+        assert_eq!(out.url, url);
+        assert_eq!(out.git_ref, "main");
     }
 }

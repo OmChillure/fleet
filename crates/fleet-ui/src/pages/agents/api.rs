@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PersonaDto {
@@ -44,12 +44,10 @@ async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
         auth_base_url().trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-    let mut req = client().get(url);
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    let first = req.send().await.map_err(|e| e.to_string())?;
+    let first = with_credentials(client().get(url))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if first.status().as_u16() != 401 {
         return Ok(first);
     }
@@ -59,12 +57,10 @@ async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
         auth_base_url().trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-    let mut req = client().get(url);
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req.send().await.map_err(|e| e.to_string())
+    with_credentials(client().get(url))
+        .send()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn fetch_personas(workspace_id: &str) -> Result<PersonasPayload, String> {

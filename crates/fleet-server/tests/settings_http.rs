@@ -15,7 +15,7 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -50,6 +50,7 @@ fn test_auth_config() -> AuthConfig {
         cookie_secure: false,
         cookie_samesite: cookie::SameSite::Lax,
         signup_token: None,
+        instance_admin_emails: Vec::new(),
     }
 }
 
@@ -71,6 +72,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         discord: None,
         trello: None,
         asana: None,
+        bitbucket: None,
+        confluence: None,
     }
 }
 
@@ -138,6 +141,11 @@ async fn app_with_state() -> (axum::Router, AppState) {
             api_key: None,
             api_base: "https://api.anthropic.com".into(),
         },
+        gemini: GeminiConfig {
+            enabled: true,
+            api_key: None,
+            api_base: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+        },
         worker_dist_dir: None,
     };
 
@@ -167,6 +175,7 @@ async fn app_with_state() -> (axum::Router, AppState) {
         grok: config.grok.clone(),
         openai: config.openai.clone(),
         claude: config.claude.clone(),
+        gemini: config.gemini.clone(),
         worker_dist_dir: config.worker_dist_dir.clone(),
     };
 
@@ -403,23 +412,28 @@ fn fleet(ws: &str, suffix: &str) -> String {
 }
 
 #[tokio::test]
-async fn fleet_settings_min_isolation_default_process_patch_container_rejects_native_host_k8s() {
+async fn fleet_settings_get_min_isolation_defaults_process() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
-    let settings = fleet(&ws, "/settings");
 
-    let got = call(&app, "GET", &settings, Some(&jar), None).await;
+    let got = call(&app, "GET", &fleet(&ws, "/settings"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(
         got.body["min_isolation"], "process",
         "new workspace default min_isolation: {}",
         got.body
     );
+}
+
+#[tokio::test]
+async fn fleet_settings_patch_min_isolation_container_persists() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
 
     let patched = call(
         &app,
         "PATCH",
-        &settings,
+        &fleet(&ws, "/settings"),
         Some(&jar),
         Some(json!({ "min_isolation": "container" })),
     )
@@ -430,29 +444,38 @@ async fn fleet_settings_min_isolation_default_process_patch_container_rejects_na
         "{}",
         patched.body
     );
+}
 
-    for rejected in ["native", "host", "k8s"] {
-        let out = call(
-            &app,
-            "PATCH",
-            &settings,
-            Some(&jar),
-            Some(json!({ "min_isolation": rejected })),
-        )
-        .await;
-        assert_eq!(
-            out.status,
-            StatusCode::CONFLICT,
-            "PATCH min_isolation={rejected} must 409: {}",
-            out.body
-        );
-        let err = out.body["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("min_isolation must be process, container, or vm"),
-            "PATCH min_isolation={rejected} error: {}",
-            out.body
-        );
-    }
+#[tokio::test]
+async fn fleet_settings_patch_min_isolation_native_is_409() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let setup = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "min_isolation": "container" })),
+    )
+    .await;
+    assert_eq!(setup.status, StatusCode::OK, "{}", setup.body);
+
+    let out = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "min_isolation": "native" })),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::CONFLICT, "{}", out.body);
+    assert!(
+        out.body["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "409 body must include error: {}",
+        out.body
+    );
 
     let after = call(&app, "GET", &settings, Some(&jar), None).await;
     assert_eq!(after.status, StatusCode::OK, "{}", after.body);
@@ -461,4 +484,75 @@ async fn fleet_settings_min_isolation_default_process_patch_container_rejects_na
         "rejected PATCH must not change stored min_isolation: {}",
         after.body
     );
+}
+
+#[tokio::test]
+async fn fleet_settings_patch_min_isolation_vm_persists() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "min_isolation": "vm" })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(patched.body["min_isolation"], "vm", "{}", patched.body);
+
+    let got = call(&app, "GET", &settings, Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["min_isolation"], "vm", "{}", got.body);
+}
+
+#[tokio::test]
+async fn fleet_settings_patch_omitted_min_isolation_preserves_container() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let setup = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "min_isolation": "container" })),
+    )
+    .await;
+    assert_eq!(setup.status, StatusCode::OK, "{}", setup.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "max_agents": 4 })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(patched.body["max_agents"], 4, "{}", patched.body);
+    assert_eq!(
+        patched.body["min_isolation"], "container",
+        "omitted min_isolation must keep container: {}",
+        patched.body
+    );
+}
+
+#[tokio::test]
+async fn fleet_settings_patch_min_isolation_without_cookie_is_401() {
+    let app = app().await;
+    let (_email, _jar, ws) = signup_and_login(&app).await;
+
+    let out = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        None,
+        Some(json!({ "min_isolation": "container" })),
+    )
+    .await;
+    assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
 }

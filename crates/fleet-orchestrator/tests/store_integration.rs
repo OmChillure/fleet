@@ -3,9 +3,11 @@
 //!   DATABASE_URL=postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable cargo test --test store_integration
 
 use fleet_orchestrator::domain::{
-    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, stable_board_task_id,
+    ExitReason, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
+    stable_board_task_id,
 };
-use fleet_orchestrator::store::{Store, connect, migrate};
+use fleet_orchestrator::orch::{apply_retry_after_failure, TickRunner};
+use fleet_orchestrator::store::{SpawnAssignment, Store, StoreError, connect, migrate};
 use uuid::Uuid;
 
 fn require_database_url() -> String {
@@ -75,41 +77,55 @@ fn sample_body(project_id: Uuid) -> WorkPlanBody {
     }
 }
 
+/// insert_accepted_plan always writes Accepted; plant a non-accepted row.
+async fn insert_plan_with_status(store: &Store, body: &WorkPlanBody, status: WorkPlanStatus) {
+    sqlx::query(
+        r#"
+        INSERT INTO work_runs (id, project_id, status, source)
+        VALUES ($1, $2, 'accepted', $3)
+        "#,
+    )
+    .bind(body.run_id)
+    .bind(body.project_id)
+    .bind(&body.source)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let body_json = serde_json::to_value(body).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO work_plans (
+            id, project_id, run_id, version, status, source, body
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(body.plan_id)
+    .bind(body.project_id)
+    .bind(body.run_id)
+    .bind(body.version)
+    .bind(status.as_db())
+    .bind(&body.source)
+    .bind(body_json)
+    .execute(store.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn create_project_and_materialize_idempotent() {
     let store = setup().await;
 
-    let name = format!("proj-{}", Uuid::new_v4());
-    let project = store.create_project(&name, 3).await.unwrap();
-    let cfg = store.get_project_config(project.id).await.unwrap();
-    assert_eq!(cfg.max_agents, 3);
-    assert!(cfg.repo_url.is_none());
-    assert_eq!(cfg.git_ref, "main");
-
-    let remote = fleet_orchestrator::domain::ProjectGitRemote {
-        url: "https://github.com/acme/app.git".into(),
-        git_ref: "develop".into(),
-    };
-    let cfg = store
-        .set_project_git_remote(project.id, Some(&remote))
+    let project = store
+        .create_project(&format!("proj-{}", Uuid::new_v4()), 2)
         .await
         .unwrap();
-    assert_eq!(
-        cfg.repo_url.as_deref(),
-        Some("https://github.com/acme/app.git")
-    );
-    assert_eq!(cfg.git_ref, "develop");
-    let cfg = store
-        .set_project_git_remote(project.id, None)
-        .await
-        .unwrap();
-    assert!(cfg.repo_url.is_none());
-    assert_eq!(cfg.git_ref, "main");
-
     let body = sample_body(project.id);
     let plan_id = body.plan_id;
+    let run_id = body.run_id;
     let (_run, plan) = store
-        .insert_accepted_plan(project.id, body.clone())
+        .insert_accepted_plan(project.id, body)
         .await
         .unwrap();
     assert_eq!(plan.status, "accepted");
@@ -121,15 +137,12 @@ async fn create_project_and_materialize_idempotent() {
     let n2 = store.materialize_plan(project.id, plan_id).await.unwrap();
     assert_eq!(n2, 0, "second materialize is no-op");
 
-    assert_eq!(cfg.fleet_llm, "off");
-    assert_eq!(cfg.fleet_llm_model, "");
-    let loaded = store
-        .get_plan_body(plan_id)
+    let run = store
+        .get_run(project.id, run_id)
         .await
         .unwrap()
-        .expect("plan body");
-    assert_eq!(loaded.plan_id, plan_id);
-    assert_eq!(loaded.tasks.len(), 2);
+        .expect("run");
+    assert_eq!(run.status, "active");
 
     let snap = store.load_board_snapshot(project.id).await.unwrap();
     assert_eq!(snap.tasks.len(), 2);
@@ -139,7 +152,79 @@ async fn create_project_and_materialize_idempotent() {
     let row1 = snap.tasks.iter().find(|t| t.id == t1).unwrap();
     let row2 = snap.tasks.iter().find(|t| t.id == t2).unwrap();
     assert_eq!(row1.status, "queued");
+    assert_eq!(row2.status, "queued");
     assert_eq!(row2.depends_on, vec![t1]);
+}
+
+#[tokio::test]
+async fn materialize_plan_activates_run_and_stamps_materialized_at() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("stamp-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let body = sample_body(project.id);
+    let plan_id = body.plan_id;
+    let run_id = body.run_id;
+    let (_run, plan) = store
+        .insert_accepted_plan(project.id, body)
+        .await
+        .unwrap();
+    assert!(plan.materialized_at.is_none());
+    assert!(plan.in_force_at.is_none());
+
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+
+    let run = store
+        .get_run(project.id, run_id)
+        .await
+        .unwrap()
+        .expect("run");
+    assert_eq!(run.status, "active");
+
+    let (materialized_at, in_force_at): (
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as("SELECT materialized_at, in_force_at FROM work_plans WHERE id = $1")
+        .bind(plan_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(materialized_at.is_some(), "materialized_at must stamp");
+    assert!(in_force_at.is_some(), "in_force_at must stamp");
+}
+
+#[tokio::test]
+async fn materialize_plan_wrong_project_is_not_found() {
+    let store = setup().await;
+    let project_a = store
+        .create_project(&format!("mat-a-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let project_b = store
+        .create_project(&format!("mat-b-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let body = sample_body(project_a.id);
+    let plan_id = body.plan_id;
+    store
+        .insert_accepted_plan(project_a.id, body)
+        .await
+        .unwrap();
+
+    let err = store
+        .materialize_plan(project_b.id, plan_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::NotFound(_)),
+        "cross-project materialize must be NotFound: {err:?}"
+    );
+
+    let snap_a = store.load_board_snapshot(project_a.id).await.unwrap();
+    let snap_b = store.load_board_snapshot(project_b.id).await.unwrap();
+    assert!(snap_a.tasks.is_empty());
+    assert!(snap_b.tasks.is_empty());
 }
 
 #[tokio::test]
@@ -163,9 +248,60 @@ async fn cancel_before_materialize_yields_zero_cards() {
 }
 
 #[tokio::test]
-async fn worker_report_inbox_idempotent_seq() {
+async fn list_pending_materialize_plans_omits_non_accepted() {
     let store = setup().await;
+    let project = store
+        .create_project(&format!("list-acc-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let draft = sample_body(project.id);
+    let ready = sample_body(project.id);
+    let accepted = sample_body(project.id);
+    let superseded = sample_body(project.id);
+    insert_plan_with_status(&store, &draft, WorkPlanStatus::Draft).await;
+    insert_plan_with_status(&store, &ready, WorkPlanStatus::Ready).await;
+    insert_plan_with_status(&store, &accepted, WorkPlanStatus::Accepted).await;
+    insert_plan_with_status(&store, &superseded, WorkPlanStatus::Superseded).await;
 
+    let pending = store
+        .list_pending_materialize_plans(project.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.iter().map(|p| p.plan_id).collect::<Vec<_>>(),
+        vec![accepted.plan_id],
+        "only the accepted unmaterialized plan is pending: {pending:?}"
+    );
+    assert_eq!(pending[0].plan_status, "accepted");
+}
+
+#[tokio::test]
+async fn materialize_plan_returns_zero_cards_for_non_accepted_status() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("mat-nonacc-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    for status in [
+        WorkPlanStatus::Draft,
+        WorkPlanStatus::Ready,
+        WorkPlanStatus::Superseded,
+    ] {
+        let body = sample_body(project.id);
+        let plan_id = body.plan_id;
+        insert_plan_with_status(&store, &body, status).await;
+        let n = store.materialize_plan(project.id, plan_id).await.unwrap();
+        assert_eq!(n, 0, "{status:?} must not materialize");
+        let snap = store.load_board_snapshot(project.id).await.unwrap();
+        assert!(
+            snap.tasks.iter().all(|t| t.plan_id != plan_id),
+            "{status:?} must leave board_tasks empty for {plan_id}"
+        );
+    }
+}
+
+/// Materialized t1 + spawning session. Reports and live events only need the session FK.
+async fn inbox_session(store: &Store) -> (Uuid, Uuid, Uuid) {
     let project = store
         .create_project(&format!("rep-{}", Uuid::new_v4()), 2)
         .await
@@ -176,6 +312,164 @@ async fn worker_report_inbox_idempotent_seq() {
     store.insert_accepted_plan(project.id, body).await.unwrap();
     store.materialize_plan(project.id, plan_id).await.unwrap();
     let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let task_id = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "t1")
+        .unwrap()
+        .id;
+    let session_id = Uuid::new_v4();
+    store
+        .insert_session_spawning(&fleet_orchestrator::store::NewWorkerSession {
+            id: session_id,
+            project_id: project.id,
+            run_id,
+            board_task_id: task_id,
+            attempt: 1,
+            runtime_backend: "stub".into(),
+            worker_token: format!("tok-{session_id}"),
+            worker_profile: "coding".into(),
+            work_dir: Some("/tmp/x".into()),
+        })
+        .await
+        .unwrap();
+    (project.id, session_id, task_id)
+}
+
+#[tokio::test]
+async fn worker_report_inbox_idempotent_seq() {
+    let store = setup().await;
+    let (project_id, session_id, task_id) = inbox_session(&store).await;
+    let payload = serde_json::json!({"progress_pct": 10});
+
+    let first = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            1,
+            "heartbeat",
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            1,
+            "heartbeat",
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(first, "first seq must insert");
+    assert!(!second, "duplicate (session_id, seq) is a no-op");
+
+    let reports = store.list_unapplied_reports(project_id).await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].session_id, session_id);
+    assert_eq!(reports[0].board_task_id, task_id);
+    assert_eq!(reports[0].seq, 1);
+    assert_eq!(reports[0].kind, "heartbeat");
+    assert_eq!(reports[0].payload, payload);
+    assert!(reports[0].applied_at.is_none());
+}
+
+#[tokio::test]
+async fn append_worker_report_new_seq_is_second_unapplied_row() {
+    let store = setup().await;
+    let (project_id, session_id, task_id) = inbox_session(&store).await;
+
+    let first = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            1,
+            "heartbeat",
+            serde_json::json!({"progress_pct": 10}),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            2,
+            "heartbeat",
+            serde_json::json!({"progress_pct": 20}),
+        )
+        .await
+        .unwrap();
+    assert!(first);
+    assert!(second, "new seq must insert a second inbox row");
+
+    let reports = store.list_unapplied_reports(project_id).await.unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].session_id, session_id);
+    assert_eq!(reports[0].seq, 1);
+    assert_eq!(reports[0].kind, "heartbeat");
+    assert_eq!(reports[0].payload, serde_json::json!({"progress_pct": 10}));
+    assert_eq!(reports[1].session_id, session_id);
+    assert_eq!(reports[1].seq, 2);
+    assert_eq!(reports[1].kind, "heartbeat");
+    assert_eq!(reports[1].payload, serde_json::json!({"progress_pct": 20}));
+}
+
+#[tokio::test]
+async fn append_worker_report_duplicate_seq_keeps_first_payload() {
+    let store = setup().await;
+    let (project_id, session_id, task_id) = inbox_session(&store).await;
+    let first_payload = serde_json::json!({"progress_pct": 10});
+
+    let first = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            1,
+            "heartbeat",
+            first_payload.clone(),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .append_worker_report(
+            project_id,
+            session_id,
+            task_id,
+            1,
+            "heartbeat",
+            serde_json::json!({"progress_pct": 99}),
+        )
+        .await
+        .unwrap();
+    assert!(first);
+    assert!(!second, "ON CONFLICT DO NOTHING must not overwrite");
+
+    let reports = store.list_unapplied_reports(project_id).await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].session_id, session_id);
+    assert_eq!(reports[0].seq, 1);
+    assert_eq!(reports[0].kind, "heartbeat");
+    assert_eq!(reports[0].payload, first_payload);
+}
+
+#[tokio::test]
+async fn cas_assign_task_rejects_second_session_when_not_ready() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("cas-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let body = sample_body(project.id);
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
     let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
 
     sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
@@ -184,56 +478,17 @@ async fn worker_report_inbox_idempotent_seq() {
         .await
         .unwrap();
 
-    let session_id = Uuid::new_v4();
-    let ok = store.cas_assign_task(task.id, session_id, 1).await.unwrap();
-    assert!(ok);
-    let ok2 = store
-        .cas_assign_task(task.id, Uuid::new_v4(), 1)
-        .await
-        .unwrap();
-    assert!(!ok2, "CAS fails if not ready");
+    let first = Uuid::new_v4();
+    assert!(store.cas_assign_task(task.id, first, 1).await.unwrap());
+    let second = Uuid::new_v4();
+    assert!(
+        !store.cas_assign_task(task.id, second, 1).await.unwrap(),
+        "CAS fails once the task is no longer ready"
+    );
 
-    use fleet_orchestrator::store::NewWorkerSession;
-    store
-        .insert_session_spawning(&NewWorkerSession {
-            id: session_id,
-            project_id: project.id,
-            run_id,
-            board_task_id: task.id,
-            attempt: 1,
-            runtime_backend: "stub".into(),
-            worker_token: "tok-1".into(),
-            worker_profile: "coding".into(),
-            work_dir: Some("/tmp/x".into()),
-        })
-        .await
-        .unwrap();
-
-    store
-        .append_worker_report(
-            project.id,
-            session_id,
-            task.id,
-            1,
-            "heartbeat",
-            serde_json::json!({"pct": 10}),
-        )
-        .await
-        .unwrap();
-    store
-        .append_worker_report(
-            project.id,
-            session_id,
-            task.id,
-            1,
-            "heartbeat",
-            serde_json::json!({"pct": 10}),
-        )
-        .await
-        .unwrap();
-
-    let reports = store.list_unapplied_reports(project.id).await.unwrap();
-    assert_eq!(reports.len(), 1);
+    let claimed = store.get_task(project.id, task.id).await.unwrap().unwrap();
+    assert_eq!(claimed.claimed_session_id, Some(first));
+    assert_ne!(claimed.claimed_session_id, Some(second));
 }
 
 #[tokio::test]
@@ -243,63 +498,147 @@ async fn update_fleet_settings_ollama_and_rejects_unknown_as_off() {
         .create_project(&format!("llm-{}", Uuid::new_v4()), 2)
         .await
         .unwrap();
-
-    let cfg = store
+    // Plant ollama+model so unknown must clear it (CHECK rejects 'grok').
+    store
         .update_fleet_settings(project.id, 8, "ollama", "qwen2.5-coder")
         .await
         .unwrap();
-    assert_eq!(cfg.max_agents, 8);
-    assert_eq!(cfg.fleet_llm, "ollama");
-    assert_eq!(cfg.fleet_llm_model, "qwen2.5-coder");
 
     let cfg = store
-        .update_fleet_settings(project.id, 0, "grok", "should-clear")
+        .update_fleet_settings(project.id, 8, "grok", "should-clear")
         .await
         .unwrap();
-    assert_eq!(cfg.max_agents, 1, "clamp low");
     assert_eq!(cfg.fleet_llm, "off", "Grok is env-only, store stays off");
     assert_eq!(cfg.fleet_llm_model, "");
 
     let again = store.get_project_config(project.id).await.unwrap();
     assert_eq!(again.fleet_llm, "off");
-    assert_eq!(again.max_agents, 1);
+    assert_eq!(again.fleet_llm_model, "");
+}
+
+#[tokio::test]
+async fn update_fleet_settings_clamps_max_agents_to_cap() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("llm-cap-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+
+    let cfg = store
+        .update_fleet_settings(
+            project.id,
+            fleet_orchestrator::domain::MAX_PROJECT_AGENTS + 1,
+            "ollama",
+            "m",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cfg.max_agents,
+        fleet_orchestrator::domain::MAX_PROJECT_AGENTS
+    );
+}
+
+#[tokio::test]
+async fn update_fleet_settings_truncates_model_to_128() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("llm-model-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+    let model = "x".repeat(200);
+
+    let cfg = store
+        .update_fleet_settings(project.id, 2, "ollama", &model)
+        .await
+        .unwrap();
+    assert_eq!(cfg.fleet_llm_model.len(), 128);
+    assert_eq!(cfg.fleet_llm_model, "x".repeat(128));
+}
+
+#[tokio::test]
+async fn update_fleet_settings_normalizes_ollama_case_and_trim() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("llm-norm-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+
+    let cfg = store
+        .update_fleet_settings(project.id, 2, " OLLAMA ", "m")
+        .await
+        .unwrap();
+    assert_eq!(cfg.fleet_llm, "ollama");
+}
+
+#[tokio::test]
+async fn set_max_agents_does_not_lower_then_raises() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("raise-{}", Uuid::new_v4()), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        32
+    );
+
+    store.set_max_agents(project.id, 16).await.unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        32,
+        "default FLEET_MAX_AGENTS (16) must not drop Settings 32"
+    );
+
+    store.set_max_agents(project.id, 40).await.unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        40
+    );
+
+    store.set_max_agents(project.id, 0).await.unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        40,
+        "clamp 0→1 must not lower an existing cap"
+    );
+
+    store.set_max_agents(project.id, 9999).await.unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        fleet_orchestrator::domain::MAX_PROJECT_AGENTS
+    );
+}
+
+#[tokio::test]
+async fn update_fleet_settings_lowers_after_set_max_agents_raise() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("set-after-raise-{}", Uuid::new_v4()), 2)
+        .await
+        .unwrap();
+
+    store.set_max_agents(project.id, 16).await.unwrap();
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        16
+    );
+
+    let cfg = store
+        .update_fleet_settings(project.id, 4, "off", "")
+        .await
+        .unwrap();
+    assert_eq!(cfg.max_agents, 4, "Settings SET must lower after a GREATEST raise");
+    assert_eq!(
+        store.get_project_config(project.id).await.unwrap().max_agents,
+        4
+    );
 }
 
 #[tokio::test]
 async fn live_events_persist_and_duplicate_seq_is_noop() {
     let store = setup().await;
-    let project = store
-        .create_project(&format!("live-{}", Uuid::new_v4()), 2)
-        .await
-        .unwrap();
-    let body = sample_body(project.id);
-    let plan_id = body.plan_id;
-    let run_id = body.run_id;
-    store.insert_accepted_plan(project.id, body).await.unwrap();
-    store.materialize_plan(project.id, plan_id).await.unwrap();
-    let snap = store.load_board_snapshot(project.id).await.unwrap();
-    let task = snap.tasks.iter().find(|t| t.plan_task_id == "t1").unwrap();
-    sqlx::query("UPDATE board_tasks SET status = 'ready' WHERE id = $1")
-        .bind(task.id)
-        .execute(store.pool())
-        .await
-        .unwrap();
-    let session_id = Uuid::new_v4();
-    assert!(store.cas_assign_task(task.id, session_id, 1).await.unwrap());
-    store
-        .insert_session_spawning(&fleet_orchestrator::store::NewWorkerSession {
-            id: session_id,
-            project_id: project.id,
-            run_id,
-            board_task_id: task.id,
-            attempt: 1,
-            runtime_backend: "remote".into(),
-            worker_token: "tok-live".into(),
-            worker_profile: "coding".into(),
-            work_dir: Some("/plane/only".into()),
-        })
-        .await
-        .unwrap();
+    let (_project_id, session_id, _task_id) = inbox_session(&store).await;
 
     let ts = chrono::Utc::now();
     let n = store
@@ -319,14 +658,21 @@ async fn live_events_persist_and_duplicate_seq_is_noop() {
         )
         .await
         .unwrap();
-    assert_eq!(n2, 0, "duplicate report_seq must not append");
+    assert_eq!(n2, 0, "duplicate (session_id, report_seq, idx) is a no-op");
 
     let live = store.list_live_events(session_id, 50).await.unwrap();
     assert_eq!(live.len(), 1);
     assert_eq!(live[0]["text"], "built calculator");
     assert_eq!(live[0]["kind"], "update");
+}
 
-    let n3 = store
+#[tokio::test]
+async fn live_events_same_seq_two_idx_activity_keys_unique() {
+    let store = setup().await;
+    let (_project_id, session_id, _task_id) = inbox_session(&store).await;
+
+    let ts = chrono::Utc::now();
+    let n = store
         .insert_live_events(
             session_id,
             8,
@@ -337,12 +683,13 @@ async fn live_events_persist_and_duplicate_seq_is_noop() {
         )
         .await
         .unwrap();
-    assert_eq!(n3, 2);
+    assert_eq!(n, 2, "same report_seq extra idx still inserts");
+
     let act = store
         .list_recent_live_activity(&[session_id], 40)
         .await
         .unwrap();
-    assert_eq!(act.len(), 3);
+    assert_eq!(act.len(), 2);
     let keys: std::collections::HashSet<String> = act
         .iter()
         .map(|e| format!("{}-{}-{}", e["session_id"], e["report_seq"], e["idx"]))
@@ -355,10 +702,63 @@ async fn live_events_persist_and_duplicate_seq_is_noop() {
 }
 
 #[tokio::test]
-async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
+async fn list_live_events_returns_newest_window_in_seq_order() {
     let store = setup().await;
+    let (_project_id, session_id, _task_id) = inbox_session(&store).await;
+
+    let ts = chrono::Utc::now();
+    for seq in 1..=5 {
+        let n = store
+            .insert_live_events(
+                session_id,
+                seq,
+                &[(ts, "update".into(), format!("seq-{seq}"))],
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    let live = store.list_live_events(session_id, 2).await.unwrap();
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0]["text"], "seq-4");
+    assert_eq!(live[1]["text"], "seq-5");
+}
+
+#[tokio::test]
+async fn list_recent_live_activity_only_requested_sessions() {
+    let store = setup().await;
+    let (_project_a, session_a, _task_a) = inbox_session(&store).await;
+    let (_project_b, session_b, _task_b) = inbox_session(&store).await;
+
+    let ts = chrono::Utc::now();
+    store
+        .insert_live_events(session_a, 1, &[(ts, "update".into(), "from-a".into())])
+        .await
+        .unwrap();
+    store
+        .insert_live_events(session_b, 1, &[(ts, "update".into(), "from-b".into())])
+        .await
+        .unwrap();
+
+    let act = store
+        .list_recent_live_activity(&[session_a], 40)
+        .await
+        .unwrap();
+    assert_eq!(act.len(), 1);
+    assert_eq!(act[0]["session_id"], serde_json::json!(session_a));
+    assert_eq!(act[0]["text"], "from-a");
+    assert!(
+        act.iter()
+            .all(|e| e["session_id"] != serde_json::json!(session_b)),
+        "dashboard activity must not include unrequested sessions"
+    );
+}
+
+/// Materialized t1 forced ready for begin_spawn_assignment.
+async fn ready_t1(store: &Store, prefix: &str) -> (Uuid, Uuid, Uuid) {
     let project = store
-        .create_project(&format!("repl-{}", Uuid::new_v4()), 2)
+        .create_project(&format!("{prefix}-{}", Uuid::new_v4()), 2)
         .await
         .unwrap();
     let body = sample_body(project.id);
@@ -373,11 +773,18 @@ async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
         .execute(store.pool())
         .await
         .unwrap();
+    (project.id, run_id, task.id)
+}
 
+/// First session exited worker_replaced after progress=40; second spawning holds the claim.
+async fn two_attempt_replace_board(
+    store: &Store,
+) -> (Uuid, Uuid, SpawnAssignment, SpawnAssignment) {
+    let (project_id, run_id, task_id) = ready_t1(store, "repl").await;
     let first = store
         .begin_spawn_assignment(
-            task.id,
-            project.id,
+            task_id,
+            project_id,
             run_id,
             "coding",
             "remote",
@@ -387,31 +794,22 @@ async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
         .unwrap()
         .expect("first spawn");
     store
-        .apply_heartbeat(first.session_id, task.id, 1, Some(40))
+        .apply_heartbeat(first.session_id, task_id, 1, Some(40))
         .await
         .unwrap();
-
-    let retired = store
-        .retire_live_sessions(task.id, None, "worker_replaced")
+    store
+        .retire_live_sessions(task_id, None, "worker_replaced")
         .await
         .unwrap();
-    assert_eq!(retired.len(), 1);
-    assert!(
-        !store
-            .complete_spawn_failure(first.session_id)
-            .await
-            .unwrap()
-    );
-
     sqlx::query("UPDATE board_tasks SET status = 'ready', claimed_session_id = NULL WHERE id = $1")
-        .bind(task.id)
+        .bind(task_id)
         .execute(store.pool())
         .await
         .unwrap();
     let second = store
         .begin_spawn_assignment(
-            task.id,
-            project.id,
+            task_id,
+            project_id,
             run_id,
             "coding",
             "remote",
@@ -420,31 +818,187 @@ async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
         .await
         .unwrap()
         .expect("second spawn");
+    (project_id, task_id, first, second)
+}
+
+#[tokio::test]
+async fn complete_spawn_failure_does_not_overwrite_retired_worker_replaced() {
+    let store = setup().await;
+    let (project_id, run_id, task_id) = ready_t1(&store, "repl-fail").await;
+    let first = store
+        .begin_spawn_assignment(
+            task_id,
+            project_id,
+            run_id,
+            "coding",
+            "remote",
+            Some("/tmp/a"),
+        )
+        .await
+        .unwrap()
+        .expect("first spawn");
+
+    let retired = store
+        .retire_live_sessions(task_id, None, "worker_replaced")
+        .await
+        .unwrap();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].id, first.session_id);
+    assert_eq!(retired[0].status, "exited");
+    assert_eq!(retired[0].exit_reason.as_deref(), Some("worker_replaced"));
+
+    assert!(
+        !store
+            .complete_spawn_failure(first.session_id)
+            .await
+            .unwrap(),
+        "late spawn-failed must not overwrite exited/worker_replaced"
+    );
+    let old = store.get_session(first.session_id).await.unwrap().unwrap();
+    assert_eq!(old.status, "exited");
+    assert_eq!(old.exit_reason.as_deref(), Some("worker_replaced"));
+}
+
+#[tokio::test]
+async fn retire_live_sessions_keep_new_skips_already_exited() {
+    let store = setup().await;
+    let (_project_id, task_id, first, second) = two_attempt_replace_board(&store).await;
+
     let retired2 = store
-        .retire_live_sessions(task.id, Some(second.session_id), "superseded")
+        .retire_live_sessions(task_id, Some(second.session_id), "superseded")
         .await
         .unwrap();
     assert!(retired2.is_empty(), "first session already exited");
 
-    store
-        .apply_heartbeat(first.session_id, task.id, 9, Some(99))
-        .await
-        .unwrap();
     let old = store.get_session(first.session_id).await.unwrap().unwrap();
     assert_eq!(old.status, "exited");
     assert_eq!(old.exit_reason.as_deref(), Some("worker_replaced"));
+    let live = store.get_session(second.session_id).await.unwrap().unwrap();
+    assert_eq!(live.status, "spawning");
+}
 
-    let task_now = store.get_task(project.id, task.id).await.unwrap().unwrap();
+#[tokio::test]
+async fn replace_does_not_leave_sibling_or_accept_dead_heartbeat() {
+    let store = setup().await;
+    let (project_id, task_id, first, second) = two_attempt_replace_board(&store).await;
+    let before = store.get_session(first.session_id).await.unwrap().unwrap();
+    let hb_at = before.last_heartbeat_at;
+    assert_eq!(before.progress_pct, 40);
+    assert_eq!(before.status, "exited");
+
+    store
+        .apply_heartbeat(first.session_id, task_id, 9, Some(99))
+        .await
+        .unwrap();
+
+    let old = store.get_session(first.session_id).await.unwrap().unwrap();
+    assert_eq!(old.status, "exited");
+    assert_eq!(old.exit_reason.as_deref(), Some("worker_replaced"));
+    assert_eq!(old.progress_pct, 40);
+    assert_eq!(old.last_heartbeat_at, hb_at);
+
+    let task_now = store.get_task(project_id, task_id).await.unwrap().unwrap();
     assert_eq!(task_now.claimed_session_id, Some(second.session_id));
-    assert_ne!(task_now.progress_pct, 99);
+    assert_eq!(task_now.progress_pct, 40);
+    assert_eq!(task_now.last_report_seq, 1);
+}
 
-    assert!(
-        store
-            .live_claim_is_other_attempt(task.id, first.attempt)
-            .await
-            .unwrap()
+#[tokio::test]
+async fn apply_heartbeat_promotes_spawning_to_healthy_and_stamps_progress() {
+    let store = setup().await;
+    let (project_id, run_id, task_id) = ready_t1(&store, "hb-promote").await;
+    let assignment = store
+        .begin_spawn_assignment(task_id, project_id, run_id, "coding", "remote", None)
+        .await
+        .unwrap()
+        .expect("spawn");
+    let session_id = assignment.session_id;
+
+    let before = store.get_session(session_id).await.unwrap().unwrap();
+    assert_eq!(before.status, "spawning");
+    assert_eq!(before.progress_pct, 0);
+    assert!(before.last_heartbeat_at.is_none());
+
+    store
+        .apply_heartbeat(session_id, task_id, 1, Some(5))
+        .await
+        .unwrap();
+
+    let after = store.get_session(session_id).await.unwrap().unwrap();
+    assert_eq!(after.status, "healthy");
+    assert_eq!(after.progress_pct, 5);
+    assert!(after.last_heartbeat_at.is_some());
+}
+
+#[tokio::test]
+async fn replace_session_already_dead_does_not_reopen_while_sibling_live() {
+    let store = setup().await;
+    let (project_id, task_id, first, second) = two_attempt_replace_board(&store).await;
+    let tick = TickRunner::with_store(store.clone());
+
+    let report = tick
+        .replace_session(project_id, first.session_id)
+        .await
+        .unwrap();
+    assert!(report.already_dead);
+    assert!(!report.replaced);
+    assert_eq!(report.task_id, task_id);
+
+    let task_now = store.get_task(project_id, task_id).await.unwrap().unwrap();
+    assert_eq!(task_now.claimed_session_id, Some(second.session_id));
+    assert_ne!(
+        task_now.status, "ready",
+        "already-dead replace must not unclaim a live sibling"
     );
-    assert!(store.task_has_live_session(task.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn apply_retry_after_failure_noops_when_live_claim_is_other_attempt() {
+    let store = setup().await;
+    let (project_id, task_id, first, second) = two_attempt_replace_board(&store).await;
+
+    apply_retry_after_failure(&store, task_id, first.attempt, 0, false, ExitReason::Stale)
+        .await
+        .unwrap();
+
+    let task_now = store.get_task(project_id, task_id).await.unwrap().unwrap();
+    assert_eq!(task_now.claimed_session_id, Some(second.session_id));
+    assert!(
+        matches!(task_now.status.as_str(), "assigned" | "in_progress"),
+        "stale retry of first attempt must not bounce the live claim: {}",
+        task_now.status
+    );
+}
+
+#[tokio::test]
+async fn authenticate_worker_session_none_after_retire_exited() {
+    let store = setup().await;
+    let (project_id, run_id, task_id) = ready_t1(&store, "repl-auth").await;
+    let first = store
+        .begin_spawn_assignment(
+            task_id,
+            project_id,
+            run_id,
+            "coding",
+            "remote",
+            Some("/tmp/a"),
+        )
+        .await
+        .unwrap()
+        .expect("first spawn");
+    store
+        .retire_live_sessions(task_id, None, "worker_replaced")
+        .await
+        .unwrap();
+
+    let authed = store
+        .authenticate_worker_session(first.session_id, &first.worker_token)
+        .await
+        .unwrap();
+    assert!(
+        authed.is_none(),
+        "exited/worker_replaced session must not authenticate"
+    );
 }
 
 #[tokio::test]
@@ -539,5 +1093,315 @@ async fn complete_spawn_failure_voids_claims_and_rejects_late_worker() {
     assert!(
         authed.is_none(),
         "failed_spawn session must not accept worker heartbeats"
+    );
+}
+
+fn independent_plan(project_id: Uuid, ids: &[&str]) -> WorkPlanBody {
+    WorkPlanBody {
+        plan_id: Uuid::new_v4(),
+        project_id,
+        run_id: Uuid::new_v4(),
+        version: 1,
+        status: WorkPlanStatus::Accepted,
+        source: "fixture".into(),
+        tasks: ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| PlanTask {
+                plan_task_id: (*id).into(),
+                title: (*id).into(),
+                summary: String::new(),
+                spec_md: String::new(),
+                depends_on: vec![],
+                worker_profile: "coding".into(),
+                acceptance: vec![],
+                priority: 100 - i as i32,
+                external_ref: None,
+                timeout_s: None,
+                max_retries: Some(1),
+            })
+            .collect(),
+        policy: PlanPolicy {
+            max_agents_override: None,
+            on_task_fail: OnTaskFailPolicy::Leave,
+            auto_sync_external: false,
+            ..Default::default()
+        },
+    }
+}
+
+async fn ready_assign_session(
+    store: &Store,
+    project_id: Uuid,
+    run_id: Uuid,
+    task_id: Uuid,
+) -> Uuid {
+    sqlx::query("UPDATE board_tasks SET status = 'ready', claimed_session_id = NULL WHERE id = $1")
+        .bind(task_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let session_id = Uuid::new_v4();
+    assert!(store.cas_assign_task(task_id, session_id, 1).await.unwrap());
+    store
+        .insert_session_spawning(&fleet_orchestrator::store::NewWorkerSession {
+            id: session_id,
+            project_id,
+            run_id,
+            board_task_id: task_id,
+            attempt: 1,
+            runtime_backend: "stub".into(),
+            worker_token: format!("tok-{session_id}"),
+            worker_profile: "coding".into(),
+            work_dir: Some(format!("/tmp/fleet-cas-{session_id}")),
+        })
+        .await
+        .unwrap();
+    session_id
+}
+
+#[tokio::test]
+async fn apply_task_terminal_cas_leaves_blocked_hitl_and_stale_claim_untouched() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("cas-term-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    let body = independent_plan(project.id, &["blocked", "stale", "ok"]);
+    let run_id = body.run_id;
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let blocked_id = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "blocked")
+        .unwrap()
+        .id;
+    let stale_id = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "stale")
+        .unwrap()
+        .id;
+    let ok_id = snap
+        .tasks
+        .iter()
+        .find(|t| t.plan_task_id == "ok")
+        .unwrap()
+        .id;
+
+    let blocked_claim = ready_assign_session(&store, project.id, run_id, blocked_id).await;
+    store
+        .apply_task_terminal(blocked_id, blocked_claim, "blocked", Some("needs_approval"), 1)
+        .await
+        .unwrap();
+    store
+        .apply_task_terminal(blocked_id, blocked_claim, "done_success", None, 2)
+        .await
+        .unwrap();
+    store
+        .apply_task_terminal(blocked_id, blocked_claim, "done_failed", Some("nope"), 3)
+        .await
+        .unwrap();
+    store
+        .apply_task_terminal(blocked_id, blocked_claim, "blocked", Some("other"), 4)
+        .await
+        .unwrap();
+
+    let stale_claim = ready_assign_session(&store, project.id, run_id, stale_id).await;
+    store
+        .apply_task_terminal(stale_id, Uuid::new_v4(), "done_success", None, 2)
+        .await
+        .unwrap();
+
+    let ok_claim = ready_assign_session(&store, project.id, run_id, ok_id).await;
+    store
+        .apply_task_terminal(ok_id, ok_claim, "done_success", None, 2)
+        .await
+        .unwrap();
+
+    let blocked = store.get_task(project.id, blocked_id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, "blocked");
+    assert_eq!(blocked.claimed_session_id, Some(blocked_claim));
+    assert_eq!(blocked.block_reason.as_deref(), Some("needs_approval"));
+
+    let stale = store.get_task(project.id, stale_id).await.unwrap().unwrap();
+    assert_eq!(stale.status, "assigned");
+    assert_eq!(stale.claimed_session_id, Some(stale_claim));
+
+    let ok = store.get_task(project.id, ok_id).await.unwrap().unwrap();
+    assert_eq!(ok.status, "done_success");
+    assert_eq!(ok.claimed_session_id, None);
+}
+
+async fn plant_blocked_with_hitl_intent(
+    store: &Store,
+    name: &str,
+    notes: &str,
+) -> (Uuid, Uuid, Uuid) {
+    let project = store
+        .create_project(&format!("{name}-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    let body = independent_plan(project.id, &["t1"]);
+    let run_id = body.run_id;
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let task_id = store
+        .load_board_snapshot(project.id)
+        .await
+        .unwrap()
+        .tasks
+        .into_iter()
+        .find(|t| t.plan_task_id == "t1")
+        .unwrap()
+        .id;
+    let claim = ready_assign_session(store, project.id, run_id, task_id).await;
+    store
+        .apply_task_terminal(task_id, claim, "blocked", Some("needs_approval"), 1)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .request_hitl_resume(project.id, task_id, notes)
+            .await
+            .unwrap(),
+        "blocked task must accept HITL resume"
+    );
+    (project.id, run_id, task_id)
+}
+
+#[tokio::test]
+async fn apply_hitl_resume_skips_when_run_cancel_requested() {
+    let store = setup().await;
+    let (project_id, run_id, task_id) =
+        plant_blocked_with_hitl_intent(&store, "hitl-cancel", "approved by operator").await;
+    store.request_cancel(project_id, run_id).await.unwrap();
+
+    let rows = store.apply_hitl_resume(project_id).await.unwrap();
+    assert_eq!(rows, 0, "K21 cancel wins over HITL resume");
+
+    let task = store.get_task(project_id, task_id).await.unwrap().unwrap();
+    assert_eq!(task.status, "blocked", "task={task:?}");
+    assert!(
+        task.hitl_resume_requested_at.is_some(),
+        "skipped apply must leave intent, task={task:?}"
+    );
+    assert!(task.hitl_resolved_at.is_none(), "task={task:?}");
+    assert_eq!(task.block_reason.as_deref(), Some("needs_approval"), "task={task:?}");
+}
+
+#[tokio::test]
+async fn request_hitl_resume_false_unless_blocked() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("hitl-gate-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    let body = independent_plan(
+        project.id,
+        &["assigned", "in_progress", "ready", "done_success", "blocked"],
+    );
+    let run_id = body.run_id;
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let id_of = |name: &str| {
+        snap.tasks
+            .iter()
+            .find(|t| t.plan_task_id == name)
+            .unwrap()
+            .id
+    };
+    let assigned_id = id_of("assigned");
+    let in_progress_id = id_of("in_progress");
+    let ready_id = id_of("ready");
+    let done_id = id_of("done_success");
+    let blocked_id = id_of("blocked");
+
+    ready_assign_session(&store, project.id, run_id, assigned_id).await;
+    ready_assign_session(&store, project.id, run_id, in_progress_id).await;
+    sqlx::query("UPDATE board_tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(in_progress_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE board_tasks SET status = 'ready', claimed_session_id = NULL WHERE id = $1")
+        .bind(ready_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let done_claim = ready_assign_session(&store, project.id, run_id, done_id).await;
+    store
+        .apply_task_terminal(done_id, done_claim, "done_success", None, 1)
+        .await
+        .unwrap();
+    let blocked_claim = ready_assign_session(&store, project.id, run_id, blocked_id).await;
+    store
+        .apply_task_terminal(blocked_id, blocked_claim, "blocked", Some("needs_approval"), 1)
+        .await
+        .unwrap();
+
+    for (tid, want_status) in [
+        (assigned_id, "assigned"),
+        (in_progress_id, "in_progress"),
+        (ready_id, "ready"),
+        (done_id, "done_success"),
+    ] {
+        let ok = store
+            .request_hitl_resume(project.id, tid, "nope")
+            .await
+            .unwrap();
+        assert!(!ok, "{want_status} must not accept HITL resume");
+        let task = store.get_task(project.id, tid).await.unwrap().unwrap();
+        assert_eq!(task.status, want_status, "task={task:?}");
+        assert!(task.hitl_notes.is_none(), "{want_status} task={task:?}");
+        assert!(
+            task.hitl_resume_requested_at.is_none(),
+            "{want_status} task={task:?}"
+        );
+    }
+
+    let ok = store
+        .request_hitl_resume(project.id, blocked_id, "approved by operator")
+        .await
+        .unwrap();
+    assert!(ok, "blocked must accept HITL resume");
+    let blocked = store.get_task(project.id, blocked_id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, "blocked", "task={blocked:?}");
+    assert_eq!(
+        blocked.hitl_notes.as_deref(),
+        Some("approved by operator"),
+        "task={blocked:?}"
+    );
+    assert!(
+        blocked.hitl_resume_requested_at.is_some(),
+        "task={blocked:?}"
+    );
+}
+
+#[tokio::test]
+async fn apply_hitl_resume_sets_ready_clears_claim_reason_and_intent() {
+    let store = setup().await;
+    let (project_id, _run_id, task_id) =
+        plant_blocked_with_hitl_intent(&store, "hitl-apply", "approved by operator").await;
+
+    let rows = store.apply_hitl_resume(project_id).await.unwrap();
+    assert_eq!(rows, 1);
+
+    let task = store.get_task(project_id, task_id).await.unwrap().unwrap();
+    assert_eq!(task.status, "ready", "task={task:?}");
+    assert!(task.claimed_session_id.is_none(), "task={task:?}");
+    assert!(task.block_reason.is_none(), "task={task:?}");
+    assert!(task.hitl_resume_requested_at.is_none(), "task={task:?}");
+    assert!(task.hitl_resolved_at.is_some(), "task={task:?}");
+    assert_eq!(
+        task.hitl_notes.as_deref(),
+        Some("approved by operator"),
+        "task={task:?}"
     );
 }
