@@ -610,3 +610,6 @@ case "$MODE" in
     exit 1
     ;;
 esac
+
+# Deploy / register-runner-release.sh run the fail-closed check after all
+# shipped OS packages exist. A single-platform stage cannot update the parent.
