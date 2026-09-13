@@ -9,9 +9,13 @@
 #       parent   — sha256 of sorted "platform=hex\\n" child lines
 #       <os>     — sha256 of that OS build
 #
-# If a staged binary's sha256 is not registered for that bin's version,
-# check-worker-dist.sh / deploy fail. Bump that bin's version and run
-# scripts/register-runner-release.sh after restaging.
+# <os>-rev is the per-OS patch. Display is 0.0.3 when rev=0, 0.0.3.1 when
+# rev=1. A Windows-only fix bumps windows-x86_64-rev only. Bumping the line
+# version to 0.0.4 resets every OS rev to 0.
+#
+# If a staged binary's sha256 is not registered, check/deploy fail. For one
+# OS: bump that <os>-rev, restage that OS, register. For all OS: bump
+# [versions] and [release.BIN].version, restage, register.
 #
 #   fleet-host   — pair / heartbeat / lease / official CLI chat
 #   fleet-driver — process worker (ACP)
@@ -28,12 +32,18 @@ fleet-driver = "0.0.3"
 version = "0.0.3"
 parent = "59ed6e096999fc3a334d3c8fd918cf2953889e350b9f9fd51d49f4d6e336768d"
 linux-x86_64 = "2424657e9fe8326c5ee6166f30ec03b5ac0fbf1ab4da0ef9f87263e3ea75c6d0"
+linux-x86_64-rev = 0
 linux-aarch64 = "1e7f210fa445aeba665b41b6653672a5c78960e11dd4c61fddb51de00f0ecdf3"
+linux-aarch64-rev = 0
 windows-x86_64 = "b2cb9dd01c2f7b8f72216dfda3ca06981c40a502e22c93dfabb4f06d1d831953"
+windows-x86_64-rev = 0
 
 [release.fleet-driver]
 version = "0.0.3"
 parent = "5ffd9b9e82c22254b22adb1cddc5a4b2c33eb67b152010210af0d8c952f91c92"
 linux-x86_64 = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
+linux-x86_64-rev = 0
 linux-aarch64 = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
+linux-aarch64-rev = 0
 windows-x86_64 = "089479d9899a0ffe6b0377e807b78d0f0197997bbf6b6bc598e8d4cbacb642dd"
+windows-x86_64-rev = 0

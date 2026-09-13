@@ -6,10 +6,12 @@ fn main() {
     let packages = manifest.join("../../runner-packages.toml");
     println!("cargo:rerun-if-changed={}", packages.display());
     let text = std::fs::read_to_string(&packages).unwrap_or_default();
-    println!(
-        "cargo:rustc-env=FLEET_HOST_PKG_VERSION={}",
-        section_value(&text, "versions", "fleet-host")
-    );
+    let host_ver = std::env::var("FLEET_HOST_PKG_VERSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| section_value(&text, "versions", "fleet-host"));
+    println!("cargo:rerun-if-env-changed=FLEET_HOST_PKG_VERSION");
+    println!("cargo:rustc-env=FLEET_HOST_PKG_VERSION={host_ver}");
     println!(
         "cargo:rustc-env=FLEET_DRIVER_PKG_VERSION={}",
         section_value(&text, "versions", "fleet-driver")

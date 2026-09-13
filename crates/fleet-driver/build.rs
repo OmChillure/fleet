@@ -3,7 +3,11 @@ fn main() {
     let packages = manifest.join("../../runner-packages.toml");
     println!("cargo:rerun-if-changed={}", packages.display());
     let text = std::fs::read_to_string(&packages).unwrap_or_default();
-    let ver = section_value(&text, "versions", "fleet-driver");
+    println!("cargo:rerun-if-env-changed=FLEET_DRIVER_PKG_VERSION");
+    let ver = std::env::var("FLEET_DRIVER_PKG_VERSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| section_value(&text, "versions", "fleet-driver"));
     println!("cargo:rustc-env=FLEET_DRIVER_PKG_VERSION={ver}");
 }
 

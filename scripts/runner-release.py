@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Independent version × hash locks for fleet-host and fleet-driver.
 
-Each bin has its own [release.BIN] version + parent. Parent = sha256 of
-sorted \"platform=hex\\n\" lines for the shipped OS set.
+Each bin has a line version (0.0.3) and a per-OS rev (0, 1, 2, …).
+Windows-only bytes become 0.0.3.1; Linux stays 0.0.3. A line bump to
+0.0.4 resets every OS rev to 0.
 
-  check         — fail if a table is inconsistent, or staged bins do not match
-  register      — rewrite both [release.BIN] children + parents from a dist dir
-  platform-ok   — exit 0 if DIST/PLATFORM hashes match [release] for both bins
+  check           — fail if a table is inconsistent, or staged bins do not match
+  register        — rewrite children, revs, parents from a dist dir
+  platform-ok     — exit 0 if DIST/PLATFORM hashes match [release]
+  display-version — print line or line.rev for BIN PLATFORM
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SHIP_PLATFORMS = ("linux-x86_64", "linux-aarch64", "windows-x86_64")
@@ -25,10 +28,22 @@ def parent_digest(children: dict[str, str]) -> str:
     return hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
-def parse_bin_release(text: str, bin_name: str) -> tuple[str, str, dict[str, str]]:
-    version = ""
-    parent = ""
-    children: dict[str, str] = {}
+@dataclass
+class BinRelease:
+    version: str = ""
+    parent: str = ""
+    children: dict[str, str] = field(default_factory=dict)
+    revs: dict[str, int] = field(default_factory=dict)
+
+
+def display_version(line: str, rev: int) -> str:
+    if rev > 0:
+        return f"{line}.{rev}"
+    return line
+
+
+def parse_bin_release(text: str, bin_name: str) -> BinRelease:
+    out = BinRelease()
     section = ""
     want = f"release.{bin_name}"
     for raw in text.splitlines():
@@ -38,17 +53,28 @@ def parse_bin_release(text: str, bin_name: str) -> tuple[str, str, dict[str, str
         if line.startswith("["):
             section = line.strip("[]")
             continue
-        m = re.match(r'^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*$', line)
-        if not m or section != want:
+        if section != want:
             continue
-        key, val = m.group(1), m.group(2).strip()
-        if key == "version":
-            version = val
-        elif key == "parent":
-            parent = val.lower()
-        elif key in SHIP_PLATFORMS:
-            children[key] = val.lower()
-    return version, parent, children
+        mq = re.match(r'^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*$', line)
+        mi = re.match(r'^([A-Za-z0-9_-]+)\s*=\s*(\d+)\s*$', line)
+        if mq:
+            key, val = mq.group(1), mq.group(2).strip()
+            if key == "version":
+                out.version = val
+            elif key == "parent":
+                out.parent = val.lower()
+            elif key in SHIP_PLATFORMS:
+                out.children[key] = val.lower()
+            elif key.endswith("-rev") and key[: -len("-rev")] in SHIP_PLATFORMS:
+                try:
+                    out.revs[key[: -len("-rev")]] = int(val)
+                except ValueError:
+                    pass
+        elif mi:
+            key, val = mi.group(1), int(mi.group(2))
+            if key.endswith("-rev") and key[: -len("-rev")] in SHIP_PLATFORMS:
+                out.revs[key[: -len("-rev")]] = val
+    return out
 
 
 def parse_versions(text: str, section: str) -> dict[str, str]:
@@ -86,10 +112,7 @@ def hashes_from_dist(dest: Path) -> dict[str, dict[str, str]]:
     return out
 
 
-def rewrite_releases(
-    text: str,
-    releases: dict[str, tuple[str, str, dict[str, str]]],
-) -> str:
+def rewrite_releases(text: str, releases: dict[str, BinRelease]) -> str:
     head: list[str] = []
     in_release = False
     for raw in text.splitlines(keepends=True):
@@ -104,12 +127,13 @@ def rewrite_releases(
         head.append(raw)
     body = "".join(head).rstrip() + "\n"
     for bin_ in BINS:
-        version, parent, children = releases[bin_]
+        rel = releases[bin_]
         body += f"\n[release.{bin_}]\n"
-        body += f"version = \"{version}\"\n"
-        body += f"parent = \"{parent}\"\n"
+        body += f"version = \"{rel.version}\"\n"
+        body += f"parent = \"{rel.parent}\"\n"
         for plat in SHIP_PLATFORMS:
-            body += f"{plat} = \"{children.get(plat, '')}\"\n"
+            body += f"{plat} = \"{rel.children.get(plat, '')}\"\n"
+            body += f"{plat}-rev = {int(rel.revs.get(plat, 0))}\n"
     return body
 
 
@@ -119,24 +143,24 @@ def cmd_check(toml_path: Path, dest: Path | None, require_all: bool) -> int:
     ver = parse_versions(text, "verify")
     errors: list[str] = []
     for bin_ in BINS:
-        version, parent, children = parse_bin_release(text, bin_)
-        if not version:
+        rel = parse_bin_release(text, bin_)
+        if not rel.version:
             errors.append(f"[release.{bin_}].version is missing")
-        if pkg.get(bin_) and version and pkg[bin_] != version:
+        if pkg.get(bin_) and rel.version and pkg[bin_] != rel.version:
             errors.append(
-                f"[release.{bin_}].version {version} != [versions] {bin_}={pkg[bin_]}"
+                f"[release.{bin_}].version {rel.version} != [versions] {bin_}={pkg[bin_]}"
             )
-        if ver.get(bin_) and version and ver[bin_] != version:
+        if ver.get(bin_) and rel.version and ver[bin_] != rel.version:
             errors.append(
-                f"[release.{bin_}].version {version} != [verify] {bin_}={ver[bin_]}"
+                f"[release.{bin_}].version {rel.version} != [verify] {bin_}={ver[bin_]}"
             )
-        miss = [p for p in SHIP_PLATFORMS if not re.fullmatch(r"[0-9a-f]{64}", children.get(p, ""))]
+        miss = [p for p in SHIP_PLATFORMS if not re.fullmatch(r"[0-9a-f]{64}", rel.children.get(p, ""))]
         if miss:
             errors.append(f"[release.{bin_}] missing 64-hex hashes: {', '.join(miss)}")
             continue
-        got = parent_digest(children)
-        if parent and parent != got:
-            errors.append(f"[release.{bin_}].parent {parent} does not match children {got}")
+        got = parent_digest(rel.children)
+        if rel.parent and rel.parent != got:
+            errors.append(f"[release.{bin_}].parent {rel.parent} does not match children {got}")
         if dest is not None and dest.is_dir():
             staged = hashes_from_dist(dest).get(bin_, {})
             if require_all:
@@ -144,14 +168,16 @@ def cmd_check(toml_path: Path, dest: Path | None, require_all: bool) -> int:
                     if plat not in staged:
                         errors.append(f"staged {plat}/{bin_} missing under {dest}")
             for plat, sha in staged.items():
-                want = children.get(plat, "")
+                want = rel.children.get(plat, "")
                 if not want:
-                    errors.append(f"{plat}/{bin_} hash {sha} is not registered for {version}")
+                    errors.append(f"{plat}/{bin_} hash {sha} is not registered for {rel.version}")
                 elif sha != want:
+                    shown = display_version(rel.version, rel.revs.get(plat, 0))
                     errors.append(
-                        f"{plat}/{bin_} hash changed ({sha}) but {bin_} {version} "
-                        f"is still registered as {want}. Bump [versions]/{bin_} and "
-                        f"[release.{bin_}].version, restage, then "
+                        f"{plat}/{bin_} hash changed ({sha}) but {shown} is still "
+                        f"registered as {want}. Keep line {rel.version} and bump "
+                        f"[release.{bin_}].{plat}-rev, or bump the line to the next "
+                        f"0.0.N (resets all OS revs). Then restage that OS and "
                         f"scripts/register-runner-release.sh"
                     )
     if errors:
@@ -161,8 +187,8 @@ def cmd_check(toml_path: Path, dest: Path | None, require_all: bool) -> int:
         return 1
     parts = []
     for bin_ in BINS:
-        v, p, _ = parse_bin_release(text, bin_)
-        parts.append(f"{bin_}={v}/{p[:12]}…")
+        rel = parse_bin_release(text, bin_)
+        parts.append(f"{bin_}={rel.version}/{rel.parent[:12]}…")
     print("runner-release: ok " + " ".join(parts))
     return 0
 
@@ -175,8 +201,8 @@ def cmd_platform_ok(toml_path: Path, dest: Path, plat: str) -> int:
     text = toml_path.read_text()
     staged = hashes_from_dist(dest)
     for bin_ in BINS:
-        _version, _parent, children = parse_bin_release(text, bin_)
-        want = children.get(plat, "")
+        rel = parse_bin_release(text, bin_)
+        want = rel.children.get(plat, "")
         got = staged.get(bin_, {}).get(plat, "")
         if not re.fullmatch(r"[0-9a-f]{64}", want or ""):
             print(f"platform-ok: [release.{bin_}].{plat} missing", file=sys.stderr)
@@ -194,17 +220,35 @@ def cmd_register(toml_path: Path, dest: Path) -> int:
         return 1
     text = toml_path.read_text()
     pkg = parse_versions(text, "versions")
-    releases: dict[str, tuple[str, str, dict[str, str]]] = {}
+    releases: dict[str, BinRelease] = {}
     for bin_ in BINS:
         version = pkg.get(bin_) or ""
         if not version:
             print(f"register: [versions].{bin_} missing", file=sys.stderr)
             return 1
-        children = staged[bin_]
-        releases[bin_] = (version, parent_digest(children), children)
+        prev = parse_bin_release(text, bin_)
+        line_bumped = prev.version != version
+        revs: dict[str, int] = {}
+        for plat in SHIP_PLATFORMS:
+            sha = staged[bin_].get(plat, "")
+            old = prev.children.get(plat, "")
+            old_rev = int(prev.revs.get(plat, 0))
+            if line_bumped:
+                revs[plat] = 0
+            elif sha and old and sha != old:
+                revs[plat] = old_rev + 1
+            else:
+                revs[plat] = old_rev
+        releases[bin_] = BinRelease(
+            version=version,
+            parent=parent_digest(staged[bin_]),
+            children=staged[bin_],
+            revs=revs,
+        )
     toml_path.write_text(rewrite_releases(text, releases))
-    for bin_, (version, parent, _) in releases.items():
-        print(f"registered {bin_} {version} parent={parent}")
+    for bin_, rel in releases.items():
+        bits = [display_version(rel.version, rel.revs.get(p, 0)) + f"@{p}" for p in SHIP_PLATFORMS]
+        print(f"registered {bin_} line={rel.version} parent={rel.parent} " + " ".join(bits))
     return 0
 
 
@@ -229,6 +273,13 @@ def main(argv: list[str]) -> int:
             print("usage: runner-release.py platform-ok DIST PLATFORM", file=sys.stderr)
             return 2
         return cmd_platform_ok(toml_path, Path(rest[0]), rest[1])
+    if cmd == "display-version":
+        if len(rest) < 2:
+            print("usage: runner-release.py display-version BIN PLATFORM", file=sys.stderr)
+            return 2
+        rel = parse_bin_release(toml_path.read_text(), rest[0])
+        sys.stdout.write(display_version(rel.version, rel.revs.get(rest[1], 0)))
+        return 0
     print(f"unknown command {cmd}", file=sys.stderr)
     return 2
 

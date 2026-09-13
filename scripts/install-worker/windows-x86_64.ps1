@@ -264,9 +264,19 @@ if ($userPath -notlike "*$BinDir*") {
     Write-Host "added $BinDir to user PATH"
 }
 
-$startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\fleet-host.cmd"
-"@echo off`r`n`"$BinDir\fleet-host.exe`" run`r`n" | Set-Content -Path $startup -Encoding ASCII
-Write-Host "startup shortcut: $startup"
+# .cmd in Startup opens a console (black flash). A .vbs Run(..., 0) does not.
+$startupCmd = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\fleet-host.cmd"
+$startupVbs = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\fleet-host.vbs"
+if (Test-Path -LiteralPath $startupCmd) {
+    Remove-Item -LiteralPath $startupCmd -Force
+}
+$exe = (Join-Path $BinDir "fleet-host.exe") -replace '\\', '\\'
+$vbs = @"
+Set sh = CreateObject("WScript.Shell")
+sh.Run """$exe"" run", 0, False
+"@
+Set-Content -Path $startupVbs -Value $vbs -Encoding ASCII
+Write-Host "startup shortcut: $startupVbs"
 
 if ($pairToken) {
     $existingUrl = Normalize-PairUrl (Get-PairedControlPlane $cfgDir)
@@ -282,11 +292,11 @@ if ($pairToken) {
     & (Join-Path $BinDir "fleet-host.exe") @pairArgs
     Write-Host "starting fleet-host (heartbeats; offline after 90s if this fails)"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
-    Write-Host "started fleet-host run (also at logon: $startup)"
+    Write-Host "started fleet-host run (also at logon: $startupVbs)"
 } elseif ($alreadyPaired) {
     Write-Host "already paired; starting fleet-host so the new bins are what heartbeats"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
-    Write-Host "started fleet-host run (also at logon: $startup)"
+    Write-Host "started fleet-host run (also at logon: $startupVbs)"
 } else {
     Write-Host "next: fleet-host pair --url $Origin --token <pair-token-from-ui>"
     Write-Host "then: Start-Process fleet-host.exe -ArgumentList run"
