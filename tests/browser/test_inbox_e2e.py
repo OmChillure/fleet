@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Inbox page browser e2e: list → Start monitor → Finish.
+"""Inbox page browser e2e: index → GitHub app → Start monitor → Start run.
 
 Fail-closed: this-tree identity (`/health.git_sha` + UI `/fleet-git-sha.txt`
 == `scripts/tree-id.sh`) and Playwright against :3030 / :8080. Missing stack
 or a foreign Kind image is a fail, not a skip.
 
-Empty inbox is not success for Finish. The page is seeded with a connected
+Empty inbox is not success for Start run. The page is seeded with a connected
 github row (so Start monitor has a listen source) and an open ticket (so
-Finish is a real button). Playwright still drives the chrome.
+Start run is a real button). Playwright still drives the chrome.
 
   python3 -m pytest tests/browser/test_inbox_e2e.py -q
   python3 -m unittest tests.browser.test_inbox_e2e -v
@@ -130,16 +130,12 @@ class InboxE2ETests(unittest.TestCase):
             start.click()
             expect(page.get_by_role("button", name="Stop monitor")).to_be_enabled()
 
-            # Start monitor no longer turns auto_launch on. Uncheck if a
-            # previous poll left it on so Finish is a real click.
-            keep = page.locator("label").filter(has_text="Launch open tickets")
-            box = keep.locator("input[type='checkbox']")
-            expect(box).to_be_visible()
-            box.uncheck()
-            save = page.get_by_role("button", name="Save filters")
-            expect(save).to_be_enabled()
-            save.click()
-            expect(save).to_be_enabled()
+            page.get_by_role("link", name="GitHub", exact=True).first.click()
+            expect(page.get_by_role("heading", name="GitHub", exact=True)).to_be_visible()
+            expect(page.get_by_text("How to set up GitHub")).to_be_visible()
+            body = page.inner_text("body")
+            self.assertNotIn("{provider}", body)
+            self.assertNotIn("not_in_channel", body)
 
             key = f"inbox-e2e-{uuid.uuid4().hex[:10]}/board#1"
             title = f"e2e-inbox-{uuid.uuid4().hex[:10]}"
@@ -147,15 +143,14 @@ class InboxE2ETests(unittest.TestCase):
             refresh = page.get_by_role("button", name="Refresh now")
             expect(refresh).to_be_enabled()
             refresh.click()
-            expect(page.get_by_text(f"{key} · {title}", exact=False)).to_be_visible()
-            finish = page.get_by_role("button", name="Finish", exact=True)
+            expect(page.get_by_text(title, exact=False)).to_be_visible()
+            finish = page.get_by_role("button", name="Start run", exact=True)
             expect(finish).to_be_enabled()
             finish.click()
-            # finish_ticket then re-lists; Finish stays until that GET returns.
             expect(
                 page.get_by_role("status").filter(has_text="Fleet launched")
             ).to_be_visible(timeout=20_000)
-            expect(page.get_by_role("button", name="Finish", exact=True)).to_have_count(
+            expect(page.get_by_role("button", name="Start run", exact=True)).to_have_count(
                 0, timeout=15_000
             )
             run_line = page.get_by_text(re.compile(r"run\s+" + _UUID_RE.pattern, re.I))

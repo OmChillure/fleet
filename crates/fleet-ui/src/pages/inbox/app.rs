@@ -6,11 +6,12 @@ use gloo_timers::future::TimeoutFuture;
 use super::api::{
     InboxResponse, MonitorPatch, TicketRow, finish_ticket, list_inbox, poll_inbox, update_monitor,
 };
-use super::catalog::inbox_app;
+use super::catalog::{explain_error, hook_url_for, inbox_app};
 use super::experience::{experience, repo_issue_parts, row_kicker, slack_parts};
-use crate::components::toast::show_toast;
-use crate::pages::integrations::IntegrationLogo;
 use crate::Route;
+use crate::clipboard::copy_text;
+use crate::components::toast::show_toast;
+use crate::pages::integrations::{IntegrationLogo, list_integrations};
 
 fn csv_list(raw: String) -> Vec<String> {
     raw.split(',')
@@ -80,6 +81,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     let mut status_line = use_signal(|| "Loading…".to_string());
     let mut last_error = use_signal(|| None::<String>);
     let mut hook_url = use_signal(String::new);
+    let mut connected = use_signal(|| false);
     let mut busy = use_signal(|| false);
     let mut finish_error = use_signal(|| None::<(String, String)>);
     let mut seeded = use_signal(|| false);
@@ -93,25 +95,41 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
             loop {
                 match list_inbox(&ws).await {
                     Ok(resp) => {
+                        if let Some(m) = resp.monitor.as_ref() {
+                            hook_url.set(hook_url_for(&m.hook_url, &prov));
+                            last_error.set(
+                                m.last_error
+                                    .as_deref()
+                                    .and_then(|e| explain_error(e, &prov)),
+                            );
+                        } else {
+                            last_error.set(None);
+                        }
                         if !seeded() {
                             filter.set(filter_value(&prov, &resp));
-                            if let Some(m) = resp.monitor.as_ref() {
-                                hook_url.set(m.hook_url.clone());
-                                last_error.set(m.last_error.clone());
-                            }
                             seeded.set(true);
-                        } else if let Some(m) = resp.monitor.as_ref() {
-                            last_error.set(m.last_error.clone());
                         }
                         let mine: Vec<_> = resp
                             .tickets
                             .into_iter()
                             .filter(|t| t.provider.eq_ignore_ascii_case(&prov))
                             .collect();
-                        status_line.set(format!("{} item(s)", mine.len()));
+                        status_line.set(if mine.is_empty() {
+                            "Nothing here yet".into()
+                        } else if mine.len() == 1 {
+                            "1 item waiting".into()
+                        } else {
+                            format!("{} items waiting", mine.len())
+                        });
                         rows.set(mine);
                     }
                     Err(e) => status_line.set(e.message()),
+                }
+                if let Ok(list) = list_integrations(&ws).await {
+                    connected.set(
+                        list.iter()
+                            .any(|i| i.connected && i.id.eq_ignore_ascii_case(&prov)),
+                    );
                 }
                 TimeoutFuture::new(8000).await;
             }
@@ -134,9 +152,9 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     };
 
     let exp = experience(info);
-    let hook = hook_url();
-    let hook_for_app = hook.replace("{{provider}}", info.id);
+    let hook_for_app = hook_url();
     let chips = csv_list(filter());
+    let on = connected();
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
@@ -153,9 +171,13 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                             "{info.name}"
                         }
                         p { class: "mt-1 text-sm text-[var(--app-muted)]", "{info.blurb}" }
-                        p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "{status_line}" }
-                        if let Some(err) = last_error() {
-                            p { class: "mt-1 text-xs text-red-400", "{err}" }
+                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                            if on {
+                                "Connected · "
+                            } else {
+                                "Not connected yet · "
+                            }
+                            "{status_line}"
                         }
                     }
                 }
@@ -173,16 +195,29 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                             let prov = prov.clone();
                             spawn(async move {
                                 match poll_inbox(&ws).await {
-                                    Ok(_) => show_toast().success("Polled."),
+                                    Ok(_) => show_toast().success(format!("Checked {}.", info.name)),
                                     Err(e) => show_toast().error(e.message()),
                                 }
                                 if let Ok(resp) = list_inbox(&ws).await {
+                                    if let Some(m) = resp.monitor.as_ref() {
+                                        last_error.set(
+                                            m.last_error
+                                                .as_deref()
+                                                .and_then(|e| explain_error(e, &prov)),
+                                        );
+                                    }
                                     let mine: Vec<_> = resp
                                         .tickets
                                         .into_iter()
                                         .filter(|t| t.provider.eq_ignore_ascii_case(&prov))
                                         .collect();
-                                    status_line.set(format!("{} item(s)", mine.len()));
+                                    status_line.set(if mine.is_empty() {
+                                        "Nothing here yet".into()
+                                    } else if mine.len() == 1 {
+                                        "1 item waiting".into()
+                                    } else {
+                                        format!("{} items waiting", mine.len())
+                                    });
                                     rows.set(mine);
                                 }
                                 busy.set(false);
@@ -193,56 +228,67 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                 }
             }
 
+            if !on {
+                p { class: "rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-[var(--app-fg)]",
+                    "This page stays empty until {info.name} is connected. "
+                    Link {
+                        to: Route::Integrations { workspace_id: workspace_id.clone() },
+                        class: "font-medium underline",
+                        "Open Integrations and connect {info.name}"
+                    }
+                    "."
+                }
+            }
+
+            if let Some(err) = last_error() {
+                p { class: "rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300",
+                    "{err}"
+                }
+            }
+
             section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
                 h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                    match info.id {
-                        "slack" => "Channels the bot is in",
-                        "teams" => "Teams channels",
-                        "github" => "Repositories",
-                        "gitlab" => "Projects",
-                        "bitbucket" => "Repositories",
-                        "jira" => "JQL",
-                        "linear" => "Teams",
-                        "trello" => "Boards",
-                        "notion" => "Databases",
-                        "confluence" => "Spaces",
-                        "asana" => "Projects",
-                        _ => "Filters",
+                    "How to set up {info.name}"
+                }
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "Each app connects a different way. Follow these steps once."
+                }
+                ol { class: "mt-3 mb-0 list-decimal space-y-2 pl-5 text-sm text-[var(--app-fg)]",
+                    for (i, step) in info.steps.iter().enumerate() {
+                        li { key: "{i}", "{step}" }
                     }
                 }
-                p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.filter_hint}" }
+            }
+
+            section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                    "What should Fleet watch?"
+                }
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "{info.filter_label}. Leave the box empty to use everything this connection can already see."
+                }
                 if info.id == "jira" {
                     textarea {
-                        class: "mt-3 min-h-20 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 font-mono text-sm text-[var(--app-fg)]",
+                        class: "mt-3 min-h-20 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
                         value: "{filter}",
-                        placeholder: "statusCategory != Done ORDER BY updated DESC",
+                        placeholder: "{info.filter_placeholder}",
                         oninput: move |e| filter.set(e.value()),
                     }
                 } else {
                     if !chips.is_empty() {
                         ul { class: "mt-3 m-0 flex list-none flex-wrap gap-1.5 p-0",
                             for c in chips {
-                                li { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 font-mono text-[11px] text-[var(--app-fg)]",
+                                li { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[11px] text-[var(--app-fg)]",
                                     "{c}"
                                 }
                             }
                         }
                     }
-                    label { class: "mt-3 block text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
-                        "{info.filter_label}"
-                    }
                     input {
-                        class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                        class: "mt-3 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
                         value: "{filter}",
+                        placeholder: "{info.filter_placeholder}",
                         oninput: move |e| filter.set(e.value()),
-                    }
-                }
-                if !hook_for_app.is_empty() {
-                    label { class: "mt-3 block text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
-                        "Webhook for {info.name}"
-                    }
-                    p { class: "mt-1 break-all font-mono text-[11px] text-[var(--app-fg)]",
-                        "{hook_for_app}"
                     }
                 }
                 button {
@@ -270,16 +316,40 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                 }
             }
 
+            if !hook_for_app.is_empty() {
+                section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Faster updates (optional)"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.hook_help}" }
+                    p { class: "mt-3 break-all font-mono text-[11px] text-[var(--app-fg)]",
+                        "{hook_for_app}"
+                    }
+                    button {
+                        class: "mt-2 rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-sm text-[var(--app-fg)]",
+                        r#type: "button",
+                        onclick: move |_| {
+                            if copy_text(&hook_for_app) {
+                                show_toast().success(format!("Copied the {} URL.", info.name));
+                            } else {
+                                show_toast().error("Could not copy. Select the URL and copy it yourself.");
+                            }
+                        },
+                        "Copy URL"
+                    }
+                }
+            }
+
             if rows().is_empty() {
                 p { class: "rounded-2xl border border-dashed {exp.accent} p-8 text-center text-sm text-[var(--app-muted)]",
-                    "{exp.empty}"
+                    "{info.empty}"
                 }
             } else {
                 ul { class: "m-0 list-none space-y-2 p-0",
                     for t in rows() {
                         {
                             let kicker = row_kicker(info.id, &t);
-                            let action = exp.action;
+                            let action = info.action;
                             let preview = t
                                 .summary
                                 .clone()
@@ -378,7 +448,13 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                                                                     .into_iter()
                                                                     .filter(|t| t.provider.eq_ignore_ascii_case(&provider))
                                                                     .collect();
-                                                                status_line.set(format!("{} item(s)", mine.len()));
+                                                                status_line.set(if mine.is_empty() {
+                                                                    "Nothing here yet".into()
+                                                                } else if mine.len() == 1 {
+                                                                    "1 item waiting".into()
+                                                                } else {
+                                                                    format!("{} items waiting", mine.len())
+                                                                });
                                                                 rows.set(mine);
                                                             }
                                                             busy.set(false);

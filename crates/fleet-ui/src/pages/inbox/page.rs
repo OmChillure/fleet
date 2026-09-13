@@ -3,11 +3,11 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{InboxResponse, list_inbox, start_monitor, stop_monitor};
+use super::api::{InboxResponse, list_inbox, poll_inbox, start_monitor, stop_monitor};
 use super::catalog::{INBOX_APPS, InboxKind};
+use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{IntegrationLogo, list_integrations};
-use crate::Route;
 
 fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
     resp.tickets
@@ -70,22 +70,17 @@ pub fn Inbox(workspace_id: String) -> Element {
     });
 
     let mut apps: Vec<_> = INBOX_APPS.iter().collect();
-    apps.sort_by_key(|a| {
-        (
-            !connected().contains(a.id),
-            a.name.to_ascii_lowercase(),
-        )
-    });
+    apps.sort_by_key(|a| (!connected().contains(a.id), a.name.to_ascii_lowercase()));
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Inbox" }
-                    p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Each connected app has its own inbox. Slack is channels, GitHub is issues — they are not the same list."
+                    p { class: "mt-1 max-w-xl text-sm text-[var(--app-muted)]",
+                        "Work from Slack, GitHub, and the other apps you connect lands here. Each app is set up differently — open one and we walk you through it."
                     }
-                    p { class: "mt-0.5 font-mono text-xs text-[var(--app-muted)]", "{status_line}" }
+                    p { class: "mt-0.5 text-xs text-[var(--app-muted)]", "{status_line}" }
                 }
                 div { class: "flex flex-wrap gap-2",
                     button {
@@ -112,6 +107,27 @@ pub fn Inbox(workspace_id: String) -> Element {
                     button {
                         class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",
                         r#type: "button",
+                        disabled: busy(),
+                        onclick: {
+                            let ws = workspace_id.clone();
+                            move |_| {
+                                if busy() { return; }
+                                busy.set(true);
+                                let ws = ws.clone();
+                                spawn(async move {
+                                    match poll_inbox(&ws).await {
+                                        Ok(_) => show_toast().success("Checked connected apps."),
+                                        Err(e) => show_toast().error(e.message()),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Refresh now"
+                    }
+                    button {
+                        class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",
+                        r#type: "button",
                         disabled: busy() || !monitor_on(),
                         onclick: {
                             let ws = workspace_id.clone();
@@ -131,6 +147,9 @@ pub fn Inbox(workspace_id: String) -> Element {
                         "Stop monitor"
                     }
                 }
+            }
+            p { class: "m-0 text-xs text-[var(--app-muted)]",
+                "Start monitor checks connected apps on a schedule. Refresh now checks once. Open an app below to connect it and choose what Fleet should watch — Slack is channels, GitHub is issues."
             }
 
             ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
