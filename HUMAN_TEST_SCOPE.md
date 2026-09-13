@@ -6,21 +6,37 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `4c464c8f4cfdce711c614c1bfbbf2209b97ba67a`
-- Tree-id: `4c464c8f4cfdce711c614c1bfbbf2209b97ba67a-b546875f831f`
+- Tree-id: `6878ac8ca3fd3a8b8e80a9279294ecbc7a97b11a-33ce75fe2b3f`
 
 ## Scenes
 
-- _(none — no product surface in the diff)_
+- `shell`
+- `inbox`
+- `integrations`
 
 ## Pause steps
 
+- Inbox
+- Sidebar
+- User menu
+- Integrations
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
-| — | — |
+| `crates/fleet-server/src/tickets.rs` | `inbox` |
+| `crates/fleet-ui/src/components/app_shell.rs` | `shell` |
+| `crates/fleet-ui/src/components/sidebar.rs` | `shell` |
+| `crates/fleet-ui/src/main.rs` | `shell` |
+| `crates/fleet-ui/src/pages/inbox/api.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/inbox/app.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/inbox/catalog.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/inbox/experience.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/inbox/mod.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/inbox/page.rs` | `inbox` |
+| `crates/fleet-ui/src/pages/integrations/mod.rs` | `integrations` |
 
 ## Film review (agent fills after recording)
 

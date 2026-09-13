@@ -276,7 +276,7 @@ cmd_guide() {
     "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
-    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion/GitLab/Trello." \
+    "/{ws}/inbox — one page per app (Slack messages, GitHub issues, …)." \
     "Start monitor follows every connected inbox app (checkbox on) and auto-launches by kind." \
     "Uncheck Follow every connected inbox app → Save filters: watch set pins to the current apps." \
     "Webhook URL on the page: paste into the provider. Slack/Linear HMAC uses the stored signing secret, not the URL token." \

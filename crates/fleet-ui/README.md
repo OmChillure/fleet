@@ -77,7 +77,8 @@ All app routes are **workspace-scoped**.
 | `/{workspace_id}/sessions` | `src/pages/sessions/` | Chat history + live worker sessions |
 | `/{workspace_id}/agents` | `src/pages/agents/` | Personas catalog + seed starters |
 | `/{workspace_id}/sandboxes` | `src/pages/sandboxes/` | Live worker sessions on paired hosts |
-| `/{workspace_id}/inbox` | `src/pages/inbox/` | Ticket inbox (monitor + finish) |
+| `/{workspace_id}/inbox` | `src/pages/inbox/` | Inbox apps index |
+| `/{workspace_id}/inbox/:provider` | `src/pages/inbox/app.rs` | One app's tickets + filters |
 | `/{workspace_id}/cases` | `src/pages/cases/` | Durable cases |
 | `/{workspace_id}/integrations` | `src/pages/integrations/` | OAuth catalog + connect |
 | `/{workspace_id}/settings` | `src/pages/settings/` | Concurrent agents + members + min isolation |
