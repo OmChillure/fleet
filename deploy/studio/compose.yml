@@ -1,0 +1,209 @@
+# Production stack for us-vmmedium.
+# Images are built on the PC and docker-loaded over SSH. No build: keys, no Git.
+#
+#   FLEET_GIT_SHA=<sha> docker compose --env-file .env up -d
+
+name: agent-fleet
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-security: &default-security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    <<: *default-security
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    mem_limit: 1g
+    cpus: "1.0"
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: fleet
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - fleet_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - data
+
+  api:
+    image: agent-fleet-api:${FLEET_GIT_SHA:?set FLEET_GIT_SHA}
+    restart: unless-stopped
+    init: true
+    <<: *default-security
+    mem_limit: 1g
+    cpus: "1.5"
+    logging: *default-logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      DATABASE_URL: postgres://fleet:${POSTGRES_PASSWORD}@postgres:5432/fleet?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-Lax}
+      API_PUBLIC_BASE: ${API_PUBLIC_BASE}
+      UI_PUBLIC_BASE: ${UI_PUBLIC_BASE}
+      DATA_DIR: /data
+      FLEET_WORKER_DIST_DIR: /worker-dist
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:?set FLEET_BOOTSTRAP_SECRET in .env}
+      INTEGRATIONS_ENCRYPTION_KEY: ${INTEGRATIONS_ENCRYPTION_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_REPLY_TO: ${SMTP_REPLY_TO:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SIGNUP_TOKEN: ${SIGNUP_TOKEN:-}
+      INSTANCE_ADMIN_EMAILS: ${INSTANCE_ADMIN_EMAILS:-}
+      ZENOH_LOCATOR: tcp/zenohd:7447
+      RUST_LOG: info,sqlx=warn,tower_http=info
+    volumes:
+      - fleet_data:/data
+      - ./worker-dist:/worker-dist:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+      start_period: 40s
+    networks:
+      - web
+      - data
+      - bus
+
+  ui:
+    image: agent-fleet-ui:${FLEET_GIT_SHA:?set FLEET_GIT_SHA}
+    restart: unless-stopped
+    <<: *default-security
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    mem_limit: 256m
+    cpus: "0.5"
+    logging: *default-logging
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3030:3030"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3030/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    <<: *default-security
+    cap_add:
+      - NET_BIND_SERVICE
+      - DAC_OVERRIDE
+    mem_limit: 256m
+    cpus: "0.5"
+    logging: *default-logging
+    depends_on:
+      ui:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs/origin.crt:/etc/caddy/certs/origin.crt:ro
+      - ./certs/origin.key:/etc/caddy/certs/origin.key:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - web
+
+  zenohd:
+    image: eclipse/zenoh:1.2.1@sha256:ed9c4ca01a64efb1bd52c2ad7668c6477c7a6981da1b502101db80e0d6be1f44
+    restart: unless-stopped
+    <<: *default-security
+    mem_limit: 256m
+    cpus: "0.5"
+    logging: *default-logging
+    command: ["--listen", "tcp/0.0.0.0:7447"]
+    ports:
+      - "127.0.0.1:7447:7447"
+    networks:
+      - bus
+
+  host:
+    image: agent-fleet-api:${FLEET_GIT_SHA:?set FLEET_GIT_SHA}
+    restart: unless-stopped
+    init: true
+    <<: *default-security
+    mem_limit: 512m
+    cpus: "1.0"
+    logging: *default-logging
+    depends_on:
+      api:
+        condition: service_healthy
+      zenohd:
+        condition: service_started
+    user: "10001:10001"
+    command: ["fleet-host", "run"]
+    environment:
+      FLEET_CONTROL_PLANE_URL: http://api:8080
+      FLEET_HOST_CONFIG_DIR: /data/host
+      FLEET_HOST_RUN_HOST: "true"
+      FLEET_HOST_RUN_CONTAINER: "false"
+      FLEET_HARNESS: ${FLEET_HARNESS:-mock}
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET}
+      ZENOH_LOCATOR: tcp/zenohd:7447
+      RUST_LOG: info
+    volumes:
+      - fleet_host:/data/host
+    healthcheck:
+      disable: true
+    networks:
+      - bus
+
+volumes:
+  fleet_pg:
+  fleet_data:
+  fleet_host:
+  caddy_data:
+  caddy_config:
+
+networks:
+  web:
+  data:
+    internal: true
+  bus:
+    internal: true

@@ -38,6 +38,9 @@ __pycache__/
 core
 core.*
 
+# deploy/studio materialize dirs (mktemp .build.XXXXXX)
+deploy/studio/.build.*
+
 # accidental local ref / temp assets
 *.webp
 !docs/**/*.webp

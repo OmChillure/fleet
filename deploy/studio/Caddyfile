@@ -1,0 +1,46 @@
+# Cloudflare terminates public TLS. UFW (not Caddy) allowlists CF anycast
+# onto :80/:443 — docker-proxy hides the real client IP from Caddy.
+# :80 redirects; :443 uses a self-signed origin cert (SSL mode Full).
+
+{
+	auto_https off
+}
+
+:80 {
+	redir https://{host}{uri} permanent
+}
+
+:443 {
+	tls /etc/caddy/certs/origin.crt /etc/caddy/certs/origin.key
+	request_body {
+		max_size 2MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+	handle /health {
+		reverse_proxy api:8080
+	}
+	# OAuth HTML under /api uses inline submit + POST to GitHub. A site-wide
+	# script-src/'form-action self' blocks Continue-to-GitHub.
+	handle /api* {
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; form-action 'self' https://github.com; frame-ancestors 'none'; base-uri 'self'"
+		reverse_proxy api:8080
+	}
+	# Worker install + bin fetch (not under /api).
+	handle /install* {
+		reverse_proxy api:8080
+	}
+	# fleet-driver job heartbeats / status.
+	handle /v1* {
+		reverse_proxy api:8080
+	}
+	handle {
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		reverse_proxy ui:3030
+	}
+}

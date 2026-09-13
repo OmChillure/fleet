@@ -28,6 +28,13 @@ phone home with the token it already has**.
 
 If you would not do it to a customer’s only jump host, do not do it to X1.
 
+## Studio VPS deploy
+
+Ship tooling lives in [`deploy/studio/`](deploy/studio/README.md) (`compose.yml`,
+Caddy, `scripts/deploy.sh`, the 5-minute timer). Runtime state is
+`~/.local/state/vps-fleet/` (not in git). Do not keep a second copy of that
+tree outside this repo.
+
 ## Parallelism
 
 Use parallelism and subagents as much as possible while it is still
