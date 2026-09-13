@@ -4,8 +4,9 @@
 Each bin has its own [release.BIN] version + parent. Parent = sha256 of
 sorted \"platform=hex\\n\" lines for the shipped OS set.
 
-  check     — fail if a table is inconsistent, or staged bins do not match
-  register  — rewrite both [release.BIN] children + parents from a dist dir
+  check         — fail if a table is inconsistent, or staged bins do not match
+  register      — rewrite both [release.BIN] children + parents from a dist dir
+  platform-ok   — exit 0 if DIST/PLATFORM hashes match [release] for both bins
 """
 from __future__ import annotations
 
@@ -166,6 +167,25 @@ def cmd_check(toml_path: Path, dest: Path | None, require_all: bool) -> int:
     return 0
 
 
+def cmd_platform_ok(toml_path: Path, dest: Path, plat: str) -> int:
+    """Exit 0 when both bins for plat are staged and match [release]."""
+    if plat not in SHIP_PLATFORMS:
+        print(f"platform-ok: unknown platform {plat}", file=sys.stderr)
+        return 2
+    text = toml_path.read_text()
+    staged = hashes_from_dist(dest)
+    for bin_ in BINS:
+        _version, _parent, children = parse_bin_release(text, bin_)
+        want = children.get(plat, "")
+        got = staged.get(bin_, {}).get(plat, "")
+        if not re.fullmatch(r"[0-9a-f]{64}", want or ""):
+            print(f"platform-ok: [release.{bin_}].{plat} missing", file=sys.stderr)
+            return 1
+        if got != want:
+            return 1
+    return 0
+
+
 def cmd_register(toml_path: Path, dest: Path) -> int:
     staged = hashes_from_dist(dest)
     miss = [f"{p}/{b}" for b in BINS for p in SHIP_PLATFORMS if p not in staged.get(b, {})]
@@ -204,6 +224,11 @@ def main(argv: list[str]) -> int:
         return cmd_check(toml_path, dest, require)
     if cmd == "register":
         return cmd_register(toml_path, dest)
+    if cmd == "platform-ok":
+        if len(rest) < 2:
+            print("usage: runner-release.py platform-ok DIST PLATFORM", file=sys.stderr)
+            return 2
+        return cmd_platform_ok(toml_path, Path(rest[0]), rest[1])
     print(f"unknown command {cmd}", file=sys.stderr)
     return 2
 
