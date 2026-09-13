@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Stage the worker packages we actually ship (not every OS in --all).
 # Rebuild a platform only when host/driver sources changed since that
-# platform's last bake, or the bins are missing.
+# platform's last bake, or the bins are missing. A runner-packages.toml
+# lock-only edit must not rebuild: those compiles are not bit-identical
+# and fail the release check. If staged hashes already match [release],
+# keep the bins.
 #
 #   linux-x86_64   (bookworm glibc — Debian/Ubuntu guests)
 #   linux-aarch64  (ARM servers)
@@ -77,6 +80,10 @@ stage_one() {
   local have
   have="$(manifest_sha "${dest}" || true)"
   if platform_complete "${dest}"; then
+    if python3 "${REPO}/scripts/runner-release.py" platform-ok "${DIST}" "${plat}"; then
+      log "worker ${plat}: staged hashes match [release], skip"
+      return 0
+    fi
     if [[ "${have}" == "${SHA}" ]]; then
       log "worker ${plat}: already ${SHA:0:12}, skip"
       return 0
