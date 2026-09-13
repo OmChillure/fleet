@@ -1179,8 +1179,18 @@ class InstallWorkerTests(unittest.TestCase):
         self.assertNotEqual(tail, -1, "unclosed FLEET_PAIR_TOKEN pair arm")
         return common[head:tail] + "\nfi\n"
 
-    def _run_unix_common_pair(self, *, platform: str, spies: tuple[str, ...]):
-        """Exec _unix_common.sh main with FLEET_PAIR_TOKEN and no leftover token."""
+    def _run_unix_common_pair(
+        self,
+        *,
+        platform: str,
+        spies: tuple[str, ...],
+        existing_url: str | None = None,
+        pair_force: bool = False,
+    ):
+        """Exec _unix_common.sh main with FLEET_PAIR_TOKEN.
+
+        existing_url seeds a leftover pair (machine.token + config.toml).
+        """
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1192,6 +1202,11 @@ class InstallWorkerTests(unittest.TestCase):
             (prefix / "bin").mkdir(parents=True)
             cfg = td / "cfg"
             cfg.mkdir()
+            if existing_url:
+                (cfg / "machine.token").write_text("flm_existing\n")
+                (cfg / "config.toml").write_text(
+                    f'control_plane_url = "{existing_url}"\n'
+                )
             spy = td / "spy"
             spy.mkdir()
             for name in spies:
@@ -1243,6 +1258,10 @@ class InstallWorkerTests(unittest.TestCase):
                 env["HOME"] = str(td)
                 env["FLEET_HOST_CONFIG_DIR"] = str(cfg)
                 env["FLEET_PAIR_TOKEN"] = "flp_testdeadbeef"
+                if pair_force:
+                    env["FLEET_PAIR_FORCE"] = "1"
+                else:
+                    env.pop("FLEET_PAIR_FORCE", None)
                 env.pop("FLEET_DETECT_ONLY", None)
                 env.pop("FLEET_WORKER_BUILD_FROM_SOURCE", None)
                 env.pop("FLEET_INSTALL_ORIGIN", None)
@@ -1337,15 +1356,26 @@ class InstallWorkerTests(unittest.TestCase):
                 start_fn,
                 "start_host_service must invoke /usr/local/etc/rc.d/fleet-host",
             )
+            helpers = (
+                self._extract_sh_fn(common, "norm_pair_url")
+                + "\n"
+                + self._extract_sh_fn(common, "paired_control_plane_url")
+                + "\n"
+                + self._extract_sh_fn(common, "confirm_unpair_and_pair")
+                + "\n"
+            )
             script = (
                 "set -eu\n"
                 'info() { printf "%s\\n" "$*"; }\n'
+                'die() { printf "%s\\n" "$*" >&2; exit 1; }\n'
                 'have() { command -v "$1" >/dev/null 2>&1; }\n'
                 f'PLATFORM={platform}\n'
                 f'BIN_DIR="{bindir}"\n'
                 f'HOME="{td}"\n'
                 f'ORIGIN=http://127.0.0.1:9\n'
                 f"FLEET_PAIR_TOKEN=flp_testdeadbeef\n"
+                "already_paired=0\n"
+                + helpers
                 + remapped
                 + "\n"
                 + pair_arm
@@ -2208,6 +2238,124 @@ class InstallWorkerTests(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_norm_pair_url_trims_slash_and_space(self):
+        fn = self._extract_sh_fn(
+            (SCRIPT_DIR / "_unix_common.sh").read_text(), "norm_pair_url"
+        )
+        cases = {
+            "https://agentfleet.studio": "https://agentfleet.studio",
+            "https://agentfleet.studio/": "https://agentfleet.studio",
+            "  http://192.168.1.10:18280/  ": "http://192.168.1.10:18280",
+        }
+        for raw, want in cases.items():
+            r = subprocess.run(
+                ["sh", "-c", fn + '\nnorm_pair_url "$1"', "norm", raw],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, want, raw)
+
+    def test_paired_control_plane_url_reads_toml(self):
+        fn = self._extract_sh_fn(
+            (SCRIPT_DIR / "_unix_common.sh").read_text(), "paired_control_plane_url"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td)
+            (cfg / "config.toml").write_text(
+                'run_host = true\ncontrol_plane_url = "http://192.168.1.10:18280/"\n'
+            )
+            r = subprocess.run(
+                ["sh", "-c", fn + "\npaired_control_plane_url\n"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "FLEET_HOST_CONFIG_DIR": str(cfg)},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "http://192.168.1.10:18280/")
+
+    def test_confirm_unpair_force_env_skips_prompt(self):
+        src = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        die = "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+        info = "info() { :; }\n"
+        fn = self._extract_sh_fn(src, "confirm_unpair_and_pair")
+        r = subprocess.run(
+            [
+                "sh",
+                "-c",
+                die + info + fn + '\nconfirm_unpair_and_pair "$1" "$2"\n',
+                "confirm",
+                "http://old",
+                "https://new",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "FLEET_PAIR_FORCE": "1"},
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def test_confirm_unpair_nontty_tells_how_to_force(self):
+        src = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        die = "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+        info = "info() { :; }\n"
+        fn = self._extract_sh_fn(src, "confirm_unpair_and_pair")
+        r = subprocess.run(
+            [
+                "sh",
+                "-c",
+                die + info + fn + '\nconfirm_unpair_and_pair "$1" "$2"\n',
+                "confirm",
+                "http://old",
+                "https://new",
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "FLEET_PAIR_FORCE": ""},
+            stdin=subprocess.DEVNULL,
+        )
+        err = (r.stderr or "") + (r.stdout or "")
+        self.assertNotEqual(r.returncode, 0, err)
+        self.assertIn("already paired to", err)
+        self.assertIn("FLEET_PAIR_FORCE=1", err)
+
+    def test_unix_url_switch_force_passes_force_to_fleet_host(self):
+        """Existing pair to another URL + FLEET_PAIR_FORCE=1 must call pair --force."""
+        r, events = self._run_unix_common_pair(
+            platform="linux-x86_64",
+            spies=("systemctl",),
+            existing_url="http://192.168.1.10:18280",
+            pair_force=True,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        self.assertEqual(r.returncode, 0, out + "\n" + events)
+        self.assertIn("fleet-host pair", events)
+        self.assertIn("--force", events, events)
+
+    def test_unix_url_switch_without_force_or_tty_keeps_old_pair(self):
+        r, events = self._run_unix_common_pair(
+            platform="linux-x86_64",
+            spies=("systemctl",),
+            existing_url="http://192.168.1.10:18280",
+            pair_force=False,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        self.assertNotEqual(r.returncode, 0, out + "\n" + events)
+        self.assertIn("already paired to http://192.168.1.10:18280", out)
+        self.assertNotIn("fleet-host pair", events)
+
+    def test_all_installers_prompt_on_url_switch(self):
+        unix = (SCRIPT_DIR / "_unix_common.sh").read_text()
+        self.assertIn("confirm_unpair_and_pair", unix)
+        self.assertIn("FLEET_PAIR_FORCE", unix)
+        self.assertIn("This machine is already paired to", unix)
+        for name in ("windows-x86_64.ps1", "windows-arm64.ps1"):
+            raw = (SCRIPT_DIR / name).read_text()
+            self.assertIn("Confirm-UnpairAndPair", raw, name)
+            self.assertIn("FLEET_PAIR_FORCE", raw, name)
+            self.assertIn("This machine is already paired to", raw, name)
+            self.assertIn("--force", raw, name)
 
 
 if __name__ == "__main__":

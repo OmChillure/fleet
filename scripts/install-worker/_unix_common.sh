@@ -122,6 +122,37 @@ if [ -n "$_pair_token" ]; then
     export FLEET_PAIR_TOKEN="$_pair_token"
 fi
 
+# Same trim as fleet-host refuse_url_switch / normalize_url.
+norm_pair_url() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s|/*$||'
+}
+
+paired_control_plane_url() {
+    _cfg="${FLEET_HOST_CONFIG_DIR:-$HOME/.config/fleet-host}/config.toml"
+    [ -f "$_cfg" ] || return 0
+    sed -n 's/^[[:space:]]*control_plane_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_cfg" | sed -n '1p'
+}
+
+# 0 = switch (caller passes --force). Non-zero = keep existing pair.
+confirm_unpair_and_pair() {
+    _old=$1
+    _new=$2
+    if [ "${FLEET_PAIR_FORCE:-}" = 1 ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        die "already paired to $_old; this install is $_new. Re-run in a terminal or set FLEET_PAIR_FORCE=1 to unpair and pair to $_new"
+    fi
+    info "This machine is already paired to $_old."
+    info "Pair to $_new instead? That unpairs the old control plane and rotates the machine token."
+    printf 'Unpair and pair to %s? [y/N] ' "$_new" >&2
+    read -r _ans || _ans=
+    case $_ans in
+        y|Y|yes|YES) return 0 ;;
+        *) die "kept existing pair to $_old" ;;
+    esac
+}
+
 warn_loopback_origin "$ORIGIN"
 
 if [ -z "$PREFIX" ]; then
@@ -484,8 +515,20 @@ case :$PATH: in
 esac
 
 if [ -n "${FLEET_PAIR_TOKEN:-}" ]; then
+    _old_pair=$(paired_control_plane_url)
+    _old_pair=$(norm_pair_url "$_old_pair")
+    _new_pair=$(norm_pair_url "$ORIGIN")
+    _pair_force=
+    if [ "$already_paired" -eq 1 ] && [ -n "$_old_pair" ] && [ "$_old_pair" != "$_new_pair" ]; then
+        confirm_unpair_and_pair "$_old_pair" "$_new_pair"
+        _pair_force=--force
+    fi
     info "pairing with the control plane"
-    "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
+    if [ -n "$_pair_force" ]; then
+        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN" --force
+    else
+        "$BIN_DIR/fleet-host" pair --url "$ORIGIN" --token "$FLEET_PAIR_TOKEN"
+    fi
     info "starting fleet-host (heartbeats; offline after 90s if this fails)"
     start_host_service || true
 elif [ "$already_paired" = 1 ]; then
