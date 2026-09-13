@@ -474,12 +474,15 @@ fn send_on_existing_session(
         let stamp = |last: &mut ChatMessage| {
             last.latency_ms = Some(now_ms().saturating_sub(sent_at));
         };
+        // stream_chat's event callback is FnMut, not async. Flag the
+        // empty-thread delete and run it after the stream future returns.
+        let mut drop_empty_thread = false;
         let result = stream_chat(
             &workspace_id,
             history,
             provider,
             Some(model_for_api.clone()),
-            Some(conversation_id),
+            Some(conversation_id.clone()),
             if runner_id.trim().is_empty() {
                 None
             } else {
@@ -532,7 +535,7 @@ fn send_on_existing_session(
                 }
                 ChatStreamEvent::Error { error } => {
                     if first_turn {
-                        let _ = delete_conversation(&workspace_id, &conversation_id).await;
+                        drop_empty_thread = true;
                         show_toast().error(error);
                         navigator.replace(Route::Chat {
                             workspace_id: workspace_id.clone(),
@@ -549,6 +552,11 @@ fn send_on_existing_session(
             },
         )
         .await;
+        if drop_empty_thread {
+            let _ = delete_conversation(&workspace_id, &conversation_id).await;
+            sending.set(false);
+            return;
+        }
         if let Err(e) = result {
             show_toast().error(e.message());
             if first_turn {
