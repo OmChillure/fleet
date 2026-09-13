@@ -55,7 +55,7 @@ notify_desktop() {
   local summary="${2:?}"
   local body="${3:-}"
   local when
-  when="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  when="$(date '+%H:%M')"
   if [[ -n "${body}" ]]; then
     body="${body}"$'\n'"${when}"
   else
