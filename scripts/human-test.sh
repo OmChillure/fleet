@@ -311,6 +311,7 @@ cmd_guide() {
   pause_step "This merge request" \
     "Self-hosted Auto-update checkbox is the plane flag. After heartbeat, config.toml matches it." \
     "A box whose config.toml still says false must update when the checkbox is on." \
+    "Deploy must not rebuild host/driver when staged hashes already match runner-packages.toml." \
     "If this list has no step for it, add one in scripts/human-test.sh and a" \
     "scene in tests/browser/record_demo.py in the same change." || return 0
 

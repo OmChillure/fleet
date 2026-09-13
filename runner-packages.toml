@@ -30,20 +30,20 @@ fleet-driver = "0.0.3"
 
 [release.fleet-host]
 version = "0.0.3"
-parent = "59ed6e096999fc3a334d3c8fd918cf2953889e350b9f9fd51d49f4d6e336768d"
-linux-x86_64 = "2424657e9fe8326c5ee6166f30ec03b5ac0fbf1ab4da0ef9f87263e3ea75c6d0"
-linux-x86_64-rev = 0
-linux-aarch64 = "1e7f210fa445aeba665b41b6653672a5c78960e11dd4c61fddb51de00f0ecdf3"
-linux-aarch64-rev = 0
-windows-x86_64 = "b2cb9dd01c2f7b8f72216dfda3ca06981c40a502e22c93dfabb4f06d1d831953"
-windows-x86_64-rev = 0
+parent = "09342a6ed13789e4116004a4338fdb9ed61d41ddb33a9bec3bde389a5fcd5cb2"
+linux-x86_64 = "6612f96e279d5ad9fb90a4d19637165555af243b2ba1c875eb4885776adcfba6"
+linux-x86_64-rev = 1
+linux-aarch64 = "0967595cf78ff78a106d0efddeb8fdb335e6b9c8f1f146fde110d8ce87d4be7a"
+linux-aarch64-rev = 1
+windows-x86_64 = "6faafc4a2681c28d48f1a5692f1fe6f7da6b18711498366e7fdeee1c1fb21315"
+windows-x86_64-rev = 1
 
 [release.fleet-driver]
 version = "0.0.3"
-parent = "5ffd9b9e82c22254b22adb1cddc5a4b2c33eb67b152010210af0d8c952f91c92"
+parent = "f00a231c2a1030c307224292c8318b1bb575459d22a69be0ed6879f427737443"
 linux-x86_64 = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
 linux-x86_64-rev = 0
 linux-aarch64 = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
 linux-aarch64-rev = 0
-windows-x86_64 = "089479d9899a0ffe6b0377e807b78d0f0197997bbf6b6bc598e8d4cbacb642dd"
-windows-x86_64-rev = 0
+windows-x86_64 = "c98b9324a9b3898a1248280df63618f0c771e3ee1111aa9d6d20f44c84fc41eb"
+windows-x86_64-rev = 1

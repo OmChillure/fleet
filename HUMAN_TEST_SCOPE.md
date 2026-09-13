@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `ab04bca26939e05040c093d95de83b9dc9562561`
-- Tree-id: `ab04bca26939e05040c093d95de83b9dc9562561-ef0df6ea564f`
+- Tree-id: `30bc27618ad90dee541d919377a2d8139b194d3b-be7aba651022`
 
 ## Scenes
 
@@ -27,6 +27,7 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-host/src/config.rs` | `runners` |
 | `crates/fleet-host/src/run.rs` | `runners` |
 | `crates/fleet-host/src/update.rs` | `runners` |
+| `runner-packages.toml` | `runners` |
 
 ## Film review (agent fills after recording)
 
