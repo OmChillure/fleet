@@ -8,6 +8,7 @@ use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
 };
+use crate::pages::inbox::INBOX_APPS;
 use crate::theme::use_theme;
 use fleet_runners_view::routes::{
     RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
@@ -348,9 +349,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Cases { workspace_id: workspace_id.clone() },
                         label: "Cases",
                     }
-                    NavSubLink {
-                        to: Route::Inbox { workspace_id: workspace_id.clone() },
-                        label: "Inbox",
+                    NavInbox {
+                        workspace_id: workspace_id.clone(),
                     }
                 }
 
@@ -633,6 +633,34 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
                 }
                 span { class: "shrink-0 text-[10px] text-[var(--app-muted)]",
                     if menu_open() { "▾" } else { "▴" }
+                }
+            }
+        }
+    }
+}
+
+/// Inbox, then a second indent of each app (Slack, GitHub, …).
+#[component]
+fn NavInbox(workspace_id: String) -> Element {
+    rsx! {
+        div { class: "flex flex-col",
+            Link {
+                class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+                to: Route::Inbox { workspace_id: workspace_id.clone() },
+                active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
+                "Inbox"
+            }
+            div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
+                for app in INBOX_APPS {
+                    Link {
+                        class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+                        to: Route::InboxApp {
+                            workspace_id: workspace_id.clone(),
+                            provider: app.id.to_string(),
+                        },
+                        active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
+                        "{app.name}"
+                    }
                 }
             }
         }

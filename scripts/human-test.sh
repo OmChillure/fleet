@@ -276,12 +276,11 @@ cmd_guide() {
     "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
-    "/{ws}/inbox — one page per app (Slack messages, GitHub issues, …)." \
-    "Start monitor follows every connected inbox app (checkbox on) and auto-launches by kind." \
-    "Uncheck Follow every connected inbox app → Save filters: watch set pins to the current apps." \
-    "Webhook URL on the page: paste into the provider. Slack/Linear HMAC uses the stored signing secret, not the URL token." \
-    "Refresh now polls. Finish starts one open row by hand. A closed board item on a launched row should go done." \
-    "Empty is OK until Integrations are connected. Start monitor without a Connect is 400." || return 0
+    "/{ws}/inbox — card per app. Left nav: Monitoring → Inbox → Slack / GitHub / … (second nest)." \
+    "Open GitHub: numbered setup, watch box, webhook URL must say /webhooks/github/ not {provider}." \
+    "Slack error (not_in_channel) must not appear on GitHub. Slack page explains invite the bot." \
+    "Start monitor on the index checks connected apps on a schedule. Refresh now checks once." \
+    "On GitHub, Start run launches one open issue. Empty is OK until Integrations are connected." || return 0
 
   pause_step "Admin  ${UI_URL}/admin" \
     "Instance page (sidebar Instance → Overview, or user menu Instance admin)." \
@@ -309,8 +308,9 @@ cmd_guide() {
     "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." || return 0
 
   pause_step "This merge request" \
-    "Inbox: follow-connected, pin on uncheck, webhook URL, Finish on an open row." \
-    "A second Finish on the same row must conflict, not start another fleet." \
+    "Inbox nav nest: Slack/GitHub under Inbox. GitHub webhook is /webhooks/github/… not {provider}." \
+    "Slack not_in_channel stays on Slack. GitHub page is a numbered setup walkthrough." \
+    "Start run on an open GitHub issue. A second Start run on the same row must conflict." \
     "If this list has no step for it, add one in scripts/human-test.sh and a" \
     "scene in tests/browser/record_demo.py in the same change." || return 0
 

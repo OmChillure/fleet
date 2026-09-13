@@ -10,84 +10,32 @@ pub struct Experience {
     pub empty: &'static str,
 }
 
+fn accent_for(id: &str) -> &'static str {
+    match id {
+        "slack" => "border-[#4A154B]/40",
+        "teams" => "border-[#6264A7]/40",
+        "github" => "border-white/10",
+        "gitlab" => "border-[#FC6D26]/40",
+        "bitbucket" | "jira" => "border-[#0052CC]/40",
+        "linear" => "border-[#5E6AD2]/40",
+        "trello" => "border-[#0079BF]/40",
+        "asana" => "border-[#F06A6A]/40",
+        "notion" => "border-white/15",
+        "confluence" => "border-[#172B4D]/40",
+        _ => "border-[var(--app-border)]",
+    }
+}
+
 pub fn experience(info: &InboxAppInfo) -> Experience {
-    match info.id {
-        "slack" => Experience {
-            accent: "border-[#4A154B]/40",
-            item_word: "message",
-            action: "Handle",
-            empty: "Invite the Slack app into a channel (/invite @the-app), then Refresh. Slack returns not_in_channel until the bot is a member.",
+    Experience {
+        accent: accent_for(info.id),
+        item_word: match info.kind {
+            InboxKind::Ticket => "issue",
+            InboxKind::Message => "message",
+            InboxKind::Page => "page",
         },
-        "teams" => Experience {
-            accent: "border-[#6264A7]/40",
-            item_word: "message",
-            action: "Handle",
-            empty: "Add the Teams app to a team/channel, then Refresh.",
-        },
-        "github" => Experience {
-            accent: "border-white/10",
-            item_word: "issue",
-            action: "Start run",
-            empty: "Connect GitHub and grant the app the repos you care about, then Refresh. Filter with owner/name.",
-        },
-        "gitlab" => Experience {
-            accent: "border-[#FC6D26]/40",
-            item_word: "issue",
-            action: "Start run",
-            empty: "Connect GitLab. Filter with group/project, then Refresh.",
-        },
-        "bitbucket" => Experience {
-            accent: "border-[#0052CC]/40",
-            item_word: "issue",
-            action: "Start run",
-            empty: "Connect Bitbucket. Issues show as workspace/repo#id.",
-        },
-        "jira" => Experience {
-            accent: "border-[#0052CC]/40",
-            item_word: "issue",
-            action: "Start run",
-            empty: "Connect Jira. Set JQL (default: not Done) and Refresh.",
-        },
-        "linear" => Experience {
-            accent: "border-[#5E6AD2]/40",
-            item_word: "issue",
-            action: "Start run",
-            empty: "Connect Linear. Filter by team key (ENG) if you do not want every team.",
-        },
-        "trello" => Experience {
-            accent: "border-[#0079BF]/40",
-            item_word: "card",
-            action: "Start run",
-            empty: "Connect Trello. Pin board ids or Refresh to pull cards from every board the token can see.",
-        },
-        "asana" => Experience {
-            accent: "border-[#F06A6A]/40",
-            item_word: "task",
-            action: "Start run",
-            empty: "Connect Asana, then Refresh to pull open tasks.",
-        },
-        "notion" => Experience {
-            accent: "border-white/15",
-            item_word: "page",
-            action: "Analyze",
-            empty: "Share Notion databases with the connection, paste database IDs, then Refresh.",
-        },
-        "confluence" => Experience {
-            accent: "border-[#172B4D]/40",
-            item_word: "page",
-            action: "Analyze",
-            empty: "Connect Confluence, then Refresh to pull pages.",
-        },
-        _ => Experience {
-            accent: "border-[var(--app-border)]",
-            item_word: match info.kind {
-                InboxKind::Ticket => "item",
-                InboxKind::Message => "message",
-                InboxKind::Page => "page",
-            },
-            action: "Finish",
-            empty: "Connect this app under Integrations, then Refresh.",
-        },
+        action: info.action,
+        empty: info.empty,
     }
 }
 
@@ -126,9 +74,7 @@ pub fn row_kicker(provider: &str, t: &TicketRow) -> String {
             }
         }
         "jira" | "linear" => t.key.clone(),
-        "trello" | "asana" | "notion" | "confluence" => t
-            .state
-            .clone(),
+        "trello" | "asana" | "notion" | "confluence" => t.state.clone(),
         _ => t.key.clone(),
     }
 }
@@ -152,8 +98,35 @@ mod tests {
         let (repo, num) = repo_issue_parts("acme/api#42");
         assert_eq!(repo, "acme/api");
         assert_eq!(num, "#42");
-        assert_eq!(experience(&super::super::catalog::INBOX_APPS.iter().find(|a| a.id == "slack").unwrap()).action, "Handle");
-        assert_eq!(experience(&super::super::catalog::INBOX_APPS.iter().find(|a| a.id == "github").unwrap()).action, "Start run");
-        assert_eq!(experience(&super::super::catalog::INBOX_APPS.iter().find(|a| a.id == "notion").unwrap()).action, "Analyze");
+        assert_eq!(
+            experience(
+                &super::super::catalog::INBOX_APPS
+                    .iter()
+                    .find(|a| a.id == "slack")
+                    .unwrap()
+            )
+            .action,
+            "Handle"
+        );
+        assert_eq!(
+            experience(
+                &super::super::catalog::INBOX_APPS
+                    .iter()
+                    .find(|a| a.id == "github")
+                    .unwrap()
+            )
+            .action,
+            "Start run"
+        );
+        assert_eq!(
+            experience(
+                &super::super::catalog::INBOX_APPS
+                    .iter()
+                    .find(|a| a.id == "notion")
+                    .unwrap()
+            )
+            .action,
+            "Analyze"
+        );
     }
 }

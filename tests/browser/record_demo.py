@@ -810,11 +810,6 @@ class Demo:
                 raise RuntimeError(f"Inbox page missing {name}")
         self.snap("empty")
         ws = base.rstrip("/").rsplit("/", 1)[-1]
-        # Ticket only — do not fake a GitHub connection. A user without
-        # OAuth still has Finish; Start monitor should say to connect.
-        key = f"demo-inbox-{uuid.uuid4().hex[:8]}/board#1"
-        title = "Demo inbox ticket"
-        seed_open_ticket(ws, "github", key, title)
         start = p.get_by_role("button", name="Start monitor")
         with self.expect_http("POST", "/inbox version", status=("200", "400", "422")):
             start.first.click()
@@ -827,16 +822,34 @@ class Demo:
             # Expected when no integration is connected.
             if "connect" not in body.lower() and "integration" not in body.lower():
                 self.bug("Start monitor neither enabled nor explained connect-first")
+        gh = p.get_by_role("link", name="GitHub", exact=True)
+        if gh.count() == 0:
+            raise RuntimeError("Inbox missing GitHub in the nav or cards")
+        gh.first.click()
+        pause(p, 800)
+        if "How to set up GitHub" not in p.inner_text("body"):
+            raise RuntimeError("GitHub inbox missing setup walkthrough")
+        body = p.inner_text("body")
+        if "{provider}" in body:
+            raise RuntimeError("GitHub webhook still has {provider} in the URL")
+        if "not_in_channel" in body:
+            raise RuntimeError("Slack not_in_channel leaked onto the GitHub inbox")
+        self.snap("github-setup")
+        # Ticket only — do not fake a GitHub connection. A user without
+        # OAuth still has Start run; Start monitor should say to connect.
+        key = f"demo-inbox-{uuid.uuid4().hex[:8]}/board#1"
+        title = "Demo inbox ticket"
+        seed_open_ticket(ws, "github", key, title)
         refresh = p.get_by_role("button", name="Refresh now")
         with self.expect_http("POST", "/inbox/poll", status=("200", "400", "422")):
             refresh.first.click()
         pause(p, 1200)
-        p.get_by_text(f"{key} · {title}", exact=False).first.wait_for(timeout=15_000)
+        p.get_by_text(title, exact=False).first.wait_for(timeout=15_000)
         self.dismiss_toasts()
         self.snap("ticket-visible")
-        finish = p.get_by_role("button", name="Finish", exact=True)
+        finish = p.get_by_role("button", name="Start run", exact=True)
         if finish.count() == 0:
-            raise RuntimeError("Inbox row missing Finish")
+            raise RuntimeError("GitHub inbox row missing Start run")
         with self.expect_http("POST", "/inbox/finish", status=("200", "201")):
             finish.first.click()
         pause(p, 1500)
@@ -851,12 +864,11 @@ class Demo:
                 self.bug("Finish did not leave a launched row or toast")
         self.dismiss_toasts()
         self.snap("after-finish")
-        if p.get_by_role("button", name="Finish", exact=True).count():
-            # Finish should hide once the row is launched.
-            if p.get_by_role("button", name="Finish", exact=True).first.is_visible():
-                self.bug("Finish still visible after launch")
+        if p.get_by_role("button", name="Start run", exact=True).count():
+            if p.get_by_role("button", name="Start run", exact=True).first.is_visible():
+                self.bug("Start run still visible after launch")
         if "failed_spawn" in after.lower():
-            self.bug("Inbox Finish reported failed_spawn")
+            self.bug("Inbox Start run reported failed_spawn")
 
     def scene_agents(self) -> None:
         base = self.ensure_session()
