@@ -26,6 +26,8 @@ what decides to run it, diagnose a red build, and open a fix MR.
 
 The first ship compiles the Rust API + UI images. Expect tens of minutes.
 Later ticks no-op unless `origin/main` moved (they do **not** start Grok).
+A desktop notification on this PC fires on a successful ship and on failure
+(build, health, rollback).
 
 Worker packages (`GET /install/worker/bin/{platform}/{bin}`) are staged in
 the same `deploy.sh` pass: **linux-x86_64** (bookworm), **linux-aarch64**,
