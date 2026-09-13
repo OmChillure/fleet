@@ -1,4 +1,4 @@
-//! One inbox app: that provider's filters and tickets only.
+//! One inbox app: that provider's filters, copy, and item layout.
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
@@ -6,7 +6,8 @@ use gloo_timers::future::TimeoutFuture;
 use super::api::{
     InboxResponse, MonitorPatch, TicketRow, finish_ticket, list_inbox, poll_inbox, update_monitor,
 };
-use super::catalog::{InboxKind, inbox_app};
+use super::catalog::inbox_app;
+use super::experience::{experience, repo_issue_parts, row_kicker, slack_parts};
 use crate::components::toast::show_toast;
 use crate::pages::integrations::IntegrationLogo;
 use crate::Route;
@@ -66,14 +67,6 @@ fn patch_for(provider: &str, raw: String) -> MonitorPatch {
             ..MonitorPatch::default()
         },
         _ => MonitorPatch::default(),
-    }
-}
-
-fn item_word(kind: InboxKind) -> &'static str {
-    match kind {
-        InboxKind::Ticket => "ticket",
-        InboxKind::Message => "message",
-        InboxKind::Page => "page",
     }
 }
 
@@ -140,9 +133,10 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
         };
     };
 
-    let word = item_word(info.kind);
+    let exp = experience(info);
     let hook = hook_url();
     let hook_for_app = hook.replace("{{provider}}", info.id);
+    let chips = csv_list(filter());
 
     rsx! {
         div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
@@ -199,20 +193,53 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                 }
             }
 
-            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Filters" }
-                p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.filter_hint}" }
-                label { class: "mt-3 block text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
-                    "{info.filter_label}"
+            section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
+                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                    match info.id {
+                        "slack" => "Channels the bot is in",
+                        "teams" => "Teams channels",
+                        "github" => "Repositories",
+                        "gitlab" => "Projects",
+                        "bitbucket" => "Repositories",
+                        "jira" => "JQL",
+                        "linear" => "Teams",
+                        "trello" => "Boards",
+                        "notion" => "Databases",
+                        "confluence" => "Spaces",
+                        "asana" => "Projects",
+                        _ => "Filters",
+                    }
                 }
-                input {
-                    class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
-                    value: "{filter}",
-                    oninput: move |e| filter.set(e.value()),
+                p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.filter_hint}" }
+                if info.id == "jira" {
+                    textarea {
+                        class: "mt-3 min-h-20 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 font-mono text-sm text-[var(--app-fg)]",
+                        value: "{filter}",
+                        placeholder: "statusCategory != Done ORDER BY updated DESC",
+                        oninput: move |e| filter.set(e.value()),
+                    }
+                } else {
+                    if !chips.is_empty() {
+                        ul { class: "mt-3 m-0 flex list-none flex-wrap gap-1.5 p-0",
+                            for c in chips {
+                                li { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 font-mono text-[11px] text-[var(--app-fg)]",
+                                    "{c}"
+                                }
+                            }
+                        }
+                    }
+                    label { class: "mt-3 block text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
+                        "{info.filter_label}"
+                    }
+                    input {
+                        class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
+                        value: "{filter}",
+                        oninput: move |e| filter.set(e.value()),
+                    }
                 }
                 if !hook_for_app.is_empty() {
                     label { class: "mt-3 block text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
-                        "Webhook URL for {info.name}"
+                        "Webhook for {info.name}"
                     }
                     p { class: "mt-1 break-all font-mono text-[11px] text-[var(--app-fg)]",
                         "{hook_for_app}"
@@ -232,85 +259,145 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                             let patch = patch_for(&prov, filter());
                             spawn(async move {
                                 match update_monitor(&ws, &patch).await {
-                                    Ok(_) => show_toast().success("Filters saved."),
+                                    Ok(_) => show_toast().success("Saved."),
                                     Err(e) => show_toast().error(e.message()),
                                 }
                                 busy.set(false);
                             });
                         }
                     },
-                    "Save filters"
+                    "Save"
                 }
             }
 
             if rows().is_empty() {
-                p { class: "rounded-2xl border border-dashed border-[var(--app-border)] p-8 text-center text-sm text-[var(--app-muted)]",
-                    "No {word}s yet. Connect {info.name} under Integrations, invite or grant access, then Refresh."
+                p { class: "rounded-2xl border border-dashed {exp.accent} p-8 text-center text-sm text-[var(--app-muted)]",
+                    "{exp.empty}"
                 }
             } else {
                 ul { class: "m-0 list-none space-y-2 p-0",
                     for t in rows() {
-                        li {
-                            key: "{t.provider}:{t.key}",
-                            class: "flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-4 py-3",
-                            div { class: "min-w-0",
-                                p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
-                                    "{t.key} · {t.title}"
-                                }
-                                p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
-                                    "{t.state}"
-                                    if let Some(run) = &t.run_id {
-                                        " · run {run}"
-                                    }
-                                }
-                            }
-                            if t.run_id.is_none() && t.state == "open" {
-                                div { class: "flex min-w-0 flex-col items-end gap-1",
-                                    button {
-                                        class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
-                                        r#type: "button",
-                                        disabled: busy(),
-                                        onclick: {
-                                            let ws = workspace_id.clone();
-                                            let provider = t.provider.clone();
-                                            let key = t.key.clone();
-                                            move |_| {
-                                                if busy() { return; }
-                                                busy.set(true);
-                                                finish_error.set(None);
-                                                let ws = ws.clone();
-                                                let provider = provider.clone();
-                                                let key = key.clone();
-                                                spawn(async move {
-                                                    match finish_ticket(&ws, &provider, &key).await {
-                                                        Ok(_) => show_toast().success("Fleet launched."),
-                                                        Err(e) => {
-                                                            finish_error.set(Some((
-                                                                format!("{provider}:{key}"),
-                                                                e.message(),
-                                                            )));
-                                                        }
-                                                    }
-                                                    if let Ok(resp) = list_inbox(&ws).await {
-                                                        let mine: Vec<_> = resp
-                                                            .tickets
-                                                            .into_iter()
-                                                            .filter(|t| t.provider.eq_ignore_ascii_case(&provider))
-                                                            .collect();
-                                                        status_line.set(format!("{} item(s)", mine.len()));
-                                                        rows.set(mine);
-                                                    }
-                                                    busy.set(false);
-                                                });
+                        {
+                            let kicker = row_kicker(info.id, &t);
+                            let action = exp.action;
+                            let preview = t
+                                .summary
+                                .clone()
+                                .filter(|s| !s.is_empty() && s != &t.title);
+                            let (ch, _) = slack_parts(&t.key);
+                            let (repo, num) = repo_issue_parts(&t.key);
+                            let is_msg = matches!(info.id, "slack" | "teams");
+                            let is_repo = matches!(info.id, "github" | "gitlab" | "bitbucket");
+                            let is_issue_key = matches!(info.id, "jira" | "linear");
+                            rsx! {
+                                li {
+                                    key: "{t.provider}:{t.key}",
+                                    class: "flex flex-wrap items-start justify-between gap-3 rounded-xl border {exp.accent} bg-[var(--app-bg-elevated)] px-4 py-3",
+                                    div { class: "min-w-0 flex-1",
+                                        if is_msg {
+                                            p { class: "m-0 font-mono text-[11px] text-[var(--app-muted)]",
+                                                "#{ch}"
                                             }
-                                        },
-                                        "Finish"
-                                    }
-                                    if let Some((id, msg)) = finish_error() {
-                                        if id == format!("{}:{}", t.provider, t.key) {
-                                            p { class: "m-0 max-w-56 text-right text-[11px] text-red-400",
-                                                "{msg}"
+                                            p { class: "m-0 mt-1 text-sm text-[var(--app-fg)]",
+                                                "{t.title}"
                                             }
+                                        }
+                                        if is_repo {
+                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
+                                                span { class: "font-mono text-[var(--app-muted)]", "{num}" }
+                                                "  {t.title}"
+                                            }
+                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
+                                                "{repo} · {t.state}"
+                                            }
+                                        }
+                                        if is_issue_key {
+                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
+                                                span { class: "mr-2 inline-block rounded bg-[var(--app-bg)] px-1.5 py-0.5 font-mono text-[11px]",
+                                                    "{t.key}"
+                                                }
+                                                "{t.title}"
+                                            }
+                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
+                                                "{t.state}"
+                                            }
+                                        }
+                                        if !is_msg && !is_repo && !is_issue_key {
+                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
+                                                "{t.title}"
+                                            }
+                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
+                                                "{kicker}"
+                                            }
+                                        }
+                                        if let Some(prev) = preview {
+                                            p { class: "m-0 mt-1 line-clamp-2 text-xs text-[var(--app-muted)]",
+                                                "{prev}"
+                                            }
+                                        }
+                                        if let Some(url) = &t.url {
+                                            a {
+                                                class: "mt-1 inline-block text-[11px] text-[var(--app-muted)] underline",
+                                                href: "{url}",
+                                                target: "_blank",
+                                                rel: "noreferrer",
+                                                "Open in {info.name}"
+                                            }
+                                        }
+                                    }
+                                    if t.run_id.is_none() && t.state == "open" {
+                                        div { class: "flex min-w-0 flex-col items-end gap-1",
+                                            button {
+                                                class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
+                                                r#type: "button",
+                                                disabled: busy(),
+                                                onclick: {
+                                                    let ws = workspace_id.clone();
+                                                    let provider = t.provider.clone();
+                                                    let key = t.key.clone();
+                                                    move |_| {
+                                                        if busy() { return; }
+                                                        busy.set(true);
+                                                        finish_error.set(None);
+                                                        let ws = ws.clone();
+                                                        let provider = provider.clone();
+                                                        let key = key.clone();
+                                                        spawn(async move {
+                                                            match finish_ticket(&ws, &provider, &key).await {
+                                                                Ok(_) => show_toast().success("Fleet launched."),
+                                                                Err(e) => {
+                                                                    finish_error.set(Some((
+                                                                        format!("{provider}:{key}"),
+                                                                        e.message(),
+                                                                    )));
+                                                                }
+                                                            }
+                                                            if let Ok(resp) = list_inbox(&ws).await {
+                                                                let mine: Vec<_> = resp
+                                                                    .tickets
+                                                                    .into_iter()
+                                                                    .filter(|t| t.provider.eq_ignore_ascii_case(&provider))
+                                                                    .collect();
+                                                                status_line.set(format!("{} item(s)", mine.len()));
+                                                                rows.set(mine);
+                                                            }
+                                                            busy.set(false);
+                                                        });
+                                                    }
+                                                },
+                                                "{action}"
+                                            }
+                                            if let Some((id, msg)) = finish_error() {
+                                                if id == format!("{}:{}", t.provider, t.key) {
+                                                    p { class: "m-0 max-w-56 text-right text-[11px] text-red-400",
+                                                        "{msg}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if let Some(run) = &t.run_id {
+                                        span { class: "font-mono text-[11px] text-[var(--app-muted)]",
+                                            "run {run}"
                                         }
                                     }
                                 }

@@ -2030,6 +2030,7 @@ pub fn tickets_json(items: &[TicketInboxItem]) -> Value {
                     "title": t.title,
                     "url": t.url,
                     "state": t.state,
+                    "summary": t.summary,
                     "run_id": t.run_id,
                     "last_seen_at": t.last_seen_at,
                 })
