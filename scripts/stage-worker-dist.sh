@@ -611,5 +611,5 @@ case "$MODE" in
     ;;
 esac
 
-# Fail closed: new bytes for a shipped OS must be a new registered version.
-python3 "$ROOT/scripts/runner-release.py" check "$DEST"
+# Deploy / register-runner-release.sh run the fail-closed check after all
+# shipped OS packages exist. A single-platform stage cannot update the parent.

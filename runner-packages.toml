@@ -17,25 +17,25 @@
 # Shipped OS (not musl / armv7 / darwin): linux-x86_64, linux-aarch64, windows-x86_64.
 
 [versions]
-fleet-host = "0.0.2"
-fleet-driver = "0.0.2"
+fleet-host = "0.0.3"
+fleet-driver = "0.0.3"
 
 [verify]
-fleet-host = "0.0.2"
-fleet-driver = "0.0.2"
+fleet-host = "0.0.3"
+fleet-driver = "0.0.3"
 
 [release]
-version = "0.0.2"
-parent = "f43ee5d432643535e4bc886a029fa9c51b812e1bd54a2a6a26576bf05eda8aae"
+version = "0.0.3"
+parent = "f37eb5d8d54b8f0c8e389957fe35e3161bc985e7ac88f520963a40cabbab9d2b"
 
 [release.linux-x86_64]
-fleet-host = "62741e1db1da2512c618d4d1cf7595b72f32ef0e0709ad6499364780b0090fdf"
-fleet-driver = "f66661b4fd0d59c5a49706736ef1717f01c58f29ef55f74e13dd2dbb0c9def9e"
+fleet-host = "4000a889077861391dc3e3f113eb259c032840efc6799f6db90efcb2e2ced25f"
+fleet-driver = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
 
 [release.linux-aarch64]
-fleet-host = "03649f5f984e51bfa0cb2b99e739cd4feb3fef60de2d07d54b80fbe522a47390"
-fleet-driver = "ce0b571eade7a3892dac6de1c7ecb64a0c8fccb47013bf9392fbc1e79fe4d70f"
+fleet-host = "1fe114fd6beea982058987d8c24f94987ff21c2916070e4ccd5b2da4e366edc2"
+fleet-driver = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
 
 [release.windows-x86_64]
-fleet-host = "6a00c2398ea3958248c5aa2da77119b602761f99459ad80e16e8ad1e52b12e18"
-fleet-driver = "a153b89c278dd0a7876a419a6426e00655f4d711444510e44c35f8493204eb4d"
+fleet-host = "9d261d6ccb23508a05ee84621ed59548fa9e27da30f4b84c8de0bc1d5e6fa2a8"
+fleet-driver = "c91c56692ceeb7ef071a165f6e04e83f0e064eed21932542b0440cdfbd333109"
