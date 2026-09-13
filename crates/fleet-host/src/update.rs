@@ -100,9 +100,11 @@ impl ApplyOptions {
     }
 }
 
-/// Plane can only restrict; the box can only restrict further. Both default true.
-pub fn effective_auto_update(local: bool, cp: bool) -> bool {
-    local && cp
+/// Control plane is authoritative. `local` is the `config.toml` mirror
+/// (heartbeat copies the plane flag). Decision uses the plane value so a
+/// stale local `false` cannot hold a box back.
+pub fn effective_auto_update(_local: bool, cp: bool) -> bool {
+    cp
 }
 
 pub fn should_apply_now(
@@ -874,7 +876,7 @@ mod tests {
     }
 
     /// catalog:unit-request-update — CP auto_update false must restrict a
-    /// box that still has local auto on (plane can only restrict).
+    /// box that still has local auto on (plane is authoritative).
     #[test]
     fn maybe_queue_auto_local_on_cp_off_without_request_is_none() {
         let state = UpdateState::new();
@@ -915,7 +917,7 @@ mod tests {
     fn maybe_queue_auto_omitted_cp_auto_defaults_true() {
         let state = UpdateState::new();
         let cfg = LocalConfig {
-            auto_update: true,
+            auto_update: false,
             ..LocalConfig::default()
         };
         let host = HostPublic {
@@ -925,7 +927,27 @@ mod tests {
         let desired = stub_desired("abc");
         assert!(
             maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
-            "omitted CP auto_update defaults true and applies when local auto is on"
+            "omitted CP auto_update defaults true even if config.toml is false"
+        );
+    }
+
+    /// catalog:unit-request-update — stale local false cannot hold back a
+    /// plane that has auto_update on.
+    #[test]
+    fn maybe_queue_auto_stale_local_off_follows_plane_on() {
+        let state = UpdateState::new();
+        let cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        let host = HostPublic {
+            auto_update: Some(true),
+            ..HostPublic::default()
+        };
+        let desired = stub_desired("abc");
+        assert!(
+            maybe_queue_auto(&state, &cfg, &host, Some(&desired)).is_some(),
+            "CP auto on must apply even when config.toml still says false"
         );
     }
 
@@ -1135,10 +1157,7 @@ mod tests {
         )
         .unwrap();
         let text = fs::read_to_string(&script).unwrap();
-        assert!(
-            !text.contains("move /Y \"%DIR%\" \"%DIR%.bak\""),
-            "{text}"
-        );
+        assert!(!text.contains("move /Y \"%DIR%\" \"%DIR%.bak\""), "{text}");
         assert!(!text.contains("%DIR%  .bak"), "{text}");
         assert!(text.contains("fleet-host.exe.new"), "{text}");
     }
@@ -1471,10 +1490,8 @@ mod tests {
                         && path.contains("/install/worker/bin/")
                         && !saw_install_get.swap(true, Ordering::SeqCst)
                     {
-                        stop_on_first_get.store(
-                            state.stop_claiming.load(Ordering::SeqCst),
-                            Ordering::SeqCst,
-                        );
+                        stop_on_first_get
+                            .store(state.stop_claiming.load(Ordering::SeqCst), Ordering::SeqCst);
                     }
                 }))
             },
@@ -1728,10 +1745,8 @@ mod tests {
                         && path.contains("/install/worker/bin/")
                         && !saw_install_get.swap(true, Ordering::SeqCst)
                     {
-                        stop_on_first_get.store(
-                            state.stop_claiming.load(Ordering::SeqCst),
-                            Ordering::SeqCst,
-                        );
+                        stop_on_first_get
+                            .store(state.stop_claiming.load(Ordering::SeqCst), Ordering::SeqCst);
                     }
                 }))
             },
@@ -1771,26 +1786,6 @@ mod tests {
         assert!(
             state.stop_claiming.load(Ordering::SeqCst),
             "stop_claiming flips only after stage"
-        );
-    }
-
-    /// catalog:unit-request-update — local auto_update=false must not queue
-    /// a CP-desired apply even when host.auto_update is true (box restrict).
-    #[test]
-    fn maybe_queue_auto_respects_local_flag() {
-        let state = UpdateState::new();
-        let cfg_off = LocalConfig {
-            auto_update: false,
-            ..LocalConfig::default()
-        };
-        let host = HostPublic {
-            auto_update: Some(true),
-            ..HostPublic::default()
-        };
-        let desired = stub_desired("sha1");
-        assert!(
-            maybe_queue_auto(&state, &cfg_off, &host, Some(&desired)).is_none(),
-            "local auto off + CP auto on + no Update now must not queue"
         );
     }
 

@@ -71,7 +71,12 @@ pub async fn pair(url: &str, token: &str, force: bool) -> Result<()> {
 }
 
 fn refuse_url_switch(cfg: &LocalConfig, url: &str, force: bool) -> Result<()> {
-    let Some(existing) = cfg.control_plane_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(existing) = cfg
+        .control_plane_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return Ok(());
     };
     let have_token = crate::config::read_machine_token()?.is_some();
@@ -325,9 +330,8 @@ fn is_machine_auth_err(e: &anyhow::Error) -> bool {
 /// Needs `FLEET_BOOTSTRAP_SECRET` (fleet-dev sets it). Otherwise the human
 /// runs `fleet-host pair` — do not invent a token.
 async fn reclaim_machine_token(cfg: &mut LocalConfig, url: &str) -> Result<HostClient> {
-    let secret = env_nonempty(BOOTSTRAP_SECRET_ENV).ok_or_else(|| {
-        anyhow!("machine token rejected; re-pair with `fleet-host pair`")
-    })?;
+    let secret = env_nonempty(BOOTSTRAP_SECRET_ENV)
+        .ok_or_else(|| anyhow!("machine token rejected; re-pair with `fleet-host pair`"))?;
     warn!("machine token rejected; reclaiming via bootstrap (same machine.id)");
     let pair_client = HostClient::for_pair(url, cfg)?;
     let resp = bootstrap_until_workspace(&pair_client, cfg, &secret).await?;
@@ -394,13 +398,23 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                         if !resp.host.accepts_leases() {
                             warn!(status = ?resp.host.status, "host not accepting leases");
                         }
+                        let mut persist = cfg
+                            .sync_auto_update_from_plane(resp.host.auto_update_or_default());
+                        if persist {
+                            info!(
+                                auto_update = cfg.auto_update,
+                                "synced auto_update from control plane"
+                            );
+                        }
                         if let Some(rs) = resp.host.runtime_settings.as_ref() {
                             if cfg.apply_runtime_settings(rs) {
-                                if let Err(e) = cfg.save() {
-                                    warn!(error = %e, "failed to persist runtime_settings");
-                                } else {
-                                    info!("applied runtime_settings from control plane");
-                                }
+                                persist = true;
+                                info!("applied runtime_settings from control plane");
+                            }
+                        }
+                        if persist {
+                            if let Err(e) = cfg.save() {
+                                warn!(error = %e, "failed to persist control-plane host settings");
                             }
                         }
                         if let Some(spec) = resp.install.as_ref().and_then(|v| {

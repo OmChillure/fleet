@@ -132,7 +132,7 @@ Never accepted from the control plane. Editing requires shell on the box.
 | `extra_env` | map | {} | Injected into children (no `FLEET_WORKER_TOKEN` override) |
 | `control_plane_url` | url | from pair | Written at pair time |
 | `host_id` | uuid | from pair | Written at pair time |
-| `auto_update` | bool | **true** | This box will apply CP-served updates. Intersected with plane `auto_update` |
+| `auto_update` | bool | **true** | Mirror of the plane flag. Heartbeat copies `host.auto_update` here so `config.toml` stays in sync. The plane is authoritative. |
 
 `run_host` / `run_container` is the worker-side executor switch
 (process vs container). Advertised on every heartbeat as
@@ -526,12 +526,14 @@ Heartbeat response (host client parses even if an older CP omits it):
 Unix bin names omit `.exe`. Platform IDs match `detect_platform()` /
 install (`linux-x86_64`, `windows-x86_64`, …).
 
-1. Effective auto = `host.auto_update` (default **true**) **and** local
-   `config.toml` `auto_update` (default **true**). Plane can only restrict;
-   the box can only restrict further. Auto-off still applies when the
-   operator runs `fleet-host update` or the CP sets `update_requested_at`.
-2. After heartbeat: if effective auto and `desired` differs, spawn apply
-   (do not block the heartbeat). One attempt per desired git sha.
+1. Effective auto = plane `host.auto_update` (default **true**). The host
+   writes that value into `config.toml` on heartbeat so the file stays a
+   mirror; a stale local `false` does not restrict. Auto-off still applies
+   when the operator runs `fleet-host update` or the CP sets
+   `update_requested_at`.
+2. After heartbeat: sync `config.toml`, then if auto is on and `desired`
+   differs, spawn apply (do not block the heartbeat). One attempt per
+   desired git sha.
 3. No `desired` / no prebuilt / 404 → stay quiet; do not error-loop.
 4. Hash local bins; all match → no download.
 5. Download **changed** bins to `{bin}.new` from the paired
