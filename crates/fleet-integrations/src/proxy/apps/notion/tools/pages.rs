@@ -1,6 +1,6 @@
 //! Notion search / page / database tools.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
@@ -25,8 +25,9 @@ pub(crate) async fn search(http: &reqwest::Client, token: &str, args: &Value) ->
     if let Some(filter) = args.get("filter") {
         payload["filter"] = filter.clone();
     }
+    let origin = notion_api_origin();
     let (status, body) =
-        notion_post(http, token, "https://api.notion.com/v1/search", &payload).await;
+        notion_post(http, token, &format!("{origin}/v1/search"), &payload).await;
     if !(200..300).contains(&status) {
         return upstream_err("search", status, &body);
     }
@@ -293,4 +294,226 @@ pub(crate) async fn append_blocks(
         json!({ "block_id": id, "appended": n }),
         Some(status),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::dispatch;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    const LEAK: &str = "ntn_SEARCH_MUST_NOT_ECHO_c0ffee";
+
+    struct OriginGuard;
+    impl Drop for OriginGuard {
+        fn drop(&mut self) {
+            TEST_NOTION_API_BASE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    struct NotionSink {
+        hits: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        origin: String,
+        last_json: Arc<Mutex<Option<Value>>>,
+    }
+
+    impl Drop for NotionSink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl NotionSink {
+        fn bind(status: u16, body: Value) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind notion sink");
+            listener.set_nonblocking(true).expect("nonblocking sink");
+            let addr = listener.local_addr().expect("sink addr");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let last_json = Arc::new(Mutex::new(None));
+            let hits_t = hits.clone();
+            let stop_t = stop.clone();
+            let last_json_t = last_json.clone();
+            let payload = body.to_string();
+            thread::spawn(move || {
+                while !stop_t.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_t.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut buf = Vec::new();
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match stream.read(&mut tmp) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        buf.extend_from_slice(&tmp[..n]);
+                                        if let Some(end) = headers_end(&buf) {
+                                            let len = content_length(&buf[..end]).unwrap_or(0);
+                                            if buf.len() >= end + len {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if let Some(end) = headers_end(&buf) {
+                                if let Ok(v) = serde_json::from_slice::<Value>(&buf[end..]) {
+                                    *last_json_t.lock().expect("last_json") = Some(v);
+                                }
+                            }
+                            let resp = format!(
+                                "HTTP/1.1 {status} ok\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                payload.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                hits,
+                stop,
+                origin: format!("http://{addr}"),
+                last_json,
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+
+        fn last_json(&self) -> Option<Value> {
+            self.last_json.lock().expect("last_json").clone()
+        }
+    }
+
+    fn headers_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        let text = std::str::from_utf8(headers).ok()?;
+        for line in text.split("\r\n") {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                return value.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    fn mapped_page() -> Value {
+        json!({
+            "object": "page",
+            "id": "page-roadmap",
+            "url": "https://www.notion.so/page-roadmap",
+            "last_edited_time": "2024-01-01T00:00:00.000Z",
+            "parent": { "type": "workspace", "workspace": true },
+            "properties": {
+                "title": {
+                    "title": [{ "plain_text": "Roadmap" }]
+                }
+            }
+        })
+    }
+
+    async fn dispatch_search(origin: &str, args: Value) -> ProxyResult {
+        let _guard = OriginGuard;
+        TEST_NOTION_API_BASE.with(|c| *c.borrow_mut() = Some(origin.to_string()));
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http");
+        dispatch("notion", &http, LEAK, "search", &args, &json!({})).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notion_search_maps_results_and_omits_blank_query() {
+        let sink = NotionSink::bind(
+            200,
+            json!({
+                "results": [mapped_page()],
+                "access_token": LEAK
+            }),
+        );
+        let result = dispatch_search(&sink.origin, json!({ "query": "" })).await;
+        assert!(result.ok, "search 200 must be ok: {result:?}");
+        assert_eq!(result.provider, "notion", "{result:?}");
+        assert_eq!(result.operation, "search", "{result:?}");
+        assert_eq!(result.data["count"], json!(1), "count must match items: {result:?}");
+        assert_eq!(result.data["query"], json!(""), "{result:?}");
+        let item = &result.data["items"][0];
+        assert_eq!(item["id"], json!("page-roadmap"), "must map results[].id: {result:?}");
+        assert_eq!(item["object"], json!("page"), "must map results[].object: {result:?}");
+        assert_eq!(
+            item["url"],
+            json!("https://www.notion.so/page-roadmap"),
+            "must map results[].url: {result:?}"
+        );
+        assert_eq!(item["title"], json!("Roadmap"), "must map title: {result:?}");
+        let posted = sink.last_json().unwrap_or_else(|| panic!("POST body: {result:?}"));
+        assert_eq!(posted, json!({ "page_size": 20 }), "blank query must POST page_size only: {posted}");
+        assert!(
+            posted.get("query").is_none(),
+            "blank query must omit query key: {posted}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK) && !dump.to_ascii_lowercase().contains("bearer"),
+            "search must not echo bearer/token: {dump}"
+        );
+        assert!(sink.hits() > 0, "search must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notion_search_nonempty_query_is_posted_and_echoed() {
+        let sink = NotionSink::bind(200, json!({ "results": [mapped_page()] }));
+        let result = dispatch_search(&sink.origin, json!({ "query": "roadmap" })).await;
+        assert!(result.ok, "search 200 must be ok: {result:?}");
+        assert_eq!(result.data["query"], json!("roadmap"), "data.query must echo: {result:?}");
+        let posted = sink.last_json().unwrap_or_else(|| panic!("POST body: {result:?}"));
+        assert_eq!(
+            posted.get("query"),
+            Some(&json!("roadmap")),
+            "payload.query must be posted: {posted}"
+        );
+        assert_eq!(posted["page_size"], json!(20), "{posted}");
+        assert!(sink.hits() > 0, "search must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notion_search_401_is_token_expired() {
+        let sink = NotionSink::bind(
+            401,
+            json!({ "message": "API token is invalid.", "access_token": LEAK }),
+        );
+        let result = dispatch_search(&sink.origin, json!({ "query": "roadmap" })).await;
+        assert!(!result.ok, "401 must be ok:false: {result:?}");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("token_expired"),
+            "Notion 401 must map to token_expired: {result:?}"
+        );
+        assert_eq!(result.provider, "notion", "{result:?}");
+        assert_eq!(result.operation, "search", "{result:?}");
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(!dump.contains(LEAK), "token_expired must not echo token: {dump}");
+        assert!(sink.hits() > 0, "401 must hit the sink: {result:?}");
+    }
 }

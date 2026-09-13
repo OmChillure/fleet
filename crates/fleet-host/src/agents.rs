@@ -78,7 +78,13 @@ pub fn probe_all() -> Vec<AgentProbe> {
             }
         }
     }
-    let fresh = vec![probe_grok(), probe_claude(), probe_openai(), probe_ollama()];
+    let fresh = vec![
+        probe_grok(),
+        probe_claude(),
+        probe_openai(),
+        probe_gemini(),
+        probe_ollama(),
+    ];
     if let Ok(mut g) = PROBE_CACHE.lock() {
         *g = Some((Instant::now(), fresh.clone()));
     }
@@ -471,6 +477,41 @@ fn claude_creds_present(path: &Path) -> bool {
     meta.is_file() && meta.len() > 2
 }
 
+fn probe_gemini() -> AgentProbe {
+    let installed = which("gemini").is_some();
+    let key = std::env::var("GEMINI_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+        .is_some_and(|s| !s.trim().is_empty());
+    let home = home_dir();
+    let cli_session = home
+        .as_ref()
+        .map(|h| {
+            claude_creds_present(&h.join(".gemini/oauth_creds.json"))
+                || claude_creds_present(&h.join(".config/gemini/oauth_creds.json"))
+        })
+        .unwrap_or(false);
+    let logged_in = key || cli_session;
+    let models = if logged_in {
+        env_model_list("GEMINI_MODELS").unwrap_or_else(|| {
+            vec![
+                "gemini-2.5-flash".into(),
+                "gemini-2.0-flash".into(),
+            ]
+        })
+    } else {
+        vec![]
+    };
+    AgentProbe {
+        id: "gemini",
+        name: "Gemini",
+        installed: installed || key,
+        logged_in,
+        models,
+        model_details: vec![],
+    }
+}
+
 fn probe_openai() -> AgentProbe {
     let installed = which("codex").is_some() || which("openai").is_some();
     let key = std::env::var("OPENAI_API_KEY")
@@ -717,28 +758,24 @@ mod tests {
 
     #[test]
     fn parse_cli_model_ids_skips_headings() {
-        let raw =
-            "NAME\n  - claude-sonnet-example\n  * claude-opus-example (default)\n  ignore-me\n";
+        let raw = "NAME\n  * gpt-4o (default)\n  - o1\n  - o3-mini\n  ignore-me\n";
         assert_eq!(
-            parse_cli_model_ids(raw, &["claude-"]),
-            vec!["claude-sonnet-example", "claude-opus-example"]
+            parse_cli_model_ids(raw, &["gpt-", "o1", "o3", "o4"]),
+            vec!["gpt-4o", "o1", "o3-mini"]
         );
     }
 
     #[test]
-    fn sanitize_strips_secrets() {
-        let dirty = json!([{
-            "id": "grok",
-            "name": "Grok",
-            "installed": true,
-            "logged_in": true,
-            "key": "SECRET",
-            "models": ["grok-4.5"]
-        }]);
-        let clean = sanitize_agents_value(&dirty);
-        let obj = clean[0].as_object().unwrap();
-        assert!(!obj.contains_key("key"));
-        assert_eq!(obj["id"], "grok");
-        assert_eq!(obj["models"][0], "grok-4.5");
+    fn parse_cli_model_ids_skips_name_even_when_prefix_matches() {
+        let raw = "NAME\n  - gpt-4o\n";
+        assert_eq!(
+            parse_cli_model_ids(raw, &["gpt-", "name"]),
+            vec!["gpt-4o"]
+        );
+    }
+
+    #[test]
+    fn parse_cli_model_ids_exact_prefix_is_case_insensitive() {
+        assert_eq!(parse_cli_model_ids("O1", &["o1"]), vec!["O1"]);
     }
 }

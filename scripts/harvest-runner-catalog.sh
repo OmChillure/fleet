@@ -33,7 +33,7 @@ exec > >(tee -a "$LOG") 2>&1
 echo "==== $TS tree=$TREE ===="
 echo "--- units ---"
 if just test \
-  && cargo test -p fleet-server --locked --test worker_hosts_http owner_can_rename_host \
+  && cargo test -p fleet-server --locked --test worker_hosts_http rename_host_patch_persists_rejects_empty_too_long \
   && cargo test -p fleet-server --locked --test worker_hosts_http request_update_marks_host; then
   units_ok=1
   echo "UNITS OK"
@@ -76,7 +76,7 @@ data["updated"] = ts
 tracks = data.setdefault("tracks", {})
 tracks["units"] = {
     "status": "pass" if units_ok == "1" else "fail",
-    "command": "just test + worker_hosts_http owner_can_rename_host + request_update_marks_host (DATABASE_URL from .env)",
+    "command": "just test + worker_hosts_http rename_host_patch_persists_rejects_empty_too_long + request_update_marks_host (DATABASE_URL from .env)",
 }
 tracks["e2e"] = {
     "status": e2e_status,

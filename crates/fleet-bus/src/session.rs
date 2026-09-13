@@ -73,26 +73,42 @@ mod tests {
     #[test]
     fn client_config_embeds_locator() {
         let cfg = client_config("tcp/127.0.0.1:7447").expect("json5");
-        let endpoints = cfg
-            .get_json("connect/endpoints")
-            .expect("connect/endpoints");
-        assert!(
-            endpoints.contains("tcp/127.0.0.1:7447"),
-            "endpoints={endpoints}"
-        );
-        let mode = cfg.get_json("mode").expect("mode");
-        assert!(mode.contains("client"), "mode={mode}");
+        let endpoints: Vec<String> = serde_json::from_str(
+            &cfg.get_json("connect/endpoints")
+                .expect("connect/endpoints"),
+        )
+        .expect("endpoints json");
+        assert_eq!(endpoints, ["tcp/127.0.0.1:7447"]);
     }
 
-    #[tokio::test]
-    async fn live_connect_skips_without_zenohd() {
-        let Some(locator) = locator_from_env() else {
-            // Optional: no zenohd / ZENOH_LOCATOR in the default unit-test path.
-            return;
-        };
-        let session = open_session(&locator)
-            .await
-            .unwrap_or_else(|e| panic!("ZENOH_LOCATOR={locator} but open failed: {e}"));
-        session.close().await.unwrap();
+    #[test]
+    fn client_config_mode_is_client() {
+        let cfg = client_config("tcp/127.0.0.1:7447").expect("json5");
+        let mode: String =
+            serde_json::from_str(&cfg.get_json("mode").expect("mode")).expect("mode json");
+        assert_eq!(mode, "client");
+    }
+
+    #[test]
+    fn client_config_disables_multicast_scouting() {
+        let cfg = client_config("tcp/127.0.0.1:7447").expect("json5");
+        let enabled: bool = serde_json::from_str(
+            &cfg.get_json("scouting/multicast/enabled")
+                .expect("scouting/multicast/enabled"),
+        )
+        .expect("enabled json");
+        assert_eq!(enabled, false);
+    }
+
+    #[test]
+    fn client_config_json_escapes_quoted_locator() {
+        let locator = r#"tcp/127.0.0.1:7447/"quote"\slash"#;
+        let cfg = client_config(locator).expect("json5");
+        let endpoints: Vec<String> = serde_json::from_str(
+            &cfg.get_json("connect/endpoints")
+                .expect("connect/endpoints"),
+        )
+        .expect("endpoints json");
+        assert_eq!(endpoints, [locator]);
     }
 }

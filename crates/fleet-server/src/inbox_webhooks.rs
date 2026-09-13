@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -165,7 +165,9 @@ async fn resolve_workspace(
             .await
             .map_err(|e| e.to_string())?
         {
-            if !verify_optional_signature(provider, token, headers, body) {
+            if !token_path_signature_ok(state, provider, mon.workspace_id, token, headers, body)
+                .await?
+            {
                 return Ok(None);
             }
             return Ok(Some(mon.workspace_id));
@@ -215,31 +217,78 @@ async fn match_github_app_signature(
     Ok(None)
 }
 
-fn verify_optional_signature(
+/// Path token is the capability. Provider HMAC, when present, is checked
+/// against the stored app secret — never against `hook_token`.
+async fn token_path_signature_ok(
+    state: &AppState,
     provider: &str,
+    workspace_id: Uuid,
     token: &str,
     headers: &HeaderMap,
     body: &[u8],
-) -> bool {
+) -> Result<bool, String> {
     match provider {
-        "github" => match header_str(headers, "x-hub-signature-256") {
-            Some(sig) => github_signature_ok(token, sig, body),
-            None => true,
-        },
-        "gitlab" => match header_str(headers, "x-gitlab-token") {
+        "gitlab" => Ok(match header_str(headers, "x-gitlab-token") {
             Some(got) => secure_eq(got.trim(), token),
             None => true,
-        },
-        "linear" => match header_str(headers, "linear-signature") {
-            Some(sig) => linear_signature_ok(token, sig, body),
-            None => true,
-        },
-        "slack" => match header_str(headers, "x-slack-signature") {
-            Some(sig) => slack_signature_ok(token, headers, sig, body),
-            None => true,
-        },
-        _ => true,
+        }),
+        "github" | "linear" | "slack" => {
+            let stored = provider_signing_secret(state, workspace_id, provider).await?;
+            Ok(match provider {
+                "github" => match header_str(headers, "x-hub-signature-256") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => github_signature_ok(secret, sig, body),
+                        None => true,
+                    },
+                    None => stored.is_none(),
+                },
+                "linear" => match header_str(headers, "linear-signature") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => linear_signature_ok(secret, sig, body),
+                        None => true,
+                    },
+                    None => stored.is_none(),
+                },
+                "slack" => match header_str(headers, "x-slack-signature") {
+                    Some(sig) => match stored.as_deref() {
+                        Some(secret) => slack_signature_ok(secret, headers, sig, body),
+                        None => slack_timestamp_fresh(headers),
+                    },
+                    None => stored.is_none(),
+                },
+                _ => true,
+            })
+        }
+        _ => Ok(true),
     }
+}
+
+async fn provider_signing_secret(
+    state: &AppState,
+    workspace_id: Uuid,
+    provider: &str,
+) -> Result<Option<String>, String> {
+    let Some(app) = fleet_db::repos::integrations::get_oauth_app(&state.db, workspace_id, provider)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let Ok(plain) = state
+        .integrations
+        .credentials_key
+        .decrypt(&app.client_secret)
+    else {
+        return Ok(None);
+    };
+    let secret = plain
+        .get("webhook_secret")
+        .or_else(|| plain.get("signing_secret"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(secret)
 }
 
 fn github_signature_ok(secret: &str, header: &str, body: &[u8]) -> bool {
@@ -256,7 +305,24 @@ fn linear_signature_ok(secret: &str, header: &str, body: &[u8]) -> bool {
     secure_eq(header.trim(), &expect)
 }
 
+fn slack_timestamp_fresh(headers: &HeaderMap) -> bool {
+    slack_timestamp_fresh_at(headers, chrono::Utc::now().timestamp())
+}
+
+fn slack_timestamp_fresh_at(headers: &HeaderMap, now: i64) -> bool {
+    let Some(ts) = header_str(headers, "x-slack-request-timestamp") else {
+        return false;
+    };
+    let Ok(ts) = ts.trim().parse::<i64>() else {
+        return false;
+    };
+    (now - ts).unsigned_abs() <= 300
+}
+
 fn slack_signature_ok(secret: &str, headers: &HeaderMap, header: &str, body: &[u8]) -> bool {
+    if !slack_timestamp_fresh(headers) {
+        return false;
+    }
     let Some(ts) = header_str(headers, "x-slack-request-timestamp") else {
         return false;
     };
@@ -802,10 +868,18 @@ mod tests {
     }
 
     #[test]
-    fn github_hmac_accepts_valid_and_rejects_bad() {
+    fn github_hmac_accepts_literal_sha256_header() {
         let body = b"{\"zen\":\"hi\"}";
-        let sig = format!("sha256={}", hmac_hex(b"s3cret", body));
-        assert!(github_signature_ok("s3cret", &sig, body));
+        assert!(github_signature_ok(
+            "s3cret",
+            "sha256=b18ce78d18646301e6811d72dbafbde385e5ab0f65482fdb261485ca0773c8bc",
+            body,
+        ));
+    }
+
+    #[test]
+    fn github_hmac_rejects_bad_sha256_header() {
+        let body = b"{\"zen\":\"hi\"}";
         assert!(!github_signature_ok("s3cret", "sha256=deadbeef", body));
     }
 
@@ -813,13 +887,11 @@ mod tests {
     fn slack_url_verification_is_challenge() {
         let bytes =
             serde_json::to_vec(&json!({"type":"url_verification","challenge":"abc"})).unwrap();
-        assert_eq!(slack_challenge(&bytes).unwrap()["challenge"], "abc");
-        let parsed = parse_event("slack", &HeaderMap::new(), &bytes).unwrap();
-        assert!(matches!(parsed, ParsedEvent::Ignore));
+        assert_eq!(slack_challenge(&bytes), Some(json!({"challenge":"abc"})));
     }
 
     #[test]
-    fn parses_jira_and_linear() {
+    fn parses_jira_issue_created() {
         let jira = json!({
             "webhookEvent": "jira:issue_created",
             "issue": { "key": "ENG-9", "fields": { "summary": "Login", "status": { "name": "To Do" } } }
@@ -831,9 +903,18 @@ mod tests {
         )
         .unwrap();
         match parsed {
-            ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-9"),
-            other => panic!("{other:?}"),
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "jira");
+                assert_eq!(items[0].key, "ENG-9");
+                assert_eq!(items[0].title, "Login");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_linear_issue_create() {
         let linear = json!({
             "type": "Issue",
             "action": "create",
@@ -846,9 +927,101 @@ mod tests {
         )
         .unwrap();
         match parsed {
-            ParsedEvent::Items(items) => assert_eq!(items[0].key, "ENG-3"),
-            other => panic!("{other:?}"),
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "linear");
+                assert_eq!(items[0].key, "ENG-3");
+                assert_eq!(items[0].title, "Ship");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_linear_non_issue_without_identifier_is_ignored() {
+        let body = json!({
+            "type": "Comment",
+            "action": "create",
+            "data": { "body": "note" }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
+    }
+
+    #[test]
+    fn parse_jira_done_and_linear_completed_mark_closed() {
+        let jira = json!({
+            "webhookEvent": "jira:issue_updated",
+            "issue": { "key": "ENG-9", "fields": { "summary": "Login", "status": { "name": "Done" } } }
+        });
+        let parsed = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&jira).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+        let linear_completed = json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ENG-3", "title": "Ship", "state": { "type": "completed" } }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&linear_completed).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+        let linear_canceled = json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ENG-3", "title": "Ship", "state": { "type": "canceled" } }
+        });
+        let parsed = parse_event(
+            "linear",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&linear_canceled).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => assert!(items[0].closed),
+            other => panic!("expected items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_jira_missing_issue_or_key_is_err() {
+        let missing_issue = json!({ "webhookEvent": "jira:issue_created" });
+        let err = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&missing_issue).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "missing issue");
+        let missing_key = json!({
+            "webhookEvent": "jira:issue_created",
+            "issue": { "fields": { "summary": "Login" } }
+        });
+        let err = parse_event(
+            "jira",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&missing_key).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "missing issue.key");
     }
 
     #[test]
@@ -872,12 +1045,68 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_without_project_or_kind_is_ignored() {
-        let bare = json!({ "object_attributes": { "iid": 3, "title": "x" } });
+    fn slack_rejects_stale_timestamp() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-slack-request-timestamp", HeaderValue::from_static("1"));
+        assert!(!slack_timestamp_fresh_at(&headers, 1_000_000));
+        headers.insert(
+            "x-slack-request-timestamp",
+            HeaderValue::from_static("1000000"),
+        );
+        assert!(slack_timestamp_fresh_at(&headers, 1_000_000));
+        assert!(slack_timestamp_fresh_at(&headers, 1_000_280));
+        assert!(!slack_timestamp_fresh_at(&headers, 1_000_301));
+    }
+
+    #[test]
+    fn gitlab_issue_with_project_and_kind_ingests_key() {
+        let body = json!({
+            "object_kind": "issue",
+            "project": { "path_with_namespace": "acme/app" },
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
         let parsed = parse_event(
             "gitlab",
             &HeaderMap::new(),
-            &serde_json::to_vec(&bare).unwrap(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].key, "acme/app#3");
+                assert_eq!(items[0].title, "x");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gitlab_issue_kind_without_project_is_ignored() {
+        let body = json!({
+            "object_kind": "issue",
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
+        let parsed = parse_event(
+            "gitlab",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
+    }
+
+    #[test]
+    fn gitlab_unknown_kind_with_project_is_ignored() {
+        let body = json!({
+            "object_kind": "push",
+            "project": { "path_with_namespace": "acme/app" },
+            "object_attributes": { "iid": 3, "title": "x" }
+        });
+        let parsed = parse_event(
+            "gitlab",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
         )
         .unwrap();
         assert!(matches!(parsed, ParsedEvent::Ignore));

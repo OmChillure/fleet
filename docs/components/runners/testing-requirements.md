@@ -6,7 +6,8 @@ A behavior is not done until the three layers that apply have tests.
 
 How to *run* tests: [`docs/testing.md`](../../testing.md).
 Where a test *lives*: [`docs/testing-standardization.md`](../../testing-standardization.md).
-Product surface: [`README.md`](./README.md), [`worker-host`](../worker-host/README.md).
+Product surface: [`README.md`](./README.md), [`worker-host`](../worker-host/README.md),
+[`run-on-pc-vs-container.md`](run-on-pc-vs-container.md).
 
 Do not invent a second framework. Rust behavior stays in Rust. Dioxus
 chrome stays in Playwright. Install / VM / OS matrix stays in lab
@@ -63,6 +64,14 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 - Do not mark a layer done because a neighboring test exists. The row
   is the unit of coverage.
 
+**Send-ACL and run-mode.** Who may send work to a PC (only me / people I
+allow / anyone in the workspace) and the guest use case (**Run on a PC**
+vs **Run in a container**) need the same three layers as every other
+runner behavior: unit / regular, browser e2e, and real-life guest. No
+silent fallback across use cases. Required coverage lives in
+[`run-on-pc-vs-container.md`](run-on-pc-vs-container.md); do not invent
+extra test names here.
+
 ---
 
 ## Catalog
@@ -79,7 +88,7 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Add worker creates a pending host + one-time pair token | HTTP create; token hashed; plaintext once | Click Add worker; panel shows token once; gone after Done + reload | Pair from a guest using that token |
+| Add worker creates a pending host + one-time pair token | HTTP create; token hashed; plaintext once | Click Add worker (name optional); panel shows token once; gone after Done + reload | Pair from a guest using that token |
 | Unix install command (Linux, macOS, FreeBSD) | Script contract; `FLEET_PAIR_TOKEN` present | Command in the panel contains token + `install-worker.sh` | Guest runs the command; bins install; daemon starts |
 | Windows PowerShell install | Same for `.ps1`; ARM64 vs x64 from the machine | Command in the panel contains token + `install-worker.ps1` | Windows x64 and ARM64 guests |
 | Copy (Unix, Windows, token) | Clipboard helper | Copy buttons work (incl. HTTP LAN fallback) | n/a (browser) |
@@ -159,11 +168,11 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| One picker: `select_assignable_runner` | Wrapper + native-only filter | n/a (orch) | Job lands on an online native guest |
+| One picker: `select_assignable_runner` | Wrapper + run-mode + native host-isolation + executor | n/a (orch) | Job lands on a matching guest |
 | Prefer remote online native under cap | `list_assignable` + in-flight | n/a | Two guests: job goes to a free one |
 | Else local only if plane taking jobs | spawn gate | n/a | Plane off + guests down → no local spawn |
 | Cloud / Partners / public-cloud never chosen | Picker ignores them | Placeholder pages do not enqueue | n/a |
-| No container / k3d enqueue in v1 | Spawn payload host-only | n/a | Sandboxed-only host gets no job |
+| No silent fallback across use cases | On-pc job never enqueues `runtime=container`; in-container job never falls back to Exec | n/a | Sandboxed-only host (five-kind placeholder) gets no job |
 
 ### Software staging and host update
 

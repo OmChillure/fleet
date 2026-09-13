@@ -419,6 +419,29 @@ mod tests {
         let archived = crate::sandbox::team::run_handoffs_dir(root.path(), project, run)
             .join("t1/tree/ui.tsx");
         assert!(archived.exists());
+
+        let next = root.path().join("sess-t2");
+        std::fs::create_dir_all(&next).unwrap();
+        hydrate_session_files(
+            root.path(),
+            &next,
+            &dummy_task(project, run, "t2"),
+            &crate::store::BoardSnapshot {
+                tasks: vec![],
+                sessions: vec![],
+            },
+            &["t1".into()],
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(next.join("handoff/t1/ui.tsx")).unwrap_or_default(),
+            "x",
+            "next specialist must see archived work/ from the previous guest"
+        );
+        assert_eq!(
+            std::fs::read_to_string(next.join("work/ui.tsx")).unwrap_or_default(),
+            "x"
+        );
     }
 
     #[test]
@@ -426,12 +449,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let req = ChangesRequest {
             targets: vec!["t1".into()],
-            reason: "missing tests".into(),
+            reason: "  missing tests\n".into(),
         };
         write_changes_request(dir.path(), &req).unwrap();
         let got = read_changes_request(dir.path()).unwrap();
         assert_eq!(got.targets, ["t1"]);
-        assert!(dir.path().join("REVIEW.md").exists());
+        assert_eq!(got.reason, "  missing tests\n");
+        let review = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(
+            review,
+            "# Changes requested\n\nTargets: t1\n\nmissing tests\n"
+        );
+    }
+
+    #[test]
+    fn write_changes_request_rejects_blank_reason() {
+        for reason in ["", "  \n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let err = write_changes_request(
+                dir.path(),
+                &ChangesRequest {
+                    targets: vec!["t1".into()],
+                    reason: reason.into(),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, "reason is empty", "reason={reason:?}");
+            assert!(
+                !changes_path(dir.path()).exists(),
+                "blank reason {reason:?} must not write request_changes.json"
+            );
+            assert!(
+                !dir.path().join("REVIEW.md").exists(),
+                "blank reason {reason:?} must not write REVIEW.md"
+            );
+        }
+    }
+
+    #[test]
+    fn write_changes_request_empty_targets_labels_dependencies_in_review_md() {
+        let dir = tempfile::tempdir().unwrap();
+        write_changes_request(
+            dir.path(),
+            &ChangesRequest {
+                targets: vec![],
+                reason: "  need deps  ".into(),
+            },
+        )
+        .unwrap();
+        let review = std::fs::read_to_string(dir.path().join("REVIEW.md")).unwrap();
+        assert_eq!(
+            review,
+            "# Changes requested\n\nTargets: (dependencies)\n\nneed deps\n"
+        );
+    }
+
+    #[test]
+    fn read_changes_request_none_when_missing_or_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "absent request_changes.json must skip bounce"
+        );
+
+        let path = changes_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "empty request_changes.json must skip bounce"
+        );
+
+        std::fs::write(&path, "{").unwrap();
+        assert!(
+            read_changes_request(dir.path()).is_none(),
+            "invalid request_changes.json must skip bounce"
+        );
     }
 
     fn dummy_task(project: Uuid, run: Uuid, id: &str) -> BoardTaskRow {

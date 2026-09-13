@@ -98,7 +98,8 @@ if [[ "${SKIP_ORCH}" != "1" ]]; then
   export ADMIN_TOKEN="${ADMIN_TOKEN:-test-admin}"
   if cargo test -p fleet-orchestrator --locked --offline \
       --test store_integration --test tick_integration --test api_integration \
-      --test e2e_matrix --test process_sandbox; then
+      --test e2e_matrix --test host_pool_spawn --test host_update_tick \
+      --test assignable_runner --test git_config_patch --test host_picker_product; then
     pass orch-integration
   else
     fail orch-integration

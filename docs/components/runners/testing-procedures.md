@@ -40,12 +40,12 @@ plus driver/host. It never talks to a browser. `fleet-runners-view`
 | --- | --- |
 | `fleet-db` `tests/worker_hosts_repos.rs` | pair consume-once, revoke, heartbeat, assignable, reclaim |
 | `fleet-db` `control_plane_runner_id` | plane id is stable and is never a paired host |
-| `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; plane first; plane DELETE 400 |
+| `fleet-server` `tests/worker_hosts_http.rs` | create/list/pair/lease/PATCH/revoke; API process is not a runner |
 | `fleet-orchestrator` `tests/assignable_runner.rs` | picker ignores cloud/partners; native-only |
 | `fleet-orchestrator` `tests/host_update_tick.rs` | hold ready while updating |
 | `fleet-orchestrator` `tests/plane_runner_tick.rs` | plane off → no local spawn |
 | `sandbox-lab/tests/test_install_worker.py` | script syntax + detect + `FLEET_PAIR_TOKEN` |
-| `fleet-runners-view` `placeholders.rs` | Cloud four cards + Coming soon; partners trust copy; disclaimer default-off; ack ≠ lend/assignable |
+| `fleet-runners-view` `placeholders.rs` | Cloud four cards (BYO Coming soon, Fleet Cloud attach); partners trust copy; disclaimer default-off; ack unlocks lend UI, not assignable |
 
 `fleet-ui` is WASM. Chrome is layer 2. Pure helpers run on the host in
 `fleet-runners-view` (`just test`): `routes.rs` (accordion title + child
@@ -79,7 +79,7 @@ Catalog → test (layer 2):
 | Redirects | `test_08` (`/workers`), `test_09` (`/runners`) |
 | Add / pair / Done / token once | `test_05_workers_add_shows_pair_token` |
 | Copy Unix / Windows / token (HTTP LAN fallback) | `test_14h_copy_buttons_http_lan_fallback`; `test_catalog_copy_buttons.test_copy_unix_windows_token_incl_http_lan_fallback` |
-| Loopback URL warning | `test_14i_loopback_warning`; `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
+| Loopback URL warning | `test_catalog_loopback_warning.test_warning_when_command_is_loopback` |
 | Cancel discards pending | `test_15_cancel_discards_pending_worker` |
 | API is not a runner; empty Self-hosted | `test_16_control_plane_card`; `test_14l_plane_sandboxed`; `test_catalog_plane_sandboxed.test_toggle_sandboxed_on_the_plane_card` |
 | Apply changes appears when dirty | `test_17_apply_changes_when_dirty` |

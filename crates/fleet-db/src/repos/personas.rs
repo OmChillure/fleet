@@ -69,6 +69,33 @@ pub async fn list_for_workspace(
     .map_err(map_query_err)
 }
 
+pub async fn find_by_slug(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    slug: &str,
+) -> DbResult<Option<Persona>> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, Persona>(&format!(
+        r#"
+        SELECT {COLS}
+        FROM personas
+        WHERE workspace_id = $1
+          AND status = 'active'
+          AND (lower(slug) = lower($2) OR lower(worker_profile) = lower($2))
+        ORDER BY is_default DESC, name ASC
+        LIMIT 1
+        "#
+    ))
+    .bind(workspace_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)
+}
+
 pub async fn get(pool: &PgPool, workspace_id: Uuid, persona_id: Uuid) -> DbResult<Option<Persona>> {
     sqlx::query_as::<_, Persona>(&format!(
         r#"

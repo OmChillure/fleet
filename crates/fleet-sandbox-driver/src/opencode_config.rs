@@ -403,19 +403,81 @@ mod tests {
     #[test]
     fn full_opencode_object_passthrough() {
         let mut job = empty_job();
-        job.opencode = Some(json!({
+        let given = json!({
             "$schema": "https://opencode.ai/config.json",
             "model": "anthropic/claude-sonnet-4-5",
             "provider": {
                 "anthropic": {
                     "options": { "apiKey": "{env:ANTHROPIC_API_KEY}" }
                 }
-            }
-        }));
+            },
+            "experimentalUnknown": "keep-me"
+        });
+        job.opencode = Some(given.clone());
+        // Lower-priority Job.provider must not synthesize a replacement config.
+        job.provider = Some(ProviderSpec {
+            id: "acme".into(),
+            name: "Acme".into(),
+            npm: "@ai-sdk/openai-compatible".into(),
+            base_url: Some("https://x.test/v1".into()),
+            api_key_env: "OPENCODE_API_KEY".into(),
+            api_key: Some("k".into()),
+            models: BTreeMap::new(),
+            headers: BTreeMap::new(),
+        });
         let mut env = HashMap::new();
         let cfg = build_opencode_config(&job, &mut env).unwrap();
-        assert_eq!(cfg["model"], "anthropic/claude-sonnet-4-5");
-        assert!(cfg["provider"]["anthropic"]["options"]["apiKey"].is_string());
+        assert_eq!(cfg, given);
+    }
+
+    #[test]
+    fn opencode_config_path_used_when_object_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "fleet-opencode-cfg-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("opencode.json");
+        let given = json!({
+            "$schema": "https://opencode.ai/config.json",
+            "model": "openai/gpt-4",
+            "fromFile": true
+        });
+        fs::write(&path, serde_json::to_string(&given).unwrap()).unwrap();
+        let mut job = empty_job();
+        job.opencode = None;
+        job.opencode_config_path = Some(path.to_string_lossy().into_owned());
+        let mut env = HashMap::new();
+        let cfg = build_opencode_config(&job, &mut env).unwrap();
+        assert_eq!(cfg, given);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opencode_object_injects_job_api_keys() {
+        let mut job = empty_job();
+        job.opencode = Some(json!({
+            "$schema": "https://opencode.ai/config.json",
+            "model": "anthropic/claude-sonnet-4-5"
+        }));
+        job.anthropic_api_key = Some("k".into());
+        let mut env = HashMap::new();
+        let _cfg = build_opencode_config(&job, &mut env).unwrap();
+        assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("k"));
+    }
+
+    #[test]
+    fn empty_schema_shell_when_no_opencode_provider_or_model() {
+        let job = empty_job();
+        let mut env = HashMap::new();
+        let cfg = build_opencode_config(&job, &mut env).unwrap();
+        assert_eq!(
+            cfg,
+            json!({
+                "$schema": "https://opencode.ai/config.json"
+            })
+        );
     }
 
     #[test]

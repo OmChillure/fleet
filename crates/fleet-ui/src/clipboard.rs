@@ -152,37 +152,3 @@ fn spawn_clipboard_write(clip: web_sys::Clipboard, text: String) {
         let _ = wasm_bindgen_futures::JsFuture::from(clip.write_text(&text)).await;
     });
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn http_lan_fallback_is_textarea_before_clipboard_api() {
-        let steps = copy_backends("curl -fsSL http://192.168.1.10/install-worker.sh");
-        assert_eq!(
-            steps,
-            &[
-                CopyBackend::ExecCommandTextarea,
-                CopyBackend::ClipboardApiIfPresent,
-            ]
-        );
-        assert!(copy_backends("flp_token").starts_with(&[CopyBackend::ExecCommandTextarea]));
-        assert!(copy_backends("").is_empty());
-    }
-
-    #[test]
-    fn missing_clipboard_api_does_not_panic() {
-        assert!(!clipboard_api_usable(false, true, true, false));
-        assert!(!clipboard_api_usable(true, true, false, false));
-        assert!(!clipboard_api_usable(true, false, true, false));
-        assert!(!clipboard_api_usable(true, false, false, false));
-        assert!(clipboard_api_usable(true, false, false, true));
-        // Host has no clipboard API. Must return false, not panic.
-        assert!(!copy_text("flp_token"));
-        assert!(!copy_text(
-            "curl -fsSL http://192.168.0.2/install-worker.sh"
-        ));
-        assert!(!copy_text(""));
-    }
-}

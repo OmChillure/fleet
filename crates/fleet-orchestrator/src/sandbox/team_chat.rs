@@ -421,6 +421,7 @@ mod tests {
     async fn send_is_unread_for_target_not_sender() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = talks(dir.path());
+        let c = TeamTalk::from_spawn(dir.path(), a.project_id, a.run_id, "t3", "reviewer");
         let msg = post_message(&a, "t2", "say", "API is POST /hello", None)
             .await
             .unwrap();
@@ -430,8 +431,36 @@ mod tests {
         let inbox = unread_for(&b).await;
         assert_eq!(inbox.len(), 1);
         assert!(inbox[0].body.contains("POST /hello"));
+        assert!(unread_for(&c).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unread_for_matches_to_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        let a = TeamTalk::from_spawn(dir.path(), project, run, "t1", "backend");
+        let b = TeamTalk::from_spawn(dir.path(), project, run, "T2", "frontend");
+        post_message(&a, "T2", "say", "API is POST /hello", None)
+            .await
+            .unwrap();
+        let inbox = unread_for(&b).await;
+        assert_eq!(inbox.len(), 1);
+        assert!(inbox[0].body.contains("POST /hello"));
+    }
+
+    #[tokio::test]
+    async fn mark_seen_through_is_per_agent_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = talks(dir.path());
+        let c = TeamTalk::from_spawn(dir.path(), a.project_id, a.run_id, "t3", "reviewer");
+        post_message(&a, "*", "say", "shared types in types.ts", None)
+            .await
+            .unwrap();
+        let inbox = unread_for(&b).await;
         mark_seen_through(&b, &inbox).await;
         assert!(unread_for(&b).await.is_empty());
+        assert_eq!(unread_for(&c).await.len(), 1);
     }
 
     #[tokio::test]
@@ -458,19 +487,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ask.kind, "ask");
-
-        let waiter = {
-            let a = a.clone();
-            let id = ask.id;
-            tokio::spawn(async move { wait_for_reply(&a, id, "t2", Duration::from_secs(2)).await })
-        };
-        tokio::time::sleep(Duration::from_millis(80)).await;
         post_message(&b, "t1", "reply", "port 8080", Some(ask.id))
             .await
             .unwrap();
-        let reply = waiter.await.unwrap().expect("reply");
+        let reply = wait_for_reply(&a, ask.id, "t2", Duration::from_secs(2))
+            .await
+            .expect("reply");
+        assert_eq!(reply.from, "t2");
+        assert_eq!(reply.kind, "reply");
         assert!(reply.body.contains("8080"));
         assert_eq!(reply.in_reply_to, Some(ask.id));
+    }
+
+    #[tokio::test]
+    async fn wait_for_reply_returns_none_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, _) = talks(dir.path());
+        let ask = post_message(&a, "t2", "ask", "what port?", None)
+            .await
+            .unwrap();
+        assert!(
+            wait_for_reply(&a, ask.id, "t2", Duration::from_millis(50))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_reply_ignores_wrong_from_and_unrelated_in_reply_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = talks(dir.path());
+        let c = TeamTalk::from_spawn(dir.path(), a.project_id, a.run_id, "t3", "reviewer");
+        let ask = post_message(&a, "t2", "ask", "what port?", None)
+            .await
+            .unwrap();
+        post_message(&c, "t1", "reply", "from t3", Some(ask.id))
+            .await
+            .unwrap();
+        post_message(&b, "t1", "reply", "unrelated", Some(Uuid::now_v7()))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_reply(&a, ask.id, "t2", Duration::from_millis(50))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn post_message_ask_to_star_is_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, _) = talks(dir.path());
+        assert!(post_message(&a, "*", "ask", "q", None).await.is_err());
     }
 
     #[test]
@@ -478,26 +546,6 @@ mod tests {
         assert_eq!(normalize_to("ALL"), "*");
         assert_eq!(normalize_to("team"), "*");
         assert_eq!(normalize_to(" t2 "), "t2");
-    }
-
-    #[test]
-    fn run_dir_is_project_and_run_scoped() {
-        let root = Path::new("/data");
-        let project = Uuid::now_v7();
-        let run = Uuid::now_v7();
-        let dir = run_dir(root, project, run);
-        assert_eq!(
-            dir,
-            root.join("projects")
-                .join(project.to_string())
-                .join("runs")
-                .join(run.to_string())
-        );
-        let other = run_dir(root, Uuid::now_v7(), run);
-        assert_ne!(
-            dir, other,
-            "same run_id under another project must not share the chat dir"
-        );
     }
 
     #[tokio::test]
@@ -531,8 +579,68 @@ mod tests {
             body: "route?".into(),
         };
         let s = format_inbox(&[msg]);
-        assert!(s.contains("route?"));
-        assert!(s.contains("ask"));
-        assert!(s.contains("`t1`"));
+        assert!(
+            s.contains("### ask `t1`"),
+            "inbox heading must name kind+from (preamble 'asked' is not enough): {s}"
+        );
+        assert!(
+            s.contains("you (`t2`)"),
+            "directed dest is you (to), not team: {s}"
+        );
+        assert!(
+            s.contains(&format!("- id: `{}`", Uuid::nil())),
+            "inbox must surface message id for reply_to: {s}"
+        );
+        assert!(s.contains("route?"), "ask body must appear: {s}");
+    }
+
+    #[test]
+    fn format_inbox_empty_is_no_new_messages() {
+        assert_eq!(format_inbox(&[]), "No new messages.");
+    }
+
+    #[test]
+    fn format_inbox_broadcast_dest_is_team() {
+        let msg = TeamMessage {
+            id: Uuid::nil(),
+            seq: 1,
+            ts: Utc::now(),
+            from: "t1".into(),
+            from_profile: "backend".into(),
+            to: "*".into(),
+            kind: "say".into(),
+            in_reply_to: None,
+            body: "shared types".into(),
+        };
+        let s = format_inbox(&[msg]);
+        assert!(
+            s.contains("→ team"),
+            "broadcast dest arm must render team, not the star token: {s}"
+        );
+        assert!(
+            !s.contains("you (`*`)"),
+            "broadcast must not take the directed dest arm: {s}"
+        );
+    }
+
+    #[test]
+    fn format_inbox_includes_in_reply_to() {
+        let ask_id = Uuid::from_u128(42);
+        let msg = TeamMessage {
+            id: Uuid::nil(),
+            seq: 2,
+            ts: Utc::now(),
+            from: "t2".into(),
+            from_profile: "frontend".into(),
+            to: "t1".into(),
+            kind: "reply".into(),
+            in_reply_to: Some(ask_id),
+            body: "port 8080".into(),
+        };
+        let s = format_inbox(&[msg]);
+        assert!(
+            s.contains(&format!("- in reply to: `{ask_id}`")),
+            "reply inbox must carry the ask id as in-reply-to: {s}"
+        );
     }
 }

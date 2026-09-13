@@ -173,3 +173,20 @@ pub async fn is_session_active(pool: &PgPool, session_id: Uuid, user_id: Uuid) -
     .map_err(map_query_err)?;
     Ok(active)
 }
+
+/// Revoke every live session for a user (disable / force sign-out).
+pub async fn revoke_all_for_user(pool: &PgPool, user_id: Uuid, at: DateTime<Utc>) -> DbResult<u64> {
+    let res = sqlx::query(
+        r#"
+        UPDATE auth_sessions
+        SET revoked_at = $1
+        WHERE user_id = $2 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(at)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected())
+}

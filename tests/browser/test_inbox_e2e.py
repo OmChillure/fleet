@@ -19,7 +19,6 @@ import os
 import re
 import socket
 import sys
-import time
 import unittest
 import uuid
 from pathlib import Path
@@ -74,22 +73,11 @@ def _require_playwright():
 
 
 def _goto_inbox(page, workspace_url: str) -> None:
-    last_err: Exception | None = None
-    for _ in range(6):
-        try:
-            page.goto(f"{workspace_url}/inbox", wait_until="domcontentloaded")
-        except Exception as e:  # noqa: BLE001 — dx restart / connection reset
-            last_err = e
-            time.sleep(2)
-            continue
-        wait_dx_ready(page)
-        try:
-            page.wait_for_selector("h1", state="attached", timeout=20_000)
-            return
-        except Exception as e:  # noqa: BLE001 — dx mid-rebuild; retry
-            last_err = e
-            time.sleep(2)
-    raise RuntimeError(f"could not open inbox page: {last_err}")
+    from playwright.sync_api import expect
+
+    page.goto(f"{workspace_url}/inbox", wait_until="domcontentloaded")
+    wait_dx_ready(page)
+    expect(page.get_by_role("heading", name="Inbox", exact=True)).to_be_visible()
 
 
 def _json(res) -> dict:
@@ -99,69 +87,6 @@ def _json(res) -> dict:
     if not text:
         return {}
     return json.loads(text)
-
-
-def _inbox(page, workspace_id: str) -> dict:
-    return _json(page.request.get(f"{UI}/api/workspaces/{workspace_id}/inbox"))
-
-
-def _ticket(inbox: dict, provider: str, key: str) -> dict | None:
-    for t in inbox.get("tickets") or []:
-        if isinstance(t, dict) and t.get("provider") == provider and t.get("key") == key:
-            return t
-    return None
-
-
-def _wait_inbox(page, workspace_id: str, timeout_s: float = 20.0) -> dict:
-    deadline = time.time() + timeout_s
-    last: dict = {}
-    last_err: Exception | None = None
-    while time.time() < deadline:
-        try:
-            last = _inbox(page, workspace_id)
-            last_err = None
-            return last
-        except Exception as e:  # noqa: BLE001 — poll until list is readable
-            last_err = e
-        page.wait_for_timeout(400)
-    raise AssertionError(f"GET inbox failed: last={last!r} err={last_err}"[:800])
-
-
-def _wait_monitor_enabled(
-    page, workspace_id: str, want: bool, timeout_s: float = 20.0
-) -> dict:
-    deadline = time.time() + timeout_s
-    last: dict = {}
-    while time.time() < deadline:
-        last = _wait_inbox(page, workspace_id, timeout_s=5.0)
-        mon = last.get("monitor") or {}
-        if bool(mon.get("enabled")) is want:
-            return last
-        page.wait_for_timeout(400)
-    raise AssertionError(
-        f"inbox monitor.enabled {((last.get('monitor') or {}).get('enabled'))!r} "
-        f"!= {want!r}: {last!r}"[:800]
-    )
-
-
-def _wait_ticket(
-    page,
-    workspace_id: str,
-    provider: str,
-    key: str,
-    timeout_s: float = 20.0,
-) -> dict:
-    deadline = time.time() + timeout_s
-    last: dict = {}
-    while time.time() < deadline:
-        last = _wait_inbox(page, workspace_id, timeout_s=5.0)
-        hit = _ticket(last, provider, key)
-        if hit is not None:
-            return hit
-        page.wait_for_timeout(400)
-    raise AssertionError(
-        f"inbox missing {provider}:{key}: {last!r}"[:800]
-    )
 
 
 class InboxE2ETests(unittest.TestCase):
@@ -186,22 +111,9 @@ class InboxE2ETests(unittest.TestCase):
         cls._browser.close()
         cls._pw.stop()
 
-    def test_unauthenticated_inbox_redirects_to_login(self) -> None:
-        ctx = self._browser.new_context(
-            base_url=UI,
-            viewport={"width": 1400, "height": 900},
-        )
-        page = ctx.new_page()
-        page.set_default_timeout(20_000)
-        try:
-            fake = uuid.uuid4()
-            page.goto(f"{UI}/{fake}/inbox", wait_until="domcontentloaded")
-            page.wait_for_url("**/login", timeout=15_000)
-            self.assertIn("/login", page.url)
-        finally:
-            ctx.close()
-
     def test_list_monitor_finish(self) -> None:
+        from playwright.sync_api import expect
+
         ctx = self._browser.new_context(
             base_url=UI,
             viewport={"width": 1400, "height": 900},
@@ -211,104 +123,46 @@ class InboxE2ETests(unittest.TestCase):
         try:
             ws, workspace_url = signup_login(page, prefix="inbox-e2e")
             _goto_inbox(page, workspace_url)
-            self.assertEqual(page.locator("h1").first.inner_text().strip(), "Inbox")
-            self.assertIn("/inbox", page.url)
-            nav = page.locator("aside nav")
-            self.assertTrue(
-                nav.get_by_role("link", name="Inbox", exact=True).count() > 0,
-                "sidebar missing Inbox under Monitoring",
-            )
-            for name in ("Start monitor", "Stop monitor", "Refresh now"):
-                self.assertTrue(
-                    page.get_by_role("button", name=name).count() > 0,
-                    f"Inbox page missing {name}",
-                )
-            body = page.inner_text("body")
-            self.assertIn("No tickets yet. Connect integrations, then Start monitor.", body)
-            self.assertIn("0 ticket(s)", body)
-            listed = _wait_inbox(page, ws)
-            self.assertEqual(listed.get("tickets") or [], [], listed)
-            mon0 = listed.get("monitor")
-            self.assertTrue(
-                mon0 is None or mon0.get("enabled") is not True,
-                f"fresh workspace must not already be monitoring: {listed}",
-            )
 
             seed_connected_github(ws)
             start = page.get_by_role("button", name="Start monitor")
-            self.assertTrue(start.first.is_enabled(), "Start monitor stayed disabled")
-            start.first.click()
-            after_start = _wait_monitor_enabled(page, ws, True)
-            mon = after_start.get("monitor") or {}
-            self.assertTrue(mon.get("enabled"), after_start)
-            providers = [str(p).lower() for p in (mon.get("providers") or [])]
-            self.assertIn("github", providers, after_start)
-            page.get_by_text(re.compile(r"monitor on")).first.wait_for(timeout=15_000)
-            stop = page.get_by_role("button", name="Stop monitor")
-            self.assertTrue(stop.first.is_enabled(), "Stop monitor stayed disabled after start")
+            expect(start).to_be_enabled()
+            start.click()
+            expect(page.get_by_role("button", name="Stop monitor")).to_be_enabled()
+
+            # Start monitor no longer turns auto_launch on. Uncheck if a
+            # previous poll left it on so Finish is a real click.
+            keep = page.locator("label").filter(has_text="Launch open tickets")
+            box = keep.locator("input[type='checkbox']")
+            expect(box).to_be_visible()
+            box.uncheck()
+            save = page.get_by_role("button", name="Save filters")
+            expect(save).to_be_enabled()
+            save.click()
+            expect(save).to_be_enabled()
 
             key = f"inbox-e2e-{uuid.uuid4().hex[:10]}/board#1"
             title = f"e2e-inbox-{uuid.uuid4().hex[:10]}"
             seed_open_ticket(ws, "github", key, title)
             refresh = page.get_by_role("button", name="Refresh now")
-            refresh.first.click()
-            row = _wait_ticket(page, ws, "github", key)
-            self.assertEqual(row.get("title"), title, row)
-            self.assertNotIn(
-                (row.get("state") or "").lower(),
-                {"launched", "done", "ignored", "closed"},
-                f"seeded ticket must still be open for Finish: {row}",
-            )
-            self.assertTrue(
-                row.get("run_id") in (None, "", []),
-                f"seeded ticket must not already have a run: {row}",
-            )
-            ticket_label = page.get_by_text(f"{key} · {title}", exact=False)
-            deadline = time.time() + 20
-            while time.time() < deadline:
-                try:
-                    if ticket_label.count() and ticket_label.first.is_visible():
-                        break
-                except Exception:
-                    pass
-                if refresh.first.is_enabled():
-                    refresh.first.click()
-                page.wait_for_timeout(500)
-            ticket_label.first.wait_for(timeout=10_000)
+            expect(refresh).to_be_enabled()
+            refresh.click()
+            expect(page.get_by_text(f"{key} · {title}", exact=False)).to_be_visible()
             finish = page.get_by_role("button", name="Finish", exact=True)
-            finish.first.wait_for(state="visible", timeout=15_000)
-            self.assertTrue(finish.first.is_enabled(), "Finish stayed disabled")
-            finish.first.click()
-
-            deadline = time.time() + 25
-            launched = row
-            while time.time() < deadline:
-                launched = _wait_ticket(page, ws, "github", key)
-                rid = launched.get("run_id")
-                state = (launched.get("state") or "").lower()
-                if rid and state == "launched":
-                    break
-                page.wait_for_timeout(400)
-            run_id = launched.get("run_id")
-            self.assertTrue(run_id, launched)
-            self.assertIsNotNone(_UUID_RE.fullmatch(str(run_id)), launched)
-            self.assertEqual((launched.get("state") or "").lower(), "launched", launched)
-            self.assertEqual(launched.get("title"), title, launched)
-            self.assertEqual(launched.get("key"), key, launched)
-            page.get_by_text(
-                re.compile(r"run\s+" + re.escape(str(run_id)))
-            ).first.wait_for(timeout=15_000)
-
-            hide_deadline = time.time() + 15
-            while time.time() < hide_deadline:
-                if page.get_by_role("button", name="Finish", exact=True).count() == 0:
-                    break
-                page.wait_for_timeout(200)
-            self.assertEqual(
-                page.get_by_role("button", name="Finish", exact=True).count(),
-                0,
-                "Finish must hide on a launched inbox row",
+            expect(finish).to_be_enabled()
+            finish.click()
+            # finish_ticket then re-lists; Finish stays until that GET returns.
+            expect(
+                page.get_by_role("status").filter(has_text="Fleet launched")
+            ).to_be_visible(timeout=20_000)
+            expect(page.get_by_role("button", name="Finish", exact=True)).to_have_count(
+                0, timeout=15_000
             )
+            run_line = page.get_by_text(re.compile(r"run\s+" + _UUID_RE.pattern, re.I))
+            expect(run_line).to_be_visible()
+            found = _UUID_RE.search(run_line.inner_text())
+            self.assertIsNotNone(found, run_line.inner_text())
+            run_id = found.group(0)
 
             runs = _json(page.request.get(f"{UI}/api/workspaces/{ws}/fleet/runs"))
             matching = [

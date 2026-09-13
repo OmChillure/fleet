@@ -100,7 +100,32 @@ async fn mock_permission_auto_approve() {
     .await
     .unwrap();
     assert!(out.ok, "error={:?} stderr={}", out.error, out.stderr_tail);
-    assert!(out.transcript.contains("hello from mock agent"));
+    assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
+    assert!(
+        out.transcript.contains("hello from mock agent"),
+        "transcript={}",
+        out.transcript
+    );
+    assert!(
+        out.transcript.contains("allow-once"),
+        "transcript={}",
+        out.transcript
+    );
+}
+
+#[tokio::test]
+async fn mock_permission_deny_does_not_complete() {
+    let dir = tempdir().unwrap();
+    let mut run = base_run(dir.path(), spec_with_args(vec!["--permission".into()]));
+    run.auto_approve = false;
+    let out = acp::run_session(run).await.unwrap();
+    assert!(!out.ok, "error={:?} stop={:?}", out.error, out.stop_reason);
+    assert_eq!(out.stop_reason.as_deref(), Some("cancelled"));
+    assert!(
+        !out.transcript.contains("hello from mock agent"),
+        "transcript={}",
+        out.transcript
+    );
 }
 
 #[tokio::test]

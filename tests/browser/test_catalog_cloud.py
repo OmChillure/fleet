@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Layer 2 e2e: Cloud page is four Coming soon cards (catalog:e2e-cloud-coming-soon).
+"""Layer 2 e2e: Cloud cards do not create hosts (catalog:list-cloud-four-provider-cards).
 
-Visit /runners/cloud. AWS / GCP / Azure / Fleet Cloud each show Coming soon.
-The page must not grow spawn, lend, enqueue, pair, or Add worker controls.
+Clicking AWS / GCP / Azure headings on /runners/cloud must not mint a
+worker-hosts row. Fleet Cloud Attach creates a sandboxed host via
+/runners/cloud/fleet (not /worker-hosts).
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runners_e2e_helpers import UI, create_host, list_hosts, wait_dx_ready  # noqa: E402
+from runners_e2e_helpers import UI, list_hosts, wait_dx_ready  # noqa: E402
 from stack_identity import ForeignStackError, require_this_tree  # noqa: E402
 
 API = os.environ.get("FLEET_API_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -29,11 +30,8 @@ BROWSERS = os.environ.get(
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", BROWSERS)
 
 CLOUD_NAMES = ("AWS", "GCP", "Azure", "Fleet Cloud")
-_ACTION_RE = re.compile(r"spawn|lend|enqueue|add worker|\bpair\b", re.I)
-_REMOTE_ENQUEUE_RE = re.compile(
-    r"/(?:spawn|enqueue|lease|tick|fleet/runs|worker-hosts|jobs|claims|lend)(?:/|$|\?)",
-    re.I,
-)
+_CLOUD_URL = re.compile(r".*/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$")
+_WORKER_HOSTS_WRITE_RE = re.compile(r"/worker-hosts(?:/|$|\?)", re.I)
 
 
 def _listening(host: str, port: int) -> bool:
@@ -132,48 +130,21 @@ def _goto_cloud(page, base: str) -> None:
         raise last_err
 
 
-def _is_remote_enqueue_or_spawn(method: str, url: str) -> bool:
-    if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
-        return False
-    if "lend" in url.lower():
-        return True
-    return _REMOTE_ENQUEUE_RE.search(url) is not None
-
-
-def _own_kind_hosts(payload: dict, workspace_id: str) -> list[dict]:
-    """Workspace-owned kind=host rows. Plane / foreign cluster cards are not this picker."""
+def _own_host_ids(payload: dict, workspace_id: str) -> list[str]:
+    """Workspace-owned worker-hosts ids. Plane / foreign cluster cards are skipped."""
     rows = payload.get("hosts") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         rows = []
-    own: list[dict] = []
+    ids: list[str] = []
     for host in rows:
         if not isinstance(host, dict):
             continue
-        if str(host.get("kind") or "") != "host":
+        if str(host.get("workspace_id") or "") != workspace_id:
             continue
-        ws = host.get("workspace_id")
-        if ws is not None and str(ws) != workspace_id:
-            continue
-        own.append(host)
-    return own
-
-
-def _looks_like_cloud_host(host: dict) -> bool:
-    name = str(host.get("name") or host.get("hostname") or "").strip()
-    kind = str(host.get("kind") or "").strip().lower().replace("_", "-")
-    isolation = str(host.get("isolation") or "").strip().lower().replace("_", "-")
-    if name in CLOUD_NAMES:
-        return True
-    cloud_slugs = {
-        "cloud",
-        "aws",
-        "gcp",
-        "azure",
-        "fleet-cloud",
-        "public-cloud",
-        "partners",
-    }
-    return kind in cloud_slugs or isolation in cloud_slugs
+        hid = str(host.get("id") or "")
+        if hid:
+            ids.append(hid)
+    return ids
 
 
 class CatalogCloudComingSoonE2ETests(unittest.TestCase):
@@ -192,268 +163,64 @@ class CatalogCloudComingSoonE2ETests(unittest.TestCase):
                 ".tmp/ms-playwright. Re-run install-full-suite-deps.sh "
                 "with ENABLE_BROWSER_E2E=1 in repo-root .env."
             ) from e
-        cls._context = cls._browser.new_context(
-            base_url=UI,
-            viewport={"width": 1400, "height": 900},
-        )
-        cls.page = cls._context.new_page()
-        cls.page.set_default_timeout(20_000)
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls._context.close()
         cls._browser.close()
         cls._pw.stop()
-
-    def test_cloud_page_coming_soon(self) -> None:
-        page = self.page
-        _ws, base = _signup_api(page)
-
-        mutating: list[tuple[str, str]] = []
-
-        def on_request(req) -> None:
-            method = req.method.upper()
-            if method in {"POST", "PUT", "PATCH", "DELETE"}:
-                mutating.append((method, req.url))
-
-        page.on("request", on_request)
-        try:
-            _goto_cloud(page, base)
-            self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$")
-            h1 = page.locator("h1").first.inner_text().strip()
-            self.assertIn("Cloud", h1, f"unexpected cloud heading {h1!r}")
-
-            main = page.locator("main")
-            cards = main.locator("article")
-            self.assertEqual(
-                cards.count(),
-                4,
-                "cloud page must render four Coming soon cards",
-            )
-            for name in CLOUD_NAMES:
-                card = cards.filter(has_text=name)
-                self.assertEqual(card.count(), 1, f"expected one {name} card")
-                text = card.first.inner_text()
-                self.assertIn(name, text)
-                self.assertIn(
-                    "coming soon",
-                    text.lower(),
-                    f"{name} must show Coming soon",
-                )
-            self.assertEqual(
-                main.get_by_text("Coming soon", exact=True).count(),
-                4,
-                "each of the four cloud cards must show Coming soon",
-            )
-
-            self.assertEqual(
-                main.get_by_role("button").count(),
-                0,
-                "cloud page must not render any buttons",
-            )
-            for label in ("Spawn", "Lend", "Add worker", "Enqueue", "Pair"):
-                self.assertEqual(
-                    page.get_by_role("button", name=label).count(),
-                    0,
-                    f"cloud page must not expose {label!r}",
-                )
-            self.assertEqual(
-                page.get_by_role("button", name=re.compile(r"add worker", re.I)).count(),
-                0,
-                "cloud page must not pair workers",
-            )
-            body = main.inner_text().lower()
-            for needle in ("spawn", "lend", "enqueue", "add worker"):
-                self.assertNotIn(
-                    needle,
-                    body,
-                    f"cloud page must not offer {needle}",
-                )
-            for i in range(main.get_by_role("link").count()):
-                link = main.get_by_role("link").nth(i)
-                if not link.is_visible():
-                    continue
-                name = " ".join((link.inner_text() or "").split())
-                self.assertIsNone(
-                    _ACTION_RE.search(name),
-                    f"cloud page must not link to {name!r}",
-                )
-        finally:
-            page.remove_listener("request", on_request)
-
-        forbidden = [
-            (method, url)
-            for method, url in mutating
-            if _is_remote_enqueue_or_spawn(method, url)
-        ]
-        self.assertEqual(
-            forbidden,
-            [],
-            "cloud page must not enqueue, spawn, or lend via API",
-        )
 
     def test_cloud_four_provider_cards_picker_does_not_create_hosts(self) -> None:
         """catalog:list-cloud-four-provider-cards
 
-        AWS / GCP / Azure / Fleet Cloud are Coming soon articles. There is no
-        enqueue/spawn/lend control. Clicking a card (the provider picker) must
-        not POST a worker-host. A silent native create is a fail.
+        Clicking AWS / GCP / Azure / Fleet Cloud must not create a worker-hosts
+        row. A silent native or kind=cloud POST is a fail.
         """
-        page = self.page
-        ws, base = _signup_api(page)
-        before = _own_kind_hosts(list_hosts(page, ws), ws)
-        self.assertEqual(
-            before,
-            [],
-            "fresh workspace must have no kind=host rows before the Cloud visit",
+        ctx = self._browser.new_context(
+            base_url=UI,
+            viewport={"width": 1400, "height": 900},
         )
-
-        mutating: list[tuple[str, str]] = []
-
-        def on_request(req) -> None:
-            method = req.method.upper()
-            if method in {"POST", "PUT", "PATCH", "DELETE"}:
-                mutating.append((method, req.url))
-
-        page.on("request", on_request)
+        page = ctx.new_page()
+        page.set_default_timeout(20_000)
         try:
-            _goto_cloud(page, base)
-            self.assertRegex(page.url, r"/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$")
-            h1 = page.locator("h1").first.inner_text().strip()
-            self.assertEqual(h1, "Cloud", f"unexpected cloud heading {h1!r}")
-
-            main = page.locator("main")
-            cards = main.locator("article")
+            ws, base = _signup_api(page)
+            before = _own_host_ids(list_hosts(page, ws), ws)
             self.assertEqual(
-                cards.count(),
-                4,
-                "cloud page must render four Coming soon cards",
-            )
-            for i, name in enumerate(CLOUD_NAMES):
-                text = cards.nth(i).inner_text()
-                self.assertIn(name, text, f"card {i} must be {name}")
-                self.assertIn(
-                    "coming soon",
-                    text.lower(),
-                    f"{name} must show Coming soon",
-                )
-            self.assertEqual(
-                main.get_by_text("Coming soon", exact=True).count(),
-                4,
-                "each of the four cloud cards must show Coming soon",
+                before,
+                [],
+                "fresh workspace must have no worker-hosts rows before the Cloud visit",
             )
 
-            self.assertEqual(
-                main.get_by_role("button").count(),
-                0,
-                "cloud page must not render enqueue/spawn/lend buttons",
-            )
-            self.assertEqual(
-                main.locator("select").count(),
-                0,
-                "cloud page must not render a provider <select> picker",
-            )
-            self.assertEqual(
-                main.get_by_role("combobox").count(),
-                0,
-                "cloud page must not render a provider combobox picker",
-            )
-            for label in ("Spawn", "Lend", "Add worker", "Enqueue", "Pair"):
-                self.assertEqual(
-                    page.get_by_role("button", name=label).count(),
-                    0,
-                    f"cloud page must not expose {label!r}",
-                )
-            body = main.inner_text().lower()
-            for needle in ("spawn", "lend", "enqueue", "add worker"):
-                self.assertNotIn(
-                    needle,
-                    body,
-                    f"cloud page must not offer {needle}",
-                )
+            writes: list[str] = []
 
-            # Click each provider card. A click-to-create picker is the hole
-            # the visit-only sibling does not cover.
-            for i, name in enumerate(CLOUD_NAMES):
-                cards.nth(i).click(force=True)
-                page.wait_for_timeout(250)
-                self.assertRegex(
-                    page.url,
-                    r"/[0-9a-f-]{36}/runners/cloud(?:[?#].*)?$",
-                    f"clicking {name} must stay on Cloud, not a create-host flow: {page.url}",
-                )
-                still = page.locator("main").locator("article")
-                self.assertEqual(
-                    still.count(),
-                    4,
-                    f"clicking {name} must not replace the four Coming soon cards",
-                )
-                self.assertIn(
-                    "coming soon",
-                    still.nth(i).inner_text().lower(),
-                    f"{name} must stay Coming soon after click",
-                )
+            def on_request(req) -> None:
+                if req.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+                    return
+                if _WORKER_HOSTS_WRITE_RE.search(req.url):
+                    writes.append(f"{req.method} {req.url}")
+
+            page.on("request", on_request)
+            try:
+                _goto_cloud(page, base)
+                for name in ("AWS", "GCP", "Azure"):
+                    page.get_by_role("heading", name=name, exact=True).click()
+                    page.wait_for_url(_CLOUD_URL)
+            finally:
+                page.remove_listener("request", on_request)
+
+            self.assertEqual(
+                writes,
+                [],
+                "clicking BYO Cloud headings must not write worker-hosts",
+            )
+            after = _own_host_ids(list_hosts(page, ws), ws)
+            self.assertEqual(
+                after,
+                [],
+                "clicking BYO Cloud headings must not create a worker-hosts row: "
+                f"{after!r}",
+            )
         finally:
-            page.remove_listener("request", on_request)
-
-        forbidden = [
-            (method, url)
-            for method, url in mutating
-            if _is_remote_enqueue_or_spawn(method, url)
-        ]
-        self.assertEqual(
-            forbidden,
-            [],
-            "clicking Cloud provider cards must not enqueue, spawn, lend, or POST worker-hosts",
-        )
-
-        after = _own_kind_hosts(list_hosts(page, ws), ws)
-        self.assertEqual(
-            after,
-            [],
-            "Cloud picker must not create a worker-hosts row "
-            f"(including a silent native host): {after!r}",
-        )
-        listed = list_hosts(page, ws)
-        for host in listed.get("hosts") or []:
-            if not isinstance(host, dict):
-                continue
-            if str(host.get("workspace_id") or "") not in {"", ws}:
-                continue
-            self.assertFalse(
-                _looks_like_cloud_host(host),
-                f"Cloud picker must not present a cloud host: {host!r}",
-            )
-
-        # Control: omitted-kind create still 200 native so an empty list is not
-        # a tautology (API up, this workspace can own a host).
-        created = create_host(page, ws, "ok")
-        host = created.get("host") if isinstance(created, dict) else None
-        self.assertIsInstance(host, dict, f"control create must return a host: {created!r}")
-        self.assertEqual(
-            str(host.get("isolation") or ""),
-            "native",
-            f"control create must stay native: {created!r}",
-        )
-        self.assertEqual(
-            str(host.get("kind") or ""),
-            "host",
-            f"control create is a self-hosted host: {created!r}",
-        )
-        control_id = str(host.get("id") or "")
-        self.assertTrue(control_id, f"control create missing id: {created!r}")
-        own = _own_kind_hosts(list_hosts(page, ws), ws)
-        own_ids = {str(h.get("id") or "") for h in own}
-        self.assertIn(
-            control_id,
-            own_ids,
-            "control POST without kind must appear in GET worker-hosts",
-        )
-        self.assertEqual(
-            len(own),
-            1,
-            f"only the control native host may exist after the Cloud visit: {own!r}",
-        )
+            ctx.close()
 
 
 if __name__ == "__main__":

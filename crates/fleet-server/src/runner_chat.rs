@@ -24,7 +24,10 @@ const WAIT: Duration = Duration::from_secs(240);
 const OFFLINE_AFTER: TimeDelta = TimeDelta::seconds(90);
 
 pub fn runner_cli_provider(provider: &str) -> bool {
-    matches!(provider, "grok" | "xai" | "claude" | "anthropic" | "ollama")
+    matches!(
+        provider,
+        "grok" | "xai" | "claude" | "anthropic" | "ollama" | "openai" | "gemini"
+    )
 }
 
 pub fn format_transcript(pairs: &[(String, String)]) -> String {
@@ -64,7 +67,7 @@ pub async fn run_on_runner(
     if chat_turn_is_empty(pairs) {
         return Err(AppError::bad_request("empty chat turn".to_string()));
     }
-        let host = require_taking(state, workspace_id, runner_id).await?;
+    let host = require_taking(state, workspace_id, runner_id).await?;
 
     let prompt = format_transcript(pairs);
     let claim_id = Uuid::now_v7();
@@ -372,6 +375,11 @@ pub(crate) async fn require_taking(
     runner_id: Uuid,
 ) -> AppResult<WorkerHost> {
     let host = crate::worker_hosts::load_visible_host(state, workspace_id, runner_id).await?;
+    if host.is_cluster_host() || host.created_by.is_none() {
+        return Err(AppError::bad_request(
+            "This runner is not Run on a PC",
+        ));
+    }
     ensure_online(&host)?;
     Ok(host)
 }
@@ -521,46 +529,159 @@ mod tests {
             ("user".into(), "hi".into()),
             ("assistant".into(), "hello".into()),
         ]);
-        assert!(t.contains("User:\nhi"));
-        assert!(t.contains("Assistant:\nhello"));
+        assert_eq!(
+            t,
+            "User:\nhi\n\nAssistant:\nhello",
+            "two-turn CLI prompt must keep User:/Assistant: order and a blank-line separator"
+        );
     }
 
-    /// Empty `messages` / empty pairs must 400 and must not enter the 240s wait.
-    /// HTTP contract lives in `tests/chat_stream_http.rs` (cookie + oneshot).
     #[test]
-    fn empty_messages_rejected_without_hang() {
-        assert!(
-            chat_turn_is_empty(&[]),
-            "no pairs must be an empty chat turn"
+    fn format_transcript_trims_pair_content() {
+        let t = format_transcript(&[("user".into(), "  hi\nthere  ".into())]);
+        assert_eq!(
+            t,
+            "User:\nhi\nthere",
+            "format_transcript must trim pair content (resumed DB history is not trimmed first)"
         );
-        assert!(
-            chat_turn_is_empty(&[("user".into(), "  \n".into())]),
-            "whitespace-only content must 400 even though format_transcript adds labels"
-        );
-        assert!(
-            chat_turn_is_empty(&[
-                ("user".into(), String::new()),
-                ("assistant".into(), " \t".into()),
-            ]),
-            "all-blank pairs must 400"
-        );
-        assert!(!chat_turn_is_empty(&[("user".into(), "hi".into())]));
-        assert!(
-            format_transcript(&[]).trim().is_empty(),
-            "no pairs must be an empty transcript"
-        );
-        // Labels alone are not a turn — do not wait on them.
-        assert!(!format_transcript(&[("user".into(), "  \n".into())])
-            .trim()
-            .is_empty());
+    }
 
-        let err = parse_result(&json!({ "result": { "ok": true, "text": "  " } }), "m")
-            .expect_err("empty CLI reply");
+    /// Done claim whose CLI text is empty or whitespace must 400 (do not persist
+    /// an empty assistant turn). Empty HTTP `messages` is locked in chat_stream_http.
+    #[test]
+    fn parse_result_empty_or_whitespace_cli_text_is_bad_request() {
+        for (label, payload) in [
+            ("whitespace", json!({ "result": { "ok": true, "text": "  " } })),
+            ("empty", json!({ "result": { "ok": true, "text": "" } })),
+            ("missing text", json!({ "result": { "ok": true } })),
+        ] {
+            let err = parse_result(&payload, "m").expect_err(label);
+            assert!(
+                matches!(
+                    &err,
+                    AppError::BadRequest(m) if m == "runner CLI returned an empty reply"
+                ),
+                "{label}: {err:?}"
+            );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_result_ok_false_surfaces_cli_error() {
+        for (label, payload, want) in [
+            (
+                "error field",
+                json!({ "result": { "ok": false, "error": "grok: model not found" } }),
+                "grok: model not found",
+            ),
+            (
+                "missing error",
+                json!({ "result": { "ok": false } }),
+                "official CLI on the runner failed",
+            ),
+        ] {
+            let err = parse_result(&payload, "m").expect_err(label);
+            assert!(
+                matches!(&err, AppError::BadRequest(m) if m == want),
+                "{label}: {err:?}"
+            );
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_result_missing_model_uses_fallback() {
+        for (label, payload) in [
+            ("absent", json!({ "result": { "ok": true, "text": "hello" } })),
+            (
+                "empty",
+                json!({ "result": { "ok": true, "text": "hello", "model": "" } }),
+            ),
+        ] {
+            let (model, text) = parse_result(&payload, "requested-model").expect(label);
+            assert_eq!(
+                (model.as_str(), text.as_str()),
+                ("requested-model", "hello"),
+                "{label}"
+            );
+        }
+    }
+
+    /// DELETE leftover: status=disabled but enabled + last_seen still set.
+    /// Dropping `ensure_online`'s first branch would then pass last_seen/enabled.
+    fn leftover_disabled_host() -> WorkerHost {
+        let now = Utc::now();
+        WorkerHost {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            name: "revoked-leftover".into(),
+            status: fleet_db::WORKER_HOST_STATUS_DISABLED.into(),
+            enabled: true,
+            paused: false,
+            drain: false,
+            isolation: "native".into(),
+            runner_kind: fleet_db::RUNNER_KIND_SELF_HOSTED.into(),
+            allow_host: true,
+            allow_container: false,
+            max_concurrent: 2,
+            max_job_timeout_s: 3600,
+            labels: vec![],
+            machine_token_hash: None,
+            advertised_host: true,
+            advertised_container: false,
+            platform: Some("linux-x86_64".into()),
+            hostname: Some("revoked-leftover".into()),
+            last_seen_at: Some(now),
+            last_error: None,
+            current_jobs: 0,
+            advertised_max_concurrent: None,
+            software_git_sha: None,
+            software_bins: None,
+            software_reported_at: Some(now),
+            software_updating: false,
+            auto_update: true,
+            update_requested_at: None,
+            machine_id: None,
+            hardware: None,
+            agent_runtimes: json!([]),
+            settings_gen: 0,
+            settings_ack_gen: 0,
+            install_request: None,
+            install_requested_at: None,
+            runtime_settings: json!({}),
+            runtime_reported: json!({}),
+            created_by: None,
+            send_policy: fleet_db::WORKER_HOST_SEND_OWNER_ONLY.to_string(),
+            run_mode: fleet_db::WORKER_HOST_RUN_ON_PC.to_string(),
+            created_at: now,
+            paired_at: Some(now),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn host_is_removed_true_when_status_disabled() {
+        let host = leftover_disabled_host();
         assert!(
-            matches!(&err, AppError::BadRequest(m) if m.contains("empty")),
-            "{err:?}"
+            host_is_removed(&host),
+            "status=disabled leftover (enabled + last_seen still set) must be removed"
         );
-        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+        let err = ensure_online(&host).expect_err(
+            "ensure_online must fail on DELETE leftover before last_seen/enabled",
+        );
+        assert!(
+            matches!(&err, AppError::BadRequest(m) if m.contains("removed")),
+            "first ensure_online branch is host_is_removed, not offline/not-taking: {err:?}"
+        );
     }
 
     #[test]

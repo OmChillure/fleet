@@ -15,6 +15,9 @@ The `k8s` backend is a **namespace-scoped operator** plus CRD:
 Each `FleetSandbox` becomes a non-root Pod running `fleet-driver` with a
 NetworkPolicy that allows **DNS + control-plane API only** by default (no
 general internet; secrets stay on the API). See [`infra/README.md`](../../../infra/README.md).
+Kubernetes here is a hosting backend, not the product isolation class.
+In-cluster guests are **Run in a container** (KubePod). See
+[`../runners/run-on-pc-vs-container.md`](../runners/run-on-pc-vs-container.md).
 
 System-wide architecture:
 

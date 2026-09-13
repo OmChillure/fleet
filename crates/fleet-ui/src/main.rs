@@ -16,6 +16,7 @@ use fleet_runners_view::routes::{
     SEGMENT_CLOUD, SEGMENT_PARTNERS, runner_child_path, runners_index_target, self_hosted_path,
     workers_redirect,
 };
+use pages::admin::Admin;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
 use pages::cases::{CaseDetail, Cases};
@@ -49,6 +50,8 @@ pub enum Route {
     OAuthDone {},
     // App shell: `/{workspace_id}/dashboard` etc.
     #[layout(AppShell)]
+        #[route("/admin")]
+        Admin {},
         #[route("/:workspace_id/dashboard")]
         Dashboard { workspace_id: String },
         #[route("/:workspace_id/chat")]

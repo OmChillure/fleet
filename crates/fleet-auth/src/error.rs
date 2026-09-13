@@ -16,6 +16,8 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{1}")]
+    ConflictCoded(&'static str, String),
     #[error("{0}")]
     TooManyRequests(String),
     #[error("{0}")]
@@ -43,6 +45,10 @@ impl AppError {
         Self::Conflict(msg.into())
     }
 
+    pub fn conflict_code(code: &'static str, msg: impl Into<String>) -> Self {
+        Self::ConflictCoded(code, msg.into())
+    }
+
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self::TooManyRequests(msg.into())
     }
@@ -57,7 +63,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Forbidden(_) => "forbidden",
             AppError::NotFound(_) => "not_found",
-            AppError::Conflict(_) => "conflict",
+            AppError::Conflict(_) | AppError::ConflictCoded(_, _) => "conflict",
             AppError::TooManyRequests(_) => "too_many_requests",
             AppError::Internal(_) => "internal",
         }
@@ -117,6 +123,8 @@ impl From<argon2::password_hash::Error> for AppError {
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 impl IntoResponse for AppError {
@@ -128,6 +136,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::ConflictCoded(_, m) => (StatusCode::CONFLICT, m.clone()),
             AppError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
         };
@@ -150,7 +159,11 @@ impl IntoResponse for AppError {
             );
         }
 
-        (status, Json(ErrorBody { error: msg })).into_response()
+        let code = match &self {
+            AppError::ConflictCoded(code, _) => Some(*code),
+            _ => None,
+        };
+        (status, Json(ErrorBody { error: msg, code })).into_response()
     }
 }
 

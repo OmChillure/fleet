@@ -15,7 +15,7 @@ pub struct DriverConfig {
     pub plan_task_id: String,
     pub token: String,
     pub work_dir: PathBuf,
-    /// `mock` | `grok` (default `mock`).
+    /// `mock` | `grok` | `claude` | `ollama` (default `mock`). `grok-acp` keeps ACP.
     pub harness: String,
     pub model: Option<String>,
     pub timeout: Duration,
@@ -137,10 +137,47 @@ mod tests {
 
     #[test]
     fn auto_approve_defaults_true() {
-        assert!(parse_env_bool_default_true(None));
-        assert!(parse_env_bool_default_true(Some("")));
-        assert!(parse_env_bool_default_true(Some("1")));
-        assert!(!parse_env_bool_default_true(Some("0")));
-        assert!(!parse_env_bool_default_true(Some("false")));
+        for (raw, want) in [
+            (None, true),
+            (Some(""), true),
+            (Some("1"), true),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("no"), false),
+            (Some("off"), false),
+        ] {
+            assert_eq!(parse_env_bool_default_true(raw), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_default_true_no_and_off_are_false() {
+        assert_eq!(parse_env_bool_default_true(Some("no")), false, r#"Some("no")"#);
+        assert_eq!(parse_env_bool_default_true(Some("OFF")), false, r#"Some("OFF")"#);
+    }
+
+    #[test]
+    fn parse_env_bool_default_true_unknown_and_whitespace_stay_true() {
+        assert_eq!(
+            parse_env_bool_default_true(Some("maybe")),
+            true,
+            r#"Some("maybe")"#
+        );
+        assert_eq!(
+            parse_env_bool_default_true(Some("  ")),
+            true,
+            r#"Some("  ")"#
+        );
+    }
+
+    #[test]
+    fn parse_env_bool_default_false_unset_empty_unknown_are_false() {
+        assert_eq!(parse_env_bool_default_false(None), false, "None");
+        assert_eq!(parse_env_bool_default_false(Some("")), false, r#"Some("")"#);
+        assert_eq!(
+            parse_env_bool_default_false(Some("maybe")),
+            false,
+            r#"Some("maybe")"#
+        );
     }
 }

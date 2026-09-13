@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct FleetSettings {
@@ -11,6 +11,8 @@ pub struct FleetSettings {
     pub max_agents_cap: i32,
     #[serde(default = "default_process")]
     pub min_isolation: String,
+    #[serde(default = "default_on_pc")]
+    pub default_run_mode: String,
     #[serde(default = "default_off")]
     pub fleet_llm: String,
     #[serde(default)]
@@ -35,12 +37,18 @@ fn default_process() -> String {
     "process".into()
 }
 
+fn default_on_pc() -> String {
+    "on_pc".into()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FleetSettingsPatch {
     pub max_agents: i32,
     pub fleet_llm: String,
     pub fleet_llm_model: String,
     pub min_isolation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_run_mode: Option<String>,
 }
 
 fn client() -> reqwest::Client {
@@ -55,14 +63,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
     let first = with_credentials(client().get(api_url(path)))
@@ -110,6 +110,63 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Res
         Err(serde_json::from_str::<ErrBody>(&text)
             .map(|b| b.error)
             .unwrap_or_else(|_| format!("request failed ({status})")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LlmKeyPublic {
+    pub id: String,
+    pub provider: String,
+    pub created_at: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LlmKeyList {
+    #[serde(default)]
+    keys: Vec<LlmKeyPublic>,
+}
+
+pub async fn list_llm_keys(workspace_id: &str) -> Result<Vec<LlmKeyPublic>, String> {
+    let res = authorized_get(&format!("/api/workspaces/{workspace_id}/llm-keys")).await?;
+    let body: LlmKeyList = parse_json(res).await?;
+    Ok(body.keys)
+}
+
+pub async fn create_llm_key(
+    workspace_id: &str,
+    provider: &str,
+    secret: &str,
+) -> Result<LlmKeyPublic, String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/llm-keys"),
+        &serde_json::json!({ "provider": provider, "secret": secret }),
+    )
+    .await?;
+    #[derive(Deserialize)]
+    struct Wrap {
+        key: LlmKeyPublic,
+    }
+    let body: Wrap = parse_json(res).await?;
+    Ok(body.key)
+}
+
+pub async fn revoke_llm_key(workspace_id: &str, key_id: &str) -> Result<(), String> {
+    let res = authorized_post_json(
+        &format!("/api/workspaces/{workspace_id}/llm-keys/{key_id}/revoke"),
+        &serde_json::json!({}),
+    )
+    .await?;
+    let status = res.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let text = res.text().await.unwrap_or_default();
+        Err(if text.is_empty() {
+            format!("request failed ({status})")
+        } else {
+            text
+        })
     }
 }
 

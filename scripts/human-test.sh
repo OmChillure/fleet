@@ -213,7 +213,7 @@ cmd_guide() {
     "Save. Host Grok is env-only (banner if FLEET_AGENT_BACKEND=grok)." || return 0
 
   pause_step "Runners / Self-hosted" \
-    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Empty state is No workers yet — the API is not a runner. Add worker, then paste the install command (this machine is fine). Cards are paired hosts only: name, status, last seen, jobs — click a card for the right panel (settings, providers, Apply, Remove). (this machine) only appears when you opened the UI on that box (localhost). Software: Current fleet-host version / Current fleet-driver version are semver from runner-packages.toml (same on every OS). Amber banner lists any required OS that is not on both current versions. Each card lists those versions, not file hashes. Providers list Grok / Claude / OpenAI / Private (Ollama) after heartbeat. Not installed: OS-specific copy-paste install. Private (Ollama) installed: disk free, popular list, tag picker (size / RAM when published), models directory, Unlisted name/URL. Disk-too-small refuses install. Sandboxing: Native (work root + process allow), VMs placeholder, Containers (k8s/docker knobs). Windows install needs the LAN URL, not localhost." \
+    "Runners is a top-level sidebar section (same rank as Monitoring and Agents), children Self-hosted / Cloud / Partners. Self-hosted (/{ws}/runners/self-hosted). Empty state is No workers yet — the API is not a runner. Add worker, then paste the install command (this machine is fine). Name is optional — the card uses the device hostname after pair. Cards are paired hosts only: name, status, last seen, jobs — click a card for the right panel (settings, providers, Apply, Remove). (this machine) only appears when you opened the UI on that box (localhost). Software: Current fleet-host version / Current fleet-driver version are semver from runner-packages.toml (same on every OS). Amber banner lists any required OS that is not on both current versions. Each card lists those versions, not file hashes. Providers list Grok / Claude / OpenAI / Private (Ollama) after heartbeat. Not installed: OS-specific copy-paste install. Private (Ollama) installed: disk free, popular list, tag picker (size / RAM when published), models directory, Unlisted name/URL. Disk-too-small refuses install. Sandboxing: Native (work root + process allow), VMs placeholder, Containers (k8s/docker knobs). Windows install needs the LAN URL, not localhost." \
     "If the command is loopback (127.0.0.1 / localhost / [::1]), the pair panel warns that another computer needs a LAN or public control-plane URL." \
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker. No paired host = task stays ready." \
@@ -221,7 +221,7 @@ cmd_guide() {
     "Auto-update is on by default. Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
-    "Click a card name to rename; Enter saves, Escape cancels." \
+    "Click the pencil in the right panel to rename; Enter saves, Escape cancels." \
     "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." || return 0
 
   pause_step "Workers" \
@@ -276,9 +276,19 @@ cmd_guide() {
     "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
-    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion." \
-    "Start monitor follows every connected inbox app and auto-launches work by kind." \
-    "Refresh now polls. Finish still starts one by hand. Empty is OK until Integrations are connected." || return 0
+    "/{ws}/inbox — tickets from connected GitHub/Jira/Linear/Slack/Notion/GitLab/Trello." \
+    "Start monitor follows every connected inbox app (checkbox on) and auto-launches by kind." \
+    "Uncheck Follow every connected inbox app → Save filters: watch set pins to the current apps." \
+    "Webhook URL on the page: paste into the provider. Slack/Linear HMAC uses the stored signing secret, not the URL token." \
+    "Refresh now polls. Finish starts one open row by hand. A closed board item on a launched row should go done." \
+    "Empty is OK until Integrations are connected. Start monitor without a Connect is 400." || return 0
+
+  pause_step "Admin  ${UI_URL}/admin" \
+    "Instance page (sidebar Instance → Overview, or user menu Instance admin)." \
+    "Only instance admins see the nav. Others get Instance admin required." \
+    "First admin: INSTANCE_ADMIN_EMAILS=you@example.test in .env, then log in — or scripts/promote-instance-admin.sh you@example.test." \
+    "Overview counts, Users (Promote / Demote / Disable), Workspaces, all runners, live work, instance health (git sha, signup mode, OAuth flags, staged packages)." \
+    "Do not show pair tokens, JWT, or OAuth secrets. Disable is for throwaway @example.test accounts only." || return 0
 
   pause_step "Settings members" \
     "/{ws}/settings — Members: invite by email (member/admin)." \
@@ -296,11 +306,11 @@ cmd_guide() {
     "Settings Isolation: process / container / vm. Save Container." \
     "Self-hosted: Add worker (token panel is enough). A process-only paired box must not take a container workspace." \
     "Fleet: Start 2-task run → Run tick. Tasks stay ready until a container-capable host is online. Never stub." \
-    "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." \
-    "Agent drive: python3 -m unittest tests.browser.test_unify_usability (artifacts in .tmp/usability/)." || return 0
+    "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." || return 0
 
   pause_step "This merge request" \
-    "Do the new thing this change added." \
+    "Inbox: follow-connected, pin on uncheck, webhook URL, Finish on an open row." \
+    "A second Finish on the same row must conflict, not start another fleet." \
     "If this list has no step for it, add one in scripts/human-test.sh and a" \
     "scene in tests/browser/record_demo.py in the same change." || return 0
 

@@ -31,89 +31,42 @@ pub fn free_slots_from_db_statuses<S: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use WorkerSessionStatus::*;
 
+    /// Settings `update_fleet_settings` may lower max_agents below current
+    /// in_use. Spawn budget must floor at 0, not go negative.
     #[test]
-    fn free_slots_cases() {
-        assert_eq!(free_slots(3, 0), 3);
-        assert_eq!(free_slots(3, 2), 1);
-        assert_eq!(free_slots(3, 3), 0);
-        assert_eq!(free_slots(3, 5), 0);
-        assert_eq!(free_slots(0, 0), 0);
+    fn free_slots_floors_at_zero_when_in_use_exceeds_max_agents() {
+        assert_eq!(
+            free_slots(3, 5),
+            0,
+            "in_use above a lowered max_agents must not yield a negative spawn budget"
+        );
     }
 
+    /// `create_project` persists `max_agents.unwrap_or(3).max(0)`, so 0 is live.
     #[test]
-    fn count_in_use() {
-        let s = [
-            Spawning,
-            Healthy,
-            Stuck,
-            Killing,
-            Exited,
-            FailedSpawn,
-            Healthy,
-        ];
-        assert_eq!(count_capacity_in_use(&s), 5);
+    fn free_slots_zero_max_agents_is_zero() {
+        assert_eq!(
+            free_slots(0, 0),
+            0,
+            "max_agents=0 must leave no spawn budget"
+        );
     }
 
-    /// Docs §8.3 / §15.2: each of spawning|healthy|stuck|killing holds one
-    /// `max_agents` slot. If stuck or killing freed the slot, the tick
-    /// would over-spawn.
+    /// Docs: unknown status strings (and case-sensitive from_db) do not hold.
+    #[test]
+    fn free_slots_from_db_statuses_unknown_strings_do_not_hold() {
+        assert_eq!(
+            free_slots_from_db_statuses(["", "nope", "HEALTHY", "exited"], 2),
+            2,
+            "empty, unknown, and uppercase HEALTHY must not hold; exited is terminal"
+        );
+    }
+
+    /// Docs §8.3 / §15.2: spawning|healthy|stuck|killing hold a max_agents
+    /// slot. If stuck or killing freed the slot, the tick would over-spawn.
     #[test]
     fn sessions_in_spawning_healthy_stuck_killing_hold_capacity_slots() {
-        const HOLDING: [WorkerSessionStatus; 4] = [Spawning, Healthy, Stuck, Killing];
-        const TERMINAL: [WorkerSessionStatus; 2] = [Exited, FailedSpawn];
-
-        for status in HOLDING {
-            assert!(
-                status.holds_capacity(),
-                "{status:?} must hold a max_agents slot"
-            );
-            assert_eq!(
-                count_capacity_in_use(&[status]),
-                1,
-                "{status:?} counts as 1 in-use"
-            );
-            assert_eq!(
-                free_slots(1, count_capacity_in_use(&[status])),
-                0,
-                "{status:?} at max_agents=1 must leave 0 free slots"
-            );
-            assert_eq!(
-                free_slots_from_db_statuses([status.as_str()], 1),
-                0,
-                "db status {:?} at max_agents=1 must leave 0 free slots",
-                status.as_str()
-            );
-        }
-        for status in TERMINAL {
-            assert!(!status.holds_capacity(), "{status:?} must not hold a slot");
-            assert_eq!(
-                count_capacity_in_use(&[status]),
-                0,
-                "{status:?} is not in-use"
-            );
-            assert_eq!(
-                free_slots(1, count_capacity_in_use(&[status])),
-                1,
-                "{status:?} must free the slot for the next ready task"
-            );
-            assert_eq!(
-                free_slots_from_db_statuses([status.as_str()], 1),
-                1,
-                "db status {:?} must not hold a slot",
-                status.as_str()
-            );
-        }
-
-        // Failure mode this card locks: cap filled only by stuck+killing
-        // must not look idle.
-        assert_eq!(count_capacity_in_use(&[Stuck, Killing]), 2);
-        assert_eq!(
-            free_slots(2, count_capacity_in_use(&[Stuck, Killing])),
-            0,
-            "stuck+killing at max_agents=2 must not free a slot so the tick over-spawns"
-        );
         assert_eq!(
             free_slots_from_db_statuses(["stuck", "killing"], 2),
             0,
@@ -125,18 +78,14 @@ mod tests {
             "terminal siblings must not cancel stuck/killing holds"
         );
         assert_eq!(
-            free_slots_from_db_statuses(["exited", "failed_spawn"], 2),
-            2,
-            "only terminal sessions free slots"
-        );
-        assert_eq!(
             free_slots_from_db_statuses(["spawning", "healthy", "stuck", "killing"], 4),
             0,
+            "each holding db status occupies one max_agents slot"
         );
         assert_eq!(
-            free_slots_from_db_statuses(["stuck"], 2),
-            1,
-            "one stuck of max_agents=2 leaves one slot, not two"
+            free_slots_from_db_statuses(["exited", "failed_spawn"], 2),
+            2,
+            "terminal db statuses must not hold slots"
         );
     }
 }

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::pages::auth::api::auth_base_url;
+use crate::pages::auth::api::{auth_base_url, with_credentials};
 
 #[derive(Debug, Clone)]
 pub enum CaseError {
@@ -84,14 +84,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn parse_json<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result<T, CaseError> {
     let status = res.status();

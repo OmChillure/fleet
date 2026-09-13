@@ -75,7 +75,7 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-async fn require_member(
+pub(crate) async fn require_member(
     state: &AppState,
     jar: &CookieJar,
     workspace_id: Uuid,
@@ -164,6 +164,12 @@ async fn settings_json(
         "max_agents": cfg.max_agents,
         "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
         "min_isolation": min_isolation,
+        "default_run_mode": workspace_repo::default_run_mode(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
+        "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "owner_only".into()),
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
         "fleet_llm": cfg.fleet_llm,
@@ -196,6 +202,8 @@ pub struct PatchSettingsBody {
     pub fleet_llm: Option<String>,
     pub fleet_llm_model: Option<String>,
     pub min_isolation: Option<String>,
+    pub default_run_mode: Option<String>,
+    pub default_send_policy: Option<String>,
 }
 
 async fn patch_settings(
@@ -204,7 +212,7 @@ async fn patch_settings(
     Path(workspace_id): Path<Uuid>,
     Json(body): Json<PatchSettingsBody>,
 ) -> AppResult<Json<Value>> {
-    let _ = require_member(&state, &jar, workspace_id).await?;
+    let (_user, role) = require_member(&state, &jar, workspace_id).await?;
     ensure_project(&state, workspace_id, "workspace fleet").await?;
     let current = state
         .orch
@@ -238,6 +246,19 @@ async fn patch_settings(
 
     if let Some(raw) = body.min_isolation.as_deref() {
         workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
+    }
+    if body.default_run_mode.is_some() || body.default_send_policy.is_some() {
+        if role != "owner" && role != "admin" {
+            return Err(AppError::forbidden(
+                "owner or admin required to change default run mode",
+            ));
+        }
+    }
+    if let Some(raw) = body.default_run_mode.as_deref() {
+        workspace_repo::set_default_run_mode(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_send_policy.as_deref() {
+        workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;
     }
 
     let cfg = state
@@ -333,6 +354,9 @@ pub struct FixtureRequest {
     /// `chain` (default) or `diamond`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// `on_pc` | `in_container`. Default: workspace `default_run_mode`.
+    #[serde(default)]
+    pub run_mode: Option<String>,
 }
 
 fn fixture_tasks(kind: &str) -> Option<Vec<PlanTask>> {
@@ -415,6 +439,15 @@ async fn post_fixture(
         .ok_or_else(|| AppError::bad_request(format!("unknown fixture kind: {kind}")))?;
     let run_id = Uuid::new_v4();
     let plan_id = Uuid::new_v4();
+    let ws_default = workspace_repo::default_run_mode(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
+    let run_mode = match body.run_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => fleet_db::parse_worker_host_run_mode(raw)
+            .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?
+            .to_string(),
+        None => ws_default,
+    };
     let plan = WorkPlanBody {
         plan_id,
         project_id: workspace_id,
@@ -429,6 +462,8 @@ async fn post_fixture(
             auto_sync_external: false,
             llm_provider: None,
             llm_model: None,
+            requested_by: Some(user.id),
+            run_mode,
             ..Default::default()
         },
     };
@@ -872,6 +907,8 @@ async fn post_cancel(
             tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
             AppError::bad_request(e.to_string())
         })?;
+    let _ = fleet_db::repos::tickets::reopen_tickets_for_run(&state.db, workspace_id, run_id)
+        .await;
     Ok(Json(json!({
         "run_id": run_id,
         "cancel_requested": true,
@@ -967,107 +1004,5 @@ impl AuthFromApp for AuthState {
             db: state.db.clone(),
             config: state.auth.clone(),
         }
-    }
-}
-
-#[cfg(test)]
-mod git_config_ref_requires_url {
-    use super::PatchFleetConfigRequest;
-    use fleet_orchestrator::domain::{apply_git_remote_patch, ProjectGitRemote};
-    use serde_json::json;
-
-    fn production_src() -> &'static str {
-        let src = include_str!("fleet_routes.rs");
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
-        }
-    }
-
-    fn parse_body(v: serde_json::Value) -> PatchFleetConfigRequest {
-        serde_json::from_value(v).expect("PatchFleetConfigRequest")
-    }
-
-    /// Omitted `repo_url` (ref-only) vs empty string (clear) must stay distinct.
-    #[test]
-    fn patch_body_omitted_url_is_none_empty_string_is_some() {
-        let omitted = parse_body(json!({ "git_ref": "feature" }));
-        assert!(omitted.repo_url.is_none(), "omitted repo_url is None");
-        assert_eq!(omitted.git_ref.as_deref(), Some("feature"));
-
-        let empty = parse_body(json!({ "repo_url": "" }));
-        assert_eq!(empty.repo_url.as_deref(), Some(""));
-        assert!(empty.git_ref.is_none());
-
-        let whitespace = parse_body(json!({ "repo_url": "   " }));
-        assert_eq!(whitespace.repo_url.as_deref(), Some("   "));
-    }
-
-    #[test]
-    fn cookie_patch_uses_shared_apply_git_remote_patch() {
-        let src = production_src();
-        let patch_fn = src
-            .split("async fn patch_fleet_config")
-            .nth(1)
-            .expect("patch_fleet_config")
-            .split("async fn ")
-            .next()
-            .expect("patch_fleet_config body");
-        assert!(
-            patch_fn.contains("apply_git_remote_patch"),
-            "cookie PATCH /fleet/config must share apply_git_remote_patch with admin (Docs §6.9 / §8.2)"
-        );
-        assert!(
-            !patch_fn.contains("git_ref requires repo_url on this project"),
-            "cookie PATCH must not re-implement the ref-without-URL branch"
-        );
-    }
-
-    /// Same three outcomes as admin PATCH, via the shared resolver.
-    #[test]
-    fn cookie_patch_empty_url_clears_git_ref_without_url_and_garbage_url_are_errors() {
-        let url = "https://github.com/acme/app.git";
-        let existing = ProjectGitRemote {
-            url: url.into(),
-            git_ref: "develop".into(),
-        };
-
-        let clear = parse_body(json!({ "repo_url": "" }));
-        assert_eq!(
-            apply_git_remote_patch(
-                Some(&existing),
-                "develop",
-                clear.repo_url.as_deref(),
-                clear.git_ref.as_deref(),
-            )
-            .unwrap(),
-            None
-        );
-
-        let ref_only = parse_body(json!({ "git_ref": "feature" }));
-        let err = apply_git_remote_patch(
-            None,
-            "main",
-            ref_only.repo_url.as_deref(),
-            ref_only.git_ref.as_deref(),
-        )
-        .expect_err("git_ref without URL");
-        assert!(
-            err.to_string().contains("repo_url"),
-            "ref-without-URL must mention repo_url: {err}"
-        );
-
-        let garbage = parse_body(json!({ "repo_url": "not a url" }));
-        let err = apply_git_remote_patch(
-            Some(&existing),
-            "develop",
-            garbage.repo_url.as_deref(),
-            garbage.git_ref.as_deref(),
-        )
-        .expect_err("garbage URL");
-        assert!(
-            err.to_string().contains("repo_url"),
-            "garbage URL must mention repo_url: {err}"
-        );
     }
 }

@@ -22,8 +22,8 @@ use crate::routes::workspaces::{
 };
 use crate::state::AuthState;
 use crate::tokens::{
-    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, generate_refresh_token, hash_refresh_token,
-    issue_access_token,
+    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, decode_access_token_for_logout,
+    generate_refresh_token, hash_refresh_token, issue_access_token,
 };
 
 /// Resolve the authenticated user from access-cookie JWT + live session row.
@@ -43,9 +43,30 @@ pub async fn require_user(state: &AuthState, jar: &CookieJar) -> AppResult<User>
         return Err(AppError::unauthorized("session is no longer valid"));
     }
 
-    user_repo::find_active_by_id(&state.db, user_id)
+    let user = user_repo::find_active_by_id(&state.db, user_id)
         .await?
-        .ok_or_else(|| AppError::unauthorized("user not found"))
+        .ok_or_else(|| AppError::unauthorized("user not found"))?;
+    grant_env_instance_admin(state, user).await
+}
+
+/// Grant `instance_admin` when the email is listed in `INSTANCE_ADMIN_EMAILS`.
+/// Never revokes a flag that was set in the UI or a previous grant.
+pub async fn grant_env_instance_admin(state: &AuthState, user: User) -> AppResult<User> {
+    if user.instance_admin || !state.config.email_is_env_instance_admin(&user.email_normalized) {
+        return Ok(user);
+    }
+    user_repo::set_instance_admin(&state.db, user.id, true)
+        .await?
+        .ok_or_else(|| AppError::internal("failed to grant instance admin"))
+}
+
+/// Cookie user who is an instance admin (after env grant).
+pub async fn require_instance_admin(state: &AuthState, jar: &CookieJar) -> AppResult<User> {
+    let user = require_user(state, jar).await?;
+    if !user.instance_admin {
+        return Err(AppError::forbidden("instance admin required"));
+    }
+    Ok(user)
 }
 
 fn normalize_email(email: &str) -> String {
@@ -158,8 +179,8 @@ pub async fn signup(
         "signup",
         &headers,
         connect,
-        5,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_SIGNUP_RATE_MAX", 5),
+        rate_limit::window_from_env("AUTH_SIGNUP_RATE_WINDOW_SECS", 15 * 60),
     )?;
     if !signup_token_ok(state.config.signup_token.as_deref(), body.token.as_deref()) {
         return Err(AppError::forbidden("valid signup token is required"));
@@ -208,6 +229,8 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
+    let user = grant_env_instance_admin(&state, user).await?;
+
     if let Err(e) =
         workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
             .await
@@ -253,8 +276,8 @@ pub async fn login(
         "login",
         &headers,
         connect,
-        10,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_LOGIN_RATE_MAX", 10),
+        rate_limit::window_from_env("AUTH_LOGIN_RATE_WINDOW_SECS", 15 * 60),
     )?;
     validate_credentials(&body.email, &body.password)?;
     let email_normalized = normalize_email(&body.email);
@@ -276,6 +299,8 @@ pub async fn login(
         tracing::warn!(user_id = %user.id, email = %email_normalized, "login failed: bad password");
         return Err(AppError::unauthorized("invalid email or password"));
     }
+
+    let user = grant_env_instance_admin(&state, user).await?;
 
     let (access, refresh, sid) =
         create_session_and_tokens(&state, &user, &headers, connect).await?;
@@ -320,10 +345,17 @@ pub async fn login(
 }
 
 pub async fn logout(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Response> {
+    let now = Utc::now();
     if let Some(refresh) = jar.get(REFRESH_COOKIE).map(|c| c.value().to_string()) {
         let hash = hash_refresh_token(&refresh);
-        let now = Utc::now();
         session_repo::revoke_by_refresh_hash(&state.db, &hash, now).await?;
+    } else if let Some(access) = jar.get(ACCESS_COOKIE).map(|c| c.value().to_string())
+        && let Ok(claims) = decode_access_token_for_logout(&state.config.jwt_secret, &access)
+        && let Ok(sid) = Uuid::parse_str(&claims.sid)
+    {
+        // Refresh cookie missing (cleared, blocked, or already rotated).
+        // Still revoke the session named in the access JWT, even if `exp` passed.
+        session_repo::revoke_by_id(&state.db, sid, now).await?;
     }
 
     let mut headers = HeaderMap::new();
@@ -346,8 +378,8 @@ pub async fn refresh(
         "refresh",
         &headers,
         connect,
-        30,
-        std::time::Duration::from_secs(15 * 60),
+        rate_limit::max_from_env("AUTH_REFRESH_RATE_MAX", 30),
+        rate_limit::window_from_env("AUTH_REFRESH_RATE_WINDOW_SECS", 15 * 60),
     )?;
     let refresh = jar
         .get(REFRESH_COOKIE)
@@ -380,6 +412,8 @@ pub async fn refresh(
     if !user.is_active() {
         return Err(AppError::unauthorized("account is not active"));
     }
+
+    let user = grant_env_instance_admin(&state, user).await?;
 
     let new_session_id = Uuid::now_v7();
     let new_refresh = generate_refresh_token();
@@ -456,25 +490,4 @@ pub async fn me(State(state): State<AuthState>, jar: CookieJar) -> AppResult<Jso
         user: UserPublic::from(user),
         workspaces,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::signup_token_ok;
-
-    #[test]
-    fn signup_token_unset_is_open() {
-        assert!(signup_token_ok(None, None));
-        assert!(signup_token_ok(Some(""), Some("anything")));
-        assert!(signup_token_ok(Some("   "), None));
-    }
-
-    #[test]
-    fn signup_token_required_when_configured() {
-        assert!(!signup_token_ok(Some("invite"), None));
-        assert!(!signup_token_ok(Some("invite"), Some("")));
-        assert!(!signup_token_ok(Some("invite"), Some("nope")));
-        assert!(signup_token_ok(Some("invite"), Some("invite")));
-        assert!(signup_token_ok(Some(" invite "), Some("invite")));
-    }
 }

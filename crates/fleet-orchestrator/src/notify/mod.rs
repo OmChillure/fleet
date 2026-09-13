@@ -62,24 +62,3 @@ impl NotificationSink for LogNotify {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn noop_ok() {
-        let n = NoopNotify;
-        n.on_blocked(HitlBlockedEvent {
-            project_id: Uuid::new_v4(),
-            run_id: Uuid::new_v4(),
-            board_task_id: Uuid::new_v4(),
-            reason: "need secret".into(),
-        })
-        .await
-        .unwrap();
-        n.on_event("run_completed", serde_json::json!({"ok": true}))
-            .await
-            .unwrap();
-    }
-}

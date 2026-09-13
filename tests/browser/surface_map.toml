@@ -9,7 +9,6 @@
 [[rule]]
 paths = [
   "crates/fleet-ui/src/pages/home",
-  "crates/fleet-ui/src/pages/home.rs",
 ]
 scenes = ["landing"]
 pauses = ["Landing"]
@@ -127,6 +126,16 @@ pauses = ["Integrations"]
 
 [[rule]]
 paths = [
+  "crates/fleet-server/src/admin.rs",
+  "crates/fleet-db/src/repos/admin.rs",
+  "crates/fleet-db/migrations/032_instance_admin.sql",
+  "crates/fleet-ui/src/pages/admin",
+]
+scenes = ["admin"]
+pauses = ["Admin"]
+
+[[rule]]
+paths = [
   "crates/fleet-ui/src/pages/settings",
   "crates/fleet-auth/src/routes/members.rs",
   "crates/fleet-server/src/config.rs",
@@ -152,7 +161,6 @@ paths = [
   "crates/fleet-db/src/models/worker_host.rs",
   "crates/fleet-ui/src/pages/runners/self_hosted",
   "crates/fleet-ui/src/pages/runners/mod.rs",
-  "crates/fleet-ui/src/pages/runners/redirects.rs",
   "crates/fleet-ui/src/pages/workers",
   "crates/fleet-runners-view",
   "scripts/install-worker",
@@ -164,8 +172,18 @@ pauses = ["Runners / Self-hosted", "Workers"]
 
 [[rule]]
 paths = [
+  "crates/fleet-server/src/planner.rs",
+  "crates/fleet-db/src/repos/plan_jobs.rs",
+]
+scenes = ["fleet"]
+pauses = ["Fleet"]
+
+[[rule]]
+paths = [
   "crates/fleet-ui/src/pages/runners/cloud",
   "crates/fleet-server/src/partners.rs",
+  "crates/fleet-server/src/runners.rs",
+  "crates/fleet-db/migrations/036_planner_runners.sql",
 ]
 scenes = ["cloud", "partners"]
 pauses = ["Runners / Cloud", "Runners / Partners"]
@@ -214,7 +232,6 @@ pauses = ["Kubernetes sandboxes"]
 [[rule]]
 paths = [
   "crates/fleet-host/src/exec_k8s.rs",
-  "crates/fleet-orchestrator/src/sandbox/k8s.rs",
 ]
 scenes = ["k8s", "fleet"]
 pauses = ["Kubernetes sandboxes", "Fleet"]

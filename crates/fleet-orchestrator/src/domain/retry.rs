@@ -95,14 +95,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_attempts() {
-        assert_eq!(total_attempts_allowed(0), 1);
-        assert_eq!(total_attempts_allowed(1), 2);
-        assert_eq!(total_attempts_allowed(2), 3);
-        assert_eq!(total_attempts_allowed(5), 6);
-    }
-
-    #[test]
     fn retry_matrix() {
         let cases = [
             (

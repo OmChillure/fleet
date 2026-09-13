@@ -2,8 +2,8 @@
 
 use serde_json::{json, Value};
 
-use crate::proxy::types::ProxyResult;
 use super::super::client::*;
+use crate::proxy::types::ProxyResult;
 
 pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
@@ -67,7 +67,10 @@ pub(crate) async fn put_file(http: &reqwest::Client, token: &str, args: &Value) 
     }
     let (get_status, existing) = github_get(http, token, &get_url).await;
     let sha = if (200..300).contains(&get_status) {
-        existing.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+        existing
+            .get("sha")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
@@ -163,8 +166,12 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         );
     }
 
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("commit_files", st, &repo_body);
     }
@@ -398,7 +405,11 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
     )
 }
 
-pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+pub(crate) async fn create_branch(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_branch", "bad_args", e, None),
@@ -415,8 +426,12 @@ pub(crate) async fn create_branch(http: &reqwest::Client, token: &str, args: &Va
             )
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_branch", st, &repo_body);
     }
@@ -491,15 +506,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     };
     let title = match args.get("title").and_then(|v| v.as_str()).map(str::trim) {
         Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            return ProxyResult::err(
-                "github",
-                "create_pr",
-                "bad_args",
-                "title is required",
-                None,
-            )
-        }
+        _ => return ProxyResult::err("github", "create_pr", "bad_args", "title is required", None),
     };
     let head = match args
         .get("head")
@@ -518,8 +525,13 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
             )
         }
     };
-    let (st, repo_body) =
-        github_get(http, token, &format!("https://api.github.com/repos/{owner}/{repo}")).await;
+    let origin = github_api_origin();
+    let (st, repo_body) = github_get(
+        http,
+        token,
+        &format!("{origin}/repos/{owner}/{repo}"),
+    )
+    .await;
     if !(200..300).contains(&st) {
         return upstream_err("create_pr", st, &repo_body);
     }
@@ -539,15 +551,12 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
         .and_then(|v| v.as_str())
         .unwrap_or("Opened by Agent Fleet (control-plane integration; no tokens in sandboxes).")
         .to_string();
-    let draft = args
-        .get("draft")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let draft = args.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (st, pr) = github_post(
         http,
         token,
-        &format!("https://api.github.com/repos/{owner}/{repo}/pulls"),
+        &format!("{origin}/repos/{owner}/{repo}/pulls"),
         &json!({
             "title": title,
             "head": head,
@@ -573,11 +582,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
     )
 }
 
-pub(crate) async fn create_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn create_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "create_issue", "bad_args", e, None),
@@ -623,11 +628,7 @@ pub(crate) async fn create_issue(
     )
 }
 
-pub(crate) async fn update_issue(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn update_issue(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "update_issue", "bad_args", e, None),
@@ -705,11 +706,7 @@ pub(crate) async fn update_issue(
     )
 }
 
-pub(crate) async fn add_comment(
-    http: &reqwest::Client,
-    token: &str,
-    args: &Value,
-) -> ProxyResult {
+pub(crate) async fn add_comment(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
     let (owner, repo) = match require_owner_repo(args) {
         Ok(v) => v,
         Err(e) => return ProxyResult::err("github", "add_comment", "bad_args", e, None),
@@ -780,8 +777,10 @@ pub(crate) async fn merge_pr(http: &reqwest::Client, token: &str, args: &Value) 
         .get("number")
         .or_else(|| args.get("pr"))
         .or_else(|| args.get("pull_number"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-    {
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
         Some(n) => n,
         None => {
             return ProxyResult::err(
@@ -841,3 +840,164 @@ pub(crate) async fn merge_pr(http: &reqwest::Client, token: &str, args: &Value) 
     )
 }
 
+#[cfg(test)]
+mod create_pr_tests {
+    use super::*;
+    use crate::proxy::dispatch;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    const LEAK: &str = "gho_CREATE_PR_OK_MUST_NOT_ECHO_7eaf";
+
+    struct OriginGuard;
+    impl Drop for OriginGuard {
+        fn drop(&mut self) {
+            TEST_GITHUB_API_BASE.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    struct OkPrSink {
+        hits: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        origin: String,
+    }
+
+    impl Drop for OkPrSink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl OkPrSink {
+        fn bind() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind create_pr ok sink");
+            listener.set_nonblocking(true).expect("nonblocking sink");
+            let addr = listener.local_addr().expect("sink addr");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let hits_t = hits.clone();
+            let stop_t = stop.clone();
+            thread::spawn(move || {
+                while !stop_t.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            hits_t.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut buf = Vec::new();
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                match stream.read(&mut tmp) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        buf.extend_from_slice(&tmp[..n]);
+                                        if let Some(end) = headers_end(&buf) {
+                                            let len = content_length(&buf[..end]).unwrap_or(0);
+                                            if buf.len() >= end + len {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let req = String::from_utf8_lossy(&buf);
+                            let (status, body) = if req.starts_with("POST ") {
+                                (
+                                    201,
+                                    json!({
+                                        "number": 7,
+                                        "title": "add README",
+                                        "html_url": "https://github.com/acme/app/pull/7",
+                                        "access_token": LEAK,
+                                    })
+                                    .to_string(),
+                                )
+                            } else {
+                                (200, json!({ "default_branch": "main" }).to_string())
+                            };
+                            let resp = format!(
+                                "HTTP/1.1 {status} ok\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                hits,
+                stop,
+                origin: format!("http://{addr}"),
+            }
+        }
+    }
+
+    fn headers_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+    }
+
+    fn content_length(headers: &[u8]) -> Option<usize> {
+        let text = std::str::from_utf8(headers).ok()?;
+        for line in text.split("\r\n") {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                return value.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Success path: GET repo 200 then POST /pulls 201; map_pr keeps number and drops access_token.
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_create_pr_ok_maps_number_and_drops_provider_access_token() {
+        let sink = OkPrSink::bind();
+        let _guard = OriginGuard;
+        TEST_GITHUB_API_BASE.with(|c| *c.borrow_mut() = Some(sink.origin.clone()));
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http");
+        let result = dispatch(
+            "github",
+            &http,
+            "token",
+            "create_pr",
+            &json!({
+                "owner": "acme",
+                "repo": "app",
+                "title": "add README",
+                "head": "agent-fleet/changes",
+            }),
+            &json!({}),
+        )
+        .await;
+        assert!(result.ok, "create_pr 201 must be ok: {result:?}");
+        assert_eq!(
+            result.data.get("number"),
+            Some(&json!(7)),
+            "map_pr must copy number: {result:?}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !dump.contains(LEAK),
+            "create_pr success must not echo provider access_token: {dump}"
+        );
+        assert!(
+            sink.hits.load(Ordering::SeqCst) >= 2,
+            "create_pr must GET repo then POST /pulls (hits={})",
+            sink.hits.load(Ordering::SeqCst)
+        );
+    }
+}

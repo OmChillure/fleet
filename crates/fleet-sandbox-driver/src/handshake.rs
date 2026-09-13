@@ -183,6 +183,75 @@ mod tests {
 
     static TEST_ENV_LOCK: TestMutex<()> = TestMutex::new(());
 
+    /// Restores env, in-memory SECRET, and dumpable even if the test panics.
+    struct HandshakeEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_env: Option<String>,
+        prev_stored: Option<String>,
+        #[cfg(target_os = "linux")]
+        prev_dumpable: i32,
+    }
+
+    impl HandshakeEnvGuard {
+        fn acquire() -> Self {
+            let lock = TEST_ENV_LOCK.lock().expect("TEST_ENV_LOCK");
+            let prev_env = std::env::var("FLEET_HANDSHAKE_SECRET").ok();
+            let prev_stored = SECRET.lock().ok().and_then(|g| g.clone());
+            #[cfg(target_os = "linux")]
+            let prev_dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+            Self {
+                _lock: lock,
+                prev_env,
+                prev_stored,
+                #[cfg(target_os = "linux")]
+                prev_dumpable,
+            }
+        }
+
+        fn set_env(&self, value: Option<&str>) {
+            // SAFETY: TEST_ENV_LOCK is held for this guard's lifetime.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var("FLEET_HANDSHAKE_SECRET", v),
+                    None => std::env::remove_var("FLEET_HANDSHAKE_SECRET"),
+                }
+            }
+        }
+
+        fn clear_stored(&self) {
+            if let Ok(mut g) = SECRET.lock() {
+                *g = None;
+            }
+        }
+    }
+
+    impl Drop for HandshakeEnvGuard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = SECRET.lock() {
+                *g = self.prev_stored.clone();
+            }
+            // SAFETY: TEST_ENV_LOCK is still held (fields drop after Drop::drop).
+            unsafe {
+                match &self.prev_env {
+                    Some(v) => std::env::set_var("FLEET_HANDSHAKE_SECRET", v),
+                    None => std::env::remove_var("FLEET_HANDSHAKE_SECRET"),
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if self.prev_dumpable >= 0 {
+                unsafe {
+                    libc::prctl(
+                        libc::PR_SET_DUMPABLE,
+                        self.prev_dumpable as libc::c_ulong,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn canonical_matches_python_style() {
         let v = json!({"b": 1, "a": {"z": true, "y": [1, "x"]}});
@@ -201,46 +270,183 @@ mod tests {
             "req_id": "r1"
         }))
         .unwrap();
+        let hmac = signed["hmac"].as_str().expect("signed hmac");
+        assert_eq!(hmac.len(), 64);
+        assert!(hmac.chars().all(|c| c.is_ascii_hexdigit()));
         verify_value(&signed).unwrap();
-        let mut bad = signed.clone();
-        bad["hmac"] = json!("00");
-        assert!(verify_value(&bad).is_err());
         unsafe {
             std::env::remove_var("FLEET_HANDSHAKE_SECRET");
         }
     }
 
     #[test]
-    fn init_from_env_strips_environ_keeps_secret() {
+    fn verify_value_rejects_same_length_forged_hmac() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HANDSHAKE_SECRET", "unit-test-secret");
+        }
+        let signed = sign_value(json!({
+            "action": "provision",
+            "job_id": "j1",
+            "req_id": "r1"
+        }))
+        .unwrap();
+        let good = signed["hmac"].as_str().expect("signed hmac").to_string();
+        assert_eq!(good.len(), 64);
+        let mut forged = signed;
+        forged["hmac"] = Value::String("0".repeat(64));
+        assert_eq!(forged["hmac"].as_str().unwrap().len(), good.len());
+        assert_ne!(forged["hmac"].as_str().unwrap(), good.as_str());
+        let err = verify_value(&forged).expect_err("same-length forged hmac");
+        assert!(
+            err.to_string().contains("invalid handshake hmac"),
+            "{err}"
+        );
+        unsafe {
+            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        }
+    }
+
+    #[test]
+    fn verify_value_rejects_tampered_payload_with_intact_hmac() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("FLEET_HANDSHAKE_SECRET", "unit-test-secret");
+        }
+        let signed = sign_value(json!({
+            "action": "provision",
+            "job_id": "j1",
+            "req_id": "r1"
+        }))
+        .unwrap();
+        let hmac = signed["hmac"].clone();
+        let mut tampered = signed;
+        tampered["job_id"] = json!("j2");
+        tampered["hmac"] = hmac;
+        let err = verify_value(&tampered).expect_err("tampered job_id");
+        assert!(
+            err.to_string().contains("invalid handshake hmac"),
+            "{err}"
+        );
+        unsafe {
+            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        }
+    }
+
+    #[test]
+    fn sign_and_verify_fail_closed_without_secret() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
         let prev = stored_secret();
-        unsafe {
-            std::env::set_var("FLEET_HANDSHAKE_SECRET", "init-secret");
+        if let Ok(mut g) = SECRET.lock() {
+            *g = None;
         }
+        unsafe {
+            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+        }
+        let body = json!({
+            "action": "provision",
+            "job_id": "j1",
+            "req_id": "r1"
+        });
+        assert!(sign_value(body.clone()).is_err());
+        assert!(verify_value(&body).is_err());
+        if let Ok(mut g) = SECRET.lock() {
+            *g = prev;
+        }
+    }
+
+    #[test]
+    fn init_from_env_strips_environ_keeps_secret() {
+        let guard = HandshakeEnvGuard::acquire();
+        guard.clear_stored();
+        guard.set_env(Some("init-secret"));
         init_from_env().expect("init_from_env");
         assert!(
             std::env::var("FLEET_HANDSHAKE_SECRET").is_err(),
             "secret must not remain in the process environ"
         );
-        assert_eq!(stored_secret().as_deref(), Some("init-secret"));
         assert_eq!(handshake_secret().as_deref(), Some("init-secret"));
-        let signed = sign_value(json!({"action": "provision", "job_id": "j1"})).unwrap();
-        verify_value(&signed).unwrap();
-        #[cfg(target_os = "linux")]
-        {
-            let blob = std::fs::read("/proc/self/environ").unwrap_or_default();
+    }
+
+    // set_var does not write the execve block that /proc/*/environ shows.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn init_from_env_child_execve_wipes_proc_environ() {
+        const SECRET: &str = "child-execve-wipe-secret";
+        const SENTINEL: &str = "handshake-child-wipe-ok";
+        const CHILD_FLAG: &str = "FLEET_HANDSHAKE_CHILD_WIPE";
+
+        if std::env::var_os(CHILD_FLAG).is_some() {
+            let before = std::fs::read("/proc/self/environ").expect("read /proc/self/environ");
             assert!(
-                !blob
-                    .windows(b"init-secret".len())
-                    .any(|w| w == b"init-secret"),
+                before.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+                "child execve env must contain the secret before init_from_env"
+            );
+            init_from_env().expect("init_from_env");
+            // init_from_env sets PR_SET_DUMPABLE=0, which makes /proc/self/environ
+            // EACCES even to this process. Re-enable dumpable only to observe the wipe.
+            let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) };
+            assert_eq!(rc, 0, "temporarily re-enable dumpable to read environ");
+            let after = std::fs::read("/proc/self/environ").expect("read /proc/self/environ");
+            assert!(
+                !after.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
                 "secret must not remain in /proc/self/environ"
             );
+            println!("{SENTINEL}");
+            return;
         }
-        if let Ok(mut g) = SECRET.lock() {
-            *g = prev;
-        }
-        unsafe {
-            std::env::remove_var("FLEET_HANDSHAKE_SECRET");
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let current = std::thread::current();
+        let test_name = current.name().expect("rustc test thread name");
+        let output = std::process::Command::new(exe)
+            .env(CHILD_FLAG, "1")
+            .env("FLEET_HANDSHAKE_SECRET", SECRET)
+            .args(["--exact", test_name, "--nocapture"])
+            .output()
+            .expect("spawn handshake child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "child failed: status={:?} stdout={stdout} stderr={stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains(SENTINEL),
+            "child did not run wipe check: stdout={stdout} stderr={stderr}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn init_from_env_sets_dumpable_0() {
+        let _guard = HandshakeEnvGuard::acquire();
+        init_from_env().expect("init_from_env");
+        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+        assert_eq!(dumpable, 0, "PR_SET_DUMPABLE=0 after init_from_env");
+    }
+
+    #[test]
+    fn init_from_env_blank_or_missing_secret_does_not_store() {
+        let guard = HandshakeEnvGuard::acquire();
+        let body = json!({
+            "action": "provision",
+            "job_id": "j1",
+            "req_id": "r1"
+        });
+        for value in [None, Some(" \t ")] {
+            guard.clear_stored();
+            guard.set_env(value);
+            init_from_env().expect("init_from_env");
+            assert!(
+                handshake_secret().is_none(),
+                "blank/missing env must not leave a handshake secret"
+            );
+            assert!(
+                sign_value(body.clone()).is_err(),
+                "sign_value must fail without a stored secret"
+            );
         }
     }
 }

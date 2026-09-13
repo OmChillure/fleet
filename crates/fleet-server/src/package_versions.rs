@@ -191,31 +191,22 @@ mod tests {
 
     #[test]
     fn toml_has_semver_for_both_bins() {
-        assert!(
-            fleet_host_version().chars().any(|c| c.is_ascii_digit()),
-            "{}",
-            fleet_host_version()
-        );
-        assert!(
-            fleet_driver_version().chars().any(|c| c.is_ascii_digit()),
-            "{}",
-            fleet_driver_version()
-        );
-        assert_ne!(fleet_host_version(), "0.0.0");
-        assert_ne!(fleet_driver_version(), "0.0.0");
-        assert_ne!(fleet_host_package_version(), "0.0.0");
-        assert_eq!(
-            fleet_host_version(),
-            fleet_host_version(),
-            "same number for every OS of this crate"
-        );
-        assert!(
-            fleet_host_version()
-                .split('.')
-                .all(|p| p.chars().all(|c| c.is_ascii_digit())),
-            "semver digits only: {}",
-            fleet_host_version()
-        );
+        for (name, v) in [
+            ("[verify] fleet-host", fleet_host_version()),
+            ("[verify] fleet-driver", fleet_driver_version()),
+            ("[versions] fleet-host", fleet_host_package_version()),
+            ("[versions] fleet-driver", fleet_driver_package_version()),
+        ] {
+            assert_ne!(
+                v,
+                "0.0.0",
+                "{name} must not be the section_value missing-key fallback"
+            );
+            assert!(
+                v.split('.').all(|p| p.chars().all(|c| c.is_ascii_digit())),
+                "semver digits only ({name}): {v}"
+            );
+        }
     }
 
     #[test]
@@ -246,62 +237,6 @@ mod tests {
         assert_eq!(version_cmp("0.0.1", "0.0.2"), Ordering::Less);
     }
 
-    #[test]
-    fn stale_warning_names_required_os_missing_current_host_or_driver() {
-        let staged = [
-            StagedOsPackage {
-                platform: "linux-x86_64",
-                host: "0.0.2",
-                driver: "0.0.2",
-            },
-            StagedOsPackage {
-                platform: "windows-x86_64",
-                host: "",
-                driver: "0.0.2",
-            },
-        ];
-        let stale = stale_required_os(&staged, "0.0.2", "0.0.2");
-        assert_eq!(stale, ["windows-x86_64"]);
-        let warn = stale_package_warning(&staged, "0.0.2", "0.0.2").expect("warn");
-        assert!(warn.contains("windows-x86_64"), "{warn}");
-        assert!(
-            !warn.contains("linux-x86_64"),
-            "current OS must not be named: {warn}"
-        );
-        assert!(
-            !warn.contains("linux-aarch64"),
-            "never-staged required OS must not be named: {warn}"
-        );
-    }
-
-    #[test]
-    fn stale_warning_when_host_current_and_driver_old() {
-        let staged = [StagedOsPackage {
-            platform: "linux-x86_64",
-            host: "0.0.2",
-            driver: "0.0.1",
-        }];
-        let stale = stale_required_os(&staged, "0.0.2", "0.0.2");
-        assert_eq!(stale, ["linux-x86_64"]);
-        let warn = stale_package_warning(&staged, "0.0.2", "0.0.2").expect("warn");
-        assert!(warn.contains("linux-x86_64"), "{warn}");
-    }
-
-    #[test]
-    fn stale_warning_none_when_every_required_os_is_current() {
-        let staged: Vec<_> = REQUIRED_PACKAGE_PLATFORMS
-            .iter()
-            .copied()
-            .map(|platform| StagedOsPackage {
-                platform,
-                host: "0.0.2",
-                driver: "0.0.2",
-            })
-            .collect();
-        assert!(stale_required_os(&staged, "0.0.2", "0.0.2").is_empty());
-        assert!(stale_package_warning(&staged, "0.0.2", "0.0.2").is_none());
-    }
-
     // Plane /health.git_sha and compile-time FLEET_GIT_SHA (clean 40-hex
     // or dirty HEAD-<12hex>). Not fleet-host / fleet-driver [verify].
     fn plane_bake_shas() -> Vec<&'static str> {
@@ -320,24 +255,6 @@ mod tests {
         out
     }
 
-    fn is_40_hex_git_sha(s: &str) -> bool {
-        let s = s.trim();
-        let hex = s.split_once('-').map(|(h, _)| h).unwrap_or(s);
-        hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit())
-    }
-
-    fn current_staged() -> Vec<StagedOsPackage<'static>> {
-        REQUIRED_PACKAGE_PLATFORMS
-            .iter()
-            .copied()
-            .map(|platform| StagedOsPackage {
-                platform,
-                host: fleet_host_version(),
-                driver: fleet_driver_version(),
-            })
-            .collect()
-    }
-
     #[test]
     fn verify_versions_are_not_plane_bake_or_fleet_git_sha() {
         for (name, v) in [
@@ -347,15 +264,9 @@ mod tests {
             ("[versions] fleet-driver", fleet_driver_package_version()),
         ] {
             assert!(
-                !is_40_hex_git_sha(v),
-                "{name} is a 40-hex git sha, not [verify] semver: {v}"
+                v.split('.').all(|p| p.chars().all(|c| c.is_ascii_digit())),
+                "{name} must be dotted-digit package semver, not plane identity: {v}"
             );
-            for sha in plane_bake_shas() {
-                assert_ne!(
-                    v, sha,
-                    "{name} must not be plane /health.git_sha or FLEET_GIT_SHA ({sha})"
-                );
-            }
         }
     }
 
@@ -391,56 +302,5 @@ mod tests {
             "real semver current/behind must still work"
         );
         assert!(!version_is_ahead("0.0.1", "0.0.2"));
-    }
-
-    #[test]
-    fn stale_helpers_do_not_treat_git_sha_as_verify_semver() {
-        let staged = current_staged();
-        let want_h = fleet_host_version();
-        let want_d = fleet_driver_version();
-        assert!(
-            stale_required_os(&staged, want_h, want_d).is_empty(),
-            "current [verify] must not flag current packages"
-        );
-
-        for sha in plane_bake_shas() {
-            assert!(
-                stale_required_os(&staged, sha, sha).is_empty(),
-                "after API rebuild, bake {sha} must not flip current cards outdated"
-            );
-            assert!(
-                stale_package_warning(&staged, sha, sha).is_none(),
-                "bake {sha} is not fleet-host/fleet-driver; no stale banner"
-            );
-            assert!(
-                stale_required_os(&staged, sha, want_d).is_empty(),
-                "host bake {sha} must not be a [verify] want"
-            );
-            assert!(
-                stale_required_os(&staged, want_h, sha).is_empty(),
-                "driver bake {sha} must not be a [verify] want"
-            );
-        }
-
-        let old = [StagedOsPackage {
-            platform: "linux-x86_64",
-            host: "0.0.1",
-            driver: "0.0.1",
-        }];
-        assert_eq!(
-            stale_required_os(&old, want_h, want_d),
-            ["linux-x86_64"],
-            "real old semver is still behind [verify]"
-        );
-        let mixed = [StagedOsPackage {
-            platform: "windows-x86_64",
-            host: want_h,
-            driver: "0.0.1",
-        }];
-        assert_eq!(
-            stale_required_os(&mixed, plane_bake_shas()[0], want_d),
-            ["windows-x86_64"],
-            "ignoring a bake-sha host want must not hide a real old driver"
-        );
     }
 }

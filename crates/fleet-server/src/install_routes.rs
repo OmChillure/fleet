@@ -457,38 +457,62 @@ mod tests {
     }
 
     #[test]
-    fn manifest_json_is_served_as_json() {
-        assert_eq!(worker_bin_content_type("manifest.json"), "application/json");
+    fn map_uname_linux_x86_64() {
+        let cases = [
+            ("Linux", "x86_64", false, "linux-x86_64"),
+            ("linux", "amd64", true, "linux-x86_64-musl"),
+            ("Linux", "armv7l", false, "linux-armv7"),
+            ("Linux", "armv7l", true, "linux-armv7-musl"),
+            ("linux", "armhf", true, "linux-armv7-musl"),
+            ("Darwin", "arm64", false, "darwin-arm64"),
+            ("FreeBSD", "amd64", false, "freebsd-amd64"),
+        ];
+        for (os, arch, musl, want) in cases {
+            assert_eq!(
+                map_uname_platform(os, arch, musl),
+                want,
+                "map_uname_platform({os}, {arch}, {musl})"
+            );
+        }
+    }
+
+    #[test]
+    fn map_uname_linux_aarch64_glibc_and_musl() {
         assert_eq!(
-            worker_bin_content_type("fleet-host.sha256"),
-            "text/plain; charset=utf-8"
+            map_uname_platform("Linux", "aarch64", false),
+            "linux-aarch64"
         );
         assert_eq!(
-            worker_bin_content_type("fleet-host"),
-            "application/octet-stream"
+            map_uname_platform("linux", "arm64", true),
+            "linux-aarch64-musl"
         );
     }
 
     #[test]
-    fn map_uname_linux_x86_64() {
-        assert_eq!(map_uname_platform("Linux", "x86_64", false), "linux-x86_64");
+    fn map_uname_windows_mingw_msys_to_windows_ids() {
         assert_eq!(
-            map_uname_platform("linux", "amd64", true),
-            "linux-x86_64-musl"
-        );
-        assert_eq!(map_uname_platform("Linux", "armv7l", false), "linux-armv7");
-        assert_eq!(
-            map_uname_platform("Linux", "armv7l", true),
-            "linux-armv7-musl"
+            map_uname_platform("MINGW64", "x86_64", false),
+            "windows-x86_64"
         );
         assert_eq!(
-            map_uname_platform("linux", "armhf", true),
-            "linux-armv7-musl"
+            map_uname_platform("msys", "amd64", false),
+            "windows-x86_64"
         );
-        assert_eq!(map_uname_platform("Darwin", "arm64", false), "darwin-arm64");
         assert_eq!(
-            map_uname_platform("FreeBSD", "amd64", false),
-            "freebsd-amd64"
+            map_uname_platform("windows", "aarch64", false),
+            "windows-arm64"
+        );
+    }
+
+    #[test]
+    fn map_uname_macos_and_x64_are_darwin_x86_64() {
+        assert_eq!(
+            map_uname_platform("macos", "x86_64", false),
+            "darwin-x86_64"
+        );
+        assert_eq!(
+            map_uname_platform("Darwin", "x64", false),
+            "darwin-x86_64"
         );
     }
 
@@ -497,66 +521,91 @@ mod tests {
         let body = script_body("linux-armv7-musl.sh").expect("wired in script_body");
         assert!(
             body.contains("FLEET_PLATFORM=linux-armv7-musl"),
-            "platform script must export linux-armv7-musl"
-        );
-        assert!(
-            body.contains("fetch -o -"),
-            "every Unix wrapper must accept fetch, not only freebsd-amd64"
-        );
-        assert!(
-            body.contains("worker install: fetching installer"),
-            "wrapper must print a phase line before the silent common fetch"
+            "linux-armv7-musl.sh must export FLEET_PLATFORM=linux-armv7-musl"
         );
     }
 
     #[test]
-    fn script_body_names_host_and_driver() {
-        let common = script_body("_unix_common.sh").expect("wired");
+    fn script_body_serves_linux_armv7() {
+        let body = script_body("linux-armv7.sh").expect("wired in script_body");
         assert!(
-            common.contains("this machine is a self-hosted worker"),
-            "installer must say the product is a worker"
+            body.contains("FLEET_PLATFORM=linux-armv7"),
+            "linux-armv7.sh must export FLEET_PLATFORM=linux-armv7"
         );
         assert!(
-            common.contains("fleet-host   stays up"),
-            "fleet-host is the machine daemon"
-        );
-        assert!(
-            common.contains("fleet-driver runs each job"),
-            "fleet-driver is the per-job process"
-        );
-        assert!(common.contains("worker install:"), "{common:.80}");
-        assert!(
-            !common.contains("fleet-host install:"),
-            "error prefix is worker install:"
-        );
-        let boot = script_body("install-worker.sh").expect("wired");
-        assert!(boot.contains("Install this worker from:"));
-        assert!(!boot.contains("Install fleet-host from:"));
-    }
-
-    #[test]
-    fn script_body_windows_arm64_fetches_libunwind() {
-        let body = script_body("windows-arm64.ps1").expect("wired in script_body");
-        assert!(
-            body.contains("libunwind.dll"),
-            "windows-arm64 installer must fetch gnullvm libunwind.dll"
-        );
-        assert!(
-            body.contains("no runtime"),
-            "libunwind 404 must be skip, not a hard fail"
-        );
-        assert!(
-            body.contains(r#"GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")"#),
-            "ARM64 installer must refuse x64-emulation arch"
+            !body.contains("FLEET_PLATFORM=linux-armv7-musl"),
+            "linux-armv7.sh must not export the musl id"
         );
     }
 
     #[test]
-    fn native_platform_id_is_a_single_token() {
-        let id = native_platform_id();
-        assert!(!id.is_empty(), "platform id must be non-empty");
-        assert!(!id.contains('/'), "{id}");
-        assert!(!id.contains('\n'), "{id}");
+    fn served_unix_platform_scripts_export_matching_fleet_platform() {
+        let mut stems = Vec::new();
+        for (name, body) in served_scripts() {
+            if !name.ends_with(".sh") || matches!(*name, "install-worker.sh" | "_unix_common.sh") {
+                continue;
+            }
+            let stem = name
+                .strip_suffix(".sh")
+                .expect("unix platform wrapper ends in .sh");
+            assert!(
+                body.contains(&format!("FLEET_PLATFORM={stem}")),
+                "{name} must export FLEET_PLATFORM={stem}"
+            );
+            stems.push(stem);
+        }
+        assert!(
+            !stems.is_empty(),
+            "served_scripts must include unix platform wrappers"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_named_script_linux_armv7_musl_ok() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let app = Router::new().route("/install/worker/{*name}", get(get_named_script));
+        let req = Request::builder()
+            .uri("/install/worker/linux-armv7-musl.sh")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            body.contains("FLEET_PLATFORM=linux-armv7-musl"),
+            "GET /install/worker/linux-armv7-musl.sh must export linux-armv7-musl"
+        );
+    }
+
+    #[test]
+    fn detect_ids_have_served_scripts() {
+        let first_class = [
+            map_uname_platform("Linux", "x86_64", false),
+            map_uname_platform("Linux", "x86_64", true),
+            map_uname_platform("Linux", "aarch64", false),
+            map_uname_platform("Linux", "aarch64", true),
+            map_uname_platform("Linux", "armv7l", false),
+            map_uname_platform("Linux", "armv7l", true),
+            map_uname_platform("Darwin", "arm64", false),
+            map_uname_platform("Darwin", "x86_64", false),
+            map_uname_platform("FreeBSD", "amd64", false),
+            map_uname_platform("windows", "x86_64", false),
+            map_uname_platform("windows", "aarch64", false),
+        ];
+        let served: Vec<&str> = served_scripts().iter().map(|(n, _)| *n).collect();
+        for id in first_class {
+            let sh = format!("{id}.sh");
+            let ps1 = format!("{id}.ps1");
+            assert!(
+                served.contains(&sh.as_str()) || served.contains(&ps1.as_str()),
+                "map_uname_platform first-class id {id} must have a served {id}.sh or {id}.ps1"
+            );
+        }
     }
 
     #[test]
@@ -580,7 +629,7 @@ mod tests {
     fn resolve_exe_platform_then_native_sibling() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join("exe");
-        write_bin(&exe, "linux-x86_64/fleet-host", b"staged");
+        let sibling = write_bin(&exe, "fleet-host", b"sibling");
         let found = resolve_worker_bin(
             None,
             Some(&exe),
@@ -589,13 +638,30 @@ mod tests {
             "fleet-host",
             "linux-x86_64",
         );
-        assert_eq!(
-            found.as_deref(),
-            Some(exe.join("linux-x86_64/fleet-host").as_path())
-        );
+        assert_eq!(found.as_deref(), Some(sibling.as_path()));
+    }
 
+    #[test]
+    fn resolve_exe_native_sibling_none_for_foreign() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join("exe");
+        write_bin(&exe, "fleet-host", b"sibling");
+        let found = resolve_worker_bin(
+            None,
+            Some(&exe),
+            None,
+            "darwin-arm64",
+            "fleet-host",
+            "linux-x86_64",
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn resolve_exe_prefers_platform_subdir_over_native_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("exe");
+        let staged = write_bin(&exe, "linux-x86_64/fleet-host", b"staged");
         write_bin(&exe, "fleet-host", b"sibling");
         let found = resolve_worker_bin(
             None,
@@ -605,9 +671,15 @@ mod tests {
             "fleet-host",
             "linux-x86_64",
         );
-        assert_eq!(found.as_deref(), Some(exe.join("fleet-host").as_path()));
+        assert_eq!(found.as_deref(), Some(staged.as_path()));
+    }
 
-        let found_foreign = resolve_worker_bin(
+    #[test]
+    fn resolve_exe_platform_subdir_hits_foreign() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("exe");
+        let staged = write_bin(&exe, "darwin-arm64/fleet-host", b"staged");
+        let found = resolve_worker_bin(
             None,
             Some(&exe),
             None,
@@ -615,14 +687,32 @@ mod tests {
             "fleet-host",
             "linux-x86_64",
         );
-        assert!(found_foreign.is_none());
+        assert_eq!(found.as_deref(), Some(staged.as_path()));
+    }
+
+    #[test]
+    fn resolve_exe_native_sibling_beats_workspace_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("exe");
+        let sibling = write_bin(&exe, "fleet-host", b"sibling");
+        let target = tmp.path().join("target");
+        write_bin(&target, "release/fleet-host", b"release");
+        let found = resolve_worker_bin(
+            None,
+            Some(&exe),
+            Some(&target),
+            "linux-x86_64",
+            "fleet-host",
+            "linux-x86_64",
+        );
+        assert_eq!(found.as_deref(), Some(sibling.as_path()));
     }
 
     #[test]
     fn resolve_workspace_target_release_then_debug_when_native() {
         let tmp = tempfile::tempdir().unwrap();
         write_bin(tmp.path(), "debug/fleet-host", b"debug");
-        write_bin(tmp.path(), "release/fleet-host", b"release");
+        let release = write_bin(tmp.path(), "release/fleet-host", b"release");
         let found = resolve_worker_bin(
             None,
             None,
@@ -631,12 +721,15 @@ mod tests {
             "fleet-host",
             "linux-x86_64",
         );
-        assert_eq!(
-            found.as_deref(),
-            Some(tmp.path().join("release/fleet-host").as_path())
-        );
+        assert_eq!(found.as_deref(), Some(release.as_path()));
+    }
 
-        let foreign = resolve_worker_bin(
+    #[test]
+    fn resolve_workspace_target_none_for_foreign() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_bin(tmp.path(), "debug/fleet-host", b"debug");
+        write_bin(tmp.path(), "release/fleet-host", b"release");
+        let found = resolve_worker_bin(
             None,
             None,
             Some(tmp.path()),
@@ -644,103 +737,39 @@ mod tests {
             "fleet-host",
             "linux-x86_64",
         );
-        assert!(foreign.is_none());
+        assert!(found.is_none());
     }
 
-    /// A planted control-plane or unknown name under dist is not a hit.
     #[test]
-    fn resolve_rejects_control_plane_and_unknown_even_when_planted() {
+    fn resolve_workspace_target_debug_when_release_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        write_bin(tmp.path(), "linux-x86_64/fleet-server", b"not-a-worker");
-        write_bin(tmp.path(), "linux-x86_64/.env", b"SECRET=1");
-        write_bin(tmp.path(), "linux-x86_64/passwd", b"root:x:0:0");
-        let host = write_bin(tmp.path(), "linux-x86_64/fleet-host", b"ok");
-        assert!(resolve_worker_bin(
+        let debug = write_bin(tmp.path(), "debug/fleet-host", b"debug");
+        let found = resolve_worker_bin(
+            None,
+            None,
             Some(tmp.path()),
-            None,
-            None,
             "linux-x86_64",
-            "fleet-server",
+            "fleet-host",
             "linux-x86_64",
-        )
-        .is_none());
-        assert!(resolve_worker_bin(
-            Some(tmp.path()),
-            None,
-            None,
-            "linux-x86_64",
-            ".env",
-            "linux-x86_64",
-        )
-        .is_none());
-        assert!(resolve_worker_bin(
-            Some(tmp.path()),
-            None,
-            None,
-            "linux-x86_64",
-            "passwd",
-            "linux-x86_64",
-        )
-        .is_none());
-        assert_eq!(
-            resolve_worker_bin(
-                Some(tmp.path()),
-                None,
-                None,
-                "linux-x86_64",
-                "fleet-host",
-                "linux-x86_64",
-            )
-            .as_deref(),
-            Some(host.as_path())
         );
-    }
-
-    /// Unset dist and no exe/workspace fallbacks: no binary is found.
-    #[test]
-    fn worker_dist_unset_resolve_is_none() {
-        let platform = "linux-x86_64";
-        let bin = "fleet-host";
-        assert_eq!(
-            resolve_worker_bin(None, None, None, platform, bin, platform),
-            None
-        );
+        assert_eq!(found.as_deref(), Some(debug.as_path()));
     }
 
     #[test]
-    fn worker_dist_missing_bin_hint_includes_build_from_source() {
-        let platform = "linux-x86_64";
-        let bin = "fleet-host";
-        let hint = missing_bin_hint(platform, bin);
-        assert!(
-            hint.contains("binary not available"),
-            "hint must say the binary is missing: {hint}"
-        );
-        assert!(
-            hint.contains("FLEET_WORKER_DIST_DIR"),
-            "hint must name FLEET_WORKER_DIST_DIR: {hint}"
-        );
-        assert!(
-            hint.contains("FLEET_WORKER_BUILD_FROM_SOURCE=1"),
-            "hint must name FLEET_WORKER_BUILD_FROM_SOURCE=1: {hint}"
-        );
-        assert!(
-            hint.contains(&format!("{platform}/{bin}")),
-            "hint must name {platform}/{bin}: {hint}"
-        );
-    }
-
-    /// Install scripts are wired even when FLEET_WORKER_DIST_DIR is unset.
-    #[test]
-    fn worker_dist_script_body_independent_of_dist() {
-        assert!(
-            script_body("install-worker.sh").is_some(),
-            "install-worker.sh must stay served when dist is unset"
-        );
-        assert!(
-            script_body("install-worker.ps1").is_some(),
-            "install-worker.ps1 must stay served when dist is unset"
-        );
+    fn reject_unsafe_name_rejects_empty_nul_dotdot_slash_and_absolute() {
+        let rejected = ["", "\0", "..", "/etc/passwd", "a/b", "a\\b"];
+        for name in rejected {
+            let err = reject_unsafe_name(name).expect_err("unsafe token");
+            match err {
+                AppError::BadRequest(msg) => {
+                    assert_eq!(msg, "invalid name", "name={name:?}");
+                }
+                other => panic!("name={name:?} must be BadRequest, got {other:?}"),
+            }
+        }
+        reject_unsafe_name("linux-x86_64").expect("safe platform token");
+        reject_unsafe_name("fleet-host").expect("safe bin token");
+        reject_unsafe_name("linux-x86_64.sh").expect("safe script token");
     }
 
     struct PublicBaseProbe {
@@ -752,9 +781,12 @@ mod tests {
     /// Run a served POSIX installer with both public bases in the child env.
     /// curl/wget/fetch are stubbed so a wrong origin is the URL log, not a
     /// real request (OAuth `API_PUBLIC_BASE` vs pair `WORKER_PUBLIC_BASE`).
+    /// `fleet_url` / `fleet_install_origin` are optional child env; unset both
+    /// is the fail-closed path (`_unix_common.sh` ORIGIN prefers install origin).
     fn probe_script_public_bases(
         script_name: &str,
         fleet_url: Option<&str>,
+        fleet_install_origin: Option<&str>,
         worker_public_base: &str,
         api_public_base: &str,
     ) -> PublicBaseProbe {
@@ -812,6 +844,13 @@ exit 22
             }
             None => {
                 cmd.env_remove("FLEET_URL");
+            }
+        }
+        match fleet_install_origin {
+            Some(url) => {
+                cmd.env("FLEET_INSTALL_ORIGIN", url);
+            }
+            None => {
                 cmd.env_remove("FLEET_INSTALL_ORIGIN");
             }
         }
@@ -831,17 +870,9 @@ exit 22
         }
     }
 
-    /// Pair URL is WORKER_PUBLIC_BASE via FLEET_URL; OAuth is API_PUBLIC_BASE.
-    /// Mixing them locks out every runner or breaks Connect.
+    /// Served installers pair via FLEET_URL; none may read OAuth API_PUBLIC_BASE.
     #[test]
     fn install_scripts_use_worker_public_base_not_api_public_base() {
-        let worker_public_base = "http://pair.example.test:9443";
-        let api_public_base = "http://oauth.example.test:8080";
-        assert_ne!(
-            worker_public_base, api_public_base,
-            "sentinels must differ so a collapsed base is visible"
-        );
-
         for (name, body) in served_scripts() {
             assert!(
                 !body.contains("API_PUBLIC_BASE"),
@@ -852,39 +883,29 @@ exit 22
                 "{name} must take the pair URL via FLEET_URL (WORKER_PUBLIC_BASE)"
             );
         }
+    }
 
-        let unix = script_body("install-worker.sh").expect("unix install command");
-        let windows = script_body("install-worker.ps1").expect("windows install command");
-        assert!(
-            unix.contains("FLEET_URL="),
-            "Unix install command must set FLEET_URL to the pair base"
-        );
-        assert!(
-            !unix.contains("API_PUBLIC_BASE="),
-            "Unix install command must not set API_PUBLIC_BASE"
-        );
-        assert!(
-            windows.contains("$env:FLEET_URL"),
-            "Windows install command must set FLEET_URL to the pair base"
-        );
-        assert!(
-            !windows.contains("$env:API_PUBLIC_BASE"),
-            "Windows install command must not set API_PUBLIC_BASE"
-        );
+    /// Fetch origin is FLEET_URL. Distinct pair sentinels make a
+    /// $WORKER_PUBLIC_BASE mutant visible; API_PUBLIC_BASE is OAuth.
+    #[test]
+    fn install_scripts_fetch_fleet_url_not_worker_public_base_env() {
+        let fleet_url = "http://pair.example.test:9443";
+        let worker_public_base = "http://other-pair.example.test:9555";
+        let api_public_base = "http://oauth.example.test:8080";
+        assert_ne!(fleet_url, worker_public_base);
+        assert_ne!(fleet_url, api_public_base);
+        assert_ne!(worker_public_base, api_public_base);
 
-        // install_hint sets FLEET_URL=<WORKER_PUBLIC_BASE>. A sourced .env may
-        // still export API_PUBLIC_BASE — the child must fetch the worker origin,
-        // not echo FLEET_URL and not pair against the OAuth base.
         for name in [
             "install-worker.sh",
-            "_unix_common.sh",
             "linux-x86_64.sh",
             "darwin-arm64.sh",
             "freebsd-amd64.sh",
         ] {
             let probe = probe_script_public_bases(
                 name,
-                Some(worker_public_base),
+                Some(fleet_url),
+                None,
                 worker_public_base,
                 api_public_base,
             );
@@ -892,8 +913,8 @@ exit 22
                 probe
                     .requested_urls
                     .lines()
-                    .any(|u| u.starts_with(worker_public_base)),
-                "{name} must fetch/pair against FLEET_URL=WORKER_PUBLIC_BASE={worker_public_base} \
+                    .any(|u| u.starts_with(fleet_url)),
+                "{name} must fetch against FLEET_URL={fleet_url} \
                  (echoing FLEET_URL is not enough):\nurls={}\nout={}",
                 probe.requested_urls,
                 probe.combined
@@ -902,125 +923,288 @@ exit 22
                 !probe
                     .requested_urls
                     .lines()
-                    .any(|u| u.starts_with(api_public_base)),
-                "{name} fetched API_PUBLIC_BASE (OAuth) instead of WORKER_PUBLIC_BASE:\nurls={}\nout={}",
+                    .any(|u| u.starts_with(worker_public_base)),
+                "{name} fetched WORKER_PUBLIC_BASE instead of FLEET_URL:\nurls={}\nout={}",
                 probe.requested_urls,
                 probe.combined
             );
             assert!(
-                !probe.combined.contains(api_public_base),
-                "{name} must not treat sourced API_PUBLIC_BASE as the pair origin:\nurls={}\nout={}",
+                !probe
+                    .requested_urls
+                    .lines()
+                    .any(|u| u.starts_with(api_public_base)),
+                "{name} fetched API_PUBLIC_BASE (OAuth) instead of FLEET_URL:\nurls={}\nout={}",
                 probe.requested_urls,
                 probe.combined
             );
         }
     }
 
-    /// The UI one-liner sets `FLEET_URL`/`FLEET_PAIR_TOKEN` on the bootstrap
-    /// `sh`. Those must be exported so `sh "$tmp"` and the piped
-    /// `_unix_common.sh` still see the pair token and the worker (pair) base.
+    /// Unset FLEET_URL must fail closed and must not fetch either public base.
     #[test]
-    fn install_worker_sh_exports_fleet_pair_token_and_fleet_url() {
-        let boot = script_body("install-worker.sh").expect("unix install command");
-        let export_token = boot
-            .find("export FLEET_PAIR_TOKEN")
-            .expect("install-worker.sh must export FLEET_PAIR_TOKEN for the platform child");
-        let export_url = boot
-            .find("export FLEET_URL")
-            .expect("install-worker.sh must export FLEET_URL (WORKER_PUBLIC_BASE)");
-        let child = boot
-            .find("sh \"$tmp\"")
-            .expect("bootstrap must run the downloaded platform script");
-        assert!(
-            export_token < child,
-            "FLEET_PAIR_TOKEN must be exported before sh \"$tmp\""
+    fn install_wrapper_unset_fleet_url_fails_closed() {
+        let worker_public_base = "http://pair.example.test:9443";
+        let api_public_base = "http://oauth.example.test:8080";
+        let probe = probe_script_public_bases(
+            "linux-x86_64.sh",
+            None,
+            None,
+            worker_public_base,
+            api_public_base,
         );
         assert!(
-            export_url < child,
-            "FLEET_URL must be exported before sh \"$tmp\""
+            !probe.success,
+            "unset FLEET_URL must fail closed: {}",
+            probe.combined
         );
         assert!(
-            !boot.contains("API_PUBLIC_BASE"),
-            "install-worker.sh must not mention API_PUBLIC_BASE (OAuth / public API)"
-        );
-        assert!(
-            !boot.contains("export API_PUBLIC_BASE"),
-            "install-worker.sh must not export API_PUBLIC_BASE"
+            !probe
+                .requested_urls
+                .lines()
+                .any(|u| u.starts_with(api_public_base) || u.starts_with(worker_public_base)),
+            "unset FLEET_URL must fetch neither API_PUBLIC_BASE nor WORKER_PUBLIC_BASE: {}",
+            probe.requested_urls
         );
     }
 
-    /// Pair traffic is WORKER_PUBLIC_BASE via FLEET_URL. API_PUBLIC_BASE is
-    /// OAuth / Connect — mixing them locks out every runner.
+    struct InstallWorkerChildEnv {
+        success: bool,
+        combined: String,
+        child_env: String,
+        requested_urls: String,
+    }
+
+    fn child_env_field<'a>(dump: &'a str, key: &str) -> Option<&'a str> {
+        let prefix = format!("{key}=");
+        dump.lines().find_map(|line| line.strip_prefix(&prefix))
+    }
+
+    /// Dump written by the stub platform / `_unix_common.sh` child.
+    const CHILD_ENV_DUMP_SH: &str = r#"#!/bin/sh
+{
+  printf 'FLEET_PAIR_TOKEN=%s\n' "${FLEET_PAIR_TOKEN-}"
+  printf 'FLEET_URL=%s\n' "${FLEET_URL-}"
+  printf 'FLEET_INSTALL_ORIGIN=%s\n' "${FLEET_INSTALL_ORIGIN-}"
+} > "${FLEET_TEST_CHILD_ENV:?}"
+"#;
+
+    /// Run served `install-worker.sh`. Stub curl/wget/fetch so `http_get`
+    /// writes `platform_body` (the `sh "$tmp"` child). `unix_common_body`
+    /// is the wrapper's curl|sh of `_unix_common.sh` when that hop runs.
+    fn run_install_worker_bootstrap(
+        fleet_url: &str,
+        pair_token: &str,
+        platform_body: &str,
+        unix_common_body: Option<&str>,
+    ) -> InstallWorkerChildEnv {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("install-worker.sh");
+        fs::write(
+            &script,
+            script_body("install-worker.sh").expect("unix install command"),
+        )
+        .unwrap();
+
+        let platform_path = tmp.path().join("platform.sh");
+        fs::write(&platform_path, platform_body).unwrap();
+        let common_path = tmp.path().join("unix_common.sh");
+        if let Some(common) = unix_common_body {
+            fs::write(&common_path, common).unwrap();
+        }
+
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let url_log = tmp.path().join("http.log");
+        let stub = r#"#!/bin/sh
+log=${FLEET_TEST_URL_LOG:?}
+printf '%s\n' "$*" >> "$log"
+url=""
+for a in "$@"; do
+  case $a in
+    http://*|https://*) url=$a; printf '%s\n' "$a" >> "${log}.urls" ;;
+  esac
+done
+case $url in
+  *_unix_common.sh*)
+    if [ -n "${FLEET_TEST_UNIX_COMMON_BODY:-}" ]; then
+      cat "$FLEET_TEST_UNIX_COMMON_BODY"
+      exit 0
+    fi
+    exit 22
+    ;;
+esac
+cat "${FLEET_TEST_PLATFORM_BODY:?}"
+exit 0
+"#;
+        for name in ["curl", "wget", "fetch"] {
+            let path = bin.join(name);
+            fs::write(&path, stub).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let child_env_log = tmp.path().join("child.env");
+        let path_var = format!("{}:/usr/bin:/bin", bin.display());
+        let mut cmd = Command::new("sh");
+        cmd.arg(&script);
+        cmd.env_clear();
+        cmd.env("PATH", &path_var);
+        cmd.env("HOME", &home);
+        cmd.env("LC_ALL", "C");
+        cmd.env("TMPDIR", tmp.path());
+        cmd.env("FLEET_TEST_URL_LOG", &url_log);
+        cmd.env("FLEET_TEST_PLATFORM_BODY", &platform_path);
+        cmd.env("FLEET_TEST_CHILD_ENV", &child_env_log);
+        cmd.env("FLEET_URL", fleet_url);
+        cmd.env("FLEET_PAIR_TOKEN", pair_token);
+        cmd.env_remove("FLEET_INSTALL_ORIGIN");
+        cmd.env_remove("FLEET_PLATFORM");
+        if unix_common_body.is_some() {
+            cmd.env("FLEET_TEST_UNIX_COMMON_BODY", &common_path);
+        } else {
+            cmd.env_remove("FLEET_TEST_UNIX_COMMON_BODY");
+        }
+        let output = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("run served install-worker.sh: {e}"));
+        InstallWorkerChildEnv {
+            success: output.status.success(),
+            combined: format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            child_env: fs::read_to_string(&child_env_log).unwrap_or_default(),
+            requested_urls: fs::read_to_string(format!("{}.urls", url_log.display()))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// UI one-liner sets FLEET_URL / FLEET_PAIR_TOKEN on the bootstrap sh.
+    /// After normalize, the platform child (`sh "$tmp"`) must see the pair
+    /// token plus FLEET_URL / FLEET_INSTALL_ORIGIN equal to that origin.
+    #[test]
+    fn install_worker_sh_exports_fleet_pair_token_and_fleet_url() {
+        let raw_url = "http://pair.example.test:9443/";
+        let normalized = "http://pair.example.test:9443";
+        let token = "flp_testdeadbeef";
+        assert_ne!(raw_url, normalized);
+
+        let probe =
+            run_install_worker_bootstrap(raw_url, token, CHILD_ENV_DUMP_SH, None);
+        assert!(
+            probe.success,
+            "bootstrap must run the platform child: {}",
+            probe.combined
+        );
+        assert!(
+            !probe.child_env.is_empty(),
+            "platform child must dump env (http_get / sh \"$tmp\" never ran): {}",
+            probe.combined
+        );
+        assert_eq!(
+            child_env_field(&probe.child_env, "FLEET_PAIR_TOKEN"),
+            Some(token),
+            "platform child must inherit FLEET_PAIR_TOKEN: {}",
+            probe.child_env
+        );
+        assert_eq!(
+            child_env_field(&probe.child_env, "FLEET_URL"),
+            Some(normalized),
+            "platform child FLEET_URL must be the normalized origin, not {raw_url}: {}",
+            probe.child_env
+        );
+        assert_eq!(
+            child_env_field(&probe.child_env, "FLEET_INSTALL_ORIGIN"),
+            Some(normalized),
+            "platform child FLEET_INSTALL_ORIGIN must be the normalized origin: {}",
+            probe.child_env
+        );
+    }
+
+    /// Windows bootstrap must put the normalized origin on $env:FLEET_URL and
+    /// $env:FLEET_INSTALL_ORIGIN before the downloaded platform .ps1 runs.
+    #[test]
+    fn install_worker_ps1_sets_env_fleet_url_and_install_origin_before_platform_invoke() {
+        let boot = script_body("install-worker.ps1").expect("windows bootstrap");
+        let set_url = boot
+            .find("$env:FLEET_URL = $origin")
+            .expect("install-worker.ps1 must set $env:FLEET_URL to the normalized origin");
+        let set_origin = boot
+            .find("$env:FLEET_INSTALL_ORIGIN = $origin")
+            .expect(
+                "install-worker.ps1 must set $env:FLEET_INSTALL_ORIGIN to the normalized origin",
+            );
+        let invoke = boot
+            .find("[scriptblock]::Create")
+            .expect("bootstrap must invoke the downloaded platform .ps1");
+        assert!(
+            set_url < invoke,
+            "$env:FLEET_URL must equal the normalized origin before the platform .ps1 runs"
+        );
+        assert!(
+            set_origin < invoke,
+            "$env:FLEET_INSTALL_ORIGIN must equal the normalized origin before the platform .ps1 runs"
+        );
+        assert!(
+            boot.contains("$origin = Normalize-Url"),
+            "origin assigned to $env:FLEET_URL / $env:FLEET_INSTALL_ORIGIN must be Normalize-Url'd"
+        );
+    }
+
+    /// After `sh "$tmp"`, the platform wrapper's curl|sh of `_unix_common.sh`
+    /// is a new sh and must still see FLEET_PAIR_TOKEN.
+    #[test]
+    fn install_worker_sh_two_hop_unix_common_inherits_pair_token() {
+        let token = "flp_testdeadbeef";
+        let wrapper = script_body("linux-x86_64.sh").expect("unix platform wrapper");
+        let probe = run_install_worker_bootstrap(
+            "http://pair.example.test:9443",
+            token,
+            wrapper,
+            Some(CHILD_ENV_DUMP_SH),
+        );
+        assert!(
+            probe.requested_urls.contains("_unix_common.sh"),
+            "second hop must fetch _unix_common.sh:\nurls={}\nout={}",
+            probe.requested_urls,
+            probe.combined
+        );
+        assert!(
+            !probe.child_env.is_empty(),
+            "piped _unix_common.sh child must dump env: {}",
+            probe.combined
+        );
+        assert_eq!(
+            child_env_field(&probe.child_env, "FLEET_PAIR_TOKEN"),
+            Some(token),
+            "piped _unix_common.sh must inherit FLEET_PAIR_TOKEN: {}",
+            probe.child_env
+        );
+    }
+
+    /// Unset FLEET_URL / FLEET_INSTALL_ORIGIN must fail closed. Sourced
+    /// API_PUBLIC_BASE / WORKER_PUBLIC_BASE must not become the pair origin.
     #[test]
     fn install_worker_unix_hits_worker_public_base_not_api_public_base() {
         let worker_public_base = "http://pair.example.test:9443";
         let api_public_base = "http://oauth.example.test:8080";
         assert_ne!(worker_public_base, api_public_base);
 
-        let common = script_body("_unix_common.sh").expect("unix common");
-        assert!(
-            common.contains("pair --url \"$ORIGIN\""),
-            "unix common must pair against ORIGIN (FLEET_URL / WORKER_PUBLIC_BASE)"
-        );
-        assert!(
-            common.contains("ORIGIN=\"${FLEET_INSTALL_ORIGIN:-${FLEET_URL:-}}\""),
-            "unix common ORIGIN must come from FLEET_URL / FLEET_INSTALL_ORIGIN, not API_PUBLIC_BASE"
-        );
-
-        let win_x64 = script_body("windows-x86_64.ps1").expect("windows x64");
-        let win_arm = script_body("windows-arm64.ps1").expect("windows arm64");
-        for (name, body) in [
-            ("windows-x86_64.ps1", win_x64),
-            ("windows-arm64.ps1", win_arm),
-        ] {
-            assert!(
-                body.contains("pair --url $Origin"),
-                "{name} must pair against Origin (FLEET_URL / WORKER_PUBLIC_BASE)"
-            );
-            assert!(
-                body.contains("$env:FLEET_URL"),
-                "{name} Origin must come from FLEET_URL, not API_PUBLIC_BASE"
-            );
-        }
-
-        let hit = probe_script_public_bases(
+        let missing = probe_script_public_bases(
             "_unix_common.sh",
-            Some(worker_public_base),
+            None,
+            None,
             worker_public_base,
             api_public_base,
         );
         assert!(
-            hit.combined.contains(worker_public_base),
-            "origin/pair URL must be FLEET_URL=WORKER_PUBLIC_BASE: {}",
-            hit.combined
-        );
-        assert!(
-            hit.requested_urls
-                .lines()
-                .any(|u| u.starts_with(worker_public_base)),
-            "fetches must go to WORKER_PUBLIC_BASE, got: {}",
-            hit.requested_urls
-        );
-        assert!(
-            !hit.requested_urls.contains(api_public_base)
-                && !hit.combined.contains(api_public_base),
-            "must not fall through to API_PUBLIC_BASE:\nurls={}\nout={}",
-            hit.requested_urls,
-            hit.combined
-        );
-
-        // Sourced .env with only API_PUBLIC_BASE / WORKER_PUBLIC_BASE must not
-        // become the pair origin — install_hint always sets FLEET_URL.
-        let missing =
-            probe_script_public_bases("_unix_common.sh", None, worker_public_base, api_public_base);
-        assert!(
             !missing.success,
             "unset FLEET_URL must fail closed: {}",
-            missing.combined
-        );
-        assert!(
-            missing.combined.contains("FLEET_URL"),
-            "fail-closed error must name FLEET_URL, got: {}",
             missing.combined
         );
         assert!(
@@ -1035,45 +1219,46 @@ exit 22
         );
     }
 
-    fn pair_token_required_check_offset(body: &str) -> Option<usize> {
-        const MARKERS: &[&str] = &[
-            "FLEET_PAIR_TOKEN is not set",
-            "FLEET_PAIR_TOKEN is empty",
-            "FLEET_PAIR_TOKEN required",
-            "missing FLEET_PAIR_TOKEN",
-            "need FLEET_PAIR_TOKEN",
-            "[ -z \"${FLEET_PAIR_TOKEN",
-            "[ -z \"$FLEET_PAIR_TOKEN",
-            "[ -n \"${FLEET_PAIR_TOKEN:-}\" ] || die",
-            "[ -n \"${FLEET_PAIR_TOKEN}\" ] || die",
-            "[ -n \"$FLEET_PAIR_TOKEN\" ] || die",
-        ];
-        MARKERS.iter().filter_map(|m| body.find(m)).min()
-    }
-
-    /// Token check must be a hard require, and it must sit before mkdir / fetch.
+    /// Bootstrap exports FLEET_INSTALL_ORIGIN; ORIGIN prefers it over FLEET_URL.
+    /// FLEET_URL unset must still fetch that origin and never the OAuth base.
     #[test]
-    fn install_worker_unix_common_requires_pair_token_before_writing_bins() {
-        let common = script_body("_unix_common.sh").expect("unix common");
-        let token_at = pair_token_required_check_offset(common)
-            .expect("_unix_common.sh must fail closed when FLEET_PAIR_TOKEN is missing or empty");
-        let mkdir_at = common
-            .find("mkdir -p \"$BIN_DIR\"")
-            .expect("unix common creates BIN_DIR");
-        let install_at = common
-            .find("install_bins_from_cp")
-            .expect("unix common writes bins via install_bins_from_cp");
-        assert!(
-            token_at < mkdir_at,
-            "missing FLEET_PAIR_TOKEN must fail closed before mkdir BIN_DIR"
+    fn unix_common_fleet_install_origin_alone_hits_that_origin_not_api_public_base() {
+        let install_origin = "http://pair.example.test:9443";
+        let worker_public_base = "http://other-pair.example.test:9555";
+        let api_public_base = "http://oauth.example.test:8080";
+        assert_ne!(install_origin, worker_public_base);
+        assert_ne!(install_origin, api_public_base);
+
+        let probe = probe_script_public_bases(
+            "_unix_common.sh",
+            None,
+            Some(install_origin),
+            worker_public_base,
+            api_public_base,
         );
         assert!(
-            token_at < install_at,
-            "missing FLEET_PAIR_TOKEN must fail closed before install_bins_from_cp"
+            probe
+                .requested_urls
+                .lines()
+                .any(|u| u.starts_with(install_origin)),
+            "_unix_common.sh must fetch against FLEET_INSTALL_ORIGIN={install_origin} \
+             when FLEET_URL is unset:\nurls={}\nout={}",
+            probe.requested_urls,
+            probe.combined
         );
         assert!(
-            !common.contains("optional FLEET_PAIR_TOKEN"),
-            "FLEET_PAIR_TOKEN is required; treating it as optional writes bins then never pairs"
+            !probe
+                .requested_urls
+                .lines()
+                .any(|u| u.starts_with(api_public_base)),
+            "_unix_common.sh fetched API_PUBLIC_BASE (OAuth) instead of FLEET_INSTALL_ORIGIN:\nurls={}\nout={}",
+            probe.requested_urls,
+            probe.combined
+        );
+        assert!(
+            !probe.combined.contains(api_public_base),
+            "must not fall through to API_PUBLIC_BASE: {}",
+            probe.combined
         );
     }
 
@@ -1085,7 +1270,19 @@ exit 22
 
     /// Run the served `_unix_common.sh` in an isolated prefix. Platform is not
     /// `linux-*` so a missing token cannot `systemctl stop` a host unit.
+    /// `127.0.0.1` is fine for fail-closed token-gate cases (they die first);
+    /// a present token must use a non-loopback closed origin or
+    /// `warn_loopback_origin` dies before mkdir/fetch.
     fn run_unix_common_install(pair_token: Option<&str>) -> UnixCommonRun {
+        run_unix_common_install_at(pair_token, "http://127.0.0.1:1", None)
+    }
+
+    fn run_unix_common_install_at(
+        pair_token: Option<&str>,
+        fleet_url: &str,
+        leftover_machine_token: Option<&str>,
+    ) -> UnixCommonRun {
+        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1094,17 +1291,32 @@ exit 22
         let prefix = tmp.path().join("prefix");
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap();
+        let cfg = home.join("cfg");
+        if let Some(contents) = leftover_machine_token {
+            fs::create_dir_all(&cfg).unwrap();
+            fs::write(cfg.join("machine.token"), contents).unwrap();
+        }
+
+        // Stub fetchers so a non-loopback closed origin fails immediately
+        // (no DNS/connect hang) after the token gate.
+        let stub_bin = tmp.path().join("stub-bin");
+        fs::create_dir_all(&stub_bin).unwrap();
+        let stub = "#!/bin/sh\nexit 22\n";
+        for name in ["curl", "wget", "fetch"] {
+            let path = stub_bin.join(name);
+            fs::write(&path, stub).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let mut cmd = Command::new("sh");
         cmd.arg(&script);
         cmd.env_clear();
-        cmd.env("PATH", "/usr/bin:/bin");
+        cmd.env("PATH", format!("{}:/usr/bin:/bin", stub_bin.display()));
         cmd.env("HOME", &home);
         cmd.env("FLEET_PREFIX", &prefix);
-        // Closed local port: connection refused if the script reaches fetch.
-        cmd.env("FLEET_URL", "http://127.0.0.1:1");
+        cmd.env("FLEET_URL", fleet_url);
         cmd.env("FLEET_PLATFORM", "test-platform");
-        cmd.env("FLEET_HOST_CONFIG_DIR", home.join("cfg"));
+        cmd.env("FLEET_HOST_CONFIG_DIR", &cfg);
         cmd.env("LC_ALL", "C");
         match pair_token {
             Some(tok) => {
@@ -1183,31 +1395,90 @@ exit 22
         assert_missing_token_fail_closed(&run_unix_common_install(Some(" \t")));
     }
 
-    /// A real token must get past the require-token gate (and then fail on
-    /// bins from the closed origin). Guards a script that always dies.
+    /// A non-empty pair token must pass the require-token gate. Closed
+    /// non-loopback origin then dies on bins (loopback would die in
+    /// `warn_loopback_origin` first).
     #[test]
     fn install_worker_present_pair_token_passes_token_gate() {
-        let run = run_unix_common_install(Some("flp_testdeadbeef"));
+        let run = run_unix_common_install_at(
+            Some("flp_testdeadbeef"),
+            "http://pair.example.test:1",
+            None,
+        );
         assert!(
             !run.success,
             "closed origin must not install bins: {}",
             run.combined
         );
         assert!(
-            !run.combined.contains("FLEET_PAIR_TOKEN is not set")
-                && !run.combined.contains("FLEET_PAIR_TOKEN is empty")
-                && !run.combined.contains("missing FLEET_PAIR_TOKEN")
-                && !run.combined.contains("need FLEET_PAIR_TOKEN"),
-            "set FLEET_PAIR_TOKEN must not fail the token gate: {}",
+            !run.wrote_bins,
+            "must not write fleet-host/fleet-driver from a closed origin: {}",
             run.combined
         );
         assert!(
-            run.combined.contains("no test-platform bins")
-                || run.combined.contains("need curl")
-                || run.combined.contains("FLEET_URL"),
-            "with a token, failure should be origin/bins, not the token: {}",
+            run.combined
+                .contains("no test-platform bins from http://pair.example.test:1"),
+            "set FLEET_PAIR_TOKEN must pass the token gate and fail on bins/origin: {}",
             run.combined
         );
+    }
+
+    /// Leftover non-empty machine.token is already_paired: unset
+    /// FLEET_PAIR_TOKEN must still pass the token gate.
+    #[test]
+    fn install_worker_already_paired_machine_token_allows_missing_pair_token() {
+        let run = run_unix_common_install_at(
+            None,
+            "http://pair.example.test:1",
+            Some("flm_existing"),
+        );
+        assert!(
+            !run.success,
+            "closed origin must not install bins: {}",
+            run.combined
+        );
+        assert!(
+            !run.wrote_bins,
+            "must not write fleet-host/fleet-driver from a closed origin: {}",
+            run.combined
+        );
+        assert!(
+            run.combined
+                .contains("no test-platform bins from http://pair.example.test:1"),
+            "leftover machine.token must pass the token gate without FLEET_PAIR_TOKEN: {}",
+            run.combined
+        );
+    }
+
+    /// Leftover whitespace-only machine.token is unpaired (same as
+    /// MachineToken::parse) and must fail closed like a missing token.
+    #[test]
+    fn install_worker_whitespace_machine_token_file_still_requires_pair_token() {
+        assert_missing_token_fail_closed(&run_unix_common_install_at(
+            None,
+            "http://127.0.0.1:1",
+            Some(" \t"),
+        ));
+    }
+
+    /// Leftover empty machine.token is unpaired; omit FLEET_PAIR_TOKEN.
+    #[test]
+    fn install_worker_leftover_empty_machine_token_fails_closed_before_writing_bins() {
+        assert_missing_token_fail_closed(&run_unix_common_install_at(
+            None,
+            "http://127.0.0.1:1",
+            Some(""),
+        ));
+    }
+
+    /// Leftover " \t\n" machine.token trims to empty (same unpaired gate).
+    #[test]
+    fn install_worker_leftover_whitespace_newline_machine_token_fails_closed_before_writing_bins() {
+        assert_missing_token_fail_closed(&run_unix_common_install_at(
+            None,
+            "http://127.0.0.1:1",
+            Some(" \t\n"),
+        ));
     }
 
     fn powershell_function_body<'a>(src: &'a str, name: &str) -> &'a str {
@@ -1223,43 +1494,25 @@ exit 22
         &rest[..end]
     }
 
-    fn windows_pair_token_required_check_offset(body: &str) -> Option<usize> {
-        const MARKERS: &[&str] = &[
-            "FLEET_PAIR_TOKEN is not set",
-            "FLEET_PAIR_TOKEN is empty",
-            "FLEET_PAIR_TOKEN required",
-            "missing FLEET_PAIR_TOKEN",
-            "need FLEET_PAIR_TOKEN",
-            "throw \"FLEET_PAIR_TOKEN",
-            "throw \"set FLEET_PAIR_TOKEN",
-            "throw 'FLEET_PAIR_TOKEN",
-            "throw \"empty FLEET_PAIR_TOKEN",
-        ];
-        MARKERS.iter().filter_map(|m| body.find(m)).min()
+    fn windows_bootstrap_platform_script_url_offset(boot: &str) -> Option<usize> {
+        boot.find(r#"$origin/install/worker/${platform}.ps1"#)
+            .or_else(|| boot.find(r#"$origin/install/worker/$platform.ps1"#))
     }
 
-    fn windows_pair_token_is_trimmed(body: &str) -> bool {
-        body.contains("FLEET_PAIR_TOKEN).Trim()")
-            || body.contains("$env:FLEET_PAIR_TOKEN.Trim()")
-            || body.contains("FLEET_PAIR_TOKEN').Trim()")
-            || body.contains("FLEET_PAIR_TOKEN\".Trim()")
+    fn windows_first_install_pair_token_throw_offset(body: &str) -> Option<usize> {
+        body.find("FLEET_PAIR_TOKEN is not set")
     }
 
-    /// Catalog: Windows PowerShell ARM64 vs x64 from the *machine* (not this
-    /// process). The served script must not fetch the other arch. Empty /
-    /// whitespace FLEET_PAIR_TOKEN on a first install must fail closed
-    /// (non-zero) before writing bins — same gate as `_unix_common.sh`.
+    /// x64 PowerShell on ARM64 reports AMD64 for this process. Get-FleetPlatform
+    /// must read Machine PROCESSOR_ARCHITECTURE first.
     #[test]
-    fn install_worker_ps1_selects_machine_arch_and_requires_pair_token() {
-        let boot = script_body("install-worker.ps1").expect("windows bootstrap");
-        let win_x64 = script_body("windows-x86_64.ps1").expect("windows x64");
-        let win_arm = script_body("windows-arm64.ps1").expect("windows arm64");
-
-        for (name, body) in [
-            ("install-worker.ps1", boot),
-            ("windows-x86_64.ps1", win_x64),
-            ("windows-arm64.ps1", win_arm),
+    fn install_worker_ps1_selects_machine_arch() {
+        for name in [
+            "install-worker.ps1",
+            "windows-x86_64.ps1",
+            "windows-arm64.ps1",
         ] {
+            let body = script_body(name).expect("wired");
             let detect = powershell_function_body(body, "Get-FleetPlatform");
             let machine = detect
                 .find(r#"GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")"#)
@@ -1269,14 +1522,6 @@ exit 22
                          (x64 PowerShell on ARM64 Windows reports AMD64)"
                     )
                 });
-            assert!(
-                detect.contains(r#""ARM64" { return "windows-arm64" }"#),
-                "{name} must map machine ARM64 to windows-arm64"
-            );
-            assert!(
-                detect.contains(r#""AMD64" { return "windows-x86_64" }"#),
-                "{name} must map machine AMD64 to windows-x86_64"
-            );
             if let Some(process) = detect.find("$env:PROCESSOR_ARCHITECTURE") {
                 assert!(
                     machine < process,
@@ -1284,10 +1529,15 @@ exit 22
                 );
             }
         }
+    }
 
+    /// Bootstrap must fetch the detected platform script, never a pinned
+    /// windows-x86_64 / windows-arm64 URL (that PE is the other arch).
+    #[test]
+    fn install_worker_ps1_does_not_hardcode_platform_script_url() {
+        let boot = script_body("install-worker.ps1").expect("windows bootstrap");
         assert!(
-            boot.contains(r#"$origin/install/worker/${platform}.ps1"#)
-                || boot.contains(r#"$origin/install/worker/$platform.ps1"#),
+            windows_bootstrap_platform_script_url_offset(boot).is_some(),
             "install-worker.ps1 must download the platform script for the detected machine"
         );
         assert!(
@@ -1297,95 +1547,108 @@ exit 22
                 && !boot.contains("/install/worker/bin/windows-arm64"),
             "install-worker.ps1 must not hardcode an arch URL; a pinned path downloads the other PE"
         );
-        assert!(
-            boot.contains("FLEET_DETECT_ONLY") && boot.contains("Get-FleetPlatform"),
-            "FLEET_DETECT_ONLY must print the machine platform and return before download"
+    }
+
+    /// FLEET_DETECT_ONLY=1 must return before fetching the platform installer.
+    #[test]
+    fn install_worker_ps1_detect_only_returns_before_platform_download() {
+        let boot = script_body("install-worker.ps1").expect("windows bootstrap");
+        let detect_at = boot
+            .find("FLEET_DETECT_ONLY")
+            .expect("install-worker.ps1 must honor FLEET_DETECT_ONLY");
+        let return_at = boot[detect_at..]
+            .find("return")
+            .map(|i| detect_at + i)
+            .expect("FLEET_DETECT_ONLY=1 must return before downloading the platform script");
+        let url_at = windows_bootstrap_platform_script_url_offset(boot).expect(
+            "install-worker.ps1 must download $origin/install/worker/${platform}.ps1",
         );
+        assert!(
+            return_at < url_at,
+            "FLEET_DETECT_ONLY=1 return must precede the platform-script download"
+        );
+    }
 
-        for (name, body, this_plat, other_plat, want_pe) in [
-            (
-                "windows-x86_64.ps1",
-                win_x64,
-                "windows-x86_64",
-                "windows-arm64",
-                "amd64",
-            ),
-            (
-                "windows-arm64.ps1",
-                win_arm,
-                "windows-arm64",
-                "windows-x86_64",
-                "arm64",
-            ),
-        ] {
-            assert!(
-                body.contains(&format!(r#"$ThisPlat = "{this_plat}""#)),
-                "{name} must pin ThisPlat to {this_plat}"
-            );
-            assert!(
-                body.contains(&format!(r#"/install/worker/bin/{this_plat}"#)),
-                "{name} must fetch bins from /install/worker/bin/{this_plat}"
-            );
-            assert!(
-                !body.contains(&format!("/install/worker/bin/{other_plat}")),
-                "{name} must not download {other_plat} bins"
-            );
-            assert!(
-                !body.contains(&format!("/install/worker/{other_plat}.ps1")),
-                "{name} must not fetch the {other_plat} installer"
-            );
-            assert!(
-                body.contains(&format!(r#"$WantPe = "{want_pe}""#)),
-                "{name} must require {want_pe} PE, not the other arch"
-            );
-            let refuse = body
-                .find("this machine is $detected, not $ThisPlat")
-                .unwrap_or_else(|| {
-                    panic!("{name} must refuse to run when the machine is not {this_plat}")
-                });
-            let save = body
-                .find("function Save-Url")
-                .or_else(|| body.find("Save-Url $url"))
-                .expect("platform script downloads bins via Save-Url");
-            assert!(
-                refuse < save,
-                "{name} must refuse the other arch before Save-Url"
-            );
-        }
-
-        for (name, body) in [
-            ("windows-x86_64.ps1", win_x64),
-            ("windows-arm64.ps1", win_arm),
-        ] {
-            let token_at = windows_pair_token_required_check_offset(body).unwrap_or_else(|| {
-                panic!(
-                    "{name} must fail closed when FLEET_PAIR_TOKEN is missing or empty \
-                     (throw / non-zero; do not print a 'next: pair' hint and exit 0)"
-                )
+    /// First-install missing/empty/whitespace FLEET_PAIR_TOKEN must throw
+    /// before creating BIN_DIR or downloading bins.
+    #[test]
+    fn install_worker_windows_pair_token_required_before_writing_bins() {
+        for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
+            let body = script_body(name).expect("wired");
+            let token_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
+                panic!("{name} must fail closed when FLEET_PAIR_TOKEN is missing")
             });
             let mkdir_at = body
-                .find("New-Item -ItemType Directory -Force -Path $BinDir")
-                .or_else(|| body.find("$BinDir = Join-Path $Prefix \"bin\""))
+                .find("New-Item")
                 .expect("platform script creates BIN_DIR");
             let download_at = body
-                .find("Save-Url $url")
-                .or_else(|| body.find("downloading $bin"))
+                .find("downloading $bin")
                 .expect("platform script downloads fleet-host / fleet-driver");
             assert!(
                 token_at < mkdir_at,
-                "{name} empty FLEET_PAIR_TOKEN must exit non-zero before creating BIN_DIR"
+                "{name} empty FLEET_PAIR_TOKEN must throw before creating BIN_DIR"
             );
             assert!(
                 token_at < download_at,
-                "{name} empty FLEET_PAIR_TOKEN must exit non-zero before downloading bins"
+                "{name} empty FLEET_PAIR_TOKEN must throw before downloading bins"
             );
+            let pair_at = body.find("FLEET_PAIR_TOKEN").unwrap_or_else(|| {
+                panic!("{name} must read FLEET_PAIR_TOKEN")
+            });
             assert!(
-                windows_pair_token_is_trimmed(body),
-                "{name} must Trim() FLEET_PAIR_TOKEN so whitespace-only is empty"
+                body[pair_at..token_at].contains(".Trim()"),
+                "{name} must Trim FLEET_PAIR_TOKEN so whitespace-only is empty"
             );
+        }
+    }
+
+    /// Leftover non-empty $FLEET_HOST_CONFIG_DIR/machine.token is already
+    /// paired: unset FLEET_PAIR_TOKEN must not take the first-install throw.
+    #[test]
+    fn install_worker_windows_already_paired_allows_missing_pair_token() {
+        for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
+            let body = script_body(name).expect("wired");
+            let throw_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
+                panic!("{name} must throw on first-install missing pair token")
+            });
+            let before = &body[..throw_at];
             assert!(
-                !body.contains("optional FLEET_PAIR_TOKEN"),
-                "{name} FLEET_PAIR_TOKEN is required on first install"
+                before.contains("FLEET_HOST_CONFIG_DIR") && before.contains("machine.token"),
+                "{name} must consult leftover $FLEET_HOST_CONFIG_DIR/machine.token \
+                 before the first-install throw"
+            );
+            let gate = &body[throw_at.saturating_sub(200)..throw_at];
+            assert!(
+                gate.contains("alreadyPaired") || gate.contains("already_paired"),
+                "{name} first-install throw must be skipped when leftover machine.token \
+                 is already paired"
+            );
+        }
+    }
+
+    /// Leftover whitespace-only machine.token is unpaired (MachineToken::parse)
+    /// and must still fail closed before BIN_DIR.
+    #[test]
+    fn install_worker_windows_whitespace_machine_token_still_requires_pair_token() {
+        for name in ["windows-x86_64.ps1", "windows-arm64.ps1"] {
+            let body = script_body(name).expect("wired");
+            let throw_at = windows_first_install_pair_token_throw_offset(body).unwrap_or_else(|| {
+                panic!("{name} must throw on first-install missing pair token")
+            });
+            let mkdir_at = body
+                .find("New-Item")
+                .expect("platform script creates BIN_DIR");
+            assert!(
+                throw_at < mkdir_at,
+                "{name} leftover whitespace machine.token must fail closed before BIN_DIR"
+            );
+            let before = &body[..throw_at];
+            let token_file_at = before.find("machine.token").unwrap_or_else(|| {
+                panic!("{name} must read leftover machine.token before the first-install throw")
+            });
+            assert!(
+                before[token_file_at..].contains(".Trim()"),
+                "{name} must Trim leftover machine.token so whitespace-only is unpaired"
             );
         }
     }
@@ -1395,19 +1658,6 @@ exit 22
         combined: String,
         requested_urls: String,
         wrote_bins: bool,
-    }
-
-    fn has_loopback_offbox_warning(text: &str) -> bool {
-        let lower = text.to_ascii_lowercase();
-        if !lower.contains("loopback") {
-            return false;
-        }
-        lower.contains("another computer")
-            || lower.contains("not this machine")
-            || lower.contains("lan or public")
-            || lower.contains("public control-plane")
-            || lower.contains("public control plane")
-            || lower.contains("reachable url")
     }
 
     /// Run a served installer with a stub HTTP client.
@@ -1520,57 +1770,25 @@ exit 22
         !lines.is_empty() && lines.iter().all(|u| u.contains("/health"))
     }
 
-    /// Loopback WORKER_PUBLIC_BASE / FLEET_URL: the served install command
-    /// must warn. Pairing from an off-box host (loopback is this process,
-    /// not the control plane) must fail closed before writing bins.
-    /// Same-box loopback (GET /health identifies the plane here) may
-    /// continue after the warning. LAN/public URLs must not take that gate.
+    fn fetched_past_health(urls: &str) -> bool {
+        urls.lines().any(|u| !u.is_empty() && !u.contains("/health"))
+    }
+
+    const UNIX_LOOPBACK_SCRIPTS: &[&str] = &["install-worker.sh", "_unix_common.sh"];
+    const LOOPBACK_FLEET_URLS: &[&str] = &[
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://[::1]:8080",
+        "http://127.1.2.3:8080",
+    ];
+
+    /// Off-box pair to 127/8, localhost, or [::1]: GET /health fails, so the
+    /// served installer must exit non-zero before platform/bin fetch.
     #[test]
     fn install_loopback_url_warns_and_offbox_pair_fails_closed() {
-        const FLEET_HEALTH: &str = r#"{"ok":true,"git_sha":"test"}"#;
-        let loopback_urls = [
-            "http://127.0.0.1:8080",
-            "http://localhost:8080",
-            "http://[::1]:8080",
-            "http://127.1.2.3:8080",
-        ];
-        let reachable = [
-            "http://192.168.1.10:8080",
-            "http://10.0.0.4:8080",
-            "https://fleet.example.test",
-        ];
-
-        for name in [
-            "install-worker.ps1",
-            "windows-x86_64.ps1",
-            "windows-arm64.ps1",
-        ] {
-            let body = script_body(name).unwrap_or_else(|| panic!("{name} must be wired"));
-            let lower = body.to_ascii_lowercase();
-            assert!(
-                lower.contains("loopback"),
-                "{name} must warn when FLEET_URL / WORKER_PUBLIC_BASE is loopback"
-            );
-            assert!(
-                lower.contains("another computer")
-                    || lower.contains("not this machine")
-                    || lower.contains("lan or public")
-                    || lower.contains("public control-plane")
-                    || lower.contains("public control plane"),
-                "{name} loopback warning must say another computer needs a LAN or public URL"
-            );
-        }
-
-        for script in ["install-worker.sh", "_unix_common.sh"] {
-            for url in loopback_urls {
+        for script in UNIX_LOOPBACK_SCRIPTS {
+            for url in LOOPBACK_FLEET_URLS {
                 let off = probe_loopback_install(script, url, None);
-                assert!(
-                    has_loopback_offbox_warning(&off.combined),
-                    "{script} must warn that {url} is loopback and another computer \
-                     needs a LAN or public control-plane URL:\nurls={}\nout={}",
-                    off.requested_urls,
-                    off.combined
-                );
                 assert!(
                     !off.success,
                     "{script} must fail closed when {url} is loopback and this host \
@@ -1585,47 +1803,84 @@ exit 22
                     off.combined
                 );
                 assert!(
-                    off.requested_urls.is_empty() || fetched_only_health_probe(&off.requested_urls),
+                    off.requested_urls.is_empty()
+                        || fetched_only_health_probe(&off.requested_urls),
                     "{script} off-box loopback gate must run before pair/bin fetch \
                      (health probe only):\nurls={}\nout={}",
                     off.requested_urls,
                     off.combined
                 );
+            }
+        }
+    }
 
+    /// Same-box loopback: GET /health identifies the plane here, so install
+    /// continues to the platform script or bins. The stub then dies (no bins).
+    #[test]
+    fn install_same_box_loopback_continues_after_health() {
+        const FLEET_HEALTH: &str = r#"{"ok":true,"git_sha":"test"}"#;
+        for script in UNIX_LOOPBACK_SCRIPTS {
+            for url in LOOPBACK_FLEET_URLS {
                 let same = probe_loopback_install(script, url, Some(FLEET_HEALTH));
                 assert!(
-                    has_loopback_offbox_warning(&same.combined),
-                    "{script} must still warn when {url} is loopback on this machine:\n\
-                     urls={}\nout={}",
-                    same.requested_urls,
-                    same.combined
+                    same.requested_urls.lines().any(|u| u.contains("/health")),
+                    "{script} same-box must probe {url}/health:\nurls={}\nout={}",
+                    same.requested_urls, same.combined
                 );
-                let continued = same
-                    .requested_urls
-                    .lines()
-                    .any(|u| !u.is_empty() && !u.contains("/health"));
                 assert!(
-                    continued,
-                    "{script} must not fail-closed the loopback gate when /health \
-                     shows the control plane is this machine ({url}); continue to \
-                     fetch the platform script or bins:\nurls={}\nout={}",
+                    fetched_past_health(&same.requested_urls),
+                    "{script} must continue past the loopback gate when /health \
+                     shows the plane is this machine ({url}):\nurls={}\nout={}",
+                    same.requested_urls, same.combined
+                );
+                assert!(
+                    !same.success,
+                    "{script} same-box continue must still die on the stub fetch \
+                     ({url}):\nurls={}\nout={}",
+                    same.requested_urls, same.combined
+                );
+                assert!(
+                    !same.wrote_bins,
+                    "{script} must not write fleet-host/fleet-driver from the stub \
+                     ({url}):\nurls={}\nout={}",
                     same.requested_urls, same.combined
                 );
             }
+        }
+    }
 
+    /// LAN/public FLEET_URL must not take the loopback /health gate.
+    #[test]
+    fn install_lan_url_is_not_loopback() {
+        let reachable = [
+            "http://192.168.1.10:8080",
+            "http://10.0.0.4:8080",
+            "https://fleet.example.test",
+        ];
+        for script in UNIX_LOOPBACK_SCRIPTS {
             for url in reachable {
                 let miss = probe_loopback_install(script, url, None);
                 assert!(
-                    !has_loopback_offbox_warning(&miss.combined),
+                    fetched_past_health(&miss.requested_urls),
                     "{script} must not treat reachable {url} as loopback:\nurls={}\nout={}",
-                    miss.requested_urls,
-                    miss.combined
+                    miss.requested_urls, miss.combined
                 );
                 assert!(
-                    !miss.combined.to_ascii_lowercase().contains("loopback"),
-                    "{script} must not print a loopback warning for {url}:\nurls={}\nout={}",
-                    miss.requested_urls,
-                    miss.combined
+                    !miss.requested_urls.lines().any(|u| u.contains("/health")),
+                    "{script} must not probe /health for non-loopback {url}:\nurls={}\nout={}",
+                    miss.requested_urls, miss.combined
+                );
+                assert!(
+                    !miss.success,
+                    "{script} LAN continue must still die on the stub fetch ({url}):\n\
+                     urls={}\nout={}",
+                    miss.requested_urls, miss.combined
+                );
+                assert!(
+                    !miss.wrote_bins,
+                    "{script} must not write fleet-host/fleet-driver from the stub \
+                     ({url}):\nurls={}\nout={}",
+                    miss.requested_urls, miss.combined
                 );
             }
         }

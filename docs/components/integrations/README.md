@@ -125,7 +125,8 @@ register playbooks): GitHub and GitLab read/write; Slack channels/messages/threa
 Notion search/pages/blocks; Jira issues + transitions; Linear issues; Figma files;
 Drive list/export; Teams chat/channel send; Discord identity + guilds;
 Trello boards/cards; Asana tasks; Bitbucket repos/PRs/issues; Confluence pages.
-Coming soon (OAuth not wired; tools already exist): Bitbucket, Confluence.
+Bitbucket and Confluence OAuth are wired the same way as the other
+Atlassian providers. Tools already exist for both.
 
 ---
 

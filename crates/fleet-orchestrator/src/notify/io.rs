@@ -30,7 +30,9 @@ impl NotificationSink for IoNotify {
             "Fleet task blocked — needs a human.\nProject `{}` · run `{}` · task `{}`\n{}",
             event.project_id, event.run_id, event.board_task_id, event.reason
         );
-        post_slack(&self.io, event.project_id, &text).await
+        let slack = post_slack(&self.io, event.project_id, &text).await;
+        let mail = post_email(&text);
+        slack.or(mail)
     }
 
     async fn on_event(
@@ -79,5 +81,33 @@ async fn post_slack(
     if !res.ok {
         return Err(NotifyError::Message(res.summary));
     }
+    Ok(())
+}
+
+/// Best-effort SMTP via `sendmail` when `FLEET_NOTIFY_EMAIL` is set.
+fn post_email(text: &str) -> Result<(), NotifyError> {
+    let to = match std::env::var("FLEET_NOTIFY_EMAIL") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return Ok(()),
+    };
+    let mut child = match std::process::Command::new("sendmail")
+        .arg("-t")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            tracing::debug!("sendmail not on PATH; skip email notify");
+            return Ok(());
+        }
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        let _ = write!(
+            stdin,
+            "To: {to}\nSubject: Fleet HITL\n\n{text}\n"
+        );
+    }
+    let _ = child.wait();
     Ok(())
 }

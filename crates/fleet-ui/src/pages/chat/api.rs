@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::pages::auth::api::{auth_base_url, refresh_session};
+use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
 #[derive(Debug, Clone)]
 pub enum ChatError {
@@ -31,14 +31,6 @@ fn api_url(path: &str) -> String {
     )
 }
 
-#[allow(unused_mut)]
-fn with_credentials(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    #[cfg(target_arch = "wasm32")]
-    {
-        req = req.fetch_credentials_include();
-    }
-    req
-}
 
 async fn authorized_get(path: &str) -> Result<reqwest::Response, ChatError> {
     let first = with_credentials(client().get(api_url(path)))
@@ -199,7 +191,6 @@ pub struct ChatActionDto {
 
 /// Wire format from POST /chat (extra fields kept for API stability).
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct ChatCompleteResponse {
     pub message: ChatMessageDtoOut,
     #[serde(default)]
@@ -213,7 +204,6 @@ pub struct ChatCompleteResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct ChatMessageDtoOut {
     #[serde(default)]
     pub role: String,
@@ -249,7 +239,6 @@ pub struct ConversationDetail {
 
 /// Wire format for loaded conversation messages.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct StoredMessage {
     pub id: String,
     pub role: String,
@@ -350,7 +339,6 @@ pub async fn delete_conversation(
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum ChatStreamEvent {
     Status { text: String },
     Delta { text: String },
@@ -359,7 +347,6 @@ pub enum ChatStreamEvent {
     Error { error: String },
 }
 
-#[cfg(target_arch = "wasm32")]
 fn parse_stream_line(line: &str) -> Option<ChatStreamEvent> {
     let v: Value = serde_json::from_str(line).ok()?;
     let kind = v.get("type")?.as_str()?;
@@ -395,13 +382,19 @@ fn parse_stream_line(line: &str) -> Option<ChatStreamEvent> {
             Some(ChatStreamEvent::Action(action))
         }
         "done" => Some(ChatStreamEvent::Done(ChatCompleteResponse {
-            message: ChatMessageDtoOut {
-                role: "assistant".into(),
-                content: v
-                    .get("message")
+            message: {
+                let msg = v.get("message");
+                let content = msg
                     .and_then(|x| x.as_str())
+                    .or_else(|| msg.and_then(|x| x.get("content")).and_then(|x| x.as_str()))
                     .unwrap_or("")
-                    .to_string(),
+                    .to_string();
+                let role = msg
+                    .and_then(|x| x.get("role"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("assistant")
+                    .to_string();
+                ChatMessageDtoOut { role, content }
             },
             model: v
                 .get("model")
@@ -650,4 +643,76 @@ pub struct FleetTasksSnapshot {
 pub async fn fetch_fleet_tasks(workspace_id: &str) -> Result<FleetTasksSnapshot, ChatError> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/tasks")).await?;
     parse_json(res).await
+}
+
+#[cfg(test)]
+mod stream_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_stream_line_reads_status_text() {
+        let status = parse_stream_line(r#"{"type":"status","text":"thinking"}"#).unwrap();
+        match status {
+            ChatStreamEvent::Status { text } => assert_eq!(text, "thinking"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_error_message() {
+        let err = parse_stream_line(r#"{"type":"error","error":"nope"}"#).unwrap();
+        match err {
+            ChatStreamEvent::Error { error } => assert_eq!(error, "nope"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_string_message_done() {
+        let done = parse_stream_line(
+            r#"{"type":"done","message":"plain","provider":"grok","conversation_id":"c2"}"#,
+        )
+        .expect("string message");
+        match done {
+            ChatStreamEvent::Done(res) => {
+                assert_eq!(res.message.content, "plain");
+                assert_eq!(res.provider, "grok");
+                assert_eq!(res.conversation_id.as_deref(), Some("c2"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_reads_delta_text() {
+        let delta = parse_stream_line(r#"{"type":"delta","text":"tok"}"#).unwrap();
+        match delta {
+            ChatStreamEvent::Delta { text } => assert_eq!(text, "tok"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_action_includes_summary_and_run_id() {
+        let action = parse_stream_line(
+            r#"{"type":"action","tool":"bash","ok":true,"summary":"ran","run_id":"run-1","sandbox_ids":["sb-1"]}"#,
+        )
+        .unwrap();
+        match action {
+            ChatStreamEvent::Action(a) => {
+                assert_eq!(a.tool, "bash");
+                assert!(a.ok);
+                assert_eq!(a.summary, "ran");
+                assert_eq!(a.run_id.as_deref(), Some("run-1"));
+                assert_eq!(a.sandbox_ids.as_deref(), Some(["sb-1".to_string()].as_slice()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_line_unknown_type_and_invalid_json_are_none() {
+        assert!(parse_stream_line(r#"{"type":"ping"}"#).is_none());
+        assert!(parse_stream_line("not-json").is_none());
+    }
 }

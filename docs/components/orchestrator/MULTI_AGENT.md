@@ -39,7 +39,7 @@ Each spawned task:
 1. Resolves `worker_profile` to a [agency-agents](https://github.com/msitarzewski/agency-agents) persona
 2. Writes `PERSONA.md` + `task.md` + live **`TEAM.md`** (who is doing what) into an isolated workdir
 3. Copies finished teammates’ `result.md` into `handoff/<id>.md` and their **files** into `handoff/<id>/` plus `work/` (shared run workspace)
-4. Runs an LLM tool loop **on the control plane** (keys never enter the box): `list_dir`, `read_file`, `write_file`, `run_bash`, `read_team`, **`send_message`**, **`read_messages`**, **`ask_teammate`**, **`request_changes`**
+4. Runs the official CLI **on the paired runner** (`fleet-host` → `fleet-driver`, same family as chat: Grok / Claude / Ollama). The control plane does not call a model. Team context (`TEAM.md`, `work/`, handoffs) is packed into the `spawn_session` claim. Integrations and team chat go back through `POST /v1/.../workers/{id}/io` (or `./fleet-tool.sh`). Keys stay in that box's `grok login` / Claude / Ollama and never enter the claim payload. Write `result.md` when done.
 5. Writes `result.md` + `stdout.log` so the next specialist can pick up
 6. **Done gate:** process/local/docker tasks are not `done_success` until `result.md` exists and acceptance (`exists:`, `contains:`) passes. Fail → task goes back to `ready` with notes. Stub fixtures skip the file checks.
 
@@ -61,6 +61,8 @@ Live chat (still needed for “what port *now*”):
 Handoffs + the board still matter for finished work. Chat is for “I need your port / contract *now*.” Parallel agents see teammates as `in progress` and can ask them; dependent agents wait, then read the handoff **and** the transcript.
 
 Chat: `list_agent_personas` then `launch_agent_plan` with different `worker_profile` per task. Omit the profile for **generalist**. Optional shortcuts: `coding`, `frontend`, `reviewer`, `testing`.
+
+If a live sandbox is the wrong specialist, `swap_agent` (or the worker’s `request_swap`) retires the process, keeps `work/`, updates `worker_profile`, and the next tick writes a new `PERSONA.md`. Same task, new agent. Cap: two swaps per task.
 
 Cross-app work is a normal chat sentence. The assistant calls `integration_query` (Slack/Notion/GitHub/…) then `launch_agent_plan`; workers use `use_integration`; plan `outputs` write back when the run ends.
 

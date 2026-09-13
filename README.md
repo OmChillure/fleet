@@ -75,21 +75,25 @@ dx serve --package fleet-ui --port 3030
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
    model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
    Grok / Claude / Ollama run on a paired runner’s official CLI. The control
-   plane still executes fleet tools (`integration_query`, `launch_agent_plan`)
-   from that reply so Slack → GitHub → Notion works without tokens leaving
-   the plane. Plan `outputs` write back when a run ends.
+   plane still executes fleet tools (`list_agent_personas`, `launch_agent_plan`,
+   `integration_query`) from that reply so Slack → GitHub → Notion works
+   without tokens leaving the plane. Plan `outputs` write back when a run ends.
    Live workers
-   message each other mid-run (`send_message` / `ask_teammate`), share `work/`,
-   and reviewers can `request_changes` to bounce work back. Fleet LLM is **Settings**
-   (Ollama model) or host env `FLEET_AGENT_BACKEND=grok`. Without either, sandboxes run
-   bash fences from the task spec.
+   message each other mid-run (`send_message` / `ask_teammate`, or
+   `./fleet-tool.sh chat-post` / `chat-list`), share `work/`,
+   and reviewers can `request_changes` to bounce work back. Worker models run on
+   the paired runner's official CLI (same as chat), using the **Chat composer**
+   provider (Grok / Claude / Ollama). Settings Ollama /
+   `FLEET_AGENT_BACKEND=grok` only select the harness when a run has no chat
+   model. Without a paired runner the task stays ready; without a harness,
+   sandboxes use mock.
    **Cases** (`start_case` / `observe_case`): durable backend state machine for
    long-running policies (wake loop owns status/stage; integrations optional later).
 7. **Sandboxes** page lists worker sessions (`GET …/fleet/workers`) leased to a
    paired `fleet-host`. The API process is not a runner: tick enqueues a claim
    or leaves the task ready. Isolation is process / container / vm **on the
    host**. Guest is `fleet-driver`
-   (ACP via `FLEET_HARNESS=mock|grok`). In-cluster, `fleet-host` creates
+   (`FLEET_HARNESS=grok|claude|ollama` official CLI, or `mock` ACP). In-cluster, `fleet-host` creates
    `FleetSandbox` CRs; the operator makes pods. Finished workdirs are kept 15
    minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter
    the sandbox.
@@ -122,6 +126,7 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok, Ollama, OpenAI, Claude) + model lists |
 | `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
+| `POST` | `/api/workspaces/{id}/chat/conversations/{cid}/pause` | Stop an in-flight turn (user line already saved) |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
@@ -129,12 +134,19 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor follows connected apps and auto-launches by kind) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
-| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent) |
+| `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent). Body `{ worker_profile, reason }` swaps the persona. |
 | `GET` | `/api/workspaces/{id}/workforce` | Open goals (durable overnight) |
 | `POST` | `/api/workspaces/{id}/workforce/goals` | Set a durable goal (case-backed) |
 | `GET`/`POST` | `/api/workspaces/{id}/cases` | Durable cases (policy + backend wake loop) |
 | `GET` | `/api/workspaces/{id}/cases/{case_id}` | Case detail + events |
 | `POST` | `/api/workspaces/{id}/cases/{case_id}/observe` | Inject fact + wake |
+| `GET` | `/api/admin/overview` | Instance counts (instance admin) |
+| `GET` | `/api/admin/users` | All users (instance admin) |
+| `PATCH` | `/api/admin/users/{id}` | Promote / disable (`instance_admin`, `status`) |
+| `GET` | `/api/admin/workspaces` | All workspaces |
+| `GET` | `/api/admin/runners` | All paired hosts |
+| `GET` | `/api/admin/instance` | Health, public URLs, provider flags, staged packages |
+| `GET` | `/api/admin/work` | Cross-workspace session/claim/case totals |
 | `GET` | `/health` | Liveness + DB probe |
 
 UI app routes (workspace-scoped):
@@ -153,6 +165,7 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/cases/{case_id}` | Case detail, observe, cancel |
 | `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
+| `/admin` | Instance admin (users, all runners, health). Not workspace-scoped |
 | `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
 | `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |
 | `/{workspace_id}/runners/cloud` | Cloud runners placeholder |

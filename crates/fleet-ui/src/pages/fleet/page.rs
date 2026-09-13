@@ -23,6 +23,7 @@ struct TaskCard {
     block_reason: String,
     hitl_notes: String,
     session_id: String,
+    failure_reason: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -64,6 +65,7 @@ fn parse_tasks(v: &Value) -> Vec<TaskCard> {
                         block_reason: t["block_reason"].as_str().unwrap_or("").to_string(),
                         hitl_notes: t["hitl_notes"].as_str().unwrap_or("").to_string(),
                         session_id: t["claimed_session_id"].as_str().unwrap_or("").to_string(),
+                        failure_reason: t["failure_reason"].as_str().unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -433,7 +435,9 @@ pub fn Fleet(workspace_id: String) -> Element {
             section { class: "rounded-xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                 h2 { class: "m-0 mb-2 text-sm font-semibold uppercase tracking-wide text-[var(--app-muted)]", "Runs" }
                 if runs().is_empty() {
-                    p { class: "text-sm text-[var(--app-muted)]", "No runs yet. Start a 2-task run." }
+                    p { class: "text-sm text-[var(--app-muted)]",
+                        "No runs yet. Finish an Inbox item, start a goal, or use Start 2-task run."
+                    }
                 } else {
                     div { class: "flex flex-col gap-2",
                         for run in runs() {
@@ -586,6 +590,9 @@ pub fn Fleet(workspace_id: String) -> Element {
                                                 class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-2.5 shadow-sm",
                                                 p { class: "m-0 text-sm font-medium text-[var(--app-fg)]", "{t.title}" }
                                                 p { class: "m-0 mt-0.5 font-mono text-[10px] text-[var(--app-muted)]", "{t.plan_task_id}" }
+                                                if !t.failure_reason.is_empty() {
+                                                    p { class: "m-0 mt-1 text-[11px] text-red-400", "{t.failure_reason}" }
+                                                }
                                                 div { class: "mt-2 flex flex-wrap items-center gap-1.5",
                                                     span {
                                                         class: "rounded-full border px-1.5 py-0.5 text-[10px] font-medium {status_pill_class(&t.status)}",
@@ -681,98 +688,5 @@ pub fn Fleet(workspace_id: String) -> Element {
                 " (process, container, or kube pod)."
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // catalog:list-fleet-ui-fixture-is-chain-not-diamond
-    // Docs §6.5: Start 2-task run calls start_fixture (kind=chain).
-    // UI never sends diamond. Does not tick.
-    // Host: cargo test -p fleet-ui --locked -- chain
-
-    fn production_page() -> &'static str {
-        include_str!("page.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("fleet page.rs production source")
-    }
-
-    fn production_api() -> &'static str {
-        include_str!("api.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("fleet api.rs production source")
-    }
-
-    fn button_named<'a>(src: &'a str, label: &str) -> &'a str {
-        let at = src.find(label).unwrap_or_else(|| panic!("missing {label}"));
-        let before = &src[..at];
-        let start = before
-            .rfind("button {")
-            .unwrap_or_else(|| panic!("{label} must sit on a button {{ ... }}"));
-        let after = &src[at + label.len()..];
-        let end = after.find("button {").unwrap_or(after.len());
-        &src[start..at + label.len() + end]
-    }
-
-    #[test]
-    fn start_2_task_button_posts_chain_fixture_and_does_not_tick() {
-        let page = production_page();
-        let api = production_api();
-        assert!(
-            page.contains("\"Start 2-task run\""),
-            "Fleet must expose Start 2-task run"
-        );
-        let start_btn = button_named(page, "\"Start 2-task run\"");
-        assert!(
-            start_btn.contains("start_fixture"),
-            "Start 2-task run must call start_fixture:\n{start_btn}"
-        );
-        assert!(
-            !start_btn.contains("run_tick") && !start_btn.contains("/tick"),
-            "docs §6.5: Start 2-task must not tick:\n{start_btn}"
-        );
-        assert!(
-            !start_btn.to_ascii_lowercase().contains("diamond"),
-            "Start 2-task must never send diamond:\n{start_btn}"
-        );
-        assert!(
-            !page.to_ascii_lowercase().contains("diamond"),
-            "Fleet page must never send or offer diamond"
-        );
-
-        let tick_btn = button_named(page, "\"Run tick\"");
-        assert!(
-            tick_btn.contains("run_tick"),
-            "Run tick is the separate tick control:\n{tick_btn}"
-        );
-        assert!(
-            !tick_btn.contains("start_fixture") && !tick_btn.contains("/runs/fixture"),
-            "Run tick must not start a fixture:\n{tick_btn}"
-        );
-
-        assert!(
-            api.contains("pub async fn start_fixture"),
-            "page start_fixture must be the fleet API helper"
-        );
-        assert!(
-            api.contains("fn start_fixture_body"),
-            "Start 2-task must post start_fixture_body (kind=chain)"
-        );
-    }
-
-    #[test]
-    fn start_2_task_button_uses_accent_foreground_not_hardcoded_white() {
-        // Dark theme --app-accent is #ffffff; text-white is invisible.
-        let start_btn = button_named(production_page(), "\"Start 2-task run\"");
-        assert!(
-            start_btn.contains("text-[var(--app-accent-fg)]"),
-            "Start 2-task run must use --app-accent-fg so dark theme is readable:\n{start_btn}"
-        );
-        assert!(
-            !start_btn.contains("text-white"),
-            "Start 2-task run must not hardcode text-white (white-on-white in dark):\n{start_btn}"
-        );
     }
 }

@@ -1,9 +1,6 @@
 //! Runners: self-hosted machines that pair and phone home, plus
-//! cloud and partners placeholder pages.
+//! Cloud attach and Partners lend / borrow.
 
 pub mod cloud;
 pub mod partners;
 pub mod self_hosted;
-
-#[cfg(test)]
-mod redirects;

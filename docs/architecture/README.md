@@ -46,6 +46,10 @@ token. The machine installs `fleet-host` and pairs outbound (HTTPS); no
 inbound port on the worker. Tick enqueues a claim for an online matching
 host; otherwise the task stays ready. See
 [`docs/components/worker-host/`](../components/worker-host/).
+Guest use case is **Run on a PC** (host process) vs **Run in a
+container** (KubePod / in-cluster). Same assignment path; no second
+spawn. See
+[`docs/components/runners/run-on-pc-vs-container.md`](../components/runners/run-on-pc-vs-container.md).
 
 Diagram sources live in [`diagrams/`](./diagrams/).
 

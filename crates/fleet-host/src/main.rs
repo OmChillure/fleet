@@ -4,7 +4,11 @@ use anyhow::{Result, bail};
 use fleet_host::run;
 
 enum Cmd {
-    Pair { url: String, token: String },
+    Pair {
+        url: String,
+        token: String,
+        force: bool,
+    },
     Run,
     Update,
     Status,
@@ -40,11 +44,11 @@ fn real_main() -> Result<()> {
         }
         Cmd::Status => run::status(),
         Cmd::Unpair => run::unpair(),
-        Cmd::Pair { url, token } => {
+        Cmd::Pair { url, token, force } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(run::pair(&url, &token))
+            rt.block_on(run::pair(&url, &token, force))
         }
         Cmd::Run => {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -84,6 +88,7 @@ fn parse_args(args: Vec<String>) -> Result<Cmd> {
 fn parse_pair(args: Vec<String>) -> Result<Cmd> {
     let mut url = None;
     let mut token = None;
+    let mut force = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -108,6 +113,8 @@ fn parse_pair(args: Vec<String>) -> Result<Cmd> {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("pair --token needs a value"))?,
             );
+        } else if a == "--force" {
+            force = true;
         } else {
             bail!("unknown pair argument: {a}");
         }
@@ -121,5 +128,26 @@ fn parse_pair(args: Vec<String>) -> Result<Cmd> {
     if token.trim().is_empty() {
         bail!("--token is empty");
     }
-    Ok(Cmd::Pair { url, token })
+    Ok(Cmd::Pair { url, token, force })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pair_force_flag() {
+        let cmd = parse_pair(vec![
+            "--url".into(),
+            "https://agentfleet.studio".into(),
+            "--token".into(),
+            "flp_x".into(),
+            "--force".into(),
+        ])
+        .unwrap();
+        match cmd {
+            Cmd::Pair { force, .. } => assert!(force),
+            _ => panic!("expected Pair"),
+        }
+    }
 }

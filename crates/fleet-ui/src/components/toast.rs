@@ -14,7 +14,6 @@ const TOAST_MS: u32 = 4000;
 const MAX_TOASTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ToastKind {
     Info,
     Success,
@@ -58,7 +57,6 @@ impl Toaster {
         self.push(ToastKind::Success, message.into());
     }
 
-    #[allow(dead_code)]
     pub fn warn(self, message: impl Into<String>) {
         self.push(ToastKind::Warn, message.into());
     }
@@ -142,7 +140,9 @@ fn ToastHost() -> Element {
                     rsx! {
                         div {
                             key: "{id}",
-                            class: "pointer-events-auto relative overflow-hidden rounded-none border border-zinc-600 bg-zinc-900 text-zinc-50 shadow-[0_12px_40px_rgba(0,0,0,0.55)]",
+                            // Card stays visible but does not eat clicks (Apply in
+                            // the runner side panel sits under this stack).
+                            class: "pointer-events-none relative overflow-hidden rounded-none border border-zinc-600 bg-zinc-900 text-zinc-50 shadow-[0_12px_40px_rgba(0,0,0,0.55)]",
                             role: "status",
                             div { class: "flex items-center gap-3 px-3.5 py-3",
                                 span {
@@ -155,7 +155,7 @@ fn ToastHost() -> Element {
                                     "{t.message}"
                                 }
                                 button {
-                                    class: "shrink-0 rounded-none bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-900 transition hover:bg-white",
+                                    class: "pointer-events-auto shrink-0 rounded-none bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-900 transition hover:bg-white",
                                     r#type: "button",
                                     "aria-label": "Dismiss",
                                     onclick: move |_| toaster.dismiss(id),
@@ -272,6 +272,24 @@ mod tests {
         let out = merge_toast(list, item(2, ToastKind::Success, "Case cancelled."));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].message, "Case cancelled.");
+    }
+
+    #[test]
+    fn toast_card_does_not_intercept_page_clicks() {
+        let src = include_str!("toast.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("pointer-events-auto relative overflow-hidden"),
+            "toast card must not be pointer-events-auto — it covered Apply"
+        );
+        assert!(
+            prod.contains("pointer-events-none relative overflow-hidden"),
+            "toast card must let clicks through to controls underneath"
+        );
+        assert!(
+            prod.contains("pointer-events-auto shrink-0"),
+            "only the dismiss button is clickable"
+        );
     }
 
     #[test]

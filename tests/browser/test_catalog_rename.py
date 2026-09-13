@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Layer 2 e2e: rename a Self-hosted card (Enter saves, Escape cancels).
 
-Catalog: List, identity, status → Rename (click name, Enter / Escape).
+Catalog: List, identity, status → Rename (pencil, Enter / Escape).
 """
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runners_e2e_helpers import (  # noqa: E402
+    assert_no_control_plane_card,
     create_host,
     goto_self_hosted,
+    open_host_panel,
     signup_login,
     wait_dx_ready,
 )
@@ -100,16 +102,11 @@ class CatalogRenameTests(unittest.TestCase):
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
 
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
-        )
+        assert_no_control_plane_card(page)
 
-        card = page.locator("article").filter(has_text=seed)
-        card.wait_for(timeout=10_000)
+        card = open_host_panel(page, seed, timeout_ms=10_000)
         rename_btn = card.get_by_title("Rename")
-        self.assertTrue(rename_btn.is_visible(), "seeded worker name is the Rename button")
-        self.assertEqual(rename_btn.inner_text().strip(), seed)
+        self.assertTrue(rename_btn.is_visible(), "side panel pencil must be the Rename control")
         rename_btn.click()
 
         # Name text lives on the button; after click it is an input value, so
@@ -144,22 +141,22 @@ class CatalogRenameTests(unittest.TestCase):
             )
 
         try:
-            page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
+            page.get_by_text(saved, exact=True).first.wait_for(timeout=15_000)
         except Exception as e:  # noqa: BLE001
             body = page.inner_text("body")
             self.fail(
-                f"saved name not on Rename button after PATCH ({e}). "
+                f"saved name not visible after PATCH ({e}). "
                 f"url={page.url} body={body[:1500]!r}"
             )
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
-        page.locator("article").first.wait_for(timeout=15_000)
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
+        open_host_panel(page, saved, timeout_ms=15_000)
+        page.get_by_text(saved, exact=True).first.wait_for(timeout=15_000)
         body = page.inner_text("body")
         self.assertIn(saved, body)
         self.assertNotIn(seed, body)
 
-        page.get_by_title("Rename").filter(has_text=saved).click()
+        page.get_by_title("Rename").click()
         inp = page.locator("input[autofocus]")
         inp.wait_for(timeout=5_000)
         inp.click()
@@ -168,7 +165,7 @@ class CatalogRenameTests(unittest.TestCase):
         inp.press_sequentially(cancelled, delay=20)
         inp.press("Escape")
 
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=5_000)
+        page.get_by_text(saved, exact=True).first.wait_for(timeout=5_000)
         self.assertNotIn(
             cancelled,
             page.inner_text("body"),
@@ -177,15 +174,12 @@ class CatalogRenameTests(unittest.TestCase):
 
         goto_self_hosted(page, workspace_url)
         wait_dx_ready(page)
-        page.locator("article").first.wait_for(timeout=15_000)
-        page.get_by_title("Rename").filter(has_text=saved).wait_for(timeout=15_000)
+        open_host_panel(page, saved, timeout_ms=15_000)
+        page.get_by_text(saved, exact=True).first.wait_for(timeout=15_000)
         body = page.inner_text("body")
         self.assertIn(saved, body)
         self.assertNotIn(cancelled, body)
-        self.assertEqual(
-            page.locator("article").filter(has_text="Control plane").count(),
-            0,
-        )
+        assert_no_control_plane_card(page)
 
 
 if __name__ == "__main__":

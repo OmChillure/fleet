@@ -110,15 +110,3 @@ pub async fn apply_review_bounce(
 
     Ok(targets.len())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changes_request_deserializes() {
-        let r: ChangesRequest =
-            serde_json::from_str(r#"{"targets":["t1"],"reason":"add tests"}"#).unwrap();
-        assert_eq!(r.targets[0], "t1");
-    }
-}

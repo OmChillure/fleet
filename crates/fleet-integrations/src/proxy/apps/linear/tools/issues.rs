@@ -1,6 +1,6 @@
 //! Linear issue tools.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;

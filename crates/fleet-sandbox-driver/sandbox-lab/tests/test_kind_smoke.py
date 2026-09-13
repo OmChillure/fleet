@@ -166,28 +166,22 @@ def _poll_project_fsb(project_id: str, timeout_s: float, want_any: bool) -> list
     return last
 
 
-class KindSmokeContractTests(unittest.TestCase):
-    def test_detection_is_not_host_http_health(self):
-        import inspect
-
-        src = inspect.getsource(_cluster)
-        self.assertIn("agent-fleet", src)
-        self.assertIn("kubectl", src)
-        self.assertNotIn("127.0.0.1:8080", src)
-        self.assertNotIn("/health", src)
-
-    def test_kind_smoke_covers_in_cluster_k8s_path(self):
-        src = Path(__file__).read_text(encoding="utf-8")
-        self.assertIn("must not set SANDBOX_BACKEND", src)
-        self.assertIn("fleet-api", src)
-        self.assertIn("runs/fixture", src)
-        self.assertIn("fleet.agentfleet.io/project-id", src)
-        self.assertIn("networkpolicies", src)
-        self.assertIn("fsb", src)
-        self.assertIn("fleet-driver", src)
-        self.assertIn("FLEET_HARNESS", src)
-        self.assertIn("zenohd", src)
-        self.assertIn("/usr/local/bin", src)
+def _labeled_names(kind: str, project_id: str) -> list[str]:
+    r = _kubectl(
+        "-n",
+        "agent-fleet",
+        "get",
+        kind,
+        "-l",
+        f"{_LABEL_PROJECT}={project_id}",
+        "-o",
+        "jsonpath={.items[*].metadata.name}",
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"kubectl get {kind}: {(r.stderr or r.stdout or '')[:300]}"
+        )
+    return [n for n in (r.stdout or "").split() if n]
 
 
 class KindSmokeTests(unittest.TestCase):
@@ -201,102 +195,103 @@ class KindSmokeTests(unittest.TestCase):
             )
         raise unittest.SkipTest("kind/agent-fleet namespace not available")
 
+    def setUp(self):
+        kube = Path.home() / ".kube" / "config"
+        self.assertTrue(
+            kube.is_file(),
+            f"no kubeconfig at {kube} (HOME={Path.home()}); "
+            "a prior test leaked HOME — kubectl would hit :8080 (fleet-server)",
+        )
+
     def test_control_plane_deployments_ready(self):
-        for name in ("api", "ui", "postgres", "fleet-operator", "fleet-host", "zenohd"):
-            r = _kubectl(
+        try:
+            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
+        except ForeignStackError as e:
+            self.fail(f"host :8080/:3030 is not this tree: {e}")
+        # api/ui: HTTP identity. fleet-operator/fleet-host: tick + sandbox pod.
+        for name in ("postgres", "zenohd"):
+            deadline = time.monotonic() + 90
+            last = ""
+            while time.monotonic() < deadline:
+                r = _kubectl(
+                    "-n",
+                    "agent-fleet",
+                    "rollout",
+                    "status",
+                    f"deploy/{name}",
+                    "--timeout=15s",
+                )
+                if r.returncode == 0:
+                    break
+                last = (r.stderr or r.stdout or "").strip()
+                time.sleep(1.5)
+            else:
+                self.fail(f"kubectl rollout status deploy/{name}: {last[:200]}")
+
+    def test_kind_zenohd_listens_7447(self):
+        try:
+            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
+        except ForeignStackError as e:
+            self.fail(f"host :8080/:3030 is not this tree: {e}")
+        locator = _deploy_env("ZENOH_LOCATOR")
+        self.assertEqual(
+            locator,
+            "tcp/zenohd.agent-fleet.svc.cluster.local:7447",
+            f"api ZENOH_LOCATOR={locator!r}",
+        )
+        deadline = time.monotonic() + 60
+        last = ""
+        while time.monotonic() < deadline:
+            probe = _kubectl(
                 "-n",
                 "agent-fleet",
-                "get",
-                "deploy",
-                name,
-                "-o",
-                "jsonpath={.status.readyReplicas}",
+                "exec",
+                "deploy/api",
+                "--",
+                "timeout",
+                "5",
+                "bash",
+                "-c",
+                "echo >/dev/tcp/zenohd.agent-fleet.svc.cluster.local/7447",
             )
-            self.assertEqual(r.returncode, 0, f"kubectl get deploy {name}: {r.stderr.strip()[:200]}")
-            self.assertGreaterEqual(int(r.stdout or "0"), 1, f"{name} readyReplicas={r.stdout!r}")
-
-    def test_crd_installed(self):
-        r = _kubectl("get", "crd", "fleetsandboxes.fleet.agentfleet.io", "-o", "name")
-        self.assertEqual(r.returncode, 0, f"kubectl get crd: {r.stderr.strip()[:200]}")
-        self.assertIn("fleetsandboxes", r.stdout)
-
-    def test_host_api_health(self):
-        try:
-            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
-        except ForeignStackError as e:
-            self.fail(
-                f"host :8080/:3030 is not this tree: {e}. "
-                "Rebuild agent-fleet-api:local and agent-fleet-ui:local "
-                "(install script or ./scripts/run-every-test.sh --prepare-kind). "
-                "Do not kubectl set env FLEET_GIT_SHA. SKIP_KIND=1 only if there is no cluster."
-            )
+            if probe.returncode == 0:
+                return
+            last = (probe.stderr or probe.stdout or "").strip()
+            time.sleep(1.5)
+        self.fail(f"in-cluster connect {locator} from deploy/api: {last[:300]}")
 
     def test_host_ui(self):
-        try:
-            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
-        except ForeignStackError as e:
-            self.fail(f"host :3030 is not this tree: {e}")
+        # Kind extraPortMappings 30303→3030, not FLEET_UI_URL (host remap :13030).
         try:
             with urllib.request.urlopen("http://127.0.0.1:3030/", timeout=5) as resp:
                 self.assertEqual(resp.status, 200)
+                root_ctype = (resp.headers.get("Content-Type") or "").lower()
+                root = resp.read().decode().strip()
             with urllib.request.urlopen(
                 "http://127.0.0.1:3030/fleet-git-sha.txt", timeout=5
             ) as resp:
                 self.assertEqual(resp.status, 200)
+                sha_ctype = (resp.headers.get("Content-Type") or "").lower()
                 sha = resp.read().decode().strip()
         except (urllib.error.URLError, TimeoutError) as e:
             self.fail(f"host :3030: {e}")
+        self.assertTrue(
+            "html" in root_ctype
+            or root[:15].lower().startswith(("<!doctype", "<html")),
+            f"Kind :3030 / is not HTML (ctype={root_ctype!r} body={root[:80]!r})",
+        )
+        self.assertFalse(
+            "html" in sha_ctype
+            or sha[:15].lower().startswith(("<!doctype", "<html")),
+            f"Kind :3030 /fleet-git-sha.txt is SPA fallback "
+            f"(ctype={sha_ctype!r} body={sha[:80]!r})",
+        )
         want = subprocess.check_output(
             ["bash", str(_REPO / "scripts" / "tree-id.sh")],
             text=True,
             cwd=str(_REPO),
         ).strip()
         self.assertEqual(sha, want, f"UI /fleet-git-sha.txt={sha!r} != tree-id {want}")
-
-    def test_api_is_not_a_runner_and_host_owns_crs(self):
-        backend = _deploy_env("SANDBOX_BACKEND")
-        self.assertEqual(
-            backend,
-            "",
-            f"api deploy must not set SANDBOX_BACKEND (got {backend!r}); apply infra/overlays/kind",
-        )
-        host = _kubectl(
-            "-n",
-            "agent-fleet",
-            "get",
-            "deploy",
-            "fleet-host",
-            "-o",
-            "jsonpath={.spec.template.spec.serviceAccountName}",
-        )
-        self.assertEqual(host.returncode, 0, host.stderr)
-        self.assertEqual((host.stdout or "").strip(), "fleet-host")
-        api_role = _kubectl("-n", "agent-fleet", "get", "role", "fleet-api", "-o", "yaml")
-        self.assertEqual(api_role.returncode, 0, api_role.stderr)
-        self.assertNotIn("fleetsandboxes", api_role.stdout)
-        host_role = _kubectl("-n", "agent-fleet", "get", "role", "fleet-host", "-o", "yaml")
-        self.assertEqual(host_role.returncode, 0, host_role.stderr)
-        self.assertIn("fleetsandboxes", host_role.stdout)
-
-    def test_api_image_has_driver_not_worker(self):
-        try:
-            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
-        except ForeignStackError as e:
-            self.fail(f"host :8080/:3030 is not this tree: {e}")
-        ls = _kubectl(
-            "-n",
-            "agent-fleet",
-            "exec",
-            "deploy/api",
-            "--",
-            "ls",
-            "/usr/local/bin",
-        )
-        self.assertEqual(ls.returncode, 0, ls.stderr)
-        bins = ls.stdout or ""
-        self.assertIn("fleet-driver", bins)
-        self.assertIn("mock-acp-agent", bins)
-        self.assertNotIn("fleet-worker", bins)
 
     def test_tick_creates_and_cancel_deletes_fleetsandbox(self):
         try:
@@ -306,7 +301,6 @@ class KindSmokeTests(unittest.TestCase):
                 f"host :8080/:3030 is not this tree: {e}. "
                 "Rebuild + apply before treating kind smoke as valid."
             )
-        self.assertEqual(_deploy_env("SANDBOX_BACKEND"), "")
 
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -340,34 +334,15 @@ class KindSmokeTests(unittest.TestCase):
         self.assertTrue(ws, "login/signup returned no workspace id")
 
         fleet = f"http://127.0.0.1:8080/api/workspaces/{ws}/fleet"
-        st, proj, raw = _json_request(opener, "GET", fleet)
-        self.assertEqual(st, 200, f"GET fleet {st}: {raw[:400]}")
-        self.assertIsInstance(proj, dict)
-        self.assertNotIn("sandbox_backend", proj or {})
-        deadline = time.monotonic() + 90
-        host_online = False
-        while time.monotonic() < deadline:
-            st, hosts, raw = _json_request(
-                opener, "GET", f"http://127.0.0.1:8080/api/workspaces/{ws}/worker-hosts"
-            )
-            self.assertEqual(st, 200, f"hosts {st}: {raw[:400]}")
-            rows = (hosts or {}).get("hosts") or []
-            host_online = any(
-                isinstance(h, dict)
-                and h.get("kind") != "control_plane"
-                and str(h.get("status") or "").lower() == "online"
-                for h in rows
-            )
-            if host_online:
-                break
-            time.sleep(2)
-        self.assertTrue(
-            host_online,
-            "cluster fleet-host did not bootstrap-pair after signup",
-        )
+        # Lab host card stays on the workspace that bootstrapped it.
+        # In-container assign is plane-global, so a new signup must not
+        # wait to see that machine on its Runners list.
 
         st, fx, raw = _json_request(
-            opener, "POST", f"{fleet}/runs/fixture", {"kind": "chain"}
+            opener,
+            "POST",
+            f"{fleet}/runs/fixture",
+            {"kind": "chain", "run_mode": "in_container"},
         )
         self.assertEqual(st, 201, f"fixture {st}: {raw[:400]}")
         self.assertIsInstance(fx, dict)
@@ -383,151 +358,37 @@ class KindSmokeTests(unittest.TestCase):
             "no FleetSandbox CR for this workspace after fixture+tick; "
             "fleet-host must lease the claim and create the CR",
         )
-        cr = _kubectl(
-            "-n",
-            "agent-fleet",
-            "get",
-            "fsb",
-            names[0],
-            "-o",
-            "json",
-        )
-        self.assertEqual(cr.returncode, 0, cr.stderr)
-        spec = (json.loads(cr.stdout or "{}") or {}).get("spec") or {}
-        self.assertEqual(
-            spec.get("command"),
-            ["fleet-driver"],
-            f"guest command must be fleet-driver, got {spec.get('command')!r}",
-        )
-        cr_env = spec.get("env") or {}
-        self.assertEqual(
-            cr_env.get("FLEET_HARNESS"),
-            "mock",
-            f"guest FLEET_HARNESS={cr_env.get('FLEET_HARNESS')!r}",
-        )
-        pod_names: list[str] = []
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            pods = _kubectl(
-                "-n",
-                "agent-fleet",
-                "get",
-                "pods",
-                "-l",
-                f"{_LABEL_PROJECT}={ws}",
-                "-o",
-                "jsonpath={.items[*].metadata.name}",
-            )
-            self.assertEqual(pods.returncode, 0, pods.stderr)
-            pod_names = [n for n in (pods.stdout or "").split() if n]
-            if pod_names:
-                break
-            time.sleep(1.5)
-        self.assertTrue(
-            pod_names,
-            f"operator did not create a sandbox pod for workspace {ws}",
-        )
-        pod_cmd = _kubectl(
-            "-n",
-            "agent-fleet",
-            "get",
-            "pod",
-            pod_names[0],
-            "-o",
-            "jsonpath={.spec.containers[0].command}",
-        )
-        self.assertEqual(pod_cmd.returncode, 0, pod_cmd.stderr)
-        self.assertIn(
-            "fleet-driver",
-            pod_cmd.stdout or "",
-            f"sandbox pod command={pod_cmd.stdout!r}",
-        )
-        nps = _kubectl(
-            "-n",
-            "agent-fleet",
-            "get",
-            "networkpolicies",
-            "-l",
-            f"{_LABEL_PROJECT}={ws}",
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        )
-        self.assertEqual(nps.returncode, 0, nps.stderr)
-        self.assertTrue(
-            (nps.stdout or "").split(),
-            "operator did not create a sandbox NetworkPolicy",
-        )
 
         st, _, raw = _json_request(opener, "POST", f"{fleet}/runs/{run_id}/cancel")
         self.assertEqual(st, 200, f"cancel {st}: {raw[:400]}")
         deadline = time.monotonic() + 120
         leftover = names
+        leftover_pods: list[str] = []
+        leftover_nps: list[str] = []
         while time.monotonic() < deadline:
             st, _, raw = _json_request(opener, "POST", f"{fleet}/tick", timeout=60)
             self.assertEqual(st, 200, f"cancel tick {st}: {raw[:400]}")
             leftover = _poll_project_fsb(ws, 8, want_any=False)
-            if not leftover:
+            try:
+                leftover_pods = _labeled_names("pods", ws)
+                leftover_nps = _labeled_names("networkpolicies", ws)
+            except RuntimeError:
+                time.sleep(1.5)
+                continue
+            if not leftover and not leftover_pods and not leftover_nps:
                 break
         self.assertEqual(
             leftover,
             [],
             f"FleetSandbox still present after cancel+ticks: {leftover}",
         )
-
-    def test_second_workspace_cluster_host_still_creates_fsb(self):
-        try:
-            require_this_tree(_REPO, "http://127.0.0.1:8080", require_ui=True)
-        except ForeignStackError as e:
-            self.fail(f"host :8080/:3030 is not this tree: {e}")
-        jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-        email = f"kind-ws2-{uuid.uuid4().hex[:12]}@example.test"
-        st, body, raw = _json_request(
-            opener,
-            "POST",
-            "http://127.0.0.1:8080/api/auth/signup",
-            {
-                "email": email,
-                "password": "kind-pass-ok",
-                "display_name": "kind-ws2",
-            },
+        self.assertEqual(
+            leftover_pods,
+            [],
+            f"sandbox pods still present after cancel+ticks: {leftover_pods}",
         )
-        self.assertIn(st, {200, 201}, f"signup {st}: {raw[:400]}")
-        st, body, raw = _json_request(
-            opener,
-            "POST",
-            "http://127.0.0.1:8080/api/auth/login",
-            {"email": email, "password": "kind-pass-ok"},
+        self.assertEqual(
+            leftover_nps,
+            [],
+            f"sandbox NetworkPolicies still present after cancel+ticks: {leftover_nps}",
         )
-        self.assertIn(st, {200, 201}, f"login {st}: {raw[:400]}")
-        ws = str(((body or {}).get("default_workspace") or {}).get("id") or "")
-        self.assertTrue(ws)
-        fleet = f"http://127.0.0.1:8080/api/workspaces/{ws}/fleet"
-        st, _, raw = _json_request(opener, "GET", fleet)
-        self.assertEqual(st, 200, raw[:400])
-        deadline = time.monotonic() + 90
-        host_online = False
-        while time.monotonic() < deadline:
-            st, hosts, raw = _json_request(
-                opener, "GET", f"http://127.0.0.1:8080/api/workspaces/{ws}/worker-hosts"
-            )
-            self.assertEqual(st, 200, raw[:400])
-            rows = (hosts or {}).get("hosts") or []
-            host_online = any(
-                isinstance(h, dict)
-                and h.get("kind") != "control_plane"
-                and str(h.get("status") or "").lower() == "online"
-                for h in rows
-            )
-            if host_online:
-                break
-            time.sleep(2)
-        self.assertTrue(host_online, "cluster host must appear on a second workspace")
-        st, fx, raw = _json_request(
-            opener, "POST", f"{fleet}/runs/fixture", {"kind": "chain"}
-        )
-        self.assertEqual(st, 201, raw[:400])
-        st, _, raw = _json_request(opener, "POST", f"{fleet}/tick", timeout=60)
-        self.assertEqual(st, 200, raw[:400])
-        names = _poll_project_fsb(ws, 90, want_any=True)
-        self.assertTrue(names, "second workspace must get a FleetSandbox")

@@ -33,13 +33,6 @@ class PublishOverlayTests(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def test_image_is_pi_does_not_match_alpine(self):
-        self.assertFalse(mod.image_is_pi("agent-fleet-opencode:alpine"))
-        self.assertFalse(mod.image_is_pi("agent-fleet-grok:alpine"))
-        self.assertFalse(mod.image_is_pi(""))
-        self.assertTrue(mod.image_is_pi("agent-fleet-pi:alpine"))
-        self.assertTrue(mod.image_is_pi("ghcr.io/x/agent-fleet-pi:latest"))
-
     def test_overlay_rewrites_lmstudio_job_to_ollama(self):
         os.environ["OPENCODE_BASE_URL"] = "http://host.docker.internal:11434/v1"
         os.environ["OPENCODE_PROVIDER_ID"] = "ollama"

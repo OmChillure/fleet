@@ -102,6 +102,27 @@ impl OrchClient {
         }
         Ok(())
     }
+
+    /// Worker I/O on the plane: integrations, team chat, request_changes.
+    pub async fn post_io(&self, body: serde_json::Value) -> Result<serde_json::Value> {
+        let url = self.worker_url("io");
+        let res = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await?;
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("io {status}: {text}"));
+        }
+        if text.trim().is_empty() {
+            return Ok(json!({ "ok": true }));
+        }
+        serde_json::from_str(&text).or_else(|_| Ok(json!({ "ok": true, "raw": text })))
+    }
 }
 
 pub fn truncate_reason(s: &str, max_chars: usize) -> String {

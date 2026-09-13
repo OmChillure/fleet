@@ -1,15 +1,15 @@
 # fleet-driver
 
-Process worker that **drives a coding agent over ACP** and reports to the
-orchestrator using the existing `FLEET_*` / heartbeat / status contract.
-
-Guest of a paired `fleet-host` (and of orchestrator tests that enable
-local spawn). Does **not** use Docker Compose or Redis.
+Guest of a paired `fleet-host`. Reports over the existing `FLEET_*` /
+heartbeat / status contract. The control plane does **not** run the model.
 
 | Harness | How | Tokens |
 | --- | --- | --- |
 | **`mock`** (default) | `mock-acp-agent` stdio ACP | none — CI / demos |
-| **`grok`** | `grok agent --no-leader [--always-approve] stdio` | Grok Build (`grok login` / `~/.grok/auth.json`) |
+| **`grok`** | official `grok` CLI (`--prompt-file`, `--permission-mode dontAsk`) | `grok login` on the runner |
+| **`claude`** | official `claude` CLI print/agent mode | Claude login on the runner |
+| **`ollama`** | `ollama run <model>` | local Ollama on the runner |
+| **`grok-acp`** | `grok agent stdio` (opt-in ACP) | same as Grok login |
 
 ## Layout
 
