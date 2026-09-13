@@ -455,7 +455,6 @@ mod tests {
             persona_md: None,
             env: HashMap::new(),
             privileged: false,
-            persona_md: None,
             workspace_files: HashMap::new(),
         }
     }

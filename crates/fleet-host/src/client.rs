@@ -617,8 +617,6 @@ pub struct SpawnPayload {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub privileged: bool,
-    #[serde(default)]
-    pub persona_md: Option<String>,
     /// Relative text files from the plane (TEAM.md, work/, handoffs).
     #[serde(default)]
     pub workspace_files: HashMap<String, String>,
