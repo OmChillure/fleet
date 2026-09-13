@@ -1,0 +1,12 @@
+[Unit]
+Description=Spawn a Grok session to deploy agent-fleet main to us-vmmedium
+Documentation=file://@ROOT@/README.md
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+ExecStart=@ROOT@/scripts/spawn-deploy-session.sh
+TimeoutStartSec=2h
+Environment=HOME=%h
+Environment=PATH=%h/.grok/bin:%h/.local/bin:/usr/bin:/bin
