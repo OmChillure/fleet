@@ -203,7 +203,8 @@ pub async fn schedule_and_spawn(
         req.env
             .insert("FLEET_TASK_TIMEOUT_S".into(), timeout_s.to_string());
         super::session_context::pass_through_driver_env(&mut req.env);
-        // Guest is fleet-driver on the paired runner. Harness follows the
+        // Guest is fleet-driver on the paired runner. Real models use the
+        // official CLI (same family as chat_turn). Harness follows the
         // plan/chat provider (grok / claude / ollama). Unknown → mock.
         if req
             .env
@@ -354,6 +355,40 @@ pub async fn signal_retired_sessions(
         let _ = store.void_spawn_claims(s.id).await;
         let _ =
             crate::store::enqueue_signal_session(store, project_id, s.id, host_id, "kill").await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::agent_loop::harness_for_backend;
+
+    #[test]
+    fn harness_maps_runner_clis_and_defaults_mock() {
+        assert_eq!(harness_for_backend(Some("grok")), "grok");
+        assert_eq!(harness_for_backend(Some("xai")), "grok");
+        assert_eq!(harness_for_backend(Some("claude")), "claude");
+        assert_eq!(harness_for_backend(Some("ollama")), "ollama");
+        assert_eq!(harness_for_backend(Some("off")), "mock");
+        assert_eq!(harness_for_backend(None), "mock");
+    }
+
+    #[test]
+    fn loopback_detects_ipv4_ipv6_and_localhost() {
+        assert!(worker_url_is_loopback("http://127.0.0.1:8080"));
+        assert!(worker_url_is_loopback("http://localhost:8080/v1"));
+        assert!(
+            worker_url_is_loopback("http://[::1]:8080"),
+            "container guests cannot reach IPv6 loopback of the plane"
+        );
+        assert!(!worker_url_is_loopback(
+            "http://api.agent-fleet.svc.cluster.local:8080"
+        ));
+        assert!(!worker_url_is_loopback("http://10.0.0.8:8080"));
+        assert!(
+            worker_url_is_loopback("http://127.1.2.3:8080"),
+            "127.0.0.0/8 is loopback; container guests cannot reach it"
+        );
     }
 }
 

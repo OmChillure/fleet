@@ -612,6 +612,8 @@ pub struct SpawnPayload {
     #[serde(default)]
     pub git_ref: Option<String>,
     #[serde(default)]
+    pub persona_md: Option<String>,
+    #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub privileged: bool,

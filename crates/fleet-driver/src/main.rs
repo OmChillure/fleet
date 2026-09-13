@@ -1,7 +1,8 @@
-//! Process-backend driver: ACP session + orchestrator worker protocol.
+//! Process-backend driver: official CLI on the runner, or mock ACP.
 //!
 //! Same `FLEET_*` contract as `fleet-worker`. Default harness is `mock`
-//! (`mock-acp-agent`). Set `FLEET_HARNESS=grok` to drive Grok Build.
+//! (`mock-acp-agent`). `FLEET_HARNESS=grok|claude|ollama` runs that box's
+//! official CLI (not a model on the control plane).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use anyhow::Result;
 use fleet_driver::acp::{self, AcpRun, is_blocked_stop};
 use fleet_driver::config::DriverConfig;
 use fleet_driver::harness;
+use fleet_driver::official_cli;
 use fleet_driver::orch::{OrchClient, truncate_reason};
 use fleet_driver::prompt;
 use fleet_driver::provision::{self, RepoToClone};
@@ -102,6 +104,13 @@ async fn run() -> Result<()> {
             let s = seq.fetch_add(1, Ordering::Relaxed);
             let proof = std::fs::read_to_string(cfg.work_dir.join("result.md")).ok();
             let files = guest_files(&cfg.work_dir);
+            if let Some((profile, why)) = read_swap_request(&cfg.work_dir) {
+                client
+                    .post_status_proof(s, "swap", Some(&why), proof.as_deref(), files)
+                    .await?;
+                info!(%profile, %why, "fleet-driver requested specialist swap");
+                return Ok(());
+            }
             client
                 .post_status_proof(s, "success", Some(&summary), proof.as_deref(), files)
                 .await?;
@@ -129,6 +138,25 @@ fn guest_files(work_dir: &std::path::Path) -> Option<serde_json::Map<String, ser
     let packed = agent_fleet_contracts::collect_guest_files(work_dir);
     let files = agent_fleet_contracts::files_as_json_map(&packed);
     if files.is_empty() { None } else { Some(files) }
+}
+
+fn read_swap_request(work_dir: &std::path::Path) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(work_dir.join(".fleet/request_swap.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let profile = v
+        .get("worker_profile")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let reason = v
+        .get("reason")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("worker requested a specialist swap")
+        .to_string();
+    Some((profile, reason))
 }
 
 enum WorkError {
@@ -177,6 +205,53 @@ fn restore_live(buf: &acp::LiveOut, mut events: Vec<serde_json::Value>) {
     }
 }
 
+async fn run_official_cli(
+    cfg: &DriverConfig,
+    agent_cwd: &std::path::Path,
+    prompt: &str,
+) -> Result<String, WorkError> {
+    let harness = cfg.harness.clone();
+    let model = cfg.model.clone();
+    let effort = cfg.reasoning_effort.clone();
+    let grok_bin = cfg.grok_bin.clone();
+    let timeout = cfg.timeout;
+    let cwd = agent_cwd.to_path_buf();
+    let prompt = prompt.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        official_cli::run(
+            &harness,
+            &cwd,
+            &prompt,
+            model.as_deref(),
+            effort.as_deref(),
+            grok_bin.as_deref(),
+            timeout,
+        )
+    })
+    .await
+    .map_err(|e| WorkError::Failed(e.to_string()))?
+    .map_err(|e| WorkError::Failed(format!("official CLI: {e:#}")))?;
+
+    if let Err(e) = official_cli::persist_outcome(&cfg.work_dir, &outcome) {
+        warn!(error = %e, "failed to persist official CLI artifacts");
+    }
+
+    if outcome.ok {
+        Ok(format!(
+            "cli ok harness={} elapsed={:.2}s chars={}",
+            outcome.provider,
+            outcome.elapsed_sec,
+            outcome.text.chars().count()
+        ))
+    } else {
+        Err(WorkError::Failed(
+            outcome
+                .error
+                .unwrap_or_else(|| "official CLI on the runner failed".into()),
+        ))
+    }
+}
+
 async fn execute_agent(
     cfg: &DriverConfig,
     client: &OrchClient,
@@ -184,8 +259,16 @@ async fn execute_agent(
 ) -> Result<String, WorkError> {
     let agent_cwd = provision_if_needed(cfg).await?;
     let prompt = prompt::load_prompt(&cfg.work_dir);
+    if official_cli::uses_official_cli(&cfg.harness) && cfg.harness_cmd.is_none() {
+        return run_official_cli(cfg, &agent_cwd, &prompt).await;
+    }
+    let harness_name = if cfg.harness.eq_ignore_ascii_case("grok-acp") {
+        "grok"
+    } else {
+        cfg.harness.as_str()
+    };
     let mut spec = harness::resolve(
-        &cfg.harness,
+        harness_name,
         cfg.harness_cmd.as_deref(),
         cfg.model.as_deref(),
         cfg.auto_approve,

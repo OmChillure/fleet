@@ -50,7 +50,7 @@ pub struct SpawnRequest {
     pub persona_name: Option<String>,
     /// Full persona markdown written to PERSONA.md.
     pub persona_md: Option<String>,
-    /// Resolved worker LLM: `grok` (env) or `ollama` (settings). None = bash worker.
+    /// Resolved worker LLM: `grok` / `claude` / `ollama` on the runner. None = mock.
     pub agent_backend: Option<String>,
     /// Model id for the worker LLM (runner CLI / Ollama tag).
     pub agent_model: Option<String>,

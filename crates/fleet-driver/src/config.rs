@@ -15,7 +15,7 @@ pub struct DriverConfig {
     pub plan_task_id: String,
     pub token: String,
     pub work_dir: PathBuf,
-    /// `mock` | `grok` (default `mock`).
+    /// `mock` | `grok` | `claude` | `ollama` (default `mock`). `grok-acp` keeps ACP.
     pub harness: String,
     pub model: Option<String>,
     pub timeout: Duration,
