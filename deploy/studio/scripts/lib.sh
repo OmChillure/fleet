@@ -47,3 +47,17 @@ vps_deploy_scp() {
 }
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+# User-session desktop notification (this PC). Harmless if the session is gone.
+notify_desktop() {
+  local urgency="${1:?}"
+  local summary="${2:?}"
+  local body="${3:-}"
+  export DISPLAY="${DISPLAY:-:0}"
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send --app-name=agent-fleet --urgency="${urgency}" \
+    "${summary}" "${body}" >/dev/null 2>&1 || true
+}

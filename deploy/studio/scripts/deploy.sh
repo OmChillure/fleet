@@ -89,6 +89,9 @@ else
   SHA="$(git -C "${REPO}" rev-parse "${GIT_REMOTE}/${GIT_BRANCH}")"
 fi
 SHORT="${SHA:0:12}"
+fail_notify() {
+  notify_desktop critical "Agent Fleet deploy failed" "${SHORT}: $*"
+}
 
 LAST_LOCAL="$(cat "${STATE_DIR}/deployed-sha" 2>/dev/null || true)"
 LAST_REMOTE="$(vps_deploy_ssh "cat '${VPS_STACK_DIR}/DEPLOYED_SHA' 2>/dev/null || true")"
@@ -140,6 +143,7 @@ if [[ "${SKIP_BUILD}" != 1 ]]; then
   wait "${ui_pid}" || fail=1
   if [[ "${fail}" -ne 0 ]]; then
     log "docker build failed"
+    fail_notify "docker build failed"
     exit 1
   fi
 fi
@@ -147,6 +151,7 @@ fi
 if ! docker image inspect "${API_IMAGE}:${SHA}" >/dev/null 2>&1 \
   || ! docker image inspect "${UI_IMAGE}:${SHA}" >/dev/null 2>&1; then
   log "images for ${SHORT} are not present locally (build failed or SKIP_BUILD=1)"
+  fail_notify "images missing locally"
   exit 1
 fi
 
@@ -157,7 +162,10 @@ if [[ -z "${WORKDIR:-}" ]]; then
   STAGE_SRC="$(mktemp -d "${ROOT}/.build.XXXXXX")"
   git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE_SRC}"
 fi
-bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"
+if ! bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
+  fail_notify "worker package stage failed"
+  exit 1
+fi
 if [[ -z "${WORKDIR:-}" ]]; then
   rm -rf "${STAGE_SRC}"
 fi
@@ -177,6 +185,8 @@ if wait_healthy "${SHA}"; then
   printf '%s\n' "${SHA}" > "${STATE_DIR}/deployed-sha"
   prune_old_images "${SHA}" "${PREV}"
   log "deployed ${SHORT} → ${PUBLIC_BASE}"
+  notify_desktop normal "Agent Fleet deployed" \
+    "${SHORT} is live at ${PUBLIC_BASE}"
   exit 0
 fi
 
@@ -187,9 +197,13 @@ if [[ -n "${PREV}" && "${PREV}" != "${SHA}" ]]; then
     vps_deploy_ssh "printf '%s\n' '${PREV}' > '${VPS_STACK_DIR}/DEPLOYED_SHA'"
     printf '%s\n' "${PREV}" > "${STATE_DIR}/deployed-sha"
     log "rollback to ${PREV:0:12} succeeded"
+    fail_notify "health failed; rolled back to ${PREV:0:12}"
     exit 1
   fi
   log "rollback health check also failed"
+  fail_notify "health and rollback of ${PREV:0:12} both failed"
+  exit 1
 fi
 
+fail_notify "did not become healthy (no previous SHA to roll back)"
 exit 1
