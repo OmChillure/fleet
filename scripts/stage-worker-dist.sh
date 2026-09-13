@@ -223,8 +223,8 @@ write_manifest() {
   local staged_at
   staged_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local host_ver driver_ver
-  host_ver="$(pkg_version_from_toml fleet-host)"
-  driver_ver="$(pkg_version_from_toml fleet-driver)"
+  host_ver="$(python3 "$ROOT/scripts/runner-release.py" display-version fleet-host "$platform")"
+  driver_ver="$(python3 "$ROOT/scripts/runner-release.py" display-version fleet-driver "$platform")"
 
   local tmp="$out/manifest.json.tmp"
   {

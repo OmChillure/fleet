@@ -42,10 +42,8 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
   outdated” compares against `[verify]` in `runner-packages.toml` (staging
   writes `[versions]`). Host and driver each have `[release.BIN]` with
-  their own version and parent hash of per-OS children (linux-x86_64,
-  linux-aarch64, windows-x86_64). `scripts/check-worker-dist.sh` fails if
-  a staged binary hash is not registered for that bin's version. Not
-  `/health.git_sha`.
+  their own line version (0.0.3) plus a per-OS rev (windows 0.0.3.1).
+  A line bump to 0.0.4 resets every OS rev. Not `/health.git_sha`.
 
 ### Worker machine
 
