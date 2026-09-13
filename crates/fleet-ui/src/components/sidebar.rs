@@ -57,7 +57,8 @@ pub fn Sidebar() -> Element {
             | Route::Sandboxes { .. }
             | Route::Cases { .. }
             | Route::CaseDetail { .. }
-            | Route::Inbox { .. } => Some(NavSection::Monitoring),
+            | Route::Inbox { .. }
+            | Route::InboxApp { .. } => Some(NavSection::Monitoring),
             Route::Agents { .. } => Some(NavSection::Agents),
             Route::SelfHosted { .. }
             | Route::CloudPage { .. }
