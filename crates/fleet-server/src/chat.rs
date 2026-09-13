@@ -1555,18 +1555,20 @@ async fn chat_complete(
             &last_user,
         )
         .await?;
-        let (used_model, content) = crate::runner_chat::run_on_runner(
+        let (used_model, content, mut actions) = crate::runner_chat::run_tools_on_runner(
             &state,
             workspace_id,
+            user.id,
             runner_id,
             &provider,
             &model,
             body.effort.as_deref(),
             &pairs_for_llm,
             None,
+            None,
         )
         .await?;
-        let (content, actions) = maybe_launch_after_runner(
+        let (content, launched) = maybe_launch_after_runner(
             &state,
             workspace_id,
             user.id,
@@ -1577,6 +1579,7 @@ async fn chat_complete(
             content,
         )
         .await;
+        actions.extend(launched);
         persist_user_and_assistant(
             &state,
             conversation_id,
@@ -1931,18 +1934,20 @@ async fn run_chat_turn(
             last_user,
         )
         .await?;
-        let (used_model, content) = crate::runner_chat::run_on_runner(
+        let (used_model, content, mut actions) = crate::runner_chat::run_tools_on_runner(
             state,
             workspace_id,
+            user_id,
             runner_id,
             &provider,
             &model,
             body.effort.as_deref(),
             &pairs_for_llm,
             progress.as_ref(),
+            None,
         )
         .await?;
-        let (content, actions) = maybe_launch_after_runner(
+        let (content, launched) = maybe_launch_after_runner(
             state,
             workspace_id,
             user_id,
@@ -1953,6 +1958,7 @@ async fn run_chat_turn(
             content,
         )
         .await;
+        actions.extend(launched);
         persist_user_and_assistant(
             state,
             conversation_id,
