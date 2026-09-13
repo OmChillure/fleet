@@ -1209,9 +1209,8 @@ pub fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
         host.max_concurrent = v;
     }
     if let Some(v) = patch.auto_update {
-        if v != host.auto_update {
-            bump = true;
-        }
+        // Plane-side allow bit. The box reads it from the next heartbeat;
+        // it is not a runtime_settings apply, so do not light pending apply.
         host.auto_update = v;
     }
     if patch.request_update == Some(true) {
@@ -2805,13 +2804,29 @@ mod tests {
         let patched = apply_patch(
             host.clone(),
             &HostPatch {
-                auto_update: Some(!host.auto_update),
+                max_concurrent: Some(host.max_concurrent.saturating_add(1)),
                 ..HostPatch::default()
             },
         );
         assert!(patched.settings_pending);
         assert_eq!(patched.settings_gen, host.settings_gen + 1);
         assert_eq!(extra_status_pills(&patched), vec!["pending apply"]);
+    }
+
+    #[test]
+    fn apply_patch_auto_update_does_not_light_pending_apply() {
+        let host = sample_host();
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                auto_update: Some(!host.auto_update),
+                ..HostPatch::default()
+            },
+        );
+        assert_eq!(patched.auto_update, !host.auto_update);
+        assert!(!patched.settings_pending);
+        assert_eq!(patched.settings_gen, host.settings_gen);
+        assert!(!extra_status_pills(&patched).contains(&"pending apply"));
     }
 
     #[test]
@@ -2915,7 +2930,7 @@ mod tests {
             host.clone(),
             &HostPatch {
                 request_update: Some(true),
-                auto_update: Some(!host.auto_update),
+                max_concurrent: Some(host.max_concurrent.saturating_add(1)),
                 ..HostPatch::default()
             },
         );

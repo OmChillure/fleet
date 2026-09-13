@@ -258,7 +258,6 @@ pub async fn patch_cp_settings(
         || max_concurrent != current.max_concurrent
         || max_job_timeout_s != current.max_job_timeout_s
         || labels != current.labels
-        || auto_update != current.auto_update
         || runtime_settings != current.runtime_settings;
     let settings_gen = if bump {
         current.settings_gen.saturating_add(1)

@@ -1987,9 +1987,9 @@ async fn request_update_second_click_replaces_planted_timestamp() {
     );
 }
 
-/// catalog:unit-request-update — auto_update=false is a settings apply.
+/// catalog:unit-request-update — auto_update is plane-side; not a settings apply.
 #[tokio::test]
-async fn patch_auto_update_false_bumps_settings_gen() {
+async fn patch_auto_update_false_does_not_bump_settings_gen() {
     let pool = connect_and_migrate().await;
     let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
     let expires = Utc::now() + Duration::hours(1);
@@ -2015,10 +2015,13 @@ async fn patch_auto_update_false_bumps_settings_gen() {
     .await
     .expect("auto off");
     assert!(!off.auto_update);
-    assert_eq!(off.settings_gen, settings_gen + 1);
+    assert_eq!(
+        off.settings_gen, settings_gen,
+        "auto_update must not bump settings_gen"
+    );
     assert!(
-        off.settings_pending(),
-        "auto_update change must light settings_pending"
+        !off.settings_pending(),
+        "toggling auto-update must not light pending apply"
     );
 }
 
