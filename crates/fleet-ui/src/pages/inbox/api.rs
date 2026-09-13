@@ -36,7 +36,11 @@ pub struct TicketRow {
     #[serde(default)]
     pub state: String,
     #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
