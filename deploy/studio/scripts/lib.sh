@@ -48,16 +48,26 @@ vps_deploy_scp() {
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-# User-session desktop notification (this PC). Harmless if the session is gone.
+# User-session desktop notification (this PC). Stays until dismissed.
+# Harmless if the session is gone.
 notify_desktop() {
   local urgency="${1:?}"
   local summary="${2:?}"
   local body="${3:-}"
+  local when
+  when="$(date '+%H:%M')"
+  if [[ -n "${body}" ]]; then
+    body="${body}"$'\n'"${when}"
+  else
+    body="${when}"
+  fi
   export DISPLAY="${DISPLAY:-:0}"
   export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
   export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   command -v notify-send >/dev/null 2>&1 || return 0
-  notify-send --app-name=agent-fleet --urgency="${urgency}" \
+  # expire-time 0 + not transient: stay in the tray until the user dismisses.
+  notify-send --app-name=agent-fleet --urgency="${urgency}" --expire-time=0 \
+    --hint=int:transient:0 \
     "${summary}" "${body}" >/dev/null 2>&1 || true
 }
