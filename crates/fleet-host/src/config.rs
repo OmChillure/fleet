@@ -76,7 +76,10 @@ pub struct LocalConfig {
     pub allow_privileged: bool,
     #[serde(default = "default_true")]
     pub use_host_git_credentials: bool,
-    /// This box will apply CP-served updates. Intersected with CP `auto_update`.
+    /// Mirror of the control-plane `auto_update` flag. The plane is
+    /// authoritative; heartbeat writes this field so existing readers of
+    /// `config.toml` stay in sync. A local-only `false` does not restrict
+    /// once the plane says on.
     #[serde(default = "default_true")]
     pub auto_update: bool,
     #[serde(default = "default_driver_bin")]
@@ -246,6 +249,16 @@ impl LocalConfig {
         unsafe {
             std::env::set_var("OLLAMA_MODELS", path);
         }
+    }
+
+    /// Copy the plane `auto_update` flag into this config. Returns true
+    /// when the on-disk value should be rewritten.
+    pub fn sync_auto_update_from_plane(&mut self, plane: bool) -> bool {
+        if self.auto_update == plane {
+            return false;
+        }
+        self.auto_update = plane;
+        true
     }
 
     /// Merge plane `runtime_settings`. Returns true if LocalConfig changed.
@@ -637,10 +650,27 @@ mod tests {
         let parsed: LocalConfig = toml::from_str("").expect("empty toml");
         assert!(
             parsed.auto_update,
-            "missing auto_update must default true: operator opt-out only"
+            "missing auto_update must default true until the plane says otherwise"
         );
         let off: LocalConfig = toml::from_str("auto_update = false").expect("toml");
         assert!(!off.auto_update);
+    }
+
+    #[test]
+    fn sync_auto_update_from_plane_mirrors_and_is_idempotent() {
+        let mut cfg = LocalConfig {
+            auto_update: false,
+            ..LocalConfig::default()
+        };
+        assert!(cfg.sync_auto_update_from_plane(true));
+        assert!(cfg.auto_update);
+        assert!(!cfg.sync_auto_update_from_plane(true));
+        assert!(cfg.sync_auto_update_from_plane(false));
+        assert!(!cfg.auto_update);
+        let dir = tempfile::tempdir().unwrap();
+        let path = cfg.save_in(dir.path()).unwrap();
+        let loaded = LocalConfig::load_path(&path).unwrap();
+        assert!(!loaded.auto_update, "mirrored value must survive save/load");
     }
 
     #[test]

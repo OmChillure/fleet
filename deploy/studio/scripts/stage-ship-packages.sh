@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Stage the worker packages we actually ship (not every OS in --all).
-# Rebuild a platform only when host/driver sources changed since that
-# platform's last bake, or the bins are missing. A runner-packages.toml
-# lock-only edit must not rebuild: those compiles are not bit-identical
-# and fail the release check. If staged hashes already match [release],
-# keep the bins.
+# Rebuild a platform only when host/driver sources changed *and* the
+# staged hashes do not already match [release]. Compiles are not
+# bit-identical: rebuilding a locked package fails check. If hashes
+# match the lock, keep the bins even when this SHA is new (inbox-only
+# deploys). Never skip just because the manifest already says this SHA
+# — that hid a lock mismatch after a bad rebuild (ab04bca).
 #
 #   linux-x86_64   (bookworm glibc — Debian/Ubuntu guests)
 #   linux-aarch64  (ARM servers)
@@ -85,12 +86,12 @@ stage_one() {
       return 0
     fi
     if [[ "${have}" == "${SHA}" ]]; then
-      log "worker ${plat}: already ${SHA:0:12}, skip"
-      return 0
+      log "worker ${plat}: already labeled ${SHA:0:12} but hashes do not match [release] — not rebuilding (not bit-identical). Restore the last registered dist or register these bins."
+      return 1
     fi
     if ! worker_sources_changed "${have}" "${SHA}"; then
-      log "worker ${plat}: host/driver unchanged since ${have:0:12}, skip"
-      return 0
+      log "worker ${plat}: host/driver unchanged since ${have:0:12} but hashes do not match [release] — not rebuilding. Restore registered bins or register."
+      return 1
     fi
   fi
   log "worker ${plat}: building ${flag} for ${SHA:0:12}"

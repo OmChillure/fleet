@@ -218,7 +218,8 @@ cmd_guide() {
     "Token panel is enough. Do not require a second machine; pairing is outbound." \
     "Stop taking jobs does not stop running work; new jobs go to another worker. No paired host = task stays ready." \
     "Workspace Settings still owns min isolation (process < container < vm). Behavior is above Providers. One Apply bar appears only when something changed and stays visible while you scroll. Sandboxing: Native work root, VMs placeholder, Containers as selects plus Advanced. Models directory is pre-filled. Stop taking jobs is the Behavior button. After Apply it says Pending apply until the box acks." \
-    "Auto-update is on by default. Turn it off on a behind box to see Update now; click becomes Update requested." \
+    "Auto-update is the control-plane checkbox (on by default). The host mirrors it into config.toml; a local-only false must not hold the box back." \
+    "Turn it off on a behind box to see Update now; click becomes Update requested." \
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
     "Click the pencil in the right panel to rename; Enter saves, Escape cancels." \
@@ -308,9 +309,9 @@ cmd_guide() {
     "Sandboxes: same sessions. Software line: missing fleet-driver is behind. Cloud/Partners stay placeholders." || return 0
 
   pause_step "This merge request" \
-    "Inbox nav nest: Slack/GitHub under Inbox. GitHub webhook is /webhooks/github/… not {provider}." \
-    "Slack not_in_channel stays on Slack. GitHub page is a numbered setup walkthrough." \
-    "Start run on an open GitHub issue. A second Start run on the same row must conflict." \
+    "Self-hosted Auto-update checkbox is the plane flag. After heartbeat, config.toml matches it." \
+    "A box whose config.toml still says false must update when the checkbox is on." \
+    "Deploy must not rebuild host/driver when staged hashes already match runner-packages.toml." \
     "If this list has no step for it, add one in scripts/human-test.sh and a" \
     "scene in tests/browser/record_demo.py in the same change." || return 0
 

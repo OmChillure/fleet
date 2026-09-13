@@ -81,7 +81,9 @@ fleet-host status
 fleet-host unpair
 ```
 
-`auto_update` in `config.toml` defaults **true**. Effective auto is that
-flag **and** the plane `host.auto_update` (also default true). Auto apply
-runs after heartbeat when `desired` bins differ; it never sets CP
-`paused`/`drain`. `fleet-host update` is the same apply path, forced.
+`auto_update` in `config.toml` defaults **true**. The plane
+`host.auto_update` is authoritative; heartbeat copies it into
+`config.toml` so the file stays a mirror. Auto apply runs after
+heartbeat when that flag is on and `desired` bins differ; it never
+sets CP `paused`/`drain`. `fleet-host update` is the same apply path,
+forced.

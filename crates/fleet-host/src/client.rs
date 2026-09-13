@@ -445,7 +445,8 @@ pub struct HostPublic {
     pub paused: Option<bool>,
     #[serde(default)]
     pub drain: Option<bool>,
-    /// Plane allows this host to self-update. Missing (old CP) defaults true.
+    /// Plane auto-update flag (authoritative). Missing (old CP) defaults true.
+    /// The host mirrors this into `config.toml` on heartbeat.
     #[serde(default)]
     pub auto_update: Option<bool>,
     /// One-shot Update click. Host applies once even when auto is off.
@@ -811,7 +812,9 @@ mod tests {
 
     #[test]
     fn parse_isolation_unknown_is_not_placement() {
-        let err = JobRuntime::parse_isolation("nonsense").unwrap_err().to_string();
+        let err = JobRuntime::parse_isolation("nonsense")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown"), "{err}");
         assert!(!err.contains("placement"), "{err}");
     }
