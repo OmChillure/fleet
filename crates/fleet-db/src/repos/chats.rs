@@ -99,6 +99,9 @@ pub async fn list_conversations(
             LIMIT 1
         ) prev ON true
         WHERE c.workspace_id = $1 AND c.user_id = $2
+          AND EXISTS (
+            SELECT 1 FROM chat_messages m WHERE m.conversation_id = c.id
+          )
         ORDER BY c.updated_at DESC
         LIMIT $3
         "#,
@@ -156,6 +159,31 @@ pub async fn delete_conversation(
         r#"
         DELETE FROM chat_conversations
         WHERE id = $1 AND workspace_id = $2 AND user_id = $3
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Drop a thread that never stored a message (failed first turn).
+pub async fn delete_empty_conversation(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        DELETE FROM chat_conversations c
+        WHERE c.id = $1 AND c.workspace_id = $2 AND c.user_id = $3
+          AND NOT EXISTS (
+            SELECT 1 FROM chat_messages m WHERE m.conversation_id = c.id
+          )
         "#,
     )
     .bind(conversation_id)

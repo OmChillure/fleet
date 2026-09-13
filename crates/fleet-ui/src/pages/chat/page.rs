@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use super::api::{
     ChatActionDto, ChatMessageDto, ChatModelInfo, ChatProviderInfo, ChatStatus, ChatStreamEvent,
-    create_conversation, fetch_chat_status, fetch_fleet_live, fetch_fleet_tasks, get_conversation,
-    stream_chat,
+    create_conversation, delete_conversation, fetch_chat_status, fetch_fleet_live,
+    fetch_fleet_tasks, get_conversation, stream_chat,
 };
 use super::markdown::{MdPart, highlight, markdown_to_parts};
 use crate::Route;
@@ -405,6 +405,8 @@ fn send_on_existing_session(
     mut draft: Signal<String>,
     mut thread_title: Signal<String>,
 ) {
+    let navigator = navigator();
+    let first_turn = messages().is_empty();
     let text = text.trim().to_string();
     if text.is_empty() || sending() {
         return;
@@ -529,6 +531,14 @@ fn send_on_existing_session(
                     messages.set(list);
                 }
                 ChatStreamEvent::Error { error } => {
+                    if first_turn {
+                        let _ = delete_conversation(&workspace_id, &conversation_id).await;
+                        show_toast().error(error);
+                        navigator.replace(Route::Chat {
+                            workspace_id: workspace_id.clone(),
+                        });
+                        return;
+                    }
                     let mut list = messages();
                     if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
                         last.content = format!("⚠️ {error}");
@@ -541,6 +551,14 @@ fn send_on_existing_session(
         .await;
         if let Err(e) = result {
             show_toast().error(e.message());
+            if first_turn {
+                let _ = delete_conversation(&workspace_id, &conversation_id).await;
+                navigator.replace(Route::Chat {
+                    workspace_id: workspace_id.clone(),
+                });
+                sending.set(false);
+                return;
+            }
             let mut list = messages();
             if let Some(last) = list.iter_mut().rev().find(|m| m.id == reply_id) {
                 if last.content.is_empty() || last.content.starts_with('_') {
@@ -859,9 +877,10 @@ fn ChatInner(workspace_id: String, initial_conversation_id: Option<String>) -> E
                         };
                         let actions: Vec<ChatActionDto> =
                             serde_json::from_value(m.actions).unwrap_or_default();
-                        let model = m.model.filter(|s| !s.is_empty()).or_else(|| {
-                            m.provider.filter(|s| !s.is_empty())
-                        });
+                        let model = m
+                            .model
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| m.provider.filter(|s| !s.is_empty()));
                         let id = if m.id.is_empty() {
                             nid
                         } else {

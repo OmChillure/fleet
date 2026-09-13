@@ -141,9 +141,7 @@ async fn insert_tx_duplicate_email_conflicts_when_first_user_is_disabled() {
 
     match &err {
         DbError::Conflict(_) => {}
-        other => panic!(
-            "expected DbError::Conflict when first user is disabled, got {other:?}"
-        ),
+        other => panic!("expected DbError::Conflict when first user is disabled, got {other:?}"),
     }
 }
 
@@ -190,8 +188,7 @@ async fn workspace_slug_unique_is_conflict() {
         .await
         .expect("user_role for second owner");
     assert_eq!(
-        second_role,
-        None,
+        second_role, None,
         "second owner must not gain membership on the first workspace"
     );
 }
@@ -292,6 +289,44 @@ async fn chat_conversation_scoped_to_user_and_workspace() {
     assert!(
         wrong_ws.is_none(),
         "conversation must not leak across workspaces"
+    );
+
+    let listed_empty = chats::list_conversations(&pool, workspace_id, owner_id, 20)
+        .await
+        .expect("list empty");
+    assert!(
+        listed_empty.iter().all(|c| c.id != conv_id),
+        "0-message conversation must not appear in history: {listed_empty:?}"
+    );
+
+    chats::insert_message(
+        &pool,
+        Uuid::now_v7(),
+        conv_id,
+        "user",
+        "hi",
+        None,
+        None,
+        &serde_json::json!([]),
+        now,
+    )
+    .await
+    .expect("insert message");
+    let listed = chats::list_conversations(&pool, workspace_id, owner_id, 20)
+        .await
+        .expect("list after message");
+    assert!(
+        listed
+            .iter()
+            .any(|c| c.id == conv_id && c.message_count == 1),
+        "conversation with a message must list: {listed:?}"
+    );
+
+    assert!(
+        !chats::delete_empty_conversation(&pool, conv_id, workspace_id, owner_id)
+            .await
+            .expect("delete_empty with messages"),
+        "delete_empty must not drop a thread that has messages"
     );
 }
 
@@ -745,7 +780,11 @@ async fn reopen_ticket_on_ignored_returns_none_and_leaves_state() {
     .execute(&pool)
     .await
     .expect("force ignored");
-    assert_eq!(n.rows_affected(), 1, "expected one inbox row forced to ignored");
+    assert_eq!(
+        n.rows_affected(),
+        1,
+        "expected one inbox row forced to ignored"
+    );
 
     assert!(
         tickets::reopen_ticket(&pool, workspace_id, "jira", "ENG-11")
@@ -1287,8 +1326,14 @@ async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable()
     };
     let pending_fp_before = fingerprint_of(&hosts_before, pending.id);
     let online_fp_before = fingerprint_of(&hosts_before, online.id);
-    assert!(pending_fp_before.is_some(), "seeded pending host must be listed");
-    assert!(online_fp_before.is_some(), "seeded online host must be listed");
+    assert!(
+        pending_fp_before.is_some(),
+        "seeded pending host must be listed"
+    );
+    assert!(
+        online_fp_before.is_some(),
+        "seeded online host must be listed"
+    );
 
     let assignable_has = |assignable: &[fleet_db::models::WorkerHost], id: Uuid| {
         assignable
@@ -1375,6 +1420,49 @@ async fn set_min_isolation_trims_then_stores() {
         .await
         .expect("raw after trim-store");
     assert_eq!(raw, "vm", "column must store the trimmed wire string");
+}
+
+#[tokio::test]
+async fn workspace_chat_max_turns_defaults_32_and_stores() {
+    let pool = connect_and_migrate().await;
+    let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+
+    let raw: i32 = sqlx::query_scalar("SELECT chat_max_turns FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_one(&pool)
+        .await
+        .expect("raw chat_max_turns");
+    assert_eq!(
+        raw,
+        workspaces::CHAT_MAX_TURNS_DEFAULT,
+        "new workspace must default chat_max_turns to 32"
+    );
+
+    let stored = workspaces::set_chat_max_turns(&pool, workspace_id, 8)
+        .await
+        .expect("set 8");
+    assert_eq!(stored, 8);
+    assert_eq!(
+        workspaces::chat_max_turns(&pool, workspace_id)
+            .await
+            .expect("get"),
+        8
+    );
+
+    let err = workspaces::set_chat_max_turns(&pool, workspace_id, 0)
+        .await
+        .expect_err("0 is below min");
+    assert!(
+        matches!(err, DbError::Conflict(_)),
+        "out of range must be Conflict, got {err:?}"
+    );
+    assert_eq!(
+        workspaces::chat_max_turns(&pool, workspace_id)
+            .await
+            .expect("unchanged"),
+        8,
+        "rejected set must not change the stored value"
+    );
 }
 
 #[tokio::test]

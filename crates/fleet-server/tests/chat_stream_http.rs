@@ -2951,6 +2951,12 @@ async fn enqueued_chat_turn_prompt_is_labeled_transcript() {
                 "chat_turn.payload.prompt must be the labeled transcript: {}",
                 claim.payload
             );
+            assert_eq!(
+                claim.payload["max_turns"].as_i64(),
+                Some(32),
+                "chat_turn.payload.max_turns must be the workspace default: {}",
+                claim.payload
+            );
         }
         out = &mut live_handle => {
             let out = out.expect("live POST join");

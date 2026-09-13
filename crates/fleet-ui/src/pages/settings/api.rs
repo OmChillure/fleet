@@ -13,6 +13,12 @@ pub struct FleetSettings {
     pub min_isolation: String,
     #[serde(default = "default_on_pc")]
     pub default_run_mode: String,
+    #[serde(default = "default_chat_max_turns")]
+    pub chat_max_turns: i32,
+    #[serde(default = "default_chat_max_turns_min")]
+    pub chat_max_turns_min: i32,
+    #[serde(default = "default_chat_max_turns_max")]
+    pub chat_max_turns_max: i32,
     #[serde(default = "default_off")]
     pub fleet_llm: String,
     #[serde(default)]
@@ -41,6 +47,18 @@ fn default_on_pc() -> String {
     "on_pc".into()
 }
 
+fn default_chat_max_turns() -> i32 {
+    32
+}
+
+fn default_chat_max_turns_min() -> i32 {
+    1
+}
+
+fn default_chat_max_turns_max() -> i32 {
+    128
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FleetSettingsPatch {
     pub max_agents: i32,
@@ -49,6 +67,8 @@ pub struct FleetSettingsPatch {
     pub min_isolation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_run_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_max_turns: Option<i32>,
 }
 
 fn client() -> reqwest::Client {
@@ -62,7 +82,6 @@ fn api_url(path: &str) -> String {
         path.trim_start_matches('/')
     )
 }
-
 
 async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
     let first = with_credentials(client().get(api_url(path)))

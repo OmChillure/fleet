@@ -21,18 +21,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::User;
 use fleet_db::WorkerAgentRuntime;
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    execute_tool, execute_tool_with_retry, rewrite_if_asked_to_continue,
-    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, wants_fleet_launch,
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
+    tool_definitions, wants_fleet_launch,
 };
 use crate::state::AppState;
 
@@ -350,8 +350,7 @@ async fn maybe_launch_after_runner(
         &llm,
     )
     .await;
-    if let Some(rewritten) = rewrite_if_asked_to_continue(&content, std::slice::from_ref(&action))
-    {
+    if let Some(rewritten) = rewrite_if_asked_to_continue(&content, std::slice::from_ref(&action)) {
         content = rewritten;
     }
     if action.ok {
@@ -499,6 +498,25 @@ async fn ensure_conversation(
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(id)
+}
+
+/// Failed first turn must not leave a 0-message row in Chat history.
+async fn drop_empty_conversation(
+    state: &AppState,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    conversation_id: Uuid,
+) {
+    if let Err(e) =
+        chat_repo::delete_empty_conversation(&state.db, conversation_id, workspace_id, user_id)
+            .await
+    {
+        tracing::warn!(
+            %conversation_id,
+            error = %e,
+            "could not drop empty conversation after failed first turn"
+        );
+    }
 }
 
 async fn persist_user_and_assistant(
@@ -1156,9 +1174,7 @@ mod chat_tool_scope_tests {
     #[test]
     fn chat_tool_same_session_workspace_id_in_json_string_args_is_allowed() {
         let session = Uuid::new_v4();
-        let parsed = tool_args_value(&Value::String(format!(
-            r#"{{"workspace_id":"{session}"}}"#
-        )));
+        let parsed = tool_args_value(&Value::String(format!(r#"{{"workspace_id":"{session}"}}"#)));
         require_session_workspace(session, &parsed)
             .expect("same-session workspace_id in JSON string args");
     }
@@ -1386,9 +1402,7 @@ async fn chat_status(
 
     let host = crate::worker_hosts::load_visible_host(&state, workspace_id, runner_id).await?;
     if host.is_cluster_host() || host.created_by.is_none() {
-        return Err(AppError::bad_request(
-            "This runner is not Run on a PC",
-        ));
+        return Err(AppError::bad_request("This runner is not Run on a PC"));
     }
     if crate::runner_chat::host_is_removed(&host) {
         return Ok(Json(ChatStatusResponse {
@@ -1555,7 +1569,7 @@ async fn chat_complete(
             &last_user,
         )
         .await?;
-        let (used_model, content, mut actions) = crate::runner_chat::run_tools_on_runner(
+        let (used_model, content, mut actions) = match crate::runner_chat::run_tools_on_runner(
             &state,
             workspace_id,
             user.id,
@@ -1567,7 +1581,14 @@ async fn chat_complete(
             None,
             None,
         )
-        .await?;
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                drop_empty_conversation(&state, workspace_id, user.id, conversation_id).await;
+                return Err(e);
+            }
+        };
         let (content, launched) = maybe_launch_after_runner(
             &state,
             workspace_id,
@@ -1934,7 +1955,7 @@ async fn run_chat_turn(
             last_user,
         )
         .await?;
-        let (used_model, content, mut actions) = crate::runner_chat::run_tools_on_runner(
+        let (used_model, content, mut actions) = match crate::runner_chat::run_tools_on_runner(
             state,
             workspace_id,
             user_id,
@@ -1946,7 +1967,14 @@ async fn run_chat_turn(
             progress.as_ref(),
             None,
         )
-        .await?;
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                drop_empty_conversation(state, workspace_id, user_id, conversation_id).await;
+                return Err(e);
+            }
+        };
         let (content, launched) = maybe_launch_after_runner(
             state,
             workspace_id,

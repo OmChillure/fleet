@@ -15,7 +15,8 @@ use fleet_integrations::{CredentialsKey, IntegrationsConfig};
 use fleet_orchestrator::api::build_app_state;
 use fleet_orchestrator::config::{AuthMode, Config as OrchConfig};
 use fleet_server::{
-    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig, build_http_app,
+    AppState, ClaudeConfig, GeminiConfig, GrokConfig, OllamaConfig, OpenaiConfig, ServerConfig,
+    build_http_app,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -555,4 +556,58 @@ async fn fleet_settings_patch_min_isolation_without_cookie_is_401() {
     )
     .await;
     assert_eq!(out.status, StatusCode::UNAUTHORIZED, "{}", out.body);
+}
+
+#[tokio::test]
+async fn fleet_settings_chat_max_turns_defaults_32_and_patches() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let got = call(&app, "GET", &settings, Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["chat_max_turns"], 32, "{}", got.body);
+    assert_eq!(got.body["chat_max_turns_min"], 1, "{}", got.body);
+    assert_eq!(got.body["chat_max_turns_max"], 128, "{}", got.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "chat_max_turns": 8 })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(patched.body["chat_max_turns"], 8, "{}", patched.body);
+
+    let keep = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "max_agents": 4 })),
+    )
+    .await;
+    assert_eq!(
+        keep.body["chat_max_turns"], 8,
+        "omitted chat_max_turns must keep 8: {}",
+        keep.body
+    );
+
+    let bad = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "chat_max_turns": 0 })),
+    )
+    .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    let after = call(&app, "GET", &settings, Some(&jar), None).await;
+    assert_eq!(
+        after.body["chat_max_turns"], 8,
+        "rejected chat_max_turns must not store: {}",
+        after.body
+    );
 }

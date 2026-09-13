@@ -26,6 +26,9 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut grok_env = use_signal(|| false);
     let mut min_isolation = use_signal(|| "process".to_string());
     let mut default_run_mode = use_signal(|| "on_pc".to_string());
+    let mut chat_max_turns = use_signal(|| 32i32);
+    let mut chat_max_turns_min = use_signal(|| 1i32);
+    let mut chat_max_turns_max = use_signal(|| 128i32);
     let mut effective = use_signal(|| None::<String>);
     let mut ollama_models = use_signal(Vec::<ChatModelInfo>::new);
     let mut ollama_error = use_signal(|| None::<String>);
@@ -56,6 +59,15 @@ pub fn Settings(workspace_id: String) -> Element {
                     }
                     if !s.default_run_mode.trim().is_empty() {
                         default_run_mode.set(s.default_run_mode);
+                    }
+                    if s.chat_max_turns > 0 {
+                        chat_max_turns.set(s.chat_max_turns);
+                    }
+                    if s.chat_max_turns_min > 0 {
+                        chat_max_turns_min.set(s.chat_max_turns_min);
+                    }
+                    if s.chat_max_turns_max > 0 {
+                        chat_max_turns_max.set(s.chat_max_turns_max);
                     }
                     effective.set(s.effective_backend);
                     error.set(None);
@@ -106,6 +118,7 @@ pub fn Settings(workspace_id: String) -> Element {
         let model = fleet_model();
         let iso = min_isolation();
         let mode = default_run_mode();
+        let turns = chat_max_turns();
         spawn(async move {
             let s = match save_settings(
                 &ws,
@@ -115,6 +128,7 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm_model: model,
                     min_isolation: iso,
                     default_run_mode: Some(mode),
+                    chat_max_turns: Some(turns),
                 },
             )
             .await
@@ -135,6 +149,9 @@ pub fn Settings(workspace_id: String) -> Element {
             }
             if !s.default_run_mode.trim().is_empty() {
                 default_run_mode.set(s.default_run_mode);
+            }
+            if s.chat_max_turns > 0 {
+                chat_max_turns.set(s.chat_max_turns);
             }
             grok_env.set(s.grok_env);
             effective.set(s.effective_backend);
@@ -207,6 +224,30 @@ pub fn Settings(workspace_id: String) -> Element {
                         onchange: move |e| default_run_mode.set(e.value()),
                         option { value: "on_pc", "Run on a PC" }
                         option { value: "in_container", "Run in a container" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Chat agent turns"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "How many steps the official CLI on the runner may take for one Chat message (tools plus a reply). 1 fails if the model uses a tool on the first step."
+                    }
+                    input {
+                        class: field_class(),
+                        r#type: "number",
+                        min: "{chat_max_turns_min}",
+                        max: "{chat_max_turns_max}",
+                        value: "{chat_max_turns}",
+                        oninput: move |e| {
+                            if let Ok(n) = e.value().parse::<i32>() {
+                                chat_max_turns.set(n);
+                            }
+                        },
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "{chat_max_turns_min}–{chat_max_turns_max}. Default 32."
                     }
                 }
 

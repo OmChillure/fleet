@@ -44,8 +44,13 @@ pub fn run_chat_turn(payload: &Value) -> Result<Value> {
             .unwrap_or(180)
             .clamp(30, 600),
     );
+    let max_turns = payload
+        .get("max_turns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32)
+        .clamp(1, 128) as u32;
     let text = match provider.as_str() {
-        "grok" | "xai" => run_grok(&prompt, &model, effort.as_deref(), timeout)?,
+        "grok" | "xai" => run_grok(&prompt, &model, effort.as_deref(), max_turns, timeout)?,
         "claude" | "anthropic" => run_claude(&prompt, &model, effort.as_deref(), timeout)?,
         "openai" | "codex" => run_openai(&prompt, &model, timeout)?,
         "gemini" | "google" => run_gemini(&prompt, &model, timeout)?,
@@ -64,7 +69,13 @@ pub fn run_chat_turn(payload: &Value) -> Result<Value> {
     }))
 }
 
-pub fn grok_argv(prompt_file: &Path, model: &str, effort: Option<&str>) -> Vec<String> {
+pub fn grok_argv(
+    prompt_file: &Path,
+    model: &str,
+    effort: Option<&str>,
+    max_turns: u32,
+) -> Vec<String> {
+    let turns = max_turns.clamp(1, 128);
     let mut args = vec![
         "--prompt-file".into(),
         prompt_file.display().to_string(),
@@ -72,8 +83,11 @@ pub fn grok_argv(prompt_file: &Path, model: &str, effort: Option<&str>) -> Vec<S
         "plain".into(),
         "--permission-mode".into(),
         "dontAsk".into(),
+        // `--prompt-file` is one *user* prompt. `--max-turns 1` is one *agent*
+        // step: a first-turn tool call exits "Max turns reached". Workspace
+        // Settings `chat_max_turns` (default 32) is the live cap.
         "--max-turns".into(),
-        "1".into(),
+        turns.to_string(),
     ];
     if !model.is_empty() {
         args.push("-m".into());
@@ -86,12 +100,18 @@ pub fn grok_argv(prompt_file: &Path, model: &str, effort: Option<&str>) -> Vec<S
     args
 }
 
-fn run_grok(prompt: &str, model: &str, effort: Option<&str>, timeout: Duration) -> Result<String> {
+fn run_grok(
+    prompt: &str,
+    model: &str,
+    effort: Option<&str>,
+    max_turns: u32,
+    timeout: Duration,
+) -> Result<String> {
     let dir = tempfile_dir("grok-chat")?;
     let file = dir.join("prompt.txt");
     fs::write(&file, prompt)?;
     let bin = grok_bin();
-    let args = grok_argv(&file, model, effort);
+    let args = grok_argv(&file, model, effort, max_turns);
     let out = run_timeout(&bin, &args, None, timeout)?;
     let _ = fs::remove_dir_all(&dir);
     Ok(out)
@@ -266,7 +286,7 @@ mod tests {
 
     #[test]
     fn grok_argv_includes_model_and_effort() {
-        let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", Some("xhigh"));
+        let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", Some("xhigh"), 32);
         assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "grok-4.6"));
         assert!(
             args.windows(2)
@@ -276,7 +296,7 @@ mod tests {
 
     #[test]
     fn grok_argv_omits_blank_model_and_none_effort() {
-        let args = grok_argv(Path::new("/tmp/p.txt"), "", None);
+        let args = grok_argv(Path::new("/tmp/p.txt"), "", None, 32);
         assert!(!args.iter().any(|a| a == "-m"));
         assert!(!args.iter().any(|a| a == "--reasoning-effort"));
     }
@@ -284,7 +304,7 @@ mod tests {
     #[test]
     fn grok_argv_prompt_file_path_and_noninteractive_flags() {
         let path = Path::new("/tmp/p.txt");
-        let args = grok_argv(path, "", None);
+        let args = grok_argv(path, "", None, 32);
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--prompt-file" && w[1] == path.display().to_string())
@@ -297,12 +317,32 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk")
         );
-        assert!(args.windows(2).any(|w| w[0] == "--max-turns" && w[1] == "1"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--max-turns" && w[1] == "32")
+        );
+    }
+
+    #[test]
+    fn grok_argv_uses_workspace_max_turns() {
+        let args = grok_argv(Path::new("/tmp/p.txt"), "", None, 8);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--max-turns" && w[1] == "8"),
+            "{args:?}"
+        );
+        let clamped = grok_argv(Path::new("/tmp/p.txt"), "", None, 0);
+        assert!(
+            clamped
+                .windows(2)
+                .any(|w| w[0] == "--max-turns" && w[1] == "1"),
+            "{clamped:?}"
+        );
     }
 
     #[test]
     fn grok_argv_model_without_effort() {
-        let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", None);
+        let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", None, 32);
         assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "grok-4.6"));
         assert!(!args.iter().any(|a| a == "--reasoning-effort"));
     }
