@@ -25,6 +25,31 @@ if ($pairToken) {
     $env:FLEET_PAIR_TOKEN = $pairToken
 }
 
+function Normalize-PairUrl([string]$Url) {
+    if (-not $Url) { return "" }
+    return $Url.Trim().TrimEnd("/")
+}
+
+function Get-PairedControlPlane([string]$Dir) {
+    $toml = Join-Path $Dir "config.toml"
+    if (-not (Test-Path -LiteralPath $toml)) { return "" }
+    foreach ($line in Get-Content -LiteralPath $toml) {
+        if ($line -match '^\s*control_plane_url\s*=\s*"(.*)"\s*$') {
+            return [string]$Matches[1]
+        }
+    }
+    return ""
+}
+
+# Same URL trim as fleet-host refuse_url_switch. y/yes switches; anything else keeps the old pair.
+function Confirm-UnpairAndPair([string]$Old, [string]$New) {
+    if ($env:FLEET_PAIR_FORCE -eq "1") { return $true }
+    Write-Host "This machine is already paired to $Old."
+    Write-Host "Pair to $New instead? That unpairs the old control plane and rotates the machine token."
+    $ans = Read-Host "Unpair and pair to $New? [y/N]"
+    return ($ans -match '^[yY]([eE][sS])?$')
+}
+
 # 127/8, localhost, or [::1] -- another computer cannot reach this URL.
 function Test-FleetUrlLoopback([string]$Url) {
     if (-not $Url) { return $false }
@@ -268,8 +293,17 @@ $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup
 Write-Host "startup shortcut: $startup"
 
 if ($pairToken) {
+    $existingUrl = Normalize-PairUrl (Get-PairedControlPlane $cfgDir)
+    $wantUrl = Normalize-PairUrl $Origin
+    $pairArgs = @("pair", "--url", $Origin, "--token", $pairToken)
+    if ($alreadyPaired -and $existingUrl -and ($existingUrl -ne $wantUrl)) {
+        if (-not (Confirm-UnpairAndPair $existingUrl $wantUrl)) {
+            throw "kept existing pair to $existingUrl"
+        }
+        $pairArgs += "--force"
+    }
     Write-Host "pairing with the control plane"
-    & (Join-Path $BinDir "fleet-host.exe") pair --url $Origin --token $pairToken
+    & (Join-Path $BinDir "fleet-host.exe") @pairArgs
     Write-Host "starting fleet-host (heartbeats; offline after 90s if this fails)"
     Start-Process -FilePath (Join-Path $BinDir "fleet-host.exe") -ArgumentList "run" -WindowStyle Hidden
     Write-Host "started fleet-host run (also at logon: $startup)"
