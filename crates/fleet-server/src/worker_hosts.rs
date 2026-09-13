@@ -1323,6 +1323,13 @@ async fn http_heartbeat(
         body.agents.clone().map(sanitize_heartbeat_agents),
     )
     .await?;
+    let host = if let Some(hn) = hostname {
+        host_repo::adopt_hostname_if_placeholder(&state.db, host.id, hn)
+            .await
+            .unwrap_or(host)
+    } else {
+        host
+    };
     let host = if let Some(n) = body.settings_ack_gen {
         host_repo::ack_settings(&state.db, host.id, n)
             .await

@@ -78,7 +78,7 @@ fn request_create_host(
         match create_host(
             &workspace_id,
             &CreateHostBody {
-                name: Some("worker".into()),
+                name: None,
                 send_policy: Some(send_policy),
             },
         )
@@ -169,36 +169,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         "{NAV_LABEL_SELF_HOSTED}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine to Run on a PC. The agent is a program on that computer. Anyone you allow can send work there — that is not isolated."
-                    }
-                    fieldset { class: "mt-3 flex flex-col gap-1.5 text-sm text-[var(--app-fg)]",
-                        legend { class: "text-xs font-medium uppercase tracking-wide text-[var(--app-muted)]",
-                            "Who can send work to this computer"
-                        }
-                        label { class: "flex items-start gap-2",
-                            input {
-                                r#type: "radio",
-                                name: "send_policy",
-                                value: "owner_only",
-                                checked: send_policy() == "owner_only",
-                                onchange: move |_| send_policy.set("owner_only".into()),
-                            }
-                            span {
-                                "Only me — my laptop or dedicated AI box"
-                            }
-                        }
-                        label { class: "flex items-start gap-2",
-                            input {
-                                r#type: "radio",
-                                name: "send_policy",
-                                value: "workspace",
-                                checked: send_policy() == "workspace",
-                                onchange: move |_| send_policy.set("workspace".into()),
-                            }
-                            span {
-                                "Anyone in this workspace — this is a shared PC, not someone's laptop"
-                            }
-                        }
+                        "Pair a machine to Run on a PC. The agent is a program on that computer. Who can send work is set on each runner, not here."
                     }
                     if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
@@ -217,25 +188,37 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         }
                     }
                 }
-                button {
-                    class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
-                    r#type: "button",
-                    disabled: creating() || loading(),
-                    onclick: {
-                        let ws = ws_create.clone();
-                        move |_| {
-                            request_create_host(
-                                ws.clone(),
-                                send_policy(),
-                                creating,
-                                hosts,
-                                pair_result,
-                                selected_id,
-                                error,
-                            );
+                div { class: "flex flex-col items-end gap-2",
+                    label { class: "flex flex-col items-end gap-1 text-xs text-[var(--app-muted)]",
+                        "Who can send to the new runner"
+                        select {
+                            class: field_class(),
+                            value: "{send_policy}",
+                            onchange: move |e| send_policy.set(e.value()),
+                            option { value: "owner_only", "Only me" }
+                            option { value: "workspace", "Anyone in this workspace" }
                         }
-                    },
-                    if creating() { "Adding…" } else { "Add worker" }
+                    }
+                    button {
+                        class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                        r#type: "button",
+                        disabled: creating() || loading(),
+                        onclick: {
+                            let ws = ws_create.clone();
+                            move |_| {
+                                request_create_host(
+                                    ws.clone(),
+                                    send_policy(),
+                                    creating,
+                                    hosts,
+                                    pair_result,
+                                    selected_id,
+                                    error,
+                                );
+                            }
+                        },
+                        if creating() { "Adding…" } else { "Add worker" }
+                    }
                 }
             }
 
@@ -636,6 +619,7 @@ fn HostDetailPanel(
     let mut name_draft = use_signal(|| host.name.clone());
     let mut d_accepting = use_signal(|| accepting_jobs(&host) && !host.paused && !host.drain);
     let mut d_auto = use_signal(|| host.auto_update);
+    let mut d_send = use_signal(|| host.send_policy.clone());
     let mut d_max = use_signal(|| host.max_concurrent);
     let d_allow_host = use_signal(|| host.allow_host);
     let d_allow_container = use_signal(|| host.allow_container);
@@ -680,7 +664,9 @@ fn HostDetailPanel(
             || d_memory() != filled_runtime(&host, "k8s_memory", "256Mi")
             || d_ephemeral() != filled_runtime(&host, "k8s_ephemeral", "1Gi")
             || d_egress() != filled_runtime(&host, "egress_mode", "none"));
-    let dirty = settings_draft_dirty(&host, d_accepting(), d_auto(), d_max()) || sandbox_dirty;
+    let dirty = settings_draft_dirty(&host, d_accepting(), d_auto(), d_max())
+        || sandbox_dirty
+        || d_send() != host.send_policy;
     let pending = widgets_locked(&host, false);
     let extra_pills = extra_status_pills(&host);
     let draft_holding = draft_holding_new_jobs(d_accepting());
@@ -869,6 +855,19 @@ fn HostDetailPanel(
                         "Auto-update"
                     }
                     }
+                    if !plane && host.run_mode != "in_container" {
+                        label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-muted)]",
+                            "Who can send work to this runner"
+                            select {
+                                class: field_class(),
+                                value: "{d_send}",
+                                disabled: busy() || pending,
+                                onchange: move |e| d_send.set(e.value()),
+                                option { value: "owner_only", "Only me" }
+                                option { value: "workspace", "Anyone in this workspace" }
+                            }
+                        }
+                    }
                     if let Some(upd_label) = update_now_label(&host, d_auto()) {
                         button {
                             class: "{btn_class()}",
@@ -1044,6 +1043,7 @@ fn HostDetailPanel(
                                         allow_host: Some(d_allow_host()),
                                         allow_container: Some(d_allow_container()),
                                         auto_update: Some(d_auto()),
+                                        send_policy: Some(d_send()),
                                         max_concurrent: Some(d_max()),
                                         max_job_timeout_s: Some(d_timeout()),
                                         paused: Some(!d_accepting()),

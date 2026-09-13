@@ -8187,6 +8187,90 @@ async fn heartbeat_includes_desired_when_staged() {
 }
 
 #[tokio::test]
+async fn heartbeat_desired_from_sibling_bins_without_manifest_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plat = dir.path().join("linux-x86_64");
+    std::fs::create_dir_all(&plat).unwrap();
+    std::fs::write(plat.join("fleet-host"), b"sibling-host-bytes").unwrap();
+    std::fs::write(plat.join("fleet-driver"), b"sibling-driver-bytes").unwrap();
+    let (app, _) = app_with_state_dist(Some(dir.path().to_path_buf())).await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let (_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
+
+    let hb = call_bearer(
+        &app,
+        "POST",
+        "/api/worker-hosts/me/heartbeat",
+        &machine,
+        Some(json!({
+            "advertised_host": true,
+            "advertised_container": false,
+            "current_jobs": 0,
+            "software": {
+                "git_sha": "old-tree",
+                "bins": {
+                    "fleet-host": "old-host",
+                    "fleet-driver": "old-driver"
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(hb.status, StatusCode::OK, "heartbeat: {}", hb.body);
+    assert!(
+        hb.body["desired"]["bins"]["fleet-host"]["sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64),
+        "desired must hash sibling fleet-host: {}",
+        hb.body
+    );
+    assert!(
+        hb.body["desired"]["bins"]["fleet-driver"]["sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64),
+        "desired must hash sibling fleet-driver: {}",
+        hb.body
+    );
+}
+
+#[tokio::test]
+async fn pair_without_create_name_uses_hostname() {
+    let (app, _) = app_with_state_dist(None).await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let created = call(
+        &app,
+        "POST",
+        &hosts_path(&ws),
+        Some(&jar),
+        Some(json!({ "send_policy": "owner_only" })),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    let pair_token = created.body["pair_token"].as_str().unwrap();
+    let paired = call(
+        &app,
+        "POST",
+        "/api/worker-hosts/pair",
+        None,
+        Some(json!({
+            "token": pair_token,
+            "hostname": "x1",
+            "platform": "linux-x86_64",
+            "advertised_host": true,
+            "advertised_container": false,
+        })),
+    )
+    .await;
+    assert_eq!(paired.status, StatusCode::OK, "{}", paired.body);
+    let listed = call(&app, "GET", &hosts_path(&ws), Some(&jar), None).await;
+    let name = listed.body["hosts"]
+        .as_array()
+        .and_then(|a| a.iter().find(|h| h["hostname"] == "x1"))
+        .and_then(|h| h["name"].as_str());
+    assert_eq!(name, Some("x1"), "listed: {}", listed.body);
+}
+
+#[tokio::test]
 async fn list_software_status_unknown_with_staged_desired() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_platform_manifest(dir.path(), "linux-x86_64", "aaa111", "stage-tree");

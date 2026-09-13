@@ -292,7 +292,10 @@ fn worker_bin_content_type(bin: &str) -> &'static str {
     }
 }
 
-/// Staged `manifest.json` for this platform, or `None` if it was not staged.
+/// Staged `manifest.json` for this platform, or a hash of the bins this
+/// process can already serve (API-image sibling / target/). Heartbeat
+/// `desired` used to be None without a staged JSON, so auto-update never
+/// ran even though GET /install/worker/bin/... returned the host binary.
 pub fn load_platform_manifest(
     state: &AppState,
     platform: Option<&str>,
@@ -301,6 +304,13 @@ pub fn load_platform_manifest(
     if reject_unsafe_name(platform).is_err() {
         return None;
     }
+    if let Some(m) = load_manifest_file(state, platform) {
+        return Some(m);
+    }
+    synthesize_manifest_from_bins(state, platform)
+}
+
+fn load_manifest_file(state: &AppState, platform: &str) -> Option<WorkerSoftwareManifest> {
     let path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
         current_exe_dir().as_deref(),
@@ -338,6 +348,66 @@ pub fn load_platform_manifest(
             None
         }
     }
+}
+
+fn synthesize_manifest_from_bins(
+    state: &AppState,
+    platform: &str,
+) -> Option<WorkerSoftwareManifest> {
+    let windows = platform.starts_with("windows-");
+    let host_name = if windows {
+        "fleet-host.exe"
+    } else {
+        "fleet-host"
+    };
+    let driver_name = if windows {
+        "fleet-driver.exe"
+    } else {
+        "fleet-driver"
+    };
+    let host_path = resolve_worker_bin(
+        state.worker_dist_dir.as_deref(),
+        current_exe_dir().as_deref(),
+        workspace_target_dir().as_deref(),
+        platform,
+        host_name,
+        &native_platform_id(),
+    )?;
+    let driver_path = resolve_worker_bin(
+        state.worker_dist_dir.as_deref(),
+        current_exe_dir().as_deref(),
+        workspace_target_dir().as_deref(),
+        platform,
+        driver_name,
+        &native_platform_id(),
+    )?;
+    let host_meta = bin_file_meta(&host_path)?;
+    let driver_meta = bin_file_meta(&driver_path)?;
+    let git_sha = option_env!("FLEET_GIT_SHA")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+    let mut bins = std::collections::BTreeMap::new();
+    bins.insert(host_name.to_string(), host_meta);
+    bins.insert(driver_name.to_string(), driver_meta);
+    Some(WorkerSoftwareManifest {
+        git_sha,
+        platform: platform.to_string(),
+        staged_at: String::new(),
+        bins,
+    })
+}
+
+fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let sha = hex::encode(Sha256::digest(&bytes));
+    Some(fleet_db::WorkerBinMeta {
+        sha256: sha,
+        size: bytes.len() as u64,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })
 }
 
 /// Every staged `manifest.json` under `FLEET_WORKER_DIST_DIR` (one per platform).

@@ -1098,6 +1098,63 @@ async fn re_pair_same_machine_id_empty_prior_name_uses_new_hostname() {
     assert_eq!(again.host.name, "studio-renamed");
 }
 
+#[tokio::test]
+async fn pair_placeholder_name_worker_becomes_hostname() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (_pending, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "worker", expires).await;
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "x1",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair");
+    assert_eq!(paired.host.name, "x1");
+    assert_eq!(paired.host.hostname.as_deref(), Some("x1"));
+}
+
+#[tokio::test]
+async fn heartbeat_adopts_hostname_when_name_is_worker() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (_pending, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "worker", expires).await;
+    let paired = worker_hosts::consume_pair_token(
+        &pool,
+        &token,
+        "ignored-if-already-worker",
+        "linux-x86_64",
+        true,
+        false,
+        None,
+    )
+    .await
+    .expect("pair");
+    // If consume already renamed, adopt is a no-op; force the placeholder back.
+    worker_hosts::patch_cp_settings(
+        &pool,
+        paired.host.id,
+        &HostCpSettings {
+            name: Some("worker".into()),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("set worker");
+    let adopted = worker_hosts::adopt_hostname_if_placeholder(&pool, paired.host.id, "x1")
+        .await
+        .expect("adopt");
+    assert_eq!(adopted.name, "x1");
+}
+
 /// reclaim UPDATE omits settings_ack_gen; an acked gen must survive revoke+re-pair.
 #[tokio::test]
 async fn reclaim_keeps_settings_ack_gen() {
