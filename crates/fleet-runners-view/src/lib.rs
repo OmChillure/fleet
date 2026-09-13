@@ -1172,6 +1172,12 @@ pub fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
         }
         host.drain = v;
     }
+    if let Some(v) = patch.send_policy.clone() {
+        if v != host.send_policy {
+            bump = true;
+        }
+        host.send_policy = v;
+    }
     if let Some(v) = patch.allow_host {
         if v != host.allow_host {
             bump = true;

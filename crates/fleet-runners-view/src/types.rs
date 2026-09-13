@@ -248,6 +248,8 @@ pub struct HostPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_update: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub install_model: Option<InstallModelRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,

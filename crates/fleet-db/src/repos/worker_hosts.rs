@@ -526,11 +526,7 @@ pub async fn consume_pair_token(
 
     let machine_token = generate_machine_token();
     let machine_token_hash = hash_token(&machine_token);
-    let display_name = if host.name.trim().is_empty() {
-        hostname
-    } else {
-        host.name.as_str()
-    };
+    let display_name = crate::name_or_device_hostname(&host.name, hostname);
 
     let upd = format!(
         r#"
@@ -681,11 +677,7 @@ async fn reclaim_existing(
 
     let machine_token = generate_machine_token();
     let machine_token_hash = hash_token(&machine_token);
-    let display_name = if prior.name.trim().is_empty() {
-        hostname.to_string()
-    } else {
-        prior.name.clone()
-    };
+    let display_name = crate::name_or_device_hostname(&prior.name, hostname).to_string();
     let upd = format!(
         r#"
         UPDATE worker_hosts
@@ -909,6 +901,37 @@ pub async fn heartbeat_with_machine(
         .bind(hardware)
         .bind(machine_id)
         .bind(agent_runtimes)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
+/// Pending create used `name = "worker"`. Once the box reports a hostname, use it.
+pub async fn adopt_hostname_if_placeholder(
+    pool: &PgPool,
+    host_id: Uuid,
+    hostname: &str,
+) -> DbResult<WorkerHost> {
+    let hostname = hostname.trim();
+    let current = get(pool, host_id)
+        .await?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))?;
+    let next = crate::name_or_device_hostname(&current.name, hostname);
+    if next == current.name.trim() || hostname.is_empty() {
+        return Ok(current);
+    }
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET name = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .bind(next)
         .fetch_optional(pool)
         .await
         .map_err(map_query_err)?

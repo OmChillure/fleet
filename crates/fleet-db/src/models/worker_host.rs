@@ -48,6 +48,24 @@ pub fn parse_worker_host_run_mode(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// Create-form placeholder. Pair / heartbeat replace it with the device hostname.
+pub fn is_placeholder_worker_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "" | "worker" | "new worker" | "unnamed worker"
+    )
+}
+
+/// Use the device hostname when the stored name is empty or a create placeholder.
+pub fn name_or_device_hostname<'a>(name: &'a str, hostname: &'a str) -> &'a str {
+    let host = hostname.trim();
+    if !host.is_empty() && is_placeholder_worker_name(name) {
+        host
+    } else {
+        name.trim()
+    }
+}
+
 /// `owner_only` | `allowlist` | `workspace`. Other values are rejected.
 pub fn parse_worker_host_send_policy(raw: &str) -> Option<&'static str> {
     match raw.trim() {
@@ -966,6 +984,17 @@ mod public_view_tests {
         );
         assert_eq!(parse_worker_host_isolation("k8s"), None);
         assert_eq!(parse_worker_host_isolation(""), None);
+    }
+
+    #[test]
+    fn placeholder_worker_name_and_hostname_fallback() {
+        assert!(is_placeholder_worker_name(""));
+        assert!(is_placeholder_worker_name(" worker "));
+        assert!(is_placeholder_worker_name("Worker"));
+        assert!(!is_placeholder_worker_name("x1"));
+        assert_eq!(name_or_device_hostname("worker", "x1"), "x1");
+        assert_eq!(name_or_device_hostname("desk", "x1"), "desk");
+        assert_eq!(name_or_device_hostname("worker", "  "), "worker");
     }
 
     #[test]
