@@ -326,6 +326,55 @@ pub async fn set_default_run_mode(
     stored.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
+pub const CHAT_MAX_TURNS_DEFAULT: i32 = 32;
+pub const CHAT_MAX_TURNS_MIN: i32 = 1;
+pub const CHAT_MAX_TURNS_MAX: i32 = 128;
+
+pub fn parse_chat_max_turns(n: i32) -> Option<i32> {
+    (CHAT_MAX_TURNS_MIN..=CHAT_MAX_TURNS_MAX)
+        .contains(&n)
+        .then_some(n)
+}
+
+pub async fn chat_max_turns(pool: &PgPool, workspace_id: Uuid) -> DbResult<i32> {
+    let row = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT chat_max_turns
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_chat_max_turns(pool: &PgPool, workspace_id: Uuid, turns: i32) -> DbResult<i32> {
+    let turns = parse_chat_max_turns(turns).ok_or_else(|| {
+        DbError::Conflict(format!(
+            "chat_max_turns must be {CHAT_MAX_TURNS_MIN}–{CHAT_MAX_TURNS_MAX}"
+        ))
+    })?;
+    let stored = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE workspaces
+        SET chat_max_turns = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING chat_max_turns
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(turns)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
 /// Record the partners disclaimer ack. First write wins.
 ///
 /// Does not enable lending, borrowing, enqueue, or assignable runners.

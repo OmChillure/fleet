@@ -71,6 +71,9 @@ pub async fn run_on_runner(
 
     let prompt = format_transcript(pairs);
     let claim_id = Uuid::now_v7();
+    let max_turns = fleet_db::repos::workspaces::chat_max_turns(&state.db, workspace_id)
+        .await
+        .unwrap_or(fleet_db::repos::workspaces::CHAT_MAX_TURNS_DEFAULT);
     let payload = json!({
         "kind": "chat_turn",
         "host_id": host.id,
@@ -79,6 +82,7 @@ pub async fn run_on_runner(
         "effort": effort,
         "prompt": prompt,
         "timeout_s": 180,
+        "max_turns": max_turns,
     });
     work_claims::enqueue(
         &state.db,

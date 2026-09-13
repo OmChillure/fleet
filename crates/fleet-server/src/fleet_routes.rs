@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
@@ -15,7 +15,7 @@ use fleet_orchestrator::domain::{
 use fleet_orchestrator::orch::TickError;
 use fleet_orchestrator::store::StoreError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -170,6 +170,11 @@ async fn settings_json(
         "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "owner_only".into()),
+        "chat_max_turns": workspace_repo::chat_max_turns(&state.db, workspace_id)
+            .await
+            .unwrap_or(workspace_repo::CHAT_MAX_TURNS_DEFAULT),
+        "chat_max_turns_min": workspace_repo::CHAT_MAX_TURNS_MIN,
+        "chat_max_turns_max": workspace_repo::CHAT_MAX_TURNS_MAX,
         "repo_url": cfg.repo_url,
         "git_ref": cfg.git_ref,
         "fleet_llm": cfg.fleet_llm,
@@ -204,6 +209,7 @@ pub struct PatchSettingsBody {
     pub min_isolation: Option<String>,
     pub default_run_mode: Option<String>,
     pub default_send_policy: Option<String>,
+    pub chat_max_turns: Option<i32>,
 }
 
 async fn patch_settings(
@@ -259,6 +265,16 @@ async fn patch_settings(
     }
     if let Some(raw) = body.default_send_policy.as_deref() {
         workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(turns) = body.chat_max_turns {
+        if workspace_repo::parse_chat_max_turns(turns).is_none() {
+            return Err(AppError::bad_request(format!(
+                "chat_max_turns must be {}–{}",
+                workspace_repo::CHAT_MAX_TURNS_MIN,
+                workspace_repo::CHAT_MAX_TURNS_MAX
+            )));
+        }
+        workspace_repo::set_chat_max_turns(&state.db, workspace_id, turns).await?;
     }
 
     let cfg = state
@@ -442,7 +458,12 @@ async fn post_fixture(
     let ws_default = workspace_repo::default_run_mode(&state.db, workspace_id)
         .await
         .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
-    let run_mode = match body.run_mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let run_mode = match body
+        .run_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => fleet_db::parse_worker_host_run_mode(raw)
             .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?
             .to_string(),
@@ -907,8 +928,7 @@ async fn post_cancel(
             tracing::error!(%workspace_id, %run_id, error = %e, "request_cancel failed");
             AppError::bad_request(e.to_string())
         })?;
-    let _ = fleet_db::repos::tickets::reopen_tickets_for_run(&state.db, workspace_id, run_id)
-        .await;
+    let _ = fleet_db::repos::tickets::reopen_tickets_for_run(&state.db, workspace_id, run_id).await;
     Ok(Json(json!({
         "run_id": run_id,
         "cancel_requested": true,
