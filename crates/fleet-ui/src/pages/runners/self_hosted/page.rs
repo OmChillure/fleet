@@ -169,7 +169,7 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         "{NAV_LABEL_SELF_HOSTED}"
                     }
                     p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                        "Pair a machine to Run on a PC. The agent is a program on that computer. Who can send work is set on each runner, not here."
+                        "Pair a machine to Run on a PC. The agent is a program on that computer. Anyone you allow on that runner can send work there — that is not isolated."
                     }
                     if !pkg_ver.host.is_empty() || !pkg_ver.driver.is_empty() {
                         p { class: "mt-2 text-xs text-[var(--app-muted)]",
@@ -188,37 +188,25 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                         }
                     }
                 }
-                div { class: "flex flex-col items-end gap-2",
-                    label { class: "flex flex-col items-end gap-1 text-xs text-[var(--app-muted)]",
-                        "Who can send to the new runner"
-                        select {
-                            class: field_class(),
-                            value: "{send_policy}",
-                            onchange: move |e| send_policy.set(e.value()),
-                            option { value: "owner_only", "Only me" }
-                            option { value: "workspace", "Anyone in this workspace" }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
+                    r#type: "button",
+                    disabled: creating() || loading(),
+                    onclick: {
+                        let ws = ws_create.clone();
+                        move |_| {
+                            request_create_host(
+                                ws.clone(),
+                                send_policy(),
+                                creating,
+                                hosts,
+                                pair_result,
+                                selected_id,
+                                error,
+                            );
                         }
-                    }
-                    button {
-                        class: "rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)] disabled:opacity-50",
-                        r#type: "button",
-                        disabled: creating() || loading(),
-                        onclick: {
-                            let ws = ws_create.clone();
-                            move |_| {
-                                request_create_host(
-                                    ws.clone(),
-                                    send_policy(),
-                                    creating,
-                                    hosts,
-                                    pair_result,
-                                    selected_id,
-                                    error,
-                                );
-                            }
-                        },
-                        if creating() { "Adding…" } else { "Add worker" }
-                    }
+                    },
+                    if creating() { "Adding…" } else { "Add worker" }
                 }
             }
 
@@ -855,19 +843,6 @@ fn HostDetailPanel(
                         "Auto-update"
                     }
                     }
-                    if !plane && host.run_mode != "in_container" {
-                        label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-muted)]",
-                            "Who can send work to this runner"
-                            select {
-                                class: field_class(),
-                                value: "{d_send}",
-                                disabled: busy() || pending,
-                                onchange: move |e| d_send.set(e.value()),
-                                option { value: "owner_only", "Only me" }
-                                option { value: "workspace", "Anyone in this workspace" }
-                            }
-                        }
-                    }
                     if let Some(upd_label) = update_now_label(&host, d_auto()) {
                         button {
                             class: "{btn_class()}",
@@ -920,6 +895,20 @@ fn HostDetailPanel(
                                     d_max.set(clamp_max_jobs(n));
                                 }
                             },
+                        }
+                    }
+                    if !plane && host.run_mode != "in_container" {
+                        label { class: "inline-flex items-center gap-1.5 text-xs text-[var(--app-fg)]",
+                            title: "Who on this workspace may send jobs to this computer.",
+                            "Who can send work"
+                            select {
+                                class: field_class(),
+                                value: "{d_send}",
+                                disabled: busy() || pending,
+                                onchange: move |e| d_send.set(e.value()),
+                                option { value: "owner_only", "Only me" }
+                                option { value: "workspace", "Anyone in this workspace" }
+                            }
                         }
                     }
                     }
@@ -1042,8 +1031,10 @@ fn HostDetailPanel(
                                     HostPatch {
                                         allow_host: Some(d_allow_host()),
                                         allow_container: Some(d_allow_container()),
-                                        auto_update: Some(d_auto()),
-                                        send_policy: Some(d_send()),
+                                        auto_update: (d_auto() != host.auto_update)
+                                            .then_some(d_auto()),
+                                        send_policy: (d_send() != host.send_policy)
+                                            .then_some(d_send()),
                                         max_concurrent: Some(d_max()),
                                         max_job_timeout_s: Some(d_timeout()),
                                         paused: Some(!d_accepting()),

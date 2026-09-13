@@ -2864,6 +2864,23 @@ mod tests {
         assert_eq!(patched.settings_gen, host.settings_gen);
     }
 
+    #[test]
+    fn apply_patch_omitted_auto_update_leaves_existing() {
+        let mut host = sample_host();
+        host.auto_update = true;
+        let patched = apply_patch(
+            host.clone(),
+            &HostPatch {
+                max_concurrent: Some(8),
+                ..HostPatch::default()
+            },
+        );
+        assert!(
+            patched.auto_update,
+            "saving other settings must not turn auto-update off"
+        );
+    }
+
     /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
     #[test]
     fn apply_patch_request_update_marks_host() {
