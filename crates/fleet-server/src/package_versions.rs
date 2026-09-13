@@ -55,50 +55,42 @@ fn section_value(section: &str, name: &str) -> &'static str {
     "0.0.0"
 }
 
-/// Shipped OS packages locked in `[release.*]`. Not musl / armv7 / darwin.
+/// Shipped OS packages locked in `[release.BIN]`. Not musl / armv7 / darwin.
 pub const SHIP_RELEASE_PLATFORMS: &[&str] = &[
     "linux-x86_64",
     "linux-aarch64",
     "windows-x86_64",
 ];
 
-const RELEASE_BINS: &[&str] = &["fleet-host", "fleet-driver"];
-
-/// `[release].version` — one number for the parent + all children.
-pub fn release_version() -> &'static str {
-    section_value("release", "version")
+/// `[release.<bin>].version` — independent of the other binary.
+pub fn release_bin_version(bin: &str) -> &'static str {
+    section_value(&format!("release.{bin}"), "version")
 }
 
-/// `[release].parent` — sha256 of sorted `platform/bin=hex\\n` children.
-pub fn release_parent() -> &'static str {
-    section_value("release", "parent")
+/// `[release.<bin>].parent` — sha256 of sorted `platform=hex\\n` children.
+pub fn release_bin_parent(bin: &str) -> &'static str {
+    section_value(&format!("release.{bin}"), "parent")
 }
 
-fn release_child_hash(platform: &str, bin: &str) -> &'static str {
-    section_value(&format!("release.{platform}"), bin)
-}
-
-/// Children in `[release.<platform>]` for the shipped OS set.
-pub fn release_children() -> BTreeMap<(String, String), String> {
+/// Per-OS hashes for one binary.
+pub fn release_bin_children(bin: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for plat in SHIP_RELEASE_PLATFORMS {
-        for bin in RELEASE_BINS {
-            let sha = release_child_hash(plat, bin).trim().to_ascii_lowercase();
-            if sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                out.insert(((*plat).to_string(), (*bin).to_string()), sha);
-            }
+        let sha = section_value(&format!("release.{bin}"), plat)
+            .trim()
+            .to_ascii_lowercase();
+        if sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.insert((*plat).to_string(), sha);
         }
     }
     out
 }
 
-/// Parent digest of `children`. Same bytes as `scripts/runner-release.py`.
-pub fn parent_digest(children: &BTreeMap<(String, String), String>) -> String {
+/// Parent digest of one binary's OS children. Same bytes as runner-release.py.
+pub fn parent_digest(children: &BTreeMap<String, String>) -> String {
     let mut blob = String::new();
-    for ((plat, bin), sha) in children {
+    for (plat, sha) in children {
         blob.push_str(plat);
-        blob.push('/');
-        blob.push_str(bin);
         blob.push('=');
         blob.push_str(&sha.to_ascii_lowercase());
         blob.push('\n');
@@ -360,43 +352,56 @@ mod tests {
 
     #[test]
     fn release_table_is_self_consistent() {
-        assert_eq!(
-            release_version(),
-            fleet_host_package_version(),
-            "[release].version must match [versions] fleet-host"
-        );
-        assert_eq!(
-            release_version(),
-            fleet_driver_package_version(),
-            "[release].version must match [versions] fleet-driver"
-        );
-        assert_eq!(
-            release_version(),
-            fleet_host_version(),
-            "[release].version must match [verify] fleet-host"
-        );
-        let kids = release_children();
-        assert_eq!(
-            kids.len(),
-            SHIP_RELEASE_PLATFORMS.len() * 2,
-            "every shipped OS must lock fleet-host and fleet-driver: {kids:?}"
-        );
-        let got = parent_digest(&kids);
-        assert_eq!(
-            got,
-            release_parent(),
-            "[release].parent must be sha256 of sorted platform/bin=hex children"
+        for (bin, pkg, verify) in [
+            (
+                "fleet-host",
+                fleet_host_package_version(),
+                fleet_host_version(),
+            ),
+            (
+                "fleet-driver",
+                fleet_driver_package_version(),
+                fleet_driver_version(),
+            ),
+        ] {
+            assert_eq!(
+                release_bin_version(bin),
+                pkg,
+                "[release.{bin}].version must match [versions] {bin}"
+            );
+            assert_eq!(
+                release_bin_version(bin),
+                verify,
+                "[release.{bin}].version must match [verify] {bin}"
+            );
+            let kids = release_bin_children(bin);
+            assert_eq!(
+                kids.len(),
+                SHIP_RELEASE_PLATFORMS.len(),
+                "{bin} must lock every shipped OS: {kids:?}"
+            );
+            assert_eq!(
+                parent_digest(&kids),
+                release_bin_parent(bin),
+                "[release.{bin}].parent must be sha256 of sorted platform=hex children"
+            );
+        }
+        assert_ne!(
+            release_bin_parent("fleet-host"),
+            release_bin_parent("fleet-driver"),
+            "host and driver parents must be independent"
         );
     }
 
     #[test]
     fn parent_digest_changes_when_a_child_hash_changes() {
-        let mut kids = release_children();
+        let mut kids = release_bin_children("fleet-host");
         let first = kids.keys().next().cloned().expect("children");
-        let old = kids.get(&first).expect("hash").clone();
         kids.insert(first, "ab".repeat(32));
-        assert_ne!(parent_digest(&kids), parent_digest(&release_children()));
-        assert_ne!(parent_digest(&kids), old);
+        assert_ne!(
+            parent_digest(&kids),
+            parent_digest(&release_bin_children("fleet-host"))
+        );
     }
 
     #[test]

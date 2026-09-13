@@ -636,15 +636,12 @@ pub fn compute_software_status(
             let want_ver = desired_bin_version(desired, stem);
             let reported = reported_bin_sha(bins, stem);
             let want = desired_bin_sha(desired, stem);
-            if reported_ver.is_some() && want_ver.is_some() {
+            if let (Some(gv), Some(wv)) = (reported_ver.as_deref(), want_ver.as_deref()) {
                 compared += 1;
-                if !sha_eq(
-                    reported_ver.as_deref().unwrap(),
-                    want_ver.as_deref().unwrap(),
-                ) {
+                if !sha_eq(gv, wv) {
                     mismatch = true;
+                    continue;
                 }
-                continue;
             }
             match (reported, want) {
                 (Some(got), Some(expect)) => {
@@ -1337,7 +1334,7 @@ mod public_view_tests {
     }
 
     #[test]
-    fn software_status_uses_package_version_then_hash() {
+    fn software_status_same_version_different_hash_is_behind() {
         let desired = sample_manifest("aaa");
         let same_ver_wrong_hash = reported(
             None,
@@ -1348,8 +1345,8 @@ mod public_view_tests {
         );
         assert_eq!(
             compute_software_status(Some(&same_ver_wrong_hash), Some(&desired)),
-            WORKER_SOFTWARE_STATUS_CURRENT,
-            "same 0.0.1 with a hash mismatch is current; version compare skips hash"
+            WORKER_SOFTWARE_STATUS_BEHIND,
+            "same version with a hash mismatch is behind"
         );
     }
 

@@ -162,7 +162,7 @@ if [[ -z "${WORKDIR:-}" ]]; then
   STAGE_SRC="$(mktemp -d "${ROOT}/.build.XXXXXX")"
   git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE_SRC}"
 fi
-if ! bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
+if ! STAGE_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
   fail_notify "worker package stage failed"
   exit 1
 fi
@@ -184,6 +184,10 @@ if wait_healthy "${SHA}"; then
   vps_deploy_ssh "printf '%s\n' '${SHA}' > '${VPS_STACK_DIR}/DEPLOYED_SHA' && printf '%s\n' '${PREV}' > '${VPS_STACK_DIR}/PREVIOUS_SHA'"
   printf '%s\n' "${SHA}" > "${STATE_DIR}/deployed-sha"
   prune_old_images "${SHA}" "${PREV}"
+  if ! SHIP_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
+    fail_notify "plane is healthy but worker-dist rsync failed"
+    exit 1
+  fi
   log "deployed ${SHORT} → ${PUBLIC_BASE}"
   notify_desktop normal "Agent Fleet deployed" \
     "${SHORT} is live at ${PUBLIC_BASE}"

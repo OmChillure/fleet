@@ -1,20 +1,20 @@
 # Operator-facing versions of the two runner binaries.
-# The same number is baked into every OS build of that source, so Linux and
-# Windows can be compared. File hashes still prove the bytes on one OS.
+# Host and driver versions are independent. Each has its own parent hash
+# of per-OS child hashes (linux-x86_64, linux-aarch64, windows-x86_64).
 #
 #   [versions]  — written into staged packages and reported by the bins
 #   [verify]    — what the control plane uses to decide current vs behind
-#   [release]   — parent hash of the children below (shipped OS × bin)
+#   [release.fleet-host] / [release.fleet-driver]
+#       version  — must match that bin's [versions] / [verify]
+#       parent   — sha256 of sorted "platform=hex\\n" child lines
+#       <os>     — sha256 of that OS build
 #
-# Parent = sha256 of sorted "platform/bin=hex\\n" lines (bin name without .exe).
-# If a staged binary's sha256 is not in this table for [release].version,
-# check-worker-dist.sh / deploy fail. Bump [versions]+[verify]+[release].version
-# and run scripts/register-runner-release.sh after restaging.
+# If a staged binary's sha256 is not registered for that bin's version,
+# check-worker-dist.sh / deploy fail. Bump that bin's version and run
+# scripts/register-runner-release.sh after restaging.
 #
 #   fleet-host   — pair / heartbeat / lease / official CLI chat
 #   fleet-driver — process worker (ACP)
-#
-# Shipped OS (not musl / armv7 / darwin): linux-x86_64, linux-aarch64, windows-x86_64.
 
 [versions]
 fleet-host = "0.0.3"
@@ -24,18 +24,16 @@ fleet-driver = "0.0.3"
 fleet-host = "0.0.3"
 fleet-driver = "0.0.3"
 
-[release]
+[release.fleet-host]
 version = "0.0.3"
-parent = "f37eb5d8d54b8f0c8e389957fe35e3161bc985e7ac88f520963a40cabbab9d2b"
+parent = "59ed6e096999fc3a334d3c8fd918cf2953889e350b9f9fd51d49f4d6e336768d"
+linux-x86_64 = "2424657e9fe8326c5ee6166f30ec03b5ac0fbf1ab4da0ef9f87263e3ea75c6d0"
+linux-aarch64 = "1e7f210fa445aeba665b41b6653672a5c78960e11dd4c61fddb51de00f0ecdf3"
+windows-x86_64 = "b2cb9dd01c2f7b8f72216dfda3ca06981c40a502e22c93dfabb4f06d1d831953"
 
-[release.linux-x86_64]
-fleet-host = "4000a889077861391dc3e3f113eb259c032840efc6799f6db90efcb2e2ced25f"
-fleet-driver = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
-
-[release.linux-aarch64]
-fleet-host = "1fe114fd6beea982058987d8c24f94987ff21c2916070e4ccd5b2da4e366edc2"
-fleet-driver = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
-
-[release.windows-x86_64]
-fleet-host = "9d261d6ccb23508a05ee84621ed59548fa9e27da30f4b84c8de0bc1d5e6fa2a8"
-fleet-driver = "c91c56692ceeb7ef071a165f6e04e83f0e064eed21932542b0440cdfbd333109"
+[release.fleet-driver]
+version = "0.0.3"
+parent = "5ffd9b9e82c22254b22adb1cddc5a4b2c33eb67b152010210af0d8c952f91c92"
+linux-x86_64 = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
+linux-aarch64 = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
+windows-x86_64 = "089479d9899a0ffe6b0377e807b78d0f0197997bbf6b6bc598e8d4cbacb642dd"
