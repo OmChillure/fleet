@@ -461,22 +461,29 @@ pub fn software_bin_rows(host: &HostPublic) -> Vec<SoftwareBinRow> {
                 desired_bin_version(host, name).or_else(|| current_pkg_version(host, name));
             let got = reported_bin_sha(host, name);
             let want = desired_bin_sha(host, name);
+            let ver_mismatch = matches!(
+                (got_ver.as_deref(), want_ver.as_deref()),
+                (Some(g), Some(w)) if !sha_eq(g, w)
+            );
+            let hash_mismatch = matches!(
+                (got.as_deref(), want.as_deref()),
+                (Some(g), Some(w)) if !sha_eq(g, w)
+            );
             let status = match (
                 got_ver.as_deref(),
                 want_ver.as_deref(),
                 got.as_deref(),
                 want.as_deref(),
             ) {
+                _ if ver_mismatch || hash_mismatch => "behind",
                 (Some(g), Some(w), _, _) if sha_eq(g, w) => "current",
-                (Some(_), Some(_), _, _) => "behind",
                 (_, _, Some(g), Some(w)) if sha_eq(g, w) => "current",
-                (_, _, Some(_), Some(_)) => "behind",
                 (None, Some(_), None, _) | (_, _, None, Some(_)) => "missing",
                 (Some(_), None, _, None) | (_, _, Some(_), None) => "reported",
                 _ => "unknown",
             };
+            // What is on the box — never the target version.
             let version = got_ver
-                .or(want_ver)
                 .or_else(|| got.as_deref().map(short_sha).map(str::to_string))
                 .unwrap_or_else(|| "—".into());
             SoftwareBinRow {
@@ -2034,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn software_bin_rows_same_version_different_hash_is_current() {
+    fn software_bin_rows_same_version_different_hash_is_behind() {
         let mut host = sample_host();
         host.current_versions = PackageVersions {
             host: "0.0.1".into(),
@@ -2052,10 +2059,31 @@ mod tests {
             ..HostDesiredSoftware::default()
         });
         let rows = software_bin_rows(&host);
-        assert_eq!(rows[0].status, "current");
-        assert_eq!(rows[1].status, "current");
+        assert_eq!(rows[0].status, "behind");
+        assert_eq!(rows[1].status, "behind");
         assert_eq!(rows[0].version, "0.0.1");
-        assert_eq!(software_flag(&host), Some("up to date"));
+        assert_eq!(software_flag(&host), Some("outdated"));
+    }
+
+    #[test]
+    fn software_bin_rows_behind_shows_reported_not_target() {
+        let mut host = sample_host();
+        host.software = serde_json::from_str(
+            r#"{"bins":{"fleet-host":{"sha256":"oldhasholdhasholdhasholdhasholdhasholdhasholdhasholdhasholdha","version":"0.0.2"},"fleet-driver":{"sha256":"drvhashdrvhashdrvhashdrvhashdrvhashdrvhashdrvhashdrvhashdrvh"}}}"#,
+        )
+        .expect("software");
+        host.desired = Some(HostDesiredSoftware {
+            bins: Some(serde_json::json!({
+                "fleet-host": {"sha256": "new", "version": "0.0.3"},
+                "fleet-driver": {"sha256": "new-d", "version": "0.0.3"}
+            })),
+            ..HostDesiredSoftware::default()
+        });
+        let rows = software_bin_rows(&host);
+        assert_eq!(rows[0].version, "0.0.2");
+        assert_eq!(rows[0].status, "behind");
+        assert_ne!(rows[1].version, "0.0.3", "must not show the target version");
+        assert_eq!(rows[1].status, "behind");
     }
 
     #[test]

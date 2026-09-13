@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# After bumping [versions]/[verify]/[release].version and restaging the
-# shipped OS packages, write their sha256s + parent into runner-packages.toml.
+# After bumping a bin's [versions]/[verify]/[release.BIN].version and
+# restaging, write that bin's per-OS sha256s + parent into the toml.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${FLEET_WORKER_DIST_DIR:-$ROOT/.tmp/vms/dist}"

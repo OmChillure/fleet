@@ -94,6 +94,22 @@ stage_one() {
   )
 }
 
+ship_dist() {
+  log "shipping worker-dist → ${VPS_HOST}:${VPS_STACK_DIR}/worker-dist"
+  vps_ssh "mkdir -p '${VPS_STACK_DIR}/worker-dist'"
+  rsync -az --delete \
+    -e "ssh -i ${VPS_SSH_KEY} -o BatchMode=yes -o IdentitiesOnly=yes ${VPS_SSH_OPTS:-} -o StrictHostKeyChecking=accept-new" \
+    "${DIST}/" "${VPS_USER}@${VPS_HOST}:${VPS_STACK_DIR}/worker-dist/"
+  printf '%s\n' "${SHA}" > "${STATE_DIR}/worker-dist-sha"
+  log "worker-dist shipped"
+}
+
+if [[ "${SHIP_ONLY:-0}" == 1 ]]; then
+  python3 "${REPO}/scripts/runner-release.py" check --require-all "${DIST}"
+  ship_dist
+  exit 0
+fi
+
 # Common guests. Not --all (no musl / armv7 / windows-arm64).
 stage_one linux-x86_64 --bookworm
 stage_one linux-aarch64 --aarch64
@@ -101,12 +117,11 @@ stage_one windows-x86_64 --windows
 
 log "worker darwin-arm64 / darwin-x86_64: not built here (no macOS cross from Linux)"
 
-python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
+python3 "${REPO}/scripts/runner-release.py" check --require-all "${DIST}"
 
-log "shipping worker-dist → ${VPS_HOST}:${VPS_STACK_DIR}/worker-dist"
-vps_deploy_ssh "mkdir -p '${VPS_STACK_DIR}/worker-dist'"
-rsync -az --delete \
-  -e "ssh -i ${VPS_DEPLOY_KEY} -o BatchMode=yes -o IdentitiesOnly=yes ${VPS_SSH_OPTS:-} -o StrictHostKeyChecking=accept-new" \
-  "${DIST}/" "${VPS_DEPLOY_USER}@${VPS_HOST}:${VPS_STACK_DIR}/worker-dist/"
-printf '%s\n' "${SHA}" > "${STATE_DIR}/worker-dist-sha"
-log "worker-dist shipped"
+if [[ "${STAGE_ONLY:-0}" == 1 ]]; then
+  log "worker-dist staged locally (${DIST}); not shipping until plane is healthy"
+  exit 0
+fi
+
+ship_dist
