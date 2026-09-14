@@ -242,7 +242,7 @@ async fn patch_settings(
         .unwrap_or(current.fleet_llm.as_str());
     if !matches!(llm, "off" | "ollama") {
         return Err(AppError::bad_request(
-            "fleet_llm must be off or ollama (Grok is env-only: FLEET_AGENT_BACKEND=grok)",
+            "fleet_llm must be off or ollama (Grok uses composer / llm-keys / FLEET_AGENT_BACKEND)",
         ));
     }
     let model = body

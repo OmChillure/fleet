@@ -6,23 +6,95 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `bbb4c6944b9bb3e484e07bec4a411e337acafd43`
-- Tree-id: `aa6755a069f38534c8b5e38f1a14d065997e48c7`
+- Tree-id: `cefb2ff4f18929773e3bbb1d5b935b7cf865a38d`
 
 ## Scenes
 
+- `auth`
+- `workspace`
+- `api`
+- `chat`
+- `fleet`
+- `sandboxes`
 - `inbox`
 - `integrations`
+- `settings`
+- `runners`
+- `cloud`
+- `partners`
+- `kind`
 
 ## Pause steps
 
-- Inbox
+- Signup
+- Login
+- Login wall
+- Workspace switcher
+- Settings
+- Settings members
+- Fleet
+- Chat
+- Runners / Self-hosted
+- Workers
+- Sandboxes
 - Integrations
+- Runners / Cloud
+- Runners / Partners
+- Inbox
+- Kubernetes sandboxes
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
+| `crates/fleet-auth/Cargo.toml` | `auth`, `workspace` |
+| `crates/fleet-auth/src/rate_limit.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/routes/auth.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/src/routes/members.rs` | `auth`, `workspace`, `settings` |
+| `crates/fleet-auth/tests/auth_http.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/common.rs` | `auth`, `workspace` |
+| `crates/fleet-auth/tests/instance_admin.rs` | `auth`, `workspace` |
+| `crates/fleet-bus/Cargo.toml` | `fleet` |
+| `crates/fleet-chat-md/Cargo.toml` | `chat` |
+| `crates/fleet-db/src/repos/worker_hosts.rs` | `runners` |
+| `crates/fleet-db/src/repos/workspaces.rs` | `auth`, `workspace` |
+| `crates/fleet-driver/README.md` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/acp.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-driver/src/main.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-host/Cargo.toml` | `runners` |
+| `crates/fleet-host/README.md` | `runners` |
+| `crates/fleet-host/src/config.rs` | `runners` |
+| `crates/fleet-host/src/spawn.rs` | `runners` |
+| `crates/fleet-integrations/Cargo.toml` | `integrations` |
+| `crates/fleet-integrations/src/catalog.rs` | `integrations` |
+| `crates/fleet-integrations/src/config.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/github/tools/writes.rs` | `integrations` |
+| `crates/fleet-integrations/src/proxy/apps/trello/client.rs` | `integrations` |
+| `crates/fleet-integrations/src/routes.rs` | `integrations` |
+| `crates/fleet-orchestrator/README.md` | `fleet` |
+| `crates/fleet-orchestrator/api/openapi.yaml` | `fleet` |
+| `crates/fleet-orchestrator/src/api/handlers.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/api/worker_io.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/git_remote.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/domain/plan.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/spawn.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/orch/tick.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sandbox/remote.rs` | `fleet`, `sandboxes` |
+| `crates/fleet-orchestrator/src/store/models.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/store/tick_ops.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sync/io.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/e2e_matrix.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/store_integration.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/tick_integration.rs` | `fleet` |
+| `crates/fleet-runners-view/Cargo.toml` | `runners` |
+| `crates/fleet-server/src/chat.rs` | `chat` |
+| `crates/fleet-server/src/chat_tools.rs` | `chat` |
+| `crates/fleet-server/src/config.rs` | `api`, `settings` |
+| `crates/fleet-server/src/fleet_routes.rs` | `fleet` |
+| `crates/fleet-server/src/runners.rs` | `cloud`, `partners` |
+| `crates/fleet-server/src/tickets.rs` | `inbox` |
+| `crates/fleet-server/src/worker_hosts.rs` | `runners` |
 | `crates/fleet-ui/src/pages/inbox/app.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/inbox/catalog.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/inbox/connect.rs` | `inbox` |
@@ -43,6 +115,8 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-ui/src/pages/inbox/views/teams.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/inbox/views/trello.rs` | `inbox` |
 | `crates/fleet-ui/src/pages/integrations/mod.rs` | `integrations` |
+| `crates/fleet-ui/src/pages/settings/page.rs` | `settings` |
+| `infra/base/secret.yaml` | `kind` |
 
 ## Film review (agent fills after recording)
 
@@ -51,9 +125,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: `aa6755a069f38534c8b5e38f1a14d065997e48c7` (`GET /health` `git_sha` and UI `/fleet-git-sha.txt` both match). Clip: `.tmp/demos/20260914T005428Z-inbox-integrations.webm`
-- Frames + webm inspected: yes — `04-inbox-empty`, `05-inbox-after-start-monitor`, `06-inbox-github-setup`, `07-inbox-ticket-visible`, `08-inbox-after-finish`, `10-integrations-search-git`, plus the `.webm`
-- Bugs found:
-  - Start monitor with no connected app correctly 400s (`no listen source connected`) and shows that toast. Expected.
-  - Start run on the seeded GitHub issue 400s (`no paired runner taking jobs`) on this isolated host stack (`:18080`/`:13030`). The issue row stays Open. Not a page-layout bug — this worktree has no paired fleet-host. The GitHub page, setup walkthrough, Connect, repo filter, and issue row (`#1 Demo inbox ticket`) all rendered.
-  - GitHub issue list sits below the setup cards; first paint on 1400×900 needs a scroll to reach Start run.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)

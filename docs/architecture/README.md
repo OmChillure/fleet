@@ -4,11 +4,12 @@ This document describes the layered orchestration architecture for Agent Fleet:
 how integrations feed work into the system, how sandboxes are created and
 provisioned, and how coding-agent sessions are driven, observed, and torn down.
 
-It is intentionally **event-oriented**. A pure request/response API is enough
-to *ask* for a sandbox, but not enough to operate one: sandboxes fail
-asynchronously (OOMKill, node loss, VM death), interactive sessions need
-bidirectional streaming, and tool-call / permission decisions must be
-evaluated out-of-band of the agent process.
+Durable assignment is HTTP tick + Postgres (`work_claims`, heartbeats).
+Mid-run sharing (100+ parallel sandboxes seeing each other and the world)
+is **Zenoh** — see [`transport-zenoh.md`](./transport-zenoh.md). The event
+catalogue is that bus’s payload, not a second REST plane. A pure
+request/response API is enough to *ask* for a sandbox, but not enough to
+operate many at once.
 
 Related component folders (stubs for deeper specs):
 
@@ -37,11 +38,11 @@ task stays ready. OAuth connect is live.
 with backend wake loop and free-form stages — see
 [`docs/components/cases/`](../components/cases/). Agent fleets remain the
 executor for coding plans; cases are the long-lived state machine.
-**Sandbox driver:** [`crates/fleet-sandbox-driver`](../../crates/fleet-sandbox-driver/)
-runs OpenCode/Pi over ACP in a per-task compose sandbox (see
-[`sandbox-workspace.md`](./sandbox-workspace.md)). Not `PROCESS_WORKER_BIN`
-(that is [`crates/fleet-driver`](../../crates/fleet-driver/)).
-**Worker hosts:** workspace owners create a host and copy a one-time pair
+**Product guest:** [`crates/fleet-driver`](../../crates/fleet-driver/) on a
+paired [`fleet-host`](../../crates/fleet-host/). The old compose-lab
+(`fleet-sandbox-driver` / OpenCode / Redis) is leftover and is not how
+production sandboxes run.
+**Runner hosts:** workspace owners create a host and copy a one-time pair
 token. The machine installs `fleet-host` and pairs outbound (HTTPS); no
 inbound port on the worker. Tick enqueues a claim for an online matching
 host; otherwise the task stays ready. See
@@ -57,9 +58,9 @@ Diagram sources live in [`diagrams/`](./diagrams/).
 | --- | --- |
 | [`events-overview.md`](./events-overview.md) | Typical events outline (lifecycle map, domains, MVP set) |
 | [`events.md`](./events.md) | Field-level catalogue + **JSON serialization** recommendation |
-| [`sandbox-workspace.md`](./sandbox-workspace.md) | **Harness vs workspace**, per-task isolation, named tools, OpenCode/Pi invoices lab |
-| [`crates/agent-fleet-contracts`](../../crates/agent-fleet-contracts/) | Rust structs (`serde`) implementing the catalogue |
-| [`transport-zenoh.md`](./transport-zenoh.md) | Zenoh as live control-plane transport (evaluation + key-space) |
+| [`sandbox-workspace.md`](./sandbox-workspace.md) | **Harness vs workspace** (historical lab notes; product guest is `fleet-driver`) |
+| [`crates/agent-fleet-contracts`](../../crates/agent-fleet-contracts/) | Rust structs (`serde`) for the Zenoh / event catalogue |
+| [`transport-zenoh.md`](./transport-zenoh.md) | Zenoh mid-run share fabric (100+ parallel sandboxes) |
 
 ---
 

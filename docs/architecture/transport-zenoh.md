@@ -4,7 +4,12 @@ Evaluation of [Zenoh](https://zenoh.io/) as the bus for Agent Fleet control-plan
 commands and events (see [`events-overview.md`](./events-overview.md) and
 [`events.md`](./events.md)).
 
-Status: **investigation / draft recommendation** — not a locked decision.
+Status: **product intent** — mid-run share fabric for many parallel sandboxes.
+HTTP tick assigns work and stores durable board state. Guests that need to
+see each other (or the world) mid-run use Zenoh so a single HTTP hop is not
+the bottleneck at 100+ sessions. Align `zenohd` image and the Rust crate
+to the same major. Router `eclipse/zenoh:1.2.1` + crate `1.10` is a known
+skew; do not treat a successful `open` as proof the wire is version-locked.
 
 ---
 

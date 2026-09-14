@@ -68,8 +68,8 @@ or kube (in-cluster / `KUBECONFIG`) is available.
 Host-mode children: cwd `{work_dir}/{session_id}`, env = job `env` +
 `extra_env`. `extra_env` cannot override `FLEET_WORKER_TOKEN`.
 
-Need `fleet-worker` / `fleet-driver` on `PATH` for host mode (same install
-script).
+Need `fleet-driver` on `PATH` for host mode (same install script; staged
+next to `fleet-host`).
 
 ## Commands
 

@@ -25,14 +25,14 @@ Paired `fleet-host` starts `fleet-driver`. Isolation is on that machine.
 
 ## True multi-agent (personas + LLM loop)
 
-Workers use **the same provider + model as the chat composer** (Grok today; Claude later when added). Not a random Ollama tag.
+Guests use **the same provider + model as the chat composer** (any supported provider on that runner). Not a random Ollama tag.
 
 Settings still has:
 
 - **Number of agents** — concurrent sandboxes
 - **Fleet LLM (Ollama)** — fallback only if a run has no chat model (fixtures)
 
-Grok host auth stays `grok login` / `XAI_API_KEY`. `FLEET_AGENT_BACKEND=grok` is optional fallback when launching outside chat.
+Grok host auth stays `grok login` / `XAI_API_KEY`. Workspace `llm-keys` win when present; env is fallback. `FLEET_AGENT_BACKEND=grok` is optional fallback when launching outside chat.
 
 Each spawned task:
 
@@ -53,16 +53,18 @@ Live chat (still needed for “what port *now*”):
 
 `DATA_DIR/projects/{workspace}/runs/{run}/chat.jsonl`
 
-- `send_message` — FYI to one teammate id or `*` (everyone)
-- `ask_teammate` — question + wait for a reply (they see it on their next thinking round)
+- `team_chat_post` — `kind` `say` (FYI) or `ask` (wait for a reply) to one teammate id or `*`
+- `team_chat_list` — read messages (`all` or unread)
 - Unread messages are **injected** into the other agent’s next LLM round (not only if they poll)
-- Human chat: `read_team_chat` / `send_team_message`
+- Human chat tools may alias these names; `/io` accepts `send_message` / `read_messages` as aliases
 
 Handoffs + the board still matter for finished work. Chat is for “I need your port / contract *now*.” Parallel agents see teammates as `in progress` and can ask them; dependent agents wait, then read the handoff **and** the transcript.
 
 Chat: `list_agent_personas` then `launch_agent_plan` with different `worker_profile` per task. Omit the profile for **generalist**. Optional shortcuts: `coding`, `frontend`, `reviewer`, `testing`.
 
-If a live sandbox is the wrong specialist, `swap_agent` (or the worker’s `request_swap`) retires the process, keeps `work/`, updates `worker_profile`, and the next tick writes a new `PERSONA.md`. Same task, new agent. Cap: two swaps per task.
+If a live sandbox is the wrong specialist, the Fleet **Replace** button posts
+`POST /api/workspaces/{id}/fleet/sessions/{session_id}/replace`. There is no
+`swap_agent` chat tool. Cap: two replacements per task.
 
 Cross-app work is a normal chat sentence. The assistant calls `integration_query` (Slack/Notion/GitHub/…) then `launch_agent_plan`; workers use `use_integration`; plan `outputs` write back when the run ends.
 

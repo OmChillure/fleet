@@ -14,7 +14,7 @@ It is **not** a vision doc. Marketing copy, old prototypes, and `docs/references
 | --- | --- | --- |
 | **Anonymous visitor** | Browser, no cookies | Landing, login, signup. Unauthenticated app routes redirect to login. |
 | **User** | Human with email/password | Own workspaces, chat, fleet, personas, integrations, settings. |
-| **Workspace member** | User with a role on a workspace | All cookie-scoped APIs for that workspace. Today the creator is always `owner`. There is no invite, join, or role change API. |
+| **Workspace member** | User with a role on a workspace | All cookie-scoped APIs for that workspace. Owner/admin can invite by email and change roles (`/members`, `/invites`). |
 | **Chat assistant** | Grok (xAI CLI) or local Ollama | Reply, call tools (up to 6 rounds per turn), persist history. |
 | **Chat tools (control plane)** | Server-side functions the model invokes | Read fleet state, launch plans/tasks, query integrations, commit/PR on GitHub. Tokens never leave the control plane. |
 | **Orchestrator tick** | Background loop + on-demand `POST …/tick` | Lock project → inbox → cancel → HITL resume → materialize → deps → spawn → stuck/kill → rollup → reap → optional external sync → wipe old workdirs. |
@@ -150,7 +150,8 @@ Returns the user plus all workspaces they belong to. Side effect: if they have z
 | Empty name / name &gt; 80 | Client or `400`. |
 | Slug collision | `409 workspace slug already exists`. |
 
-There is **no** UI or API to: rename a workspace, delete a workspace, invite members, change roles, or leave.
+There is **no** UI or API to: rename a workspace, delete a workspace, or leave.
+Invites and role changes live on Settings (`GET/POST /invites`, `PATCH/DELETE /members`).
 
 Workspace membership is checked on every scoped route. Non-member → `403 not a member of this workspace`.
 

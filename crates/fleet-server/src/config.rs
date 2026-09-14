@@ -57,20 +57,21 @@ impl ServerConfig {
             .parse()
             .with_context(|| format!("invalid HOST/PORT: {host}:{port}"))?;
 
+        let ui_port = env::var("FLEET_UI_PORT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .unwrap_or(3030);
         let cors_origins = match env::var("CORS_ORIGINS") {
             Ok(s) if !s.trim().is_empty() => s
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
+                .map(|origin| rewrite_loopback_origin(&origin, ui_port))
                 .collect(),
             _ => {
-                let ui = env::var("FLEET_UI_PORT")
-                    .ok()
-                    .and_then(|s| s.trim().parse::<u16>().ok())
-                    .unwrap_or(3030);
                 vec![
-                    format!("http://localhost:{ui}"),
-                    format!("http://127.0.0.1:{ui}"),
+                    format!("http://localhost:{ui_port}"),
+                    format!("http://127.0.0.1:{ui_port}"),
                 ]
             }
         };
@@ -99,6 +100,23 @@ impl ServerConfig {
             worker_dist_dir,
         })
     }
+}
+
+/// Loopback CORS origins follow `FLEET_UI_PORT`. Public hostnames stay.
+fn rewrite_loopback_origin(origin: &str, port: u16) -> String {
+    let (scheme, rest) = if let Some(r) = origin.strip_prefix("https://") {
+        ("https", r)
+    } else if let Some(r) = origin.strip_prefix("http://") {
+        ("http", r)
+    } else {
+        return origin.to_string();
+    };
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let host = hostport.split(':').next().unwrap_or(hostport);
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return origin.to_string();
+    }
+    format!("{scheme}://{host}:{port}")
 }
 
 /// Unset, empty, or whitespace-only `FLEET_WORKER_DIST_DIR` is `None` (not an error).
@@ -352,6 +370,41 @@ mod tests {
                     "http://localhost:18280"
                 );
                 assert_eq!(cfg.integrations.ui_public_base, "http://localhost:13230");
+            },
+        );
+    }
+
+    #[test]
+    fn set_loopback_cors_follows_ui_port() {
+        with_env(
+            &[
+                ("DATABASE_URL", Some(NOCONNECT_URL)),
+                ("JWT_SECRET", Some(JWT)),
+                ("INTEGRATIONS_ENCRYPTION_KEY", None),
+                ("COOKIE_SAMESITE", Some("Lax")),
+                ("COOKIE_SECURE", Some("false")),
+                ("HOST", Some("127.0.0.1")),
+                ("PORT", Some("18080")),
+                ("FLEET_UI_PORT", Some("13030")),
+                ("AUTH_HOST", None),
+                ("AUTH_PORT", None),
+                (
+                    "CORS_ORIGINS",
+                    Some("http://localhost:3030,http://127.0.0.1:3030,https://agentfleet.studio"),
+                ),
+                ("API_PUBLIC_BASE", Some("http://localhost:8080")),
+                ("UI_PUBLIC_BASE", Some("http://localhost:3030")),
+            ],
+            || {
+                let cfg = ServerConfig::from_env().expect("from_env");
+                assert_eq!(
+                    cfg.cors_origins,
+                    vec![
+                        "http://localhost:13030".to_string(),
+                        "http://127.0.0.1:13030".to_string(),
+                        "https://agentfleet.studio".to_string(),
+                    ]
+                );
             },
         );
     }

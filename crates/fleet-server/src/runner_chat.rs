@@ -313,7 +313,6 @@ fn looks_like_fleet_tool(name: &str) -> bool {
             | "launch_agent_plan"
             | "launch_agent_task"
             | "list_agent_personas"
-            | "swap_agent"
             | "get_fleet_status"
             | "list_sandboxes"
             | "list_tasks"

@@ -27,8 +27,7 @@ per-user tokens stay encrypted in the control plane for AI / orchestrator use.
 | Trello | `TRELLO_CLIENT_ID` / `TRELLO_CLIENT_SECRET` | OAuth implemented (API key + user token) |
 | Asana | `ASANA_CLIENT_ID` / `ASANA_CLIENT_SECRET` | OAuth implemented |
 
-Other catalog entries (Bitbucket, Confluence, …) may appear as
-**Coming soon** until OAuth is wired.
+Bitbucket and Confluence are **available** (same `/oauth/start` as the others).
 
 ### Chat + apps
 

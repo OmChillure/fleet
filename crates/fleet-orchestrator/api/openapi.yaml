@@ -2,7 +2,9 @@ openapi: 3.0.3
 info:
   title: Fleet Orchestrator Control Plane
   description: |
-    Project-scoped orchestration HTTP API (PR6).
+    Worker + automation surface (`/v1`) on `fleet-server`.
+    The product UI uses cookie routes under `/api/workspaces/{id}/fleet/*`
+    (see `GET /api`). This spec is not that BFF.
 
     **Auth**
     - Admin routes: `Authorization: Bearer <ADMIN_TOKEN>` when `AUTH_MODE=token`.
@@ -13,10 +15,8 @@ info:
     name: Apache-2.0 OR MIT
 
 servers:
-  - url: http://127.0.0.1:8081
-    description: Standalone fleet-orchestrator (typical local)
   - url: http://127.0.0.1:8080
-    description: Embedded under fleet-server
+    description: fleet-server (library orchestrator; /v1 fallback)
 
 tags:
   - name: health
@@ -415,7 +415,19 @@ paths:
                 op:
                   type: string
                   enum:
-                    [integration, team_chat_post, team_chat_list, request_changes]
+                    [
+                      integration,
+                      use_integration,
+                      team_chat_post,
+                      send_message,
+                      team_chat_list,
+                      read_messages,
+                      request_changes,
+                    ]
+                  description: |
+                    Canonical names are `integration`, `team_chat_post`,
+                    `team_chat_list`, `request_changes`. The other values are
+                    aliases the driver still sends.
       responses:
         "200":
           description: Result
@@ -725,6 +737,18 @@ components:
         progress_pct:
           type: integer
           nullable: true
+        events:
+          type: array
+          description: Live trace lines the driver always sends (`ts`, `kind`, `text`).
+          items:
+            type: object
+            properties:
+              ts:
+                type: string
+              kind:
+                type: string
+              text:
+                type: string
     StatusRequest:
       type: object
       required: [seq, status]
@@ -737,6 +761,14 @@ components:
         reason:
           type: string
           nullable: true
+        result_md:
+          type: string
+          nullable: true
+          description: Guest-written result.md. HTTP status alone is not proof.
+        files:
+          type: object
+          additionalProperties: true
+          description: Optional extra relative files (`work/foo.txt` → body).
     TickReport:
       type: object
       properties:

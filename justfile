@@ -1,44 +1,48 @@
 # Agent Fleet — local development
 #
-#   just setup   # once: create .env.local + start Postgres
-#   just dev     # Postgres + API (:8080) + UI (:3030)
+#   just setup   # once: create .env + start Postgres
+#   just dev     # Postgres + API + UI
 #
-# Env is loaded from `.env.local` (see `.env.local.example`).
+# Env is loaded from repo-root `.env` (same file as DATABASE_URL / PROFILE).
+# When Kind owns :8080/:3030, set PORT=18080 and FLEET_UI_PORT=13030
+# (scripts/fleet-dev.sh does this). Loopback API_PUBLIC_BASE / CORS follow those ports.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
-set dotenv-filename := ".env.local"
+set dotenv-filename := ".env"
 set dotenv-load := true
 
 export RUST_LOG := env_var_or_default("RUST_LOG", "info,sqlx=warn,fleet_db=info,fleet_auth=info,fleet_server=info,fleet_orchestrator=info")
 
-ui_port := env_var_or_default("UI_PORT", "3030")
+ui_port := env_var_or_default("FLEET_UI_PORT", env_var_or_default("UI_PORT", "3030"))
+api_port := env_var_or_default("PORT", "8080")
 
 # List recipes (default).
 default:
     @just --list
 
-# Create `.env.local` from the example if missing, then start Postgres.
+# Create `.env` from the example if missing, then start Postgres.
 setup: _env-init db-up
     @echo ""
     @echo "Ready. Run the full stack with:  just dev"
-    @echo "  API  http://localhost:8080"
+    @echo "  API  http://localhost:{{ api_port }}"
     @echo "  UI   http://localhost:{{ ui_port }}"
+    @echo "If Kind already bound :8080/:3030, set PORT=18080 FLEET_UI_PORT=13030 in .env"
 
-# Create `.env.local` from `.env.local.example` when it does not exist.
+# Create `.env` from `.env.example` when it does not exist.
 _env-init:
     #!/usr/bin/env bash
-    if [[ -f .env.local ]]; then
-      echo ".env.local already exists"
+    if [[ -f .env ]]; then
+      echo ".env already exists"
     else
-      cp .env.local.example .env.local
-      echo "Created .env.local from .env.local.example"
+      cp .env.example .env
+      echo "Created .env from .env.example"
     fi
 
 # Fail fast if local env is missing.
 _require-env:
     #!/usr/bin/env bash
-    if [[ ! -f .env.local ]]; then
-      echo "Missing .env.local — run: just setup" >&2
+    if [[ ! -f .env ]]; then
+      echo "Missing .env — run: just setup" >&2
       exit 1
     fi
 
@@ -85,7 +89,7 @@ test:
     cargo test -p fleet-driver --locked
     cargo test -p fleet-host --locked
 
-# Integration tests that need Postgres (`just db-up` + `.env.local` / DATABASE_URL).
+# Integration tests that need Postgres (`just db-up` + `.env` / DATABASE_URL).
 test-integration: _require-env db-up
     cargo test -p fleet-orchestrator --locked \
       --test store_integration \
@@ -106,7 +110,7 @@ test-integration: _require-env db-up
 check:
     cargo check --workspace
 
-# fleet-server: auth + workspaces + orchestrator (http://HOST:PORT from .env.local).
+# fleet-server: auth + workspaces + orchestrator (http://HOST:PORT from .env).
 server: _require-env
     cargo run -p fleet-server
 

@@ -61,7 +61,7 @@ See [`infra/README.md`](infra/README.md).
 1. Open http://localhost:3030  
 2. **Sign up** → login → workspace dashboard  
 3. **Agents** → **Seed starters** for personas  
-4. **Workers** — add a worker and copy the install/pair command (token panel is enough; no second machine). [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md)
+4. **Runners → Self-hosted** — add a runner and copy the install/pair command (token panel is enough; no second machine). [`docs/components/worker-host/README.md`](docs/components/worker-host/README.md)
 
 ### Tear down
 
@@ -145,14 +145,17 @@ COOKIE_SECURE=false
 DATA_DIR=./data
 ```
 
-Listen ports are declared once (`PORT`, optional `FLEET_UI_PORT`). Local API / UI / CORS / worker URLs are derived. Set a public host only when it is not this machine.
+Listen ports are declared once (`PORT`, optional `FLEET_UI_PORT`). Loopback
+`API_PUBLIC_BASE` / `UI_PUBLIC_BASE` / `CORS_ORIGINS` follow those ports.
+A public hostname (VPS) is left alone. When Kind already owns `:8080`/`:3030`,
+use `PORT=18080` and `FLEET_UI_PORT=13030` (`scripts/fleet-dev.sh` does this).
 
 | Variable | Notes |
 |----------|--------|
 | `DATABASE_URL` | Host → port **5433**; inside Compose network → `postgres:5432` |
 | `PORT` | API listen port. OAuth `API_PUBLIC_BASE` defaults to `http://localhost:$PORT`. |
 | `FLEET_UI_PORT` | UI listen port (default 3030). `UI_PUBLIC_BASE` and `CORS_ORIGINS` follow it. |
-| `WORKER_PUBLIC_BASE` | Pair + guest heartbeat. Unset = this machine's LAN IP + `PORT`. |
+| `WORKER_PUBLIC_BASE` | Pair + guest heartbeat. Unset = `API_PUBLIC_BASE`. Off-box runners need a reachable URL. |
 | `ADMIN_TOKEN` | Optional bearer for `/v1` automation scripts |
 | `INSTANCE_ADMIN_EMAILS` | Comma-separated emails granted `/admin` on login |
 

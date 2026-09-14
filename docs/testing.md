@@ -86,7 +86,7 @@ until there is a bootable guest.
 
 ```bash
 just test                          # no Postgres
-just test-integration              # just db-up + DATABASE_URL from .env.local
+just test-integration              # just db-up + DATABASE_URL from .env
 crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh
 ./scripts/run-every-test.sh         # every bucket; no SKIP_* (see bootstrap-every-test.sh)
 ```

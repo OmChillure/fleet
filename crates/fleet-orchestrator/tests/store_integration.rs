@@ -1,6 +1,6 @@
 //! Store integration tests. Requires Postgres:
 //!   docker compose up -d postgres
-//!   DATABASE_URL=postgres://fleet:fleet@localhost:5432/fleet?sslmode=disable cargo test --test store_integration
+//!   DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable cargo test --test store_integration
 
 use fleet_orchestrator::domain::{
     ExitReason, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,

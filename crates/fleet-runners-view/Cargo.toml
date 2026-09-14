@@ -3,7 +3,6 @@ name = "fleet-runners-view"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 rust-version.workspace = true
 description = "Host-testable self-hosted runner card formatters (extracted from fleet-ui)"
 

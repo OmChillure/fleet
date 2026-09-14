@@ -24,8 +24,8 @@ default-members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/dvratil/agent-fleet"
-# Dockerfiles + GitLab CI use rust:1.88-bookworm. Pin enum-ordinalize 4.3.2
+# No public forge. GitLab is private. Do not put a public repository URL here.
+# Dockerfiles use rust:1.88-bookworm. Pin enum-ordinalize 4.3.2
 # (via fleet-operator) — 4.4+ requires rustc 1.89 and breaks those images.
 rust-version = "1.88"
 

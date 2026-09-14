@@ -1,6 +1,6 @@
 //! Process-backend driver: official CLI on the runner, or mock ACP.
 //!
-//! Same `FLEET_*` contract as `fleet-worker`. Default harness is `mock`
+//! Guest of a paired `fleet-host`. Same `FLEET_*` pair contract. Default harness is `mock`
 //! (`mock-acp-agent`). `FLEET_HARNESS=grok|claude|ollama` runs that box's
 //! official CLI (not a model on the control plane).
 

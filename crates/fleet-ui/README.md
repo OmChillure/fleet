@@ -202,10 +202,13 @@ Dioxus 0.7 runs Tailwind when it finds root `tailwind.css` (`dx serve` /
 | Default workspace on signup/login | Done |
 | Workspace-scoped routes + switcher | Done |
 | App shell session gate | Done |
-| Chat page (composer UI) | Done (no backend yet) |
+| Chat persist + stream | Done |
 | Integrations OAuth UI | Done |
 | Global toasts | Done |
-| Live fleet / orchestrator data | Partial (fleet page) |
+| Theme persistence (`localStorage` `fleet-theme`) | Done |
+| Runners (self-hosted / cloud / partners) | Done |
+| Inbox + members + Settings | Done |
+| Live fleet / orchestrator data | Done (cookie BFF) |
 
 ---
 
