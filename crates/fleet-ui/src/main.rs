@@ -120,6 +120,27 @@ impl Route {
     }
 }
 
+#[cfg(test)]
+mod route_tests {
+    use super::Route;
+
+    #[test]
+    fn runners_paths_are_not_inbox() {
+        let ws = "01a063e3-1963-7912-97ea-342287142f87";
+        let runners: Route = format!("/{ws}/runners").parse().expect("runners");
+        assert!(matches!(runners, Route::RunnersIndex { .. }), "{runners:?}");
+        let self_hosted: Route = format!("/{ws}/runners/self-hosted")
+            .parse()
+            .expect("self-hosted");
+        assert!(
+            matches!(self_hosted, Route::SelfHosted { .. }),
+            "{self_hosted:?}"
+        );
+        let inbox: Route = format!("/{ws}/inbox").parse().expect("inbox");
+        assert!(matches!(inbox, Route::Inbox { .. }), "{inbox:?}");
+    }
+}
+
 fn main() {
     dioxus::launch(App);
 }

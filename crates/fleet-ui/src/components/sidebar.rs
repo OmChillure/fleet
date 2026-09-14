@@ -1,5 +1,7 @@
 //! App sidebar — collapsible sections with nested links (sidenav07-style, Dioxus).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use dioxus::prelude::*;
 
 use crate::Route;
@@ -25,6 +27,14 @@ enum NavSection {
     Instance,
 }
 
+/// AppShell remounts on route change. A use_signal default of `true` would
+/// reopen the Inbox nest every time someone clicks Runners (or anything else).
+static INBOX_NEST_OPEN: AtomicBool = AtomicBool::new(false);
+
+fn route_opens_inbox_nest(route: &Route) -> bool {
+    matches!(route, Route::Inbox { .. } | Route::InboxApp { .. })
+}
+
 #[component]
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
@@ -45,12 +55,12 @@ pub fn Sidebar() -> Element {
     // Collapsible sections — start with Chat + Monitoring open.
     let mut expanded =
         use_signal(|| std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring]));
-    // Second nest under Monitoring → Inbox. Open by default so the apps show.
-    let mut inbox_open = use_signal(|| true);
+    let mut inbox_open = use_signal(|| INBOX_NEST_OPEN.load(Ordering::Relaxed));
 
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
-        let section = match use_route::<Route>() {
+        let current = use_route::<Route>();
+        let section = match &current {
             Route::Chat { .. }
             | Route::ChatThread { .. }
             | Route::Sessions { .. }
@@ -78,12 +88,9 @@ pub fn Sidebar() -> Element {
                 expanded.set(set);
             }
         }
-        if matches!(
-            use_route::<Route>(),
-            Route::Inbox { .. } | Route::InboxApp { .. }
-        ) {
-            inbox_open.set(true);
-        }
+        let nest = route_opens_inbox_nest(&current);
+        inbox_open.set(nest);
+        INBOX_NEST_OPEN.store(nest, Ordering::Relaxed);
     });
 
     use_effect(move || {
@@ -361,7 +368,11 @@ pub fn Sidebar() -> Element {
                         to: Route::Inbox { workspace_id: workspace_id.clone() },
                         label: "Inbox",
                         expanded: inbox_open(),
-                        on_toggle: move |_| inbox_open.set(!inbox_open()),
+                        on_toggle: move |_| {
+                            let next = !inbox_open();
+                            inbox_open.set(next);
+                            INBOX_NEST_OPEN.store(next, Ordering::Relaxed);
+                        },
                         for app in INBOX_APPS.iter().copied() {
                             NavSubLink {
                                 key: "{app.id}",
@@ -854,7 +865,33 @@ fn IconSettings() -> Element {
             stroke_linecap: "round",
             stroke_linejoin: "round",
             path { d: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" }
-            path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
+            path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06-.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runners_and_dashboard_do_not_open_inbox_nest() {
+        let ws = "ws".to_string();
+        assert!(!route_opens_inbox_nest(&Route::SelfHosted {
+            workspace_id: ws.clone()
+        }));
+        assert!(!route_opens_inbox_nest(&Route::RunnersIndex {
+            workspace_id: ws.clone()
+        }));
+        assert!(!route_opens_inbox_nest(&Route::Dashboard {
+            workspace_id: ws.clone()
+        }));
+        assert!(route_opens_inbox_nest(&Route::Inbox {
+            workspace_id: ws.clone()
+        }));
+        assert!(route_opens_inbox_nest(&Route::InboxApp {
+            workspace_id: ws,
+            provider: "slack".into()
+        }));
     }
 }
