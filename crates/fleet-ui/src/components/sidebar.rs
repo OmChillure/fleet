@@ -1,11 +1,10 @@
 //! App sidebar — collapsible sections with nested links (sidenav07-style, Dioxus).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use dioxus::prelude::*;
 
 use crate::Route;
 use crate::components::app_shell::clear_session_ok;
+use crate::components::nav_chrome::{NavChrome, NavSection, update_nav};
 use crate::components::toast::show_toast;
 use crate::pages::auth::api::{
     CreateWorkspaceBody, UserPublic, WorkspacePublic, create_workspace, list_workspaces, logout, me,
@@ -16,32 +15,16 @@ use fleet_runners_view::routes::{
     RUNNER_NAV_CHILDREN, RUNNERS_NAV_TITLE, SEGMENT_CLOUD, SEGMENT_PARTNERS, SEGMENT_SELF_HOSTED,
 };
 
-/// Which top-level nav sections are expanded.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum NavSection {
-    Chat,
-    Monitoring,
-    Agents,
-    Runners,
-    Workspace,
-    Instance,
-}
-
-/// AppShell remounts on route change. A use_signal default of `true` would
-/// reopen the Inbox nest every time someone clicks Runners (or anything else).
-static INBOX_NEST_OPEN: AtomicBool = AtomicBool::new(false);
-
-fn route_opens_inbox_nest(route: &Route) -> bool {
-    matches!(route, Route::Inbox { .. } | Route::InboxApp { .. })
-}
-
 #[component]
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
     let route_ws = route.workspace_id().unwrap_or("").to_string();
 
+    let mut nav = use_context::<Signal<NavChrome>>();
+    let chrome = nav();
+
     // Full-width when true; collapsed rail with only the toggle when false.
-    let mut sidebar_open = use_signal(|| true);
+    let is_open = chrome.sidebar_open;
     let mut workspaces = use_signal(|| Vec::<WorkspacePublic>::new());
     let mut user = use_signal(|| Option::<UserPublic>::None);
     let mut open = use_signal(|| false);
@@ -52,45 +35,16 @@ pub fn Sidebar() -> Element {
     let mut load_error = use_signal(|| Option::<String>::None);
     let navigator = use_navigator();
 
-    // Collapsible sections — start with Chat + Monitoring open.
-    let mut expanded =
-        use_signal(|| std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring]));
-    let mut inbox_open = use_signal(|| INBOX_NEST_OPEN.load(Ordering::Relaxed));
-
-    // Ensure the section for the active route stays open while navigating.
+    // Only ensure the current page's section is visible. Other sections
+    // stay as the user left them (App holds this signal across remounts).
     use_effect(move || {
         let current = use_route::<Route>();
-        let section = match &current {
-            Route::Chat { .. }
-            | Route::ChatThread { .. }
-            | Route::Sessions { .. }
-            | Route::SessionDetail { .. } => Some(NavSection::Chat),
-            Route::Fleet { .. }
-            | Route::Dashboard { .. }
-            | Route::Sandboxes { .. }
-            | Route::Cases { .. }
-            | Route::CaseDetail { .. }
-            | Route::Inbox { .. }
-            | Route::InboxApp { .. } => Some(NavSection::Monitoring),
-            Route::Agents { .. } => Some(NavSection::Agents),
-            Route::SelfHosted { .. }
-            | Route::CloudPage { .. }
-            | Route::PartnersPage { .. }
-            | Route::RunnersIndex { .. }
-            | Route::WorkersRedirect { .. } => Some(NavSection::Runners),
-            Route::Integrations { .. } | Route::Settings { .. } => Some(NavSection::Workspace),
-            Route::Admin {} => Some(NavSection::Instance),
-            _ => None,
-        };
-        if let Some(section) = section {
-            let mut set = expanded();
-            if set.insert(section) {
-                expanded.set(set);
-            }
+        let mut next = nav();
+        let before = next.clone();
+        next.reveal_route(&current);
+        if next != before {
+            nav.set(next);
         }
-        let nest = route_opens_inbox_nest(&current);
-        inbox_open.set(nest);
-        INBOX_NEST_OPEN.store(nest, Ordering::Relaxed);
     });
 
     use_effect(move || {
@@ -133,8 +87,6 @@ pub fn Sidebar() -> Element {
         }
     });
 
-    let is_open = sidebar_open();
-
     rsx! {
         aside {
             class: if is_open {
@@ -167,12 +119,12 @@ pub fn Sidebar() -> Element {
                     title: if is_open { "Close sidebar" } else { "Open sidebar" },
                     "aria-label": if is_open { "Close sidebar" } else { "Open sidebar" },
                     onclick: move |_| {
-                        let next = !sidebar_open();
-                        sidebar_open.set(next);
-                        if !next {
-                            open.set(false);
-                            creating.set(false);
+                        update_nav(nav, |n| n.toggle_sidebar());
+                        if nav().sidebar_open {
+                            return;
                         }
+                        open.set(false);
+                        creating.set(false);
                     },
                     IconPanelLeft {}
                 }
@@ -318,14 +270,8 @@ pub fn Sidebar() -> Element {
             nav { class: "flex min-h-0 flex-1 flex-col gap-0 overflow-y-auto px-2 py-0.5",
                 NavAccordion {
                     title: "Chat",
-                    expanded: expanded().contains(&NavSection::Chat),
-                    on_toggle: move |_| {
-                        let mut set = expanded();
-                        if !set.remove(&NavSection::Chat) {
-                            set.insert(NavSection::Chat);
-                        }
-                        expanded.set(set);
-                    },
+                    expanded: chrome.expanded.contains(&NavSection::Chat),
+                    on_toggle: move |_| update_nav(nav, |n| n.toggle_section(NavSection::Chat)),
                     icon: rsx! { IconMessage {} },
                     NavSubLink {
                         to: Route::Chat { workspace_id: workspace_id.clone() },
@@ -339,13 +285,9 @@ pub fn Sidebar() -> Element {
 
                 NavAccordion {
                     title: "Monitoring",
-                    expanded: expanded().contains(&NavSection::Monitoring),
+                    expanded: chrome.expanded.contains(&NavSection::Monitoring),
                     on_toggle: move |_| {
-                        let mut set = expanded();
-                        if !set.remove(&NavSection::Monitoring) {
-                            set.insert(NavSection::Monitoring);
-                        }
-                        expanded.set(set);
+                        update_nav(nav, |n| n.toggle_section(NavSection::Monitoring))
                     },
                     icon: rsx! { IconMonitor {} },
                     NavSubLink {
@@ -367,12 +309,8 @@ pub fn Sidebar() -> Element {
                     NavBranch {
                         to: Route::Inbox { workspace_id: workspace_id.clone() },
                         label: "Inbox",
-                        expanded: inbox_open(),
-                        on_toggle: move |_| {
-                            let next = !inbox_open();
-                            inbox_open.set(next);
-                            INBOX_NEST_OPEN.store(next, Ordering::Relaxed);
-                        },
+                        expanded: chrome.inbox_nest,
+                        on_toggle: move |_| update_nav(nav, |n| n.toggle_inbox_nest()),
                         for app in INBOX_APPS.iter().copied() {
                             NavSubLink {
                                 key: "{app.id}",
@@ -388,14 +326,8 @@ pub fn Sidebar() -> Element {
 
                 NavAccordion {
                     title: "Agents",
-                    expanded: expanded().contains(&NavSection::Agents),
-                    on_toggle: move |_| {
-                        let mut set = expanded();
-                        if !set.remove(&NavSection::Agents) {
-                            set.insert(NavSection::Agents);
-                        }
-                        expanded.set(set);
-                    },
+                    expanded: chrome.expanded.contains(&NavSection::Agents),
+                    on_toggle: move |_| update_nav(nav, |n| n.toggle_section(NavSection::Agents)),
                     icon: rsx! { IconBot {} },
                     NavSubLink {
                         to: Route::Agents { workspace_id: workspace_id.clone() },
@@ -409,14 +341,8 @@ pub fn Sidebar() -> Element {
 
                 NavAccordion {
                     title: RUNNERS_NAV_TITLE,
-                    expanded: expanded().contains(&NavSection::Runners),
-                    on_toggle: move |_| {
-                        let mut set = expanded();
-                        if !set.remove(&NavSection::Runners) {
-                            set.insert(NavSection::Runners);
-                        }
-                        expanded.set(set);
-                    },
+                    expanded: chrome.expanded.contains(&NavSection::Runners),
+                    on_toggle: move |_| update_nav(nav, |n| n.toggle_section(NavSection::Runners)),
                     icon: rsx! { IconServer {} },
                     for child in RUNNER_NAV_CHILDREN {
                         NavSubLink {
@@ -441,13 +367,9 @@ pub fn Sidebar() -> Element {
 
                 NavAccordion {
                     title: "Workspace",
-                    expanded: expanded().contains(&NavSection::Workspace),
+                    expanded: chrome.expanded.contains(&NavSection::Workspace),
                     on_toggle: move |_| {
-                        let mut set = expanded();
-                        if !set.remove(&NavSection::Workspace) {
-                            set.insert(NavSection::Workspace);
-                        }
-                        expanded.set(set);
+                        update_nav(nav, |n| n.toggle_section(NavSection::Workspace))
                     },
                     icon: rsx! { IconSettings {} },
                     NavSubLink {
@@ -463,13 +385,9 @@ pub fn Sidebar() -> Element {
                 if user().is_some_and(|u| u.instance_admin) {
                     NavAccordion {
                         title: "Instance",
-                        expanded: expanded().contains(&NavSection::Instance),
+                        expanded: chrome.expanded.contains(&NavSection::Instance),
                         on_toggle: move |_| {
-                            let mut set = expanded();
-                            if !set.remove(&NavSection::Instance) {
-                                set.insert(NavSection::Instance);
-                            }
-                            expanded.set(set);
+                            update_nav(nav, |n| n.toggle_section(NavSection::Instance))
                         },
                         icon: rsx! { IconMonitor {} },
                         NavSubLink {
@@ -867,31 +785,5 @@ fn IconSettings() -> Element {
             path { d: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" }
             path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06-.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runners_and_dashboard_do_not_open_inbox_nest() {
-        let ws = "ws".to_string();
-        assert!(!route_opens_inbox_nest(&Route::SelfHosted {
-            workspace_id: ws.clone()
-        }));
-        assert!(!route_opens_inbox_nest(&Route::RunnersIndex {
-            workspace_id: ws.clone()
-        }));
-        assert!(!route_opens_inbox_nest(&Route::Dashboard {
-            workspace_id: ws.clone()
-        }));
-        assert!(route_opens_inbox_nest(&Route::Inbox {
-            workspace_id: ws.clone()
-        }));
-        assert!(route_opens_inbox_nest(&Route::InboxApp {
-            workspace_id: ws,
-            provider: "slack".into()
-        }));
     }
 }
