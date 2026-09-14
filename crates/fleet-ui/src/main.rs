@@ -10,6 +10,7 @@ mod theme;
 use dioxus::prelude::*;
 
 use components::app_shell::AppShell;
+use components::nav_chrome::NavChrome;
 use components::navbar::Navbar;
 use components::toast::ToastProvider;
 use fleet_runners_view::routes::{
@@ -147,6 +148,9 @@ fn main() {
 
 #[component]
 fn App() -> Element {
+    // Lives above AppShell so accordion state survives layout remounts.
+    let nav = use_signal(NavChrome::default);
+    use_context_provider(|| nav);
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
         document::Link { rel: "icon", href: asset!("/assets/app-icon.png") }
