@@ -134,16 +134,18 @@ fn persist_pair(cfg: &mut LocalConfig, url: &str, resp: &PairResponse) -> Result
 
 /// Pair is a handshake. Offline after 90s unless `fleet-host run` is up.
 fn start_run_after_pair() {
-    let user = std::process::Command::new("systemctl")
+    let mut user_cmd = std::process::Command::new("systemctl");
+    crate::platform::hide_console(&mut user_cmd);
+    let user = user_cmd
         .args(["--user", "enable", "--now", "fleet-host"])
         .status();
     if matches!(user, Ok(s) if s.success()) {
         println!("started systemd user unit fleet-host");
         return;
     }
-    let sys = std::process::Command::new("systemctl")
-        .args(["enable", "--now", "fleet-host"])
-        .status();
+    let mut sys_cmd = std::process::Command::new("systemctl");
+    crate::platform::hide_console(&mut sys_cmd);
+    let sys = sys_cmd.args(["enable", "--now", "fleet-host"]).status();
     if matches!(sys, Ok(s) if s.success()) {
         println!("started systemd unit fleet-host");
         return;
@@ -237,6 +239,7 @@ pub fn acquire_run_lock() -> Result<crate::paths::RunLock> {
 }
 
 pub async fn run() -> Result<()> {
+    crate::platform::detach_console();
     let cfg = LocalConfig::load_or_default()?;
     init_tracing(&cfg.log_level);
     let _run_lock = acquire_run_lock()?;

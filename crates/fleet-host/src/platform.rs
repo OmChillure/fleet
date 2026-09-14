@@ -32,16 +32,42 @@ fn windows_platform_id() -> String {
     }
 }
 
-/// Console children (`hostname.exe`, Git `uname`, `wmic`, `powershell`)
-/// allocate a visible window unless this flag is set. Heartbeat is 10s.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Console-subsystem children (`hostname.exe`, `taskkill`, `wmic`,
+/// `powershell`, Git `uname`) open a visible window unless this is set.
 pub(crate) fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let _ = cmd;
+}
+
+pub(crate) fn hide_console_tokio(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+/// Drop the console inherited from a `.cmd` / installer so `run` is silent.
+/// `pair` / `status` keep their console. Children still need [`hide_console`].
+pub fn detach_console() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn FreeConsole() -> i32;
+        }
+        unsafe {
+            let _ = FreeConsole();
+        }
+    }
 }
 
 /// Map uname `-s`/`-m` plus musl to the install-worker / staged-dist id.
@@ -196,7 +222,9 @@ fn is_musl() -> bool {
     if Path::new("/etc/alpine-release").is_file() {
         return true;
     }
-    if let Ok(out) = Command::new("ldd").arg("/bin/sh").output() {
+    let mut ldd = Command::new("ldd");
+    hide_console(&mut ldd);
+    if let Ok(out) = ldd.arg("/bin/sh").output() {
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -336,6 +364,12 @@ mod tests {
         let host = hostname();
         assert!(!host.is_empty(), "hostname must be non-empty");
         assert!(!host.contains('\n'), "hostname must be a single token");
+    }
+
+    #[test]
+    fn detach_console_is_safe_to_call() {
+        detach_console();
+        detach_console();
     }
 
     #[test]

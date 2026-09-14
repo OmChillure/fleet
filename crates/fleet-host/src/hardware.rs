@@ -1246,7 +1246,9 @@ fn cmd_stdout_timeout(program: &str, args: &[&str], timeout: Duration) -> Option
     target_os = "netbsd"
 ))]
 fn sysctl_string(name: &str) -> Option<String> {
-    let out = Command::new("sysctl").arg("-n").arg(name).output().ok()?;
+    let mut cmd = Command::new("sysctl");
+    crate::platform::hide_console(&mut cmd);
+    let out = cmd.arg("-n").arg(name).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1256,7 +1258,9 @@ fn sysctl_string(name: &str) -> Option<String> {
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn sysctl_u64(name: &str) -> Option<u64> {
-    let out = Command::new("sysctl").arg("-n").arg(name).output().ok()?;
+    let mut cmd = Command::new("sysctl");
+    crate::platform::hide_console(&mut cmd);
+    let out = cmd.arg("-n").arg(name).output().ok()?;
     if !out.status.success() {
         return None;
     }
