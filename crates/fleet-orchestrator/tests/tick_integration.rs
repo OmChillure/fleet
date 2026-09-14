@@ -897,3 +897,48 @@ async fn apply_inbox_stale_success_after_reclaim_does_not_complete_wrong_session
     assert_eq!(t1.status, "in_progress");
     assert_eq!(t1.claimed_session_id, Some(session_b));
 }
+
+#[tokio::test]
+async fn tick_recovers_in_progress_task_when_session_row_is_gone() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("tick-orphan-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    let body = independent_plan(project.id, &["t1"]);
+    let run_id = body.run_id;
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let t1 = store
+        .load_board_snapshot(project.id)
+        .await
+        .unwrap()
+        .tasks
+        .into_iter()
+        .find(|t| t.plan_task_id == "t1")
+        .unwrap()
+        .id;
+    let sid = ready_assign_session(&store, project.id, run_id, t1, 1, "remote").await;
+    sqlx::query("UPDATE board_tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(t1)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM worker_sessions WHERE id = $1")
+        .bind(sid)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let r = runner(store.clone())
+        .tick_project(project.id)
+        .await
+        .unwrap();
+    assert_eq!(r.orphans_recovered, 1, "r={r:?}");
+
+    let task = store.get_task(project.id, t1).await.unwrap().unwrap();
+    assert_eq!(task.status, "ready", "task={task:?}");
+    assert!(task.claimed_session_id.is_none(), "task={task:?}");
+    assert_eq!(task.failure_reason.as_deref(), Some("session_gone"));
+}

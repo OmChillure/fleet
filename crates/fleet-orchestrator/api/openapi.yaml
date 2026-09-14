@@ -765,6 +765,9 @@ components:
           type: integer
         retry_promoted:
           type: integer
+        orphans_recovered:
+          type: integer
+          description: assigned/in_progress tasks bounced to ready because their session is gone
         reaped:
           type: integer
         runs_terminated:

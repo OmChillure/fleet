@@ -323,6 +323,36 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// After a studio bounce the run can stay active while the session row is
+    /// gone or already terminal. Spawn only picks `ready`, so bounce those
+    /// claims back. Leave spawning/healthy/stuck/killing alone.
+    pub async fn recover_orphaned_active_tasks(&self, project_id: Uuid) -> Result<u64> {
+        let res = sqlx::query(
+            r#"
+            UPDATE board_tasks t
+            SET status = 'ready',
+                claimed_session_id = NULL,
+                failure_reason = 'session_gone',
+                updated_at = now()
+            WHERE t.project_id = $1
+              AND t.status IN ('assigned', 'in_progress')
+              AND (
+                t.claimed_session_id IS NULL
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM worker_sessions s
+                    WHERE s.id = t.claimed_session_id
+                      AND s.status IN ('spawning', 'healthy', 'stuck', 'killing')
+                )
+              )
+            "#,
+        )
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn mark_report_applied(&self, report_id: i64) -> Result<()> {
         sqlx::query(
             r#"

@@ -239,7 +239,11 @@ pub async fn monitor_tickets(
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
 
-    if enabled {
+    if enabled
+        && watching
+            .iter()
+            .any(|p| matches!(inbox_sources::kind_for(p), InboxKind::Ticket))
+    {
         let _ = state
             .orch
             .store
@@ -1299,6 +1303,8 @@ async fn poll_slack(
         }
     }
     let mut n = 0usize;
+    let mut ok_channels = 0usize;
+    let mut channel_errors = Vec::new();
     for channel in targets.iter().take(target_limit) {
         let listed = proxy_op(
             state,
@@ -1310,8 +1316,10 @@ async fn poll_slack(
         )
         .await;
         if !listed.ok {
-            return Err(format!("{channel}: {}", listed.summary));
+            channel_errors.push(format!("{channel}: {}", listed.summary));
+            continue;
         }
+        ok_channels += 1;
         let items = listed
             .data
             .get("items")
@@ -1319,27 +1327,18 @@ async fn poll_slack(
             .cloned()
             .unwrap_or_default();
         for m in items {
-            let ts = m.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-            if ts.is_empty() {
+            let Some((key, title, summary)) = inbox_sources::slack_inbox_item(channel, &m) else {
                 continue;
-            }
-            let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if text.is_empty() {
-                continue;
-            }
-            if text.starts_with("Fleet run ") {
-                continue;
-            }
-            let title: String = text.chars().take(80).collect();
+            };
             ticket_repo::upsert_inbox(
                 &state.db,
                 &UpsertInbox {
                     workspace_id,
                     provider: "slack".into(),
-                    external_key: format!("{channel}:{ts}"),
+                    external_key: key,
                     title,
                     url: None,
-                    summary: text.chars().take(4000).collect(),
+                    summary,
                     provider_closed: false,
                 },
             )
@@ -1348,7 +1347,7 @@ async fn poll_slack(
             n += 1;
         }
     }
-    Ok(n)
+    inbox_sources::slack_poll_outcome(ok_channels, n, &channel_errors)
 }
 
 async fn poll_notion(
@@ -2151,14 +2150,20 @@ pub async fn finish_and_launch(
         .ensure_project(workspace_id, "workspace fleet", 3)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
-    let _ = state
-        .orch
-        .store
-        .set_auto_sync_external(workspace_id, true)
-        .await;
+    let ticket_kind = matches!(
+        inbox_sources::kind_for(&prep.item.provider),
+        InboxKind::Ticket
+    );
+    if ticket_kind {
+        let _ = state
+            .orch
+            .store
+            .set_auto_sync_external(workspace_id, true)
+            .await;
+    }
     let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
     plan.source = "inbox".into();
-    plan.policy.auto_sync_external = true;
+    plan.policy.auto_sync_external = ticket_kind;
     crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
     plan.policy.requested_by = Some(user_id);
     let (run, _) = match state

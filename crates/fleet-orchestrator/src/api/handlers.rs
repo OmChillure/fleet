@@ -655,6 +655,7 @@ pub async fn admin_tick(
         "retried": report.retried,
         "cancel_tasks": report.cancel_tasks,
         "retry_promoted": report.retry_promoted,
+        "orphans_recovered": report.orphans_recovered,
         "reaped": report.reaped,
         "runs_terminated": report.runs_terminated,
         "external_synced": report.external_synced,

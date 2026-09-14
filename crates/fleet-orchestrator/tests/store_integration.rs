@@ -1405,3 +1405,69 @@ async fn apply_hitl_resume_sets_ready_clears_claim_reason_and_intent() {
         "task={task:?}"
     );
 }
+
+#[tokio::test]
+async fn recover_orphaned_active_tasks_ready_when_session_gone() {
+    let store = setup().await;
+    let project = store
+        .create_project(&format!("orphan-{}", Uuid::new_v4()), 3)
+        .await
+        .unwrap();
+    let body = independent_plan(project.id, &["gone", "live", "nullclaim"]);
+    let run_id = body.run_id;
+    let plan_id = body.plan_id;
+    store.insert_accepted_plan(project.id, body).await.unwrap();
+    store.materialize_plan(project.id, plan_id).await.unwrap();
+    let snap = store.load_board_snapshot(project.id).await.unwrap();
+    let id_of = |name: &str| {
+        snap.tasks
+            .iter()
+            .find(|t| t.plan_task_id == name)
+            .unwrap()
+            .id
+    };
+    let gone_id = id_of("gone");
+    let live_id = id_of("live");
+    let null_id = id_of("nullclaim");
+
+    let gone_sid = ready_assign_session(&store, project.id, run_id, gone_id).await;
+    sqlx::query("UPDATE board_tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(gone_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM worker_sessions WHERE id = $1")
+        .bind(gone_sid)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let live_sid = ready_assign_session(&store, project.id, run_id, live_id).await;
+
+    sqlx::query(
+        "UPDATE board_tasks SET status = 'assigned', claimed_session_id = NULL WHERE id = $1",
+    )
+    .bind(null_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let n = store
+        .recover_orphaned_active_tasks(project.id)
+        .await
+        .unwrap();
+    assert_eq!(n, 2, "gone + nullclaim must recover; live must stay");
+
+    let gone = store.get_task(project.id, gone_id).await.unwrap().unwrap();
+    assert_eq!(gone.status, "ready", "task={gone:?}");
+    assert!(gone.claimed_session_id.is_none(), "task={gone:?}");
+    assert_eq!(gone.failure_reason.as_deref(), Some("session_gone"));
+
+    let live = store.get_task(project.id, live_id).await.unwrap().unwrap();
+    assert_eq!(live.status, "assigned", "task={live:?}");
+    assert_eq!(live.claimed_session_id, Some(live_sid));
+
+    let null = store.get_task(project.id, null_id).await.unwrap().unwrap();
+    assert_eq!(null.status, "ready", "task={null:?}");
+    assert!(null.claimed_session_id.is_none(), "task={null:?}");
+}

@@ -645,21 +645,16 @@ fn parse_slack(v: &Value) -> Result<ParsedEvent, String> {
     if ev.get("type").and_then(|t| t.as_str()) != Some("message") {
         return Ok(ParsedEvent::Ignore);
     }
-    if ev.get("subtype").and_then(|s| s.as_str()) == Some("bot_message") {
-        return Ok(ParsedEvent::Ignore);
-    }
     let channel = ev.get("channel").and_then(|c| c.as_str()).unwrap_or("");
-    let ts = ev.get("ts").and_then(|t| t.as_str()).unwrap_or("");
-    let text = ev.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
-    if channel.is_empty() || ts.is_empty() || text.is_empty() || text.starts_with("Fleet run ") {
+    let Some((key, title, summary)) = crate::inbox_sources::slack_inbox_item(channel, ev) else {
         return Ok(ParsedEvent::Ignore);
-    }
+    };
     Ok(ParsedEvent::Items(vec![IngestItem {
         provider: "slack".into(),
-        key: format!("{channel}:{ts}"),
-        title: text.chars().take(80).collect(),
+        key,
+        title,
         url: None,
-        summary: text.chars().take(4000).collect(),
+        summary,
         closed: false,
     }]))
 }
@@ -1054,6 +1049,52 @@ mod tests {
                 assert_eq!(items[0].summary, "please look");
             }
             other => panic!("expected comment items, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slack_channel_join_is_ignored() {
+        let body = json!({
+            "event": {
+                "type": "message",
+                "subtype": "channel_join",
+                "channel": "C1",
+                "ts": "1.1",
+                "text": "<@U1> has joined the channel"
+            }
+        });
+        let parsed = parse_event(
+            "slack",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(parsed, ParsedEvent::Ignore));
+    }
+
+    #[test]
+    fn slack_user_message_ingests_channel_ts() {
+        let body = json!({
+            "event": {
+                "type": "message",
+                "channel": "C1",
+                "ts": "2.2",
+                "text": "please look at weather-app"
+            }
+        });
+        let parsed = parse_event(
+            "slack",
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "slack");
+                assert_eq!(items[0].key, "C1:2.2");
+                assert_eq!(items[0].title, "please look at weather-app");
+            }
+            other => panic!("expected items, got {other:?}"),
         }
     }
 
