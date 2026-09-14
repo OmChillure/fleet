@@ -172,6 +172,7 @@ pub fn status() -> Result<()> {
     println!("run_host:       {}", cfg.run_host);
     println!("run_container:  {}", cfg.run_container);
     println!("auto_update:    {}", cfg.auto_update);
+    println!("update_probe:   0.0.3.2");
     println!(
         "token:          {}",
         if token.is_some() {
