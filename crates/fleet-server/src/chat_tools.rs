@@ -1518,6 +1518,14 @@ pub(crate) fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
     }
 }
 
+async fn stamp_workspace_run_mode(state: &AppState, workspace_id: Uuid, plan: &mut WorkPlanBody) {
+    if let Ok(mode) = fleet_db::repos::workspaces::default_run_mode(&state.db, workspace_id).await {
+        if fleet_db::parse_worker_host_run_mode(&mode).is_some() {
+            plan.policy.run_mode = mode;
+        }
+    }
+}
+
 pub fn build_multi_task_plan(
     workspace_id: Uuid,
     max_agents_override: Option<i32>,
@@ -2498,6 +2506,7 @@ async fn launch_agent_task(
     require_runner_worker_llm(llm)?;
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
+    stamp_workspace_run_mode(state, workspace_id, &mut plan).await;
     plan.policy.requested_by = Some(user_id);
     plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     accept_and_drive_plan(
@@ -2598,6 +2607,7 @@ async fn launch_agent_plan(
             .collect();
     }
     stamp_plan_llm(&mut plan, llm);
+    stamp_workspace_run_mode(state, workspace_id, &mut plan).await;
     plan.policy.requested_by = Some(user_id);
     plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     if let Err(e) = validate::validate_plan(&plan) {

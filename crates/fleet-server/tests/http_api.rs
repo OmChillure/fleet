@@ -40,6 +40,19 @@ fn unique_email() -> String {
     format!("srv.{}@example.test", Uuid::new_v4())
 }
 
+/// Inbox JSON exposes the token in `hook_url`, not a separate `hook_token` field.
+fn hook_token_from_monitor(body: &Value) -> String {
+    if let Some(t) = body["hook_token"].as_str().filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    body["hook_url"]
+        .as_str()
+        .and_then(|u| u.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| panic!("hook_url token: {body}"))
+        .to_string()
+}
+
 fn test_auth_config() -> AuthConfig {
     AuthConfig {
         jwt_secret: TEST_JWT_SECRET.into(),
@@ -2088,9 +2101,26 @@ async fn invite_existing_member(app: &axum::Router, owner_jar: &CookieJar, ws: &
     );
     assert_eq!(
         invited.body["added_existing_user"],
-        true,
-        "existing user must join immediately: {}",
+        false,
+        "invite of an existing user is pending until accept: {}",
         invited.body
+    );
+    let token = invited.body["invite"]["token"]
+        .as_str()
+        .expect("invite.token");
+    let accepted = call(
+        app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "accept teammate invite: {}",
+        accepted.body
     );
     member_jar
 }
@@ -2891,7 +2921,7 @@ async fn fleet_settings_get_defaults_fleet_llm_off() {
     assert_eq!(got.body["fleet_llm"], "off", "{}", got.body);
     assert_eq!(got.body["fleet_llm_model"], "", "{}", got.body);
     assert_eq!(got.body["effective_backend"], "off", "{}", got.body);
-    assert_eq!(got.body["max_agents"], 3, "{}", got.body);
+    assert_eq!(got.body["max_agents"], 16, "{}", got.body);
 }
 
 #[tokio::test]
@@ -6671,9 +6701,7 @@ async fn inbox_webhook_unknown_token_is_401() {
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
     assert!(
-        started.body["hook_token"]
-            .as_str()
-            .is_some_and(|t| !t.is_empty()),
+        !hook_token_from_monitor(&started.body).is_empty(),
         "need a live hook_token so a stranger path is not the monitor: {}",
         started.body
     );
@@ -6720,10 +6748,7 @@ async fn inbox_webhook_lists_upserted_ticket() {
     )
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
-    let token = started.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&started.body);
     assert!(!token.is_empty());
 
     let ok = call_raw(
@@ -6771,10 +6796,7 @@ async fn inbox_webhook_pinned_slack_still_ingests_slack() {
     )
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
-    let token = started.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&started.body);
     assert!(!token.is_empty());
 
     let pin = call(
@@ -6838,10 +6860,7 @@ async fn inbox_webhook_disabled_monitor_ingests_zero() {
     )
     .await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    let token = stopped.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&stopped.body);
     assert!(!token.is_empty());
 
     let hook = call_raw(

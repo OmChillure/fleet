@@ -1079,9 +1079,26 @@ async fn invite_existing_member(
     );
     assert_eq!(
         invited.body["added_existing_user"],
-        true,
-        "existing user must join immediately: {}",
+        false,
+        "invite of an existing user is pending until accept: {}",
         invited.body
+    );
+    let token = invited.body["invite"]["token"]
+        .as_str()
+        .expect("invite.token");
+    let accepted = call(
+        app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "accept teammate invite: {}",
+        accepted.body
     );
     member_jar
 }

@@ -875,7 +875,8 @@ mod tests {
             slack_poll_outcome(1, 5, &["Cbad: Slack API: not_in_channel".into()]).unwrap(),
             5
         );
-        let err = slack_poll_outcome(0, 0, &["Cbad: Slack API: not_in_channel".into()]).unwrap_err();
+        let err =
+            slack_poll_outcome(0, 0, &["Cbad: Slack API: not_in_channel".into()]).unwrap_err();
         assert!(err.contains("not_in_channel"), "{err}");
         assert_eq!(slack_poll_outcome(1, 0, &[]).unwrap(), 0);
     }

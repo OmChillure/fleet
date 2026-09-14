@@ -47,8 +47,17 @@ _require-env:
     fi
 
 # Start Postgres (docker compose) and wait until healthy.
+# Another checkout may already own :5433 — reuse it.
 db-up:
     #!/usr/bin/env bash
+    if docker compose exec -T postgres pg_isready -U fleet -d fleet >/dev/null 2>&1; then
+      echo "Postgres is ready (this compose project, localhost:5433)"
+      exit 0
+    fi
+    if pg_isready -h 127.0.0.1 -p 5433 -U fleet -d fleet >/dev/null 2>&1; then
+      echo "Postgres is ready (existing localhost:5433)"
+      exit 0
+    fi
     docker compose up -d postgres
     echo "Waiting for Postgres…"
     for i in $(seq 1 60); do
