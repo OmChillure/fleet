@@ -113,7 +113,7 @@ pub fn spawn_payload(
     let mut env: HashMap<String, String> = req
         .env
         .iter()
-        .filter(|(k, _)| k.starts_with("FLEET_") || is_vendor_guest_env(k))
+        .filter(|(k, _)| k.starts_with("FLEET_") && !is_vendor_guest_env(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     env.remove("FLEET_WORK_DIR");
@@ -311,7 +311,8 @@ mod tests {
         let mut req = sample_req();
         req.env.insert("GITHUB_TOKEN".into(), "gh-secret".into());
         req.env.insert("access_token".into(), "oauth-access".into());
-        req.env.insert("client_secret".into(), "oauth-client".into());
+        req.env
+            .insert("client_secret".into(), "oauth-client".into());
         let host_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
         let p = spawn_payload(&req, "http://172.18.0.1:8080", "host", 3600, host_id);
         assert!(
@@ -374,8 +375,7 @@ mod tests {
             let mut req = sample_req();
             req.agent_backend = backend.map(str::to_string);
             req.persona_md = Some("# Persona: reviewer\n".into());
-            req.env
-                .insert("FLEET_HARNESS".into(), want.to_string());
+            req.env.insert("FLEET_HARNESS".into(), want.to_string());
             let p = spawn_payload(&req, "http://api.example:8080", "host", 60, host_id);
             assert_eq!(
                 p.env.get("FLEET_HARNESS").map(String::as_str),

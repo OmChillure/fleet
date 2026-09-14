@@ -1,14 +1,14 @@
 //! Worker-authenticated plane I/O. Tokens stay here.
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::Json;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::auth::WorkerAuth;
-use super::handlers::{ApiError, err, map_store};
+use super::handlers::{err, map_store, ApiError};
 use super::state::AppState;
 use crate::sandbox::share::ChangesRequest;
 use crate::sandbox::team;
@@ -60,6 +60,9 @@ pub async fn post_worker_io(
         .await
         .map_err(map_store)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "task not found"))?;
+    if task.status == "blocked" {
+        return Err(err(StatusCode::CONFLICT, "task is blocked"));
+    }
     let talk = TeamTalk::from_spawn(
         state.tick.data_dir(),
         project_id,
@@ -91,7 +94,12 @@ pub async fn post_worker_io(
                 .ok_or_else(|| err(StatusCode::BAD_REQUEST, "operation required"))?;
             let args = body.args.unwrap_or_else(|| json!({}));
             let res = inv
-                .invoke(project_id, provider.to_string(), operation.to_string(), args)
+                .invoke(
+                    project_id,
+                    provider.to_string(),
+                    operation.to_string(),
+                    args,
+                )
                 .await;
             Ok(Json(json!({
                 "ok": res.ok,

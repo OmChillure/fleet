@@ -9361,8 +9361,8 @@ async fn request_update_true_while_auto_on_stamps() {
     let before = call(&app, "GET", &host_path, Some(&jar), None).await;
     assert_eq!(before.status, StatusCode::OK, "get: {}", before.body);
     assert_eq!(
-        before.body["auto_update"], true,
-        "paired host defaults auto-update on: {}",
+        before.body["auto_update"], false,
+        "paired host defaults auto-update off: {}",
         before.body
     );
     let gen_before = before.body["settings_gen"].as_i64().unwrap_or(0);

@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Value, json};
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::harness::HarnessSpec;
@@ -750,13 +750,22 @@ fn write_text_file(cwd: &Path, msg: &Value) -> Result<()> {
 }
 
 fn resolve_under_cwd(cwd: &Path, path: &str) -> Result<PathBuf> {
-    let p = if path.starts_with("file://") {
-        PathBuf::from(path.trim_start_matches("file://"))
-    } else {
-        PathBuf::from(path)
-    };
+    let raw = path.strip_prefix("file://").unwrap_or(path);
+    let p = PathBuf::from(raw);
+    for c in p.components() {
+        if matches!(c, std::path::Component::ParentDir) {
+            bail!("path escapes work dir: {path}");
+        }
+    }
     let abs = if p.is_absolute() { p } else { cwd.join(p) };
     let canon_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    if abs.exists() {
+        let canon = abs.canonicalize().unwrap_or(abs);
+        if !canon.starts_with(&canon_cwd) {
+            bail!("path escapes work dir: {path}");
+        }
+        return Ok(canon);
+    }
     let parent = abs.parent().unwrap_or(cwd);
     let canon_parent = parent
         .canonicalize()
@@ -764,11 +773,7 @@ fn resolve_under_cwd(cwd: &Path, path: &str) -> Result<PathBuf> {
     if !canon_parent.starts_with(&canon_cwd) {
         bail!("path escapes work dir: {path}");
     }
-    Ok(if abs.exists() {
-        abs.canonicalize().unwrap_or(abs)
-    } else {
-        abs
-    })
+    Ok(abs)
 }
 
 fn format_session_update(update: &Value) -> Option<String> {

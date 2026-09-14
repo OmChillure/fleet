@@ -88,7 +88,7 @@ fn default_on_task_fail() -> OnTaskFailPolicy {
 }
 
 fn default_plan_run_mode() -> String {
-    "on_pc".into()
+    "in_container".into()
 }
 
 impl Default for PlanPolicy {

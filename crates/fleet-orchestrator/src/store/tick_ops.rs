@@ -501,7 +501,7 @@ impl Store {
                 retry_not_before = $2,
                 failure_reason = COALESCE($3, failure_reason),
                 updated_at = now()
-            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled')
+            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled', 'blocked')
             "#,
         )
         .bind(task_id)
@@ -521,7 +521,7 @@ impl Store {
                 claimed_session_id = NULL,
                 terminal_at = now(),
                 updated_at = now()
-            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled')
+            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled', 'blocked')
             "#,
         )
         .bind(task_id)
@@ -597,7 +597,7 @@ impl Store {
                 claimed_session_id = NULL,
                 terminal_at = now(),
                 updated_at = now()
-            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled')
+            WHERE id = $1 AND status NOT IN ('done_success', 'done_failed', 'cancelled', 'blocked')
             "#,
         )
         .bind(task_id)

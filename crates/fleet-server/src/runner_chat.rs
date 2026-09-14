@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::chat::ChatProgress;
 use crate::chat_tools::{
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
-    rewrite_if_asked_to_continue, system_prompt_for_workspace,
+    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace, ChatAction,
+    ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -56,6 +56,7 @@ fn chat_turn_is_empty(pairs: &[(String, String)]) -> bool {
 pub async fn run_on_runner(
     state: &AppState,
     workspace_id: Uuid,
+    user_id: Uuid,
     runner_id: Uuid,
     provider: &str,
     model: &str,
@@ -67,7 +68,7 @@ pub async fn run_on_runner(
     if chat_turn_is_empty(pairs) {
         return Err(AppError::bad_request("empty chat turn".to_string()));
     }
-    let host = require_taking(state, workspace_id, runner_id).await?;
+    let host = require_taking(state, workspace_id, runner_id, user_id).await?;
 
     let prompt = format_transcript(pairs);
     let claim_id = Uuid::now_v7();
@@ -141,7 +142,7 @@ pub async fn run_tools_on_runner(
     progress: Option<&tokio::sync::mpsc::Sender<ChatProgress>>,
     conversation_id: Option<Uuid>,
 ) -> AppResult<(String, String, Vec<ChatAction>)> {
-    let _host = require_taking(state, workspace_id, runner_id).await?;
+    let _host = require_taking(state, workspace_id, runner_id, user_id).await?;
     let system = {
         let mut s = system_prompt_for_workspace(state, workspace_id).await;
         s.push_str(RUNNER_TOOL_PROTOCOL);
@@ -164,6 +165,7 @@ pub async fn run_tools_on_runner(
         let (reply_model, text) = run_on_runner(
             state,
             workspace_id,
+            user_id,
             runner_id,
             provider,
             model,
@@ -210,16 +212,9 @@ pub async fn run_tools_on_runner(
                 },
             )
             .await;
-            let (result_json, action) = execute_tool_with_retry(
-                state,
-                workspace_id,
-                user_id,
-                &name,
-                &args,
-                &llm,
-                &prior,
-            )
-            .await;
+            let (result_json, action) =
+                execute_tool_with_retry(state, workspace_id, user_id, &name, &args, &llm, &prior)
+                    .await;
             emit(progress, ChatProgress::from_action(&action)).await;
             let line = serde_json::to_string(&result_json).unwrap_or_else(|_| "{}".into());
             if !tool_blob.is_empty() {
@@ -232,7 +227,12 @@ pub async fn run_tools_on_runner(
             "user".into(),
             format!("Tool results (control plane; tokens stayed here):\n{tool_blob}"),
         ));
-        let failed: Vec<&ChatAction> = actions.iter().rev().take(n_calls).filter(|a| !a.ok).collect();
+        let failed: Vec<&ChatAction> = actions
+            .iter()
+            .rev()
+            .take(n_calls)
+            .filter(|a| !a.ok)
+            .collect();
         if !failed.is_empty() {
             pairs.push(("system".into(), crate::retry::fail_nudge(&failed)));
             let extra = max_rounds - MAX_TOOL_ROUNDS;
@@ -279,7 +279,11 @@ pub(crate) fn parse_runner_tool_calls(text: &str) -> Option<Vec<(String, Value)>
             );
             out.push((name.to_string(), args));
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     } else {
         let name = v
             .get("name")
@@ -344,7 +348,9 @@ fn extract_json_object(text: &str) -> Option<Value> {
     {
         return Some(v);
     }
-    if let Some(inner) = t.strip_prefix("```json").or_else(|| t.strip_prefix("```JSON"))
+    if let Some(inner) = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```JSON"))
     {
         let inner = inner.strip_prefix('\n').unwrap_or(inner);
         if let Some(end) = inner.find("```") {
@@ -377,15 +383,26 @@ pub(crate) async fn require_taking(
     state: &AppState,
     workspace_id: Uuid,
     runner_id: Uuid,
+    actor: Uuid,
 ) -> AppResult<WorkerHost> {
     let host = crate::worker_hosts::load_visible_host(state, workspace_id, runner_id).await?;
     if host.is_cluster_host() || host.created_by.is_none() {
-        return Err(AppError::bad_request(
-            "This runner is not Run on a PC",
+        return Err(AppError::bad_request("This runner is not Run on a PC"));
+    }
+    if !send_policy_allows(&host, actor) {
+        return Err(AppError::forbidden(
+            "this PC only accepts jobs from its owner",
         ));
     }
     ensure_online(&host)?;
     Ok(host)
+}
+
+pub(crate) fn send_policy_allows(host: &WorkerHost, actor: Uuid) -> bool {
+    match host.send_policy.as_str() {
+        fleet_db::WORKER_HOST_SEND_WORKSPACE => true,
+        _ => host.created_by.map(|o| o == actor).unwrap_or(false),
+    }
 }
 
 fn ensure_online(host: &WorkerHost) -> AppResult<()> {
@@ -534,8 +551,7 @@ mod tests {
             ("assistant".into(), "hello".into()),
         ]);
         assert_eq!(
-            t,
-            "User:\nhi\n\nAssistant:\nhello",
+            t, "User:\nhi\n\nAssistant:\nhello",
             "two-turn CLI prompt must keep User:/Assistant: order and a blank-line separator"
         );
     }
@@ -544,8 +560,7 @@ mod tests {
     fn format_transcript_trims_pair_content() {
         let t = format_transcript(&[("user".into(), "  hi\nthere  ".into())]);
         assert_eq!(
-            t,
-            "User:\nhi\nthere",
+            t, "User:\nhi\nthere",
             "format_transcript must trim pair content (resumed DB history is not trimmed first)"
         );
     }
@@ -555,7 +570,10 @@ mod tests {
     #[test]
     fn parse_result_empty_or_whitespace_cli_text_is_bad_request() {
         for (label, payload) in [
-            ("whitespace", json!({ "result": { "ok": true, "text": "  " } })),
+            (
+                "whitespace",
+                json!({ "result": { "ok": true, "text": "  " } }),
+            ),
             ("empty", json!({ "result": { "ok": true, "text": "" } })),
             ("missing text", json!({ "result": { "ok": true } })),
         ] {
@@ -605,7 +623,10 @@ mod tests {
     #[test]
     fn parse_result_missing_model_uses_fallback() {
         for (label, payload) in [
-            ("absent", json!({ "result": { "ok": true, "text": "hello" } })),
+            (
+                "absent",
+                json!({ "result": { "ok": true, "text": "hello" } }),
+            ),
             (
                 "empty",
                 json!({ "result": { "ok": true, "text": "hello", "model": "" } }),
@@ -679,9 +700,8 @@ mod tests {
             host_is_removed(&host),
             "status=disabled leftover (enabled + last_seen still set) must be removed"
         );
-        let err = ensure_online(&host).expect_err(
-            "ensure_online must fail on DELETE leftover before last_seen/enabled",
-        );
+        let err = ensure_online(&host)
+            .expect_err("ensure_online must fail on DELETE leftover before last_seen/enabled");
         assert!(
             matches!(&err, AppError::BadRequest(m) if m.contains("removed")),
             "first ensure_online branch is host_is_removed, not offline/not-taking: {err:?}"

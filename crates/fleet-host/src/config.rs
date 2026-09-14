@@ -80,7 +80,7 @@ pub struct LocalConfig {
     /// authoritative; heartbeat writes this field so existing readers of
     /// `config.toml` stay in sync. A local-only `false` does not restrict
     /// once the plane says on.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_update: bool,
     #[serde(default = "default_driver_bin")]
     pub fleet_driver_bin: String,
@@ -176,7 +176,7 @@ impl Default for LocalConfig {
             docker_network: default_docker_network(),
             allow_privileged: false,
             use_host_git_credentials: true,
-            auto_update: true,
+            auto_update: false,
             fleet_driver_bin: default_driver_bin(),
             log_level: default_log_level(),
             heartbeat_interval_s: 10,
@@ -644,13 +644,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_update_defaults_true_and_can_be_disabled() {
+    fn auto_update_defaults_false_and_can_be_enabled() {
         let cfg = LocalConfig::defaults();
-        assert!(cfg.auto_update);
+        assert!(!cfg.auto_update);
         let parsed: LocalConfig = toml::from_str("").expect("empty toml");
         assert!(
-            parsed.auto_update,
-            "missing auto_update must default true until the plane says otherwise"
+            !parsed.auto_update,
+            "missing auto_update must default false"
         );
         let off: LocalConfig = toml::from_str("auto_update = false").expect("toml");
         assert!(!off.auto_update);

@@ -304,8 +304,11 @@ fn linear_team_hit(allow: &[String], key: &str) -> bool {
     })
 }
 
-/// Webhook ingest: follow-connected (or empty allowlist) accepts any inbox
-/// provider. A pinned allowlist accepts only those providers.
+/// Webhook ingest: a pinned allowlist accepts only those providers.
+/// `follow_connected` no longer means "any inbox provider" — the path
+/// provider must be listed (or the allowlist empty *and* a later HMAC /
+/// connection check applies). Empty allowlist + follow_connected still
+/// requires `is_inbox_provider` so `/jira/{token}` cannot stand in for GitHub.
 pub fn webhook_provider_allowed(
     follow_connected: bool,
     allowlist: &[String],
@@ -314,17 +317,17 @@ pub fn webhook_provider_allowed(
     if !is_inbox_provider(provider) {
         return false;
     }
-    if follow_connected {
-        return true;
+    if !allowlist.is_empty() {
+        let provider = provider.trim().to_ascii_lowercase();
+        return allowlist
+            .iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .any(|p| p == provider);
     }
-    if allowlist.is_empty() {
-        return false;
-    }
-    let provider = provider.trim().to_ascii_lowercase();
-    allowlist
-        .iter()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .any(|p| p == provider)
+    // No pin: token is workspace-scoped. HMAC (when the provider signs) still
+    // binds the payload. Do not accept a non-inbox path.
+    let _ = follow_connected;
+    true
 }
 
 /// True when this inbox key is allowed by the monitor filters (empty = allow all).

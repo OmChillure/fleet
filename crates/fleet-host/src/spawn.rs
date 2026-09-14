@@ -7,14 +7,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use agent_fleet_contracts::ExecutorKind;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::client::{JobRuntime, SpawnPayload};
-use crate::config::{ContainerBackend, LocalConfig, merge_child_env};
+use crate::config::{merge_child_env, ContainerBackend, LocalConfig};
 use crate::platform::{command_exists, hypervisor_on_path, in_cluster, kubeconfig_present};
 
 const WORKER_TOKEN_KEY: &str = "FLEET_WORKER_TOKEN";
@@ -93,6 +93,10 @@ pub fn child_env(
     if !env.contains_key(WORKER_TOKEN_KEY) && !payload.worker_token.is_empty() {
         env.insert(WORKER_TOKEN_KEY.into(), payload.worker_token.clone());
     }
+    env.remove("ZENOH_LOCATOR");
+    env.remove("XAI_API_KEY");
+    env.remove("ANTHROPIC_API_KEY");
+    env.remove("ANTHROPIC_AUTH_TOKEN");
     env.insert("FLEET_WORK_DIR".into(), work_dir.display().to_string());
     if env
         .get(HARNESS_KEY)
@@ -348,7 +352,10 @@ pub async fn run_claim_with(
             ("on_pc", JobRuntime::Host) | ("in_container", JobRuntime::Container)
         );
         if !ok {
-            bail!("run_mode {mode} does not match runtime {}", runtime.as_str());
+            bail!(
+                "run_mode {mode} does not match runtime {}",
+                runtime.as_str()
+            );
         }
     }
     if !runtime_allowed_with(runtime, cfg, effective_host, effective_container, probe) {
@@ -416,7 +423,7 @@ pub async fn run_claim_with(
         let _ = tokio::fs::write(session_dir.join("PERSONA.md"), md).await;
     }
 
-    match runtime {
+    let result = match runtime {
         JobRuntime::Host => run_host(cfg, payload, &session_dir).await,
         JobRuntime::Container => match container_exec.expect("container executor") {
             ExecutorKind::Docker => {
@@ -431,7 +438,9 @@ pub async fn run_claim_with(
             ),
         },
         JobRuntime::Vm => run_vm(cfg, payload, &session_dir).await,
-    }
+    };
+    wipe_session_dir(&session_dir);
+    result
 }
 
 async fn run_host(cfg: &LocalConfig, payload: &SpawnPayload, cwd: &Path) -> Result<()> {
@@ -468,6 +477,10 @@ async fn run_host(cfg: &LocalConfig, payload: &SpawnPayload, cwd: &Path) -> Resu
     let result = wait_child(&mut child, payload.timeout_s, &bin).await;
     live_children().remove(payload.session_id).await;
     result
+}
+
+fn wipe_session_dir(session_dir: &Path) {
+    let _ = std::fs::remove_dir_all(session_dir);
 }
 
 pub fn docker_preflight_with(docker_on_path: bool) -> Result<()> {
@@ -674,11 +687,7 @@ fn vm_rootfs_path() -> Option<std::path::PathBuf> {
 }
 
 fn qemu_bin() -> Option<&'static str> {
-    for b in [
-        "qemu-system-x86_64",
-        "qemu-system-aarch64",
-        "firecracker",
-    ] {
+    for b in ["qemu-system-x86_64", "qemu-system-aarch64", "firecracker"] {
         if command_exists(b) {
             return Some(b);
         }
@@ -1002,8 +1011,9 @@ mod tests {
             "{args:?}"
         );
         assert!(
-            args.windows(2).any(|w| w[0] == "-e"
-                && w[1] == "FLEET_SESSION_ID=550e8400-e29b-41d4-a716-446655440000"),
+            args.windows(2)
+                .any(|w| w[0] == "-e"
+                    && w[1] == "FLEET_SESSION_ID=550e8400-e29b-41d4-a716-446655440000"),
             "{args:?}"
         );
         assert!(
@@ -1151,11 +1161,9 @@ mod tests {
             std::fs::read_to_string(dir.path().join("work/app.rs")).unwrap(),
             "fn main() {}\n"
         );
-        assert!(
-            std::fs::read_to_string(dir.path().join("PERSONA.md"))
-                .unwrap()
-                .contains("coder")
-        );
+        assert!(std::fs::read_to_string(dir.path().join("PERSONA.md"))
+            .unwrap()
+            .contains("coder"));
         assert!(dir.path().join("fleet-tool.sh").is_file());
     }
 
@@ -1170,11 +1178,7 @@ mod tests {
             "transcript-only body from artifacts\n",
         )
         .unwrap();
-        std::fs::write(
-            dir.path().join("artifacts/result.json"),
-            r#"{"ok":true}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"ok":true}"#).unwrap();
         let md = collect_guest_proof(dir.path()).expect("proof");
         assert_eq!(md, result_md.trim());
         assert!(
@@ -1210,11 +1214,7 @@ mod tests {
     fn collect_guest_proof_json_only_synthesizes_header() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
-        std::fs::write(
-            dir.path().join("artifacts/result.json"),
-            r#"{"ok":true}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("artifacts/result.json"), r#"{"ok":true}"#).unwrap();
         let md = collect_guest_proof(dir.path()).expect("json-only proof");
         assert_eq!(md, "# Result\n\nACP completed.\n\n");
     }
@@ -1473,10 +1473,7 @@ mod tests {
             err.contains(DOCKER_MISSING),
             "Docker backend must not fall through to KubePod when docker is missing: {err}"
         );
-        assert!(
-            !lower.contains("k8s"),
-            "must not pick KubePod: {err}"
-        );
+        assert!(!lower.contains("k8s"), "must not pick KubePod: {err}");
         assert!(
             !lower.contains("spawn host"),
             "must not fall back to host: {err}"

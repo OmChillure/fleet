@@ -4,9 +4,8 @@ use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
 use crate::sandbox::remote::{self, RemoteHostHandle};
 use crate::sandbox::{fleet_worker_env, SpawnRequest};
 use crate::store::{
-    enqueue_remote_spawn, hold_ready_for_host_update, JobNeed, RunMode,
-    select_assignable_runner_preferring_for_job,
-    workspace_has_updating_host, BoardSnapshot, Store,
+    enqueue_remote_spawn, hold_ready_for_host_update, select_assignable_runner_preferring_for_job,
+    workspace_has_updating_host, BoardSnapshot, JobNeed, RunMode, Store,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -75,13 +74,12 @@ pub async fn schedule_and_spawn(
             .as_ref()
             .and_then(|p| RunMode::parse(&p.policy.run_mode))
             .unwrap_or(RunMode::OnPc);
-        let min_isolation = match fleet_db::repos::workspaces::min_isolation(store.pool(), project_id)
-            .await
-        {
-            Ok(raw) => crate::domain::IsolationClass::parse(&raw)
-                .unwrap_or(crate::domain::IsolationClass::Process),
-            Err(_) => crate::domain::IsolationClass::Process,
-        };
+        let min_isolation =
+            match fleet_db::repos::workspaces::min_isolation(store.pool(), project_id).await {
+                Ok(raw) => crate::domain::IsolationClass::parse(&raw)
+                    .unwrap_or(crate::domain::IsolationClass::Process),
+                Err(_) => crate::domain::IsolationClass::Process,
+            };
         let provider = plan_hint
             .as_ref()
             .and_then(|p| p.policy.llm_provider.clone());
@@ -212,9 +210,8 @@ pub async fn schedule_and_spawn(
             .map(|s| s.trim().is_empty())
             .unwrap_or(true)
         {
-            let harness = crate::sandbox::agent_loop::harness_for_backend(
-                req.agent_backend.as_deref(),
-            );
+            let harness =
+                crate::sandbox::agent_loop::harness_for_backend(req.agent_backend.as_deref());
             req.env.insert("FLEET_HARNESS".into(), harness.into());
         }
         if req
@@ -438,44 +435,10 @@ pub async fn apply_retry_after_failure(
 }
 
 async fn inject_workspace_vendor_key(
-    env: &mut HashMap<String, String>,
-    pool: &sqlx::PgPool,
-    workspace_id: Uuid,
-    provider: Option<&str>,
+    _env: &mut HashMap<String, String>,
+    _pool: &sqlx::PgPool,
+    _workspace_id: Uuid,
+    _provider: Option<&str>,
 ) {
-    let Some(provider) = provider.map(str::trim).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let p = provider.to_ascii_lowercase();
-    let env_name = match p.as_str() {
-        "grok" | "xai" => "XAI_API_KEY",
-        "claude" | "anthropic" => "ANTHROPIC_API_KEY",
-        _ => return,
-    };
-    if env.contains_key(env_name) {
-        return;
-    }
-    let Ok(Some(ct)) = fleet_db::repos::llm_keys::active_ciphertext(pool, workspace_id, &p).await
-    else {
-        return;
-    };
-    let secret = std::env::var("INTEGRATIONS_ENCRYPTION_KEY")
-        .or_else(|_| std::env::var("JWT_SECRET"))
-        .ok();
-    let Some(secret) = secret else {
-        tracing::warn!("in-container vendor key present but no INTEGRATIONS_ENCRYPTION_KEY/JWT_SECRET");
-        return;
-    };
-    let Ok(key) = fleet_integrations::CredentialsKey::from_secret(&secret) else {
-        tracing::warn!("in-container vendor key: bad encryption secret");
-        return;
-    };
-    let Ok(plain) = key.decrypt(&ct) else {
-        tracing::warn!("in-container vendor key decrypt failed");
-        return;
-    };
-    let Some(api_key) = plain.get("api_key").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    env.insert(env_name.into(), api_key.to_string());
+    // Vendor keys stay on the plane. Guests call the control-plane proxy.
 }

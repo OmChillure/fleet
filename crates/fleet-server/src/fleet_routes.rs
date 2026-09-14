@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
@@ -15,7 +15,7 @@ use fleet_orchestrator::domain::{
 use fleet_orchestrator::orch::TickError;
 use fleet_orchestrator::store::StoreError;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -250,6 +250,11 @@ async fn patch_settings(
         .clone()
         .unwrap_or_else(|| current.fleet_llm_model.clone());
 
+    if body.min_isolation.is_some() && role != "owner" && role != "admin" {
+        return Err(AppError::forbidden(
+            "owner or admin required to change min_isolation",
+        ));
+    }
     if let Some(raw) = body.min_isolation.as_deref() {
         workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
     }

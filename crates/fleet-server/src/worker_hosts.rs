@@ -4,21 +4,21 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{header, HeaderMap};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    HostCpSettings, NewWorkerHost, WORKER_SOFTWARE_STATUS_CURRENT, WorkerHost, WorkerHostPublic,
-    parse_worker_host_isolation,
+    parse_worker_host_isolation, HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic,
+    WORKER_SOFTWARE_STATUS_CURRENT,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -27,80 +27,78 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let name = obj.get("name")?.as_str()?.trim();
-                if name.is_empty() {
-                    return None;
-                }
-                let efforts: Vec<Value> = obj
-                    .get("efforts")
-                    .and_then(|e| e.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|e| {
-                                let value = e
-                                    .get("value")
-                                    .or_else(|| e.get("id"))
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("")
-                                    .trim();
-                                if value.is_empty() {
-                                    return None;
-                                }
-                                Some(json!({
-                                    "value": value,
-                                    "label": e.get("label").and_then(|l| l.as_str()),
-                                }))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(json!({
-                    "name": name,
-                    "efforts": efforts,
-                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let name = obj.get("name")?.as_str()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let efforts: Vec<Value> = obj
+                .get("efforts")
+                .and_then(|e| e.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let value = e
+                                .get("value")
+                                .or_else(|| e.get("id"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            if value.is_empty() {
+                                return None;
+                            }
+                            Some(json!({
+                                "value": value,
+                                "label": e.get("label").and_then(|l| l.as_str()),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "name": name,
+                "efforts": efforts,
+                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(
-        arr.iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                let id = obj.get("id")?.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                let models: Vec<String> = obj
-                    .get("models")
-                    .and_then(|m| m.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let model_details = sanitize_model_details(obj.get("model_details"));
-                Some(json!({
-                    "id": id,
-                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                    "models": models,
-                    "model_details": model_details,
-                }))
-            })
-            .collect::<Vec<_>>()
-    )
+    json!(arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let id = obj.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let models: Vec<String> = obj
+                .get("models")
+                .and_then(|m| m.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let model_details = sanitize_model_details(obj.get("model_details"));
+            Some(json!({
+                "id": id,
+                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                "models": models,
+                "model_details": model_details,
+            }))
+        })
+        .collect::<Vec<_>>())
 }
 
 const PAIR_TTL: Duration = Duration::hours(1);
@@ -916,9 +914,7 @@ async fn http_list(
     let rows = host_repo::list_visible_for_workspace(&state.db, workspace_id, &names).await?;
     let hosts: Vec<_> = rows
         .iter()
-        .filter(|h| {
-            h.workspace_id == workspace_id || h.is_cluster_host() || host_advertises_local_ip(h)
-        })
+        .filter(|h| h.workspace_id == workspace_id || h.is_cluster_host())
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
     let packages = crate::install_routes::list_dist_packages(&state);
@@ -952,7 +948,6 @@ pub(crate) async fn load_visible_host(
     }
     match host_repo::get(&state.db, host_id).await? {
         Some(host) if host.is_cluster_host() => Ok(host),
-        Some(host) if host_advertises_local_ip(&host) => Ok(host),
         // Do not name the other workspace — that is a tenant leak.
         Some(_) | None => Err(AppError::not_found("worker host not found")),
     }
@@ -1178,11 +1173,14 @@ async fn http_pair(
     Ok(Json(paired_payload(&state, &host, &machine_token)))
 }
 
+const PUBLISHED_BOOTSTRAP_DEFAULT: &str = "dev-bootstrap-secret-change-me";
+
 fn bootstrap_secret_from_env() -> Option<String> {
     std::env::var(BOOTSTRAP_SECRET_ENV)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .filter(|s| s != PUBLISHED_BOOTSTRAP_DEFAULT && s.len() >= 24)
 }
 
 fn require_bootstrap_secret(headers: &HeaderMap) -> AppResult<()> {
@@ -1219,24 +1217,15 @@ async fn http_bootstrap(
     if platform.is_empty() {
         return Err(AppError::bad_request("platform is required"));
     }
-    let workspace_id = match body.workspace_id {
-        Some(id) => {
-            workspace_repo::min_isolation(&state.db, id).await?;
-            id
-        }
-        None => workspace_repo::first_id(&state.db)
-            .await?
-            .ok_or_else(|| AppError::conflict("no_workspace"))?,
-    };
+    let workspace_id = body
+        .workspace_id
+        .ok_or_else(|| AppError::bad_request("workspace_id is required"))?;
+    workspace_repo::min_isolation(&state.db, workspace_id).await?;
     let machine_id = parse_machine_id(body.machine_id.as_deref());
-    if let Some(mid) = machine_id
-        && let Some(existing) = host_repo::find_by_machine_id(&state.db, workspace_id, mid).await?
-    {
-        let PairedWorkerHost {
-            host,
-            machine_token,
-        } = host_repo::rotate_machine_token(&state.db, existing.id).await?;
-        return Ok(Json(paired_payload(&state, &host, &machine_token)));
+    if machine_id.is_some() {
+        return Err(AppError::forbidden(
+            "bootstrap cannot rotate an existing host; pair with the current machine token",
+        ));
     }
 
     let mut new = NewWorkerHost::new(Uuid::now_v7(), workspace_id, hostname, None);
@@ -1391,8 +1380,7 @@ async fn http_lease(State(state): State<AppState>, headers: HeaderMap) -> AppRes
     // Lease poll is the reclaim path. A sweeper-only helper would never run
     // in this process; expired rows must return to ready before this claim.
     let _ = work_claims::reclaim_expired_leases(&state.db, 64).await;
-    let claim = if host.is_cluster_host() || host_advertises_local_ip(&host) {
-        // Cluster and the CP laptop take jobs from any workspace.
+    let claim = if host.is_cluster_host() {
         work_claims::claim_next_spawn_for_host(&state.db, host.workspace_id, host.id, LEASE_FOR)
             .await?
     } else {
@@ -1528,7 +1516,7 @@ mod plane_bake_tests {
     use super::{
         host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
     };
-    use axum::http::{HeaderMap, HeaderValue, header};
+    use axum::http::{header, HeaderMap, HeaderValue};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
