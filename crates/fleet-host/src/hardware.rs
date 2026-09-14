@@ -201,12 +201,21 @@ fn os_line() -> String {
 }
 
 fn uname_release() -> Option<String> {
-    let out = Command::new("uname").arg("-r").output().ok()?;
-    if !out.status.success() {
-        return None;
+    #[cfg(windows)]
+    {
+        None
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new("uname");
+        crate::platform::hide_console(&mut cmd);
+        let out = cmd.arg("-r").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
 }
 
 fn cpu_model() -> Option<String> {
@@ -328,7 +337,12 @@ fn mem_total_bytes() -> Option<u64> {
     {
         return win_mem().map(|m| m.0);
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    )))]
     {
         None
     }
@@ -1190,7 +1204,9 @@ fn collapse_ws(s: &str) -> String {
 }
 
 fn cmd_stdout_timeout(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(program)
+    let mut cmd = Command::new(program);
+    crate::platform::hide_console(&mut cmd);
+    let mut child = cmd
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1825,10 +1841,9 @@ Memory Device
 
     #[test]
     fn parse_macos_memory_takes_min_speed_across_dimms() {
-        let mem = parse_macos_memory(
-            "      Speed: 3200 MHz\n      Speed: 2666 MHz\n      Type: DDR4\n",
-        )
-        .unwrap();
+        let mem =
+            parse_macos_memory("      Speed: 3200 MHz\n      Speed: 2666 MHz\n      Type: DDR4\n")
+                .unwrap();
         assert_eq!(mem.0, Some(2666));
         assert_eq!(mem.1.as_deref(), Some("DDR4"));
     }
@@ -1870,8 +1885,7 @@ Memory Device
 
     #[test]
     fn wmic_memory_uses_min_stick_speed() {
-        let mem =
-            parse_wmic_memory("Speed=3200\r\nSpeed=2666\r\nSMBIOSMemoryType=26\r\n").unwrap();
+        let mem = parse_wmic_memory("Speed=3200\r\nSpeed=2666\r\nSMBIOSMemoryType=26\r\n").unwrap();
         assert_eq!(mem.0, Some(2666));
         assert_eq!(mem.1.as_deref(), Some("DDR4"));
     }
