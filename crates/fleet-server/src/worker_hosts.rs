@@ -4,20 +4,21 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    parse_worker_host_isolation, HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic,
+    HostCpSettings, NewWorkerHost, WORKER_SOFTWARE_STATUS_CURRENT, WorkerHost, WorkerHostPublic,
+    parse_worker_host_isolation,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -26,78 +27,80 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(arr
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let name = obj.get("name")?.as_str()?.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let efforts: Vec<Value> = obj
-                .get("efforts")
-                .and_then(|e| e.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|e| {
-                            let value = e
-                                .get("value")
-                                .or_else(|| e.get("id"))
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("")
-                                .trim();
-                            if value.is_empty() {
-                                return None;
-                            }
-                            Some(json!({
-                                "value": value,
-                                "label": e.get("label").and_then(|l| l.as_str()),
-                            }))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(json!({
-                "name": name,
-                "efforts": efforts,
-                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-            }))
-        })
-        .collect::<Vec<_>>())
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let name = obj.get("name")?.as_str()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let efforts: Vec<Value> = obj
+                    .get("efforts")
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                let value = e
+                                    .get("value")
+                                    .or_else(|| e.get("id"))
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if value.is_empty() {
+                                    return None;
+                                }
+                                Some(json!({
+                                    "value": value,
+                                    "label": e.get("label").and_then(|l| l.as_str()),
+                                }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(json!({
+                    "name": name,
+                    "efforts": efforts,
+                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(arr
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let id = obj.get("id")?.as_str()?.trim();
-            if id.is_empty() {
-                return None;
-            }
-            let models: Vec<String> = obj
-                .get("models")
-                .and_then(|m| m.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let model_details = sanitize_model_details(obj.get("model_details"));
-            Some(json!({
-                "id": id,
-                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                "models": models,
-                "model_details": model_details,
-            }))
-        })
-        .collect::<Vec<_>>())
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let id = obj.get("id")?.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                let models: Vec<String> = obj
+                    .get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model_details = sanitize_model_details(obj.get("model_details"));
+                Some(json!({
+                    "id": id,
+                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "models": models,
+                    "model_details": model_details,
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 const PAIR_TTL: Duration = Duration::hours(1);
@@ -204,9 +207,8 @@ fn resolve_send_policy<'a>(wanted: &'a str, ceiling: &str) -> AppResult<&'a str>
     let wanted = fleet_db::parse_worker_host_send_policy(wanted).ok_or_else(|| {
         AppError::bad_request("send_policy must be owner_only, allowlist, or workspace")
     })?;
-    let ceil = fleet_db::parse_worker_host_send_policy(ceiling).unwrap_or(
-        fleet_db::WORKER_HOST_SEND_OWNER_ONLY,
-    );
+    let ceil = fleet_db::parse_worker_host_send_policy(ceiling)
+        .unwrap_or(fleet_db::WORKER_HOST_SEND_OWNER_ONLY);
     if send_policy_rank(wanted).unwrap_or(99) > send_policy_rank(ceil).unwrap_or(0) {
         return Err(AppError::bad_request(
             "send_policy cannot be more open than the workspace default",
@@ -300,10 +302,7 @@ fn sha_matches_plane(got: Option<&str>, plane: Option<&str>) -> bool {
 }
 
 fn local_hostname() -> String {
-    local_machine_names()
-        .into_iter()
-        .next()
-        .unwrap_or_default()
+    local_machine_names().into_iter().next().unwrap_or_default()
 }
 
 /// HOSTNAME, `/etc/hostname`, `uname -n`, `hostname` — same needles the
@@ -421,25 +420,30 @@ fn host_is_loopback_origin(raw: &str) -> bool {
             }
         }
     }
-    let rest = raw
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(raw);
-    let hostport = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let rest = raw.split_once("://").map(|(_, r)| r).unwrap_or(raw);
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
     let host = if let Some(inner) = hostport.strip_prefix('[') {
         inner.split(']').next().unwrap_or("")
     } else {
         hostport.split(':').next().unwrap_or(hostport)
     };
     let host = host.trim().to_ascii_lowercase();
-    host == "localhost"
-        || host == "127.0.0.1"
-        || host == "::1"
-        || host.starts_with("127.")
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127.")
+}
+
+async fn clear_update_request_if_current(state: &AppState, host: WorkerHost) -> WorkerHost {
+    if host.update_requested_at.is_none() {
+        return host;
+    }
+    let public = host
+        .as_public(Utc::now())
+        .with_desired(desired_for(state, &host));
+    if public.software_status != WORKER_SOFTWARE_STATUS_CURRENT {
+        return host;
+    }
+    host_repo::clear_update_requested(&state.db, host.id)
+        .await
+        .unwrap_or(host)
 }
 
 fn host_json(state: &AppState, host: &WorkerHost) -> WorkerHostPublic {
@@ -913,9 +917,7 @@ async fn http_list(
     let hosts: Vec<_> = rows
         .iter()
         .filter(|h| {
-            h.workspace_id == workspace_id
-                || h.is_cluster_host()
-                || host_advertises_local_ip(h)
+            h.workspace_id == workspace_id || h.is_cluster_host() || host_advertises_local_ip(h)
         })
         .map(|h| host_json_for_viewer(&state, h, viewer_loopback))
         .collect();
@@ -1068,11 +1070,12 @@ async fn http_patch(
         },
     };
     let mut host =
-        host_repo::patch_cp_settings_in_workspace(&state.db, workspace_id, host_id, &patch)
-            .await?;
+        host_repo::patch_cp_settings_in_workspace(&state.db, workspace_id, host_id, &patch).await?;
     if let Some(raw) = body.run_mode.as_deref() {
         if host.current_jobs > 0 {
-            return Err(AppError::conflict("run_mode cannot change while jobs are running"));
+            return Err(AppError::conflict(
+                "run_mode cannot change while jobs are running",
+            ));
         }
         let mode = fleet_db::parse_worker_host_run_mode(raw)
             .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?;
@@ -1352,6 +1355,7 @@ async fn http_heartbeat(
         let _ =
             host_repo::set_runtime_reported(&state.db, host.id, sanitize_runtime_object(&rt)).await;
     }
+    let host = clear_update_request_if_current(&state, host).await;
     let public = host_json(&state, &host);
     let desired = public.desired.clone();
     Ok(Json(json!({
@@ -1524,7 +1528,7 @@ mod plane_bake_tests {
     use super::{
         host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
     };
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, header};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1579,7 +1583,9 @@ mod plane_bake_tests {
         assert!(super::host_is_loopback_origin("http://localhost:3030"));
         assert!(super::host_is_loopback_origin("http://127.0.0.1:3030"));
         assert!(super::host_is_loopback_origin("http://[::1]:3030"));
-        assert!(!super::host_is_loopback_origin("http://localhost.evil.example.test"));
+        assert!(!super::host_is_loopback_origin(
+            "http://localhost.evil.example.test"
+        ));
         assert!(!super::host_is_loopback_origin(
             "http://192.168.1.50:3030/?next=http://localhost:3030"
         ));
