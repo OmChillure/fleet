@@ -125,15 +125,23 @@ Protocol (checklist, when to film, which scene maps to which crate):
 
 ## Merge requests and review
 
+**Opening an MR is the green light to merge.** Do not create the GitLab
+MR until every merge requirement below is done on the **final tree**
+(ship-image compile, `just test` / `just test-integration`, relevant
+locks, `HUMAN_TEST_SCOPE.md` + film when this is not a small tweak).
+A branch can exist locally. The MR must not. Starting a long bake and
+then opening the MR while it runs is not done — wait, or do not open.
+
 Ship work through a **GitLab merge request** and **ask for a peer review on
 Slack**. That is the default.
 
 Skip the MR/review loop **only** for small tweaks: typos, comment nits,
 import order, one-line docs wording. If it changes behavior, data, UI,
 install, tests, sandbox/lab, or operator scripts, it is not a small tweak
-— open an MR and ask on Slack.
+— finish the merge bar, then open an MR and ask on Slack.
 
-Do not merge unless a human asks you to merge.
+Do not merge unless a human asks you to merge. The human should not have
+to ask whether tests, ship images, or the film are still pending.
 
 All tests must pass before a merge to main. `just test` and
 `just test-integration` must be green on the merge tree. Do not merge

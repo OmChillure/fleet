@@ -305,6 +305,9 @@ after this MR merges.
 
 ## Per-MR checklist (copy)
 
+Opening the GitLab MR **is** the green light to merge (`AGENTS.md`).
+Do not create the MR until this list is done on the final tree.
+
 - [ ] Decision numbers in the MR description
 - [ ] `python3 tests/browser/surface_scope.py --write` (`--check` clean)
 - [ ] Relevant `just test` / `just test-integration`
