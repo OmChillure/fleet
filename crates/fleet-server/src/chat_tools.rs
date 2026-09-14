@@ -5,16 +5,16 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyResult,
+    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
 };
-use fleet_integrations::{catalog, IntegrationAvailability};
+use fleet_integrations::{IntegrationAvailability, catalog};
 use fleet_orchestrator::domain::{
-    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
-    MAX_TASKS_PER_PLAN,
+    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
+    WorkPlanStatus,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -242,7 +242,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "list_agent_personas",
-                "description": "List specialist agent personas to use as worker_profile on launch_agent_task / launch_agent_plan. Any roster slug works (engineering, marketing, finance, healthcare, …). Default if omitted: generalist. Optional shortcuts: coding, frontend, reviewer, testing.",
+                "description": "List roster specialists to use as worker_profile on launch_agent_task / launch_agent_plan. Returns specialists as the main list; workspace personas (if any) are a separate workspace_personas array, not mixed in. Any roster slug works (engineering, marketing, finance, healthcare, …). Default if omitted: generalist. Optional shortcuts: coding, frontend, reviewer, testing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -807,8 +807,7 @@ pub fn require_runner_worker_llm(llm: &ChatLlmContext) -> AppResult<()> {
         return Ok(());
     }
     Err(AppError::bad_request(
-        "fleet workers run Grok, Claude, Gemini, OpenAI, or Ollama on a paired runner"
-            .to_string(),
+        "fleet workers run Grok, Claude, Gemini, OpenAI, or Ollama on a paired runner".to_string(),
     ))
 }
 
@@ -841,10 +840,8 @@ pub fn wants_fleet_launch(text: &str) -> bool {
         || t.contains("start an")
         || t.contains("start a ")
         || t.contains("create an");
-    let target = t.contains("agent")
-        || t.contains("fleet")
-        || t.contains("sandbox")
-        || t.contains("worker");
+    let target =
+        t.contains("agent") || t.contains("fleet") || t.contains("sandbox") || t.contains("worker");
     launchy && target
 }
 
@@ -1298,19 +1295,15 @@ pub fn coerce_integration_args(
         let ch = next.get("channel").and_then(|v| v.as_str()).unwrap_or("");
         let needs_id = ch.is_empty() || !(ch.starts_with('C') && ch.len() >= 8);
         if needs_id {
-            if let Some(id) = harvest_slack_channel_named(prior, ch)
-                .or_else(|| harvest_slack_channel(prior))
+            if let Some(id) =
+                harvest_slack_channel_named(prior, ch).or_else(|| harvest_slack_channel(prior))
             {
                 next.as_object_mut()?.insert("channel".into(), json!(id));
                 changed = true;
             }
         }
     }
-    if changed {
-        Some(next)
-    } else {
-        None
-    }
+    if changed { Some(next) } else { None }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -1780,32 +1773,64 @@ async fn list_agent_personas_tool(
     let data_dir = std::env::var("DATA_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
-    let mut personas = fleet_orchestrator::personas::list_personas(&data_dir).await;
+    let mut specialists = fleet_orchestrator::personas::list_roster_specialists(&data_dir).await;
     if let Some(d) = division {
-        personas.retain(|p| p.division.eq_ignore_ascii_case(d));
+        specialists.retain(|p| p.division.eq_ignore_ascii_case(d));
     }
     let custom =
         fleet_db::repos::personas::list_for_workspace(&state.db, workspace_id, Some("active"))
             .await
             .unwrap_or_default();
-    let custom_json: Vec<Value> = custom
+    let workspace_json: Vec<Value> = custom
         .iter()
         .map(|p| {
             json!({
                 "slug": p.slug,
                 "name": p.name,
                 "description": p.description,
-                "division": "workspace",
+                "role_prompt": p.role_prompt,
+                "worker_profile": p.worker_profile,
+                "model_preference": p.model_preference,
                 "source": "workspace",
             })
         })
         .collect();
-    let n = personas.len() + custom_json.len();
-    let content = json!({
+    let specialists_json: Vec<Value> = specialists
+        .iter()
+        .take(80)
+        .map(|p| serde_json::to_value(p).unwrap_or_else(|_| json!({})))
+        .collect();
+    let content = list_agent_personas_payload(&specialists_json, &workspace_json);
+    let n = specialists_json.len();
+    let ws_n = workspace_json.len();
+    let summary = if ws_n == 0 {
+        format!("{n} specialist(s)")
+    } else {
+        format!("{n} specialist(s), {ws_n} workspace persona(s)")
+    };
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "list_agent_personas".into(),
+            ok: true,
+            summary,
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+/// Specialists are the main list. Workspace personas stay in their own array.
+fn list_agent_personas_payload(specialists: &[Value], workspace_personas: &[Value]) -> Value {
+    json!({
         "source": "https://github.com/msitarzewski/agency-agents",
-        "count": n,
+        "count": specialists.len(),
         "default": "generalist",
-        "workspace_personas": custom_json,
+        "specialists": specialists,
+        // Same as specialists — never mixed with workspace personas.
+        "personas": specialists,
+        "workspace_personas": workspace_personas,
         "aliases": {
             "generalist": "generalist",
             "coding": "engineering-backend-architect (optional shortcut)",
@@ -1813,20 +1838,8 @@ async fn list_agent_personas_tool(
             "reviewer": "any *reviewer* slug (optional shortcut)",
             "testing": "testing/* first match (optional shortcut)",
         },
-        "personas": personas.iter().take(80).collect::<Vec<_>>(),
-        "hint": "Set worker_profile to a workspace persona slug (Agents page) or any roster slug.",
-    });
-    Ok((
-        content.clone(),
-        ChatAction {
-            tool: "list_agent_personas".into(),
-            ok: true,
-            summary: format!("{n} persona(s)"),
-            run_id: None,
-            sandbox_ids: None,
-            detail: Some(content),
-        },
-    ))
+        "hint": "Main list is roster specialists (worker_profile slugs). Workspace personas are only in workspace_personas — they are a different JSON shape.",
+    })
 }
 
 fn orch_data_dir(state: &AppState) -> std::path::PathBuf {
@@ -1840,7 +1853,8 @@ async fn resolve_chat_run(
 ) -> AppResult<Uuid> {
     ensure_project(state, workspace_id).await?;
     if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
-        let id = Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
+        let id =
+            Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
         return state
             .orch
             .store
@@ -2952,6 +2966,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_agent_personas_payload_keeps_specialists_and_workspace_apart() {
+        let specialists = vec![json!({
+            "slug": "generalist",
+            "name": "Specialist",
+            "division": "specialized",
+        })];
+        let workspace = vec![json!({
+            "slug": "software-engineer",
+            "name": "Software engineer",
+            "role_prompt": "Be careful.",
+            "worker_profile": "coding",
+            "source": "workspace",
+        })];
+        let v = list_agent_personas_payload(&specialists, &workspace);
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["default"], "generalist");
+        assert_eq!(v["specialists"][0]["slug"], "generalist");
+        assert_eq!(v["personas"][0]["slug"], "generalist");
+        assert_eq!(v["workspace_personas"][0]["slug"], "software-engineer");
+        assert_eq!(v["workspace_personas"][0]["role_prompt"], "Be careful.");
+        let specialist_slugs: Vec<&str> = v["specialists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["slug"].as_str())
+            .collect();
+        assert!(
+            !specialist_slugs.contains(&"software-engineer"),
+            "workspace persona must not appear in specialists: {v}"
+        );
+        let persona_slugs: Vec<&str> = v["personas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["slug"].as_str())
+            .collect();
+        assert!(
+            !persona_slugs.contains(&"software-engineer"),
+            "workspace persona must not appear in personas: {v}"
+        );
+    }
+
+    #[test]
+    fn list_agent_personas_payload_count_is_specialists_only() {
+        let specialists = vec![json!({"slug": "a"}), json!({"slug": "b"})];
+        let workspace = vec![
+            json!({"slug": "ws-1"}),
+            json!({"slug": "ws-2"}),
+            json!({"slug": "ws-3"}),
+        ];
+        let v = list_agent_personas_payload(&specialists, &workspace);
+        assert_eq!(v["count"], 2, "count must not mix workspace personas: {v}");
+        assert_eq!(v["specialists"].as_array().unwrap().len(), 2);
+        assert_eq!(v["workspace_personas"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn stamp_plan_llm_writes_provider_and_model() {
         let mut plan = build_chat_plan(Uuid::nil(), "T", "S", "coding");
         let runner = Uuid::now_v7();
@@ -3054,10 +3125,12 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_id() {
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": " ", "title": "X" }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": " ", "title": "X" }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3086,19 +3159,23 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_task_title() {
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "a", "title": "  " }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": "a", "title": "  " }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn parse_launch_plan_args_rejects_task_title_over_200() {
         let title = "x".repeat(201);
-        assert!(parse_launch_plan_args(&json!({
-            "tasks": [{ "id": "a", "title": title }]
-        }))
-        .is_err());
+        assert!(
+            parse_launch_plan_args(&json!({
+                "tasks": [{ "id": "a", "title": title }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3299,13 +3376,9 @@ mod tests {
     fn coerce_post_message_and_get_thread_resolve_hash_eng() {
         let prior = listed_channels_general_then_eng();
         for operation in ["post_message", "get_thread"] {
-            let fixed = coerce_integration_args(
-                "slack",
-                operation,
-                &json!({ "channel": "#eng" }),
-                &prior,
-            )
-            .unwrap_or_else(|| panic!("{operation} should rewrite #eng"));
+            let fixed =
+                coerce_integration_args("slack", operation, &json!({ "channel": "#eng" }), &prior)
+                    .unwrap_or_else(|| panic!("{operation} should rewrite #eng"));
             assert_eq!(fixed["channel"], "CENG", "{operation}");
         }
     }

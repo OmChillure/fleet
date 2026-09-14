@@ -3,17 +3,17 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
+use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, patch};
-use axum::Router;
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_instance_admin, AppError, AppResult, AuthState};
-use fleet_db::repos::{admin as admin_repo, sessions as session_repo, users as user_repo};
+use fleet_auth::{AppError, AppResult, AuthState, require_instance_admin};
 use fleet_db::User;
+use fleet_db::repos::{admin as admin_repo, sessions as session_repo, users as user_repo};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -26,7 +26,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/users/{user_id}", patch(http_patch_user))
         .route("/api/admin/workspaces", get(http_workspaces))
         .route("/api/admin/runners", get(http_runners))
-        .route("/api/admin/instance", get(http_instance))
+        .route(
+            "/api/admin/instance",
+            get(http_instance).patch(http_patch_instance),
+        )
         .route("/api/admin/work", get(http_work))
         .route("/api/admin/sessions", get(http_sessions))
 }
@@ -50,10 +53,7 @@ fn sum_map(m: &BTreeMap<String, i64>) -> i64 {
     m.values().sum()
 }
 
-async fn http_overview(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> AppResult<Json<Value>> {
+async fn http_overview(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<Value>> {
     let _ = require_admin(&state, &jar).await?;
     let users = user_repo::count_by_status(&state.db).await?;
     let mut users_by_status: BTreeMap<String, i64> = users.into_iter().collect();
@@ -146,9 +146,7 @@ async fn http_patch_user(
         match status {
             "active" | "disabled" => {}
             _ => {
-                return Err(AppError::bad_request(
-                    "status must be active or disabled",
-                ));
+                return Err(AppError::bad_request("status must be active or disabled"));
             }
         }
         if target.id == actor.id && status == "disabled" {
@@ -216,10 +214,7 @@ async fn http_patch_user(
     Ok(Json(json!({ "user": fleet_db::UserPublic::from(latest) })))
 }
 
-async fn http_workspaces(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> AppResult<Json<Value>> {
+async fn http_workspaces(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<Value>> {
     let _ = require_admin(&state, &jar).await?;
     let workspaces = admin_repo::list_workspaces(&state.db).await?;
     Ok(Json(json!({ "workspaces": workspaces })))
@@ -260,10 +255,7 @@ fn env_set(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn http_instance(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> AppResult<Json<Value>> {
+async fn http_instance(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<Value>> {
     let _ = require_admin(&state, &jar).await?;
     let db_ok = state.db.acquire().await.is_ok();
     let git_sha = option_env!("FLEET_GIT_SHA")
@@ -306,6 +298,10 @@ async fn http_instance(
         "instance_admin_emails": state.auth.instance_admin_emails,
         "bootstrap_pair_enabled": env_set("FLEET_BOOTSTRAP_SECRET"),
         "fleet_max_agents": std::env::var("FLEET_MAX_AGENTS").ok(),
+        "max_agents_cap": fleet_db::repos::instance_settings::get(&state.db)
+            .await
+            .map(|s| s.max_agents_cap)
+            .unwrap_or(128),
         "providers": {
             "ollama": state.ollama.enabled,
             "grok": state.grok.enabled,
@@ -322,6 +318,27 @@ async fn http_instance(
         },
         "plane_git_sha": git_sha,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchInstanceBody {
+    max_agents_cap: Option<i32>,
+}
+
+async fn http_patch_instance(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<PatchInstanceBody>,
+) -> AppResult<Json<Value>> {
+    let _ = require_admin(&state, &jar).await?;
+    let Some(cap) = body.max_agents_cap else {
+        return Err(AppError::bad_request("max_agents_cap required"));
+    };
+    if !(1..=1024).contains(&cap) {
+        return Err(AppError::bad_request("max_agents_cap must be 1–1024"));
+    }
+    let row = fleet_db::repos::instance_settings::set_max_agents_cap(&state.db, cap).await?;
+    Ok(Json(json!({ "max_agents_cap": row.max_agents_cap })))
 }
 
 async fn http_work(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<Value>> {
@@ -346,10 +363,7 @@ async fn http_work(State(state): State<AppState>, jar: CookieJar) -> AppResult<J
     })))
 }
 
-async fn http_sessions(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> AppResult<Json<Value>> {
+async fn http_sessions(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<Value>> {
     let _ = require_admin(&state, &jar).await?;
     let sessions = admin_repo::list_active_sessions(&state.db).await?;
     Ok(Json(json!({ "sessions": sessions })))

@@ -4,21 +4,21 @@
 //! Machine: pair token once, then `Authorization: Bearer flm_…`.
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::work_claims;
 use fleet_db::repos::worker_hosts::{self as host_repo, PairedWorkerHost};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    parse_worker_host_isolation, HostCpSettings, NewWorkerHost, WorkerHost, WorkerHostPublic,
-    WORKER_SOFTWARE_STATUS_CURRENT,
+    HostCpSettings, NewWorkerHost, WORKER_SOFTWARE_STATUS_CURRENT, WorkerHost, WorkerHostPublic,
+    parse_worker_host_isolation,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -27,78 +27,80 @@ fn sanitize_model_details(v: Option<&Value>) -> Value {
     let Some(arr) = v.and_then(|x| x.as_array()) else {
         return json!([]);
     };
-    json!(arr
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let name = obj.get("name")?.as_str()?.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let efforts: Vec<Value> = obj
-                .get("efforts")
-                .and_then(|e| e.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|e| {
-                            let value = e
-                                .get("value")
-                                .or_else(|| e.get("id"))
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("")
-                                .trim();
-                            if value.is_empty() {
-                                return None;
-                            }
-                            Some(json!({
-                                "value": value,
-                                "label": e.get("label").and_then(|l| l.as_str()),
-                            }))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(json!({
-                "name": name,
-                "efforts": efforts,
-                "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
-            }))
-        })
-        .collect::<Vec<_>>())
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let name = obj.get("name")?.as_str()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let efforts: Vec<Value> = obj
+                    .get("efforts")
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                let value = e
+                                    .get("value")
+                                    .or_else(|| e.get("id"))
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                if value.is_empty() {
+                                    return None;
+                                }
+                                Some(json!({
+                                    "value": value,
+                                    "label": e.get("label").and_then(|l| l.as_str()),
+                                }))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(json!({
+                    "name": name,
+                    "efforts": efforts,
+                    "default_effort": obj.get("default_effort").and_then(|d| d.as_str()),
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 fn sanitize_heartbeat_agents(v: Value) -> Value {
     let Some(arr) = v.as_array() else {
         return json!([]);
     };
-    json!(arr
-        .iter()
-        .filter_map(|item| {
-            let obj = item.as_object()?;
-            let id = obj.get("id")?.as_str()?.trim();
-            if id.is_empty() {
-                return None;
-            }
-            let models: Vec<String> = obj
-                .get("models")
-                .and_then(|m| m.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let model_details = sanitize_model_details(obj.get("model_details"));
-            Some(json!({
-                "id": id,
-                "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
-                "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
-                "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
-                "models": models,
-                "model_details": model_details,
-            }))
-        })
-        .collect::<Vec<_>>())
+    json!(
+        arr.iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                let id = obj.get("id")?.as_str()?.trim();
+                if id.is_empty() {
+                    return None;
+                }
+                let models: Vec<String> = obj
+                    .get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model_details = sanitize_model_details(obj.get("model_details"));
+                Some(json!({
+                    "id": id,
+                    "name": obj.get("name").and_then(|n| n.as_str()).unwrap_or(id),
+                    "installed": obj.get("installed").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "logged_in": obj.get("logged_in").and_then(|b| b.as_bool()).unwrap_or(false),
+                    "models": models,
+                    "model_details": model_details,
+                }))
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
 const PAIR_TTL: Duration = Duration::hours(1);
@@ -570,6 +572,12 @@ fn validate_max_job_timeout_s(n: i32) -> AppResult<()> {
 }
 
 fn validate_isolation(raw: &str) -> AppResult<&'static str> {
+    let trimmed = raw.trim();
+    if matches!(trimmed, "process" | "container" | "vm") {
+        return Err(AppError::bad_request(
+            "isolation process/container/vm is workspace_location (min_isolation), not host isolation; use agent_runtime (run_mode) or workspace_location",
+        ));
+    }
     parse_worker_host_isolation(raw)
         .ok_or_else(|| AppError::bad_request("isolation must be native or sandboxed"))
 }
@@ -692,7 +700,7 @@ pub struct CreateWorkerHostBody {
     /// Rejected on create. Cloud / Partners are not worker_hosts rows.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Rejected on create. Isolation is a PATCH of a paired native box.
+    /// Rejected on create. Host isolation is a PATCH of a paired box.
     #[serde(default)]
     pub isolation: Option<String>,
     /// `owner_only` | `allowlist` | `workspace`. Capped by workspace default.
@@ -734,7 +742,8 @@ pub struct PatchWorkerHostBody {
     pub send_policy: Option<String>,
     #[serde(default)]
     pub send_allowlist: Option<Vec<Uuid>>,
-    #[serde(default)]
+    /// `on_pc` | `in_container`. Product alias: `agent_runtime`.
+    #[serde(default, alias = "agent_runtime")]
     pub run_mode: Option<String>,
 }
 
@@ -1079,8 +1088,9 @@ async fn http_patch(
                 "run_mode cannot change while jobs are running",
             ));
         }
-        let mode = fleet_db::parse_worker_host_run_mode(raw)
-            .ok_or_else(|| AppError::bad_request("run_mode must be on_pc or in_container"))?;
+        let mode = fleet_db::parse_worker_host_run_mode(raw).ok_or_else(|| {
+            AppError::bad_request("agent_runtime (run_mode) must be on_pc or in_container")
+        })?;
         host_repo::set_run_mode(&state.db, host_id, mode).await?;
     }
     if let Some(raw) = body.send_policy.as_deref() {
@@ -1530,7 +1540,7 @@ mod plane_bake_tests {
     use super::{
         host_on_manifest_versions, origin_is_loopback, sha_matches_plane, should_withhold_desired,
     };
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, header};
     use fleet_db::{WorkerBinMeta, WorkerHost, WorkerSoftwareManifest};
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1830,5 +1840,42 @@ mod plane_bake_tests {
             !super::host_advertises_local_ip(&short),
             "hostname-only must not unscoped-share"
         );
+    }
+}
+
+#[cfg(test)]
+mod isolation_naming_tests {
+    use super::{PatchWorkerHostBody, validate_isolation};
+
+    #[test]
+    fn patch_isolation_process_is_400_naming_axes() {
+        for raw in ["process", "container", "vm", " process "] {
+            let err = validate_isolation(raw).expect_err(raw);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("agent_runtime") && msg.contains("workspace_location"),
+                "PATCH isolation={raw} must name both axes: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_isolation_native_and_sandboxed_still_ok() {
+        assert_eq!(validate_isolation("native").expect("native"), "native");
+        assert_eq!(
+            validate_isolation("sandboxed").expect("sandboxed"),
+            "sandboxed"
+        );
+    }
+
+    #[test]
+    fn patch_body_accepts_agent_runtime_alias_of_run_mode() {
+        let via_alias: PatchWorkerHostBody =
+            serde_json::from_value(serde_json::json!({ "agent_runtime": "in_container" }))
+                .expect("alias");
+        assert_eq!(via_alias.run_mode.as_deref(), Some("in_container"));
+        let via_old: PatchWorkerHostBody =
+            serde_json::from_value(serde_json::json!({ "run_mode": "on_pc" })).expect("old key");
+        assert_eq!(via_old.run_mode.as_deref(), Some("on_pc"));
     }
 }

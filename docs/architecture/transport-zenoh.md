@@ -111,6 +111,7 @@ fleet/{tenant}/session/{session_id}/agent/{turn_id}/stream/{seq}     # optional 
 fleet/{tenant}/sandbox/{sandbox_id}/event/{type}
 fleet/{tenant}/task/{task_id}/event/{type}
 fleet/{tenant}/integration/{name}/event/{type}
+fleet/{workspace}/run/{run_id}/share/{aspect}                       # mid-run team facts
 ```
 
 Examples:
@@ -131,6 +132,8 @@ Wildcard subscriptions:
 | Everything for one session | `fleet/{t}/session/{sid}/**` |
 | All agent streams fleet-wide (ops) | `fleet/*/session/*/agent/**` |
 | One integration inbound | `fleet/{t}/integration/slack/event/*` |
+| Mid-run share (all runs) | `fleet/*/run/*/share/**` (`KEY_EXPR_ALL_RUN_SHARE`) |
+| One run's team share | `fleet/{workspace}/run/{run}/**` |
 
 Payload: **JSON** body = our [common envelope](./events.md#0-common-envelope)
 + `payload` domain fields ([serialization](./events.md#01-serialization-recommended)).
@@ -193,6 +196,20 @@ fleet/{tenant}/admin/…
 ```
 
 Keep out of the critical event path.
+
+### 4.5 Mid-run share (team facts)
+
+HTTP tick still assigns work and stores durable board state. Guests that
+need to see each other mid-run publish on:
+
+```
+fleet/{workspace}/run/{run_id}/share/{aspect}
+```
+
+`{aspect}` is typically `chat/{message_id}`. Plane subscriber:
+`fleet/*/run/*/share/**` (`KEY_EXPR_ALL_RUN_SHARE`). If `ZENOH_LOCATOR` is
+unset or open fails, assignment still works (degrade, no deadlock). Tick
+does not wait on Zenoh.
 
 ---
 

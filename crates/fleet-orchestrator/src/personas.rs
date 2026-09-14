@@ -1,5 +1,9 @@
-//! Agency-agents personas (https://github.com/msitarzewski/agency-agents).
+//! Agency-agents **roster specialists** (https://github.com/msitarzewski/agency-agents).
 //! Cloned into DATA_DIR/agency-agents (or FLEET_PERSONAS_DIR). `worker_profile` selects one.
+//!
+//! Distinct from **workspace personas** (`/api/workspaces/{id}/personas`): those
+//! persist `role_prompt` / tools / budget in Postgres. This module is the roster
+//! (division / emoji / vibe) plus spawn resolution.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +15,8 @@ use serde::Serialize;
 const UPSTREAM: &str = "https://github.com/msitarzewski/agency-agents.git";
 const SYNC_TTL: Duration = Duration::from_secs(6 * 3600);
 
+/// Resolved spawn payload: a workspace persona or a roster specialist.
+/// Not the workspace-persona CRUD JSON (`PersonaPublic`).
 #[derive(Debug, Clone, Serialize)]
 pub struct Persona {
     pub slug: String,
@@ -19,7 +25,7 @@ pub struct Persona {
     pub division: String,
     pub emoji: String,
     pub vibe: String,
-    /// Workspace catalog `model_preference`. Empty for roster personas.
+    /// Workspace persona `model_preference`. Empty for roster specialists.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model_preference: String,
     /// Full markdown body (frontmatter stripped + original).
@@ -27,6 +33,7 @@ pub struct Persona {
     pub body: String,
 }
 
+/// Agency-agents roster specialist card. Not a workspace persona.
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonaSummary {
     pub slug: String,
@@ -36,6 +43,12 @@ pub struct PersonaSummary {
     pub emoji: String,
     pub vibe: String,
 }
+
+/// Same fields as [`Persona`] when the source is the agency-agents roster.
+pub type RosterSpecialist = Persona;
+
+/// Alias for [`PersonaSummary`] — roster specialist cards on `/fleet/personas`.
+pub type RosterSpecialistSummary = PersonaSummary;
 
 impl Persona {
     pub fn summary(&self) -> PersonaSummary {
@@ -61,7 +74,7 @@ pub fn personas_dir(data_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| data_dir.join("agency-agents"))
 }
 
-/// Clone or refresh the upstream roster (best-effort).
+/// Clone or refresh the upstream roster specialists (best-effort).
 pub async fn ensure_roster(dir: &Path) -> Result<(), String> {
     if let Ok(g) = LAST_SYNC.lock()
         && let Some(t) = *g
@@ -93,7 +106,7 @@ fn sync_blocking(dir: &Path) -> Result<(), String> {
                 .status()
                 .map_err(|e| format!("git pull personas: {e}"))?;
             if !st.success() {
-                tracing::warn!("git pull agency-agents failed; using existing clone");
+                tracing::warn!("git pull agency-agents roster failed; using existing clone");
             }
         }
         return Ok(());
@@ -116,27 +129,32 @@ fn sync_blocking(dir: &Path) -> Result<(), String> {
         .status()
         .map_err(|e| format!("git clone agency-agents: {e}"))?;
     if !st.success() {
-        return Err("git clone agency-agents failed (network?)".into());
+        return Err("git clone agency-agents roster failed (network?)".into());
     }
-    tracing::info!(dir = %dir.display(), "cloned agency-agents personas");
+    tracing::info!(dir = %dir.display(), "cloned agency-agents roster specialists");
     Ok(())
 }
 
-pub async fn list_personas(data_dir: &Path) -> Vec<PersonaSummary> {
+/// List roster specialists (agency-agents). Never mixes in workspace personas.
+pub async fn list_roster_specialists(data_dir: &Path) -> Vec<RosterSpecialistSummary> {
     let dir = personas_dir(data_dir);
     let _ = ensure_roster(&dir).await;
     let mut all = scan_dir(&dir);
     if all.is_empty() {
         all = builtin_personas();
     }
-    let mut out: Vec<PersonaSummary> = all.into_iter().map(|p| p.summary()).collect();
+    let mut out: Vec<RosterSpecialistSummary> = all.into_iter().map(|p| p.summary()).collect();
     out.sort_by(|a, b| a.division.cmp(&b.division).then(a.name.cmp(&b.name)));
     out
 }
 
-/// Workspace catalog first (role_prompt + model_preference), then the
-/// agency-agents roster. The personas HTTP API never invokes an LLM;
-/// this is consumption at spawn.
+pub async fn list_personas(data_dir: &Path) -> Vec<PersonaSummary> {
+    list_roster_specialists(data_dir).await
+}
+
+/// Workspace persona first (`role_prompt` + `model_preference`), then the
+/// agency-agents roster specialist. The workspace-personas HTTP API never
+/// invokes an LLM; this is consumption at spawn.
 pub async fn resolve_for_workspace(
     pool: &sqlx::PgPool,
     workspace_id: uuid::Uuid,
@@ -151,7 +169,7 @@ pub async fn resolve_for_workspace(
                 error = %e,
                 workspace_id = %workspace_id,
                 profile,
-                "workspace persona lookup failed; using roster"
+                "workspace persona lookup failed; using roster specialist"
             );
         }
     }
@@ -177,7 +195,7 @@ fn persona_from_workspace_row(row: &fleet_db::Persona) -> Persona {
     }
 }
 
-/// Resolve `worker_profile` to a full persona (body included).
+/// Resolve `worker_profile` to a roster specialist (body included).
 pub async fn resolve(profile: &str, data_dir: &Path) -> Persona {
     let dir = personas_dir(data_dir);
     let _ = ensure_roster(&dir).await;

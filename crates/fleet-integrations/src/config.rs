@@ -91,10 +91,8 @@ impl IntegrationsConfig {
             "API_PUBLIC_BASE",
             env_port(&["PORT", "FLEET_API_PORT", "AUTH_PORT"], 8080),
         );
-        let ui_public_base = env_url_or_localhost(
-            "UI_PUBLIC_BASE",
-            env_port(&["FLEET_UI_PORT"], 3030),
-        );
+        let ui_public_base =
+            env_url_or_localhost("UI_PUBLIC_BASE", env_port(&["FLEET_UI_PORT"], 3030));
 
         let state_secret = match env::var("JWT_SECRET") {
             Ok(s) => {
@@ -867,10 +865,7 @@ mod tests {
                 cfg.github.is_none(),
                 "{case}: github must be None, not a half-config"
             );
-            assert!(
-                cfg.gitlab.is_none(),
-                "{case}: gitlab must stay None"
-            );
+            assert!(cfg.gitlab.is_none(), "{case}: gitlab must stay None");
             assert_eq!(cfg.state_secret, PAIR_JWT);
         }
     }
@@ -892,10 +887,7 @@ mod tests {
             github.github_app_slug.is_none(),
             "optional_oauth stores github_app_slug: None"
         );
-        assert!(
-            cfg.gitlab.is_none(),
-            "gitlab must stay None when unset"
-        );
+        assert!(cfg.gitlab.is_none(), "gitlab must stay None when unset");
         assert_eq!(cfg.state_secret, PAIR_JWT);
     }
 
@@ -924,13 +916,10 @@ mod tests {
     #[test]
     fn oauth_client_pair_gitlab_both_set_parses_from_env() {
         assert!(PAIR_JWT.len() >= 32);
-        let cfg = with_oauth_client_pair_env(
-            None,
-            None,
-            Some(PAIR_GL_ID),
-            Some(PAIR_GL_SECRET),
-            || IntegrationsConfig::from_env().expect("both set must parse gitlab"),
-        );
+        let cfg =
+            with_oauth_client_pair_env(None, None, Some(PAIR_GL_ID), Some(PAIR_GL_SECRET), || {
+                IntegrationsConfig::from_env().expect("both set must parse gitlab")
+            });
         let gitlab = cfg
             .gitlab
             .as_ref()

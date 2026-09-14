@@ -1,4 +1,11 @@
-# Sandbox compose rig — per-task driver + Redis + harness (ACP)
+# Sandbox-lab leftover (not the product sandbox)
+
+This compose rig (OpenCode / Pi / Redis, per-task driver) is leftover.
+It is not how sandboxes run today. The product guest is
+[`fleet-driver`](../../fleet-driver/) on a paired
+[`fleet-host`](../../fleet-host/).
+
+The notes below describe the leftover lab only.
 
 ```
   host                         per-task sandbox (compose project)
@@ -8,14 +15,15 @@
                                jobs/{job_id}/repo + fleet-wsexec
 ```
 
-**Rule:** one task → one Compose project → one volume → one workspace.  
-Do not share `/workspace` across tasks. Driver: [`crates/fleet-sandbox-driver`](../../) (`fleet-sandbox-driver`).
+**Rule (lab only):** one task → one Compose project → one volume → one workspace.  
+Do not share `/workspace` across tasks. Leftover driver: [`crates/fleet-sandbox-driver`](../../) (`fleet-sandbox-driver`).
 
-Architecture: [`docs/architecture/sandbox-workspace.md`](../../../docs/architecture/sandbox-workspace.md)
+Architecture (historical lab notes): [`docs/architecture/sandbox-workspace.md`](../../../docs/architecture/sandbox-workspace.md)
 
 ## Prerequisites / install
 
-**Install (only source of truth):** [`scripts/install-full-suite-deps.sh`](scripts/install-full-suite-deps.sh)  
+**Install (only source of truth):** [`scripts/install-full-suite-deps.sh`](../../../../scripts/install-full-suite-deps.sh)  
+(leftover wrapper: [`scripts/install-full-suite-deps.sh`](scripts/install-full-suite-deps.sh))  
 Settings live in the repo-root `.env`. No command-line flags.
 
 ### One-time: pin compose images

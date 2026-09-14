@@ -1,6 +1,6 @@
 use super::StoreError;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -56,13 +56,10 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
         .map_err(StoreError::Sqlx)
 }
 
+/// Schema lives in `fleet-db/migrations` (including the old orch version
+/// prefixes). Do not run a second `sqlx::migrate!` against this pool.
 pub async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
-    let mut conn = pool.acquire().await.map_err(StoreError::Sqlx)?;
-    let _ = sqlx::query("DEALLOCATE ALL").execute(&mut *conn).await;
-    sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
-        .run(&mut *conn)
+    fleet_db::migrate(pool)
         .await
-        .map_err(|e| StoreError::Validation(format!("migrate: {e}")))?;
-    Ok(())
+        .map_err(|e| StoreError::Validation(format!("migrate: {e}")))
 }

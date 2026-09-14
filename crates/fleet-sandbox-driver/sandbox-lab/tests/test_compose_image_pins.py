@@ -7,7 +7,7 @@ from pathlib import Path
 
 LAB = Path(__file__).resolve().parents[1]
 COMPOSE = LAB / "docker-compose.yml"
-INSTALL = LAB / "scripts" / "install-full-suite-deps.sh"
+INSTALL = LAB.parents[2] / "scripts" / "install-full-suite-deps.sh"
 WS_TAG = "agent-fleet-sandbox-workspace:local"
 DR_TAG = "agent-fleet-sandbox-driver:local"
 PINNED = (

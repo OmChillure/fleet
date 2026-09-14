@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
@@ -15,7 +15,7 @@ use fleet_orchestrator::domain::{
 use fleet_orchestrator::orch::TickError;
 use fleet_orchestrator::store::StoreError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -92,7 +92,7 @@ async fn ensure_project(state: &AppState, workspace_id: Uuid, name_hint: &str) -
     state
         .orch
         .store
-        .ensure_project(workspace_id, name_hint, 3)
+        .ensure_project(workspace_id, name_hint, 16)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -162,8 +162,15 @@ async fn settings_json(
     // Do not serialize OpenaiConfig / ClaudeConfig / GrokConfig — api_key stays off the wire.
     json!({
         "max_agents": cfg.max_agents,
-        "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
+        "max_agents_cap": fleet_db::repos::instance_settings::get(&state.db)
+            .await
+            .map(|s| s.max_agents_cap)
+            .unwrap_or(128),
         "min_isolation": min_isolation,
+        "workspace_location": min_isolation,
+        "agent_runtime": workspace_repo::default_run_mode(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
         "default_run_mode": workspace_repo::default_run_mode(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "on_pc".into()),
@@ -228,10 +235,14 @@ async fn patch_settings(
         .map_err(|e| map_orch_err("get_project_config", e))?;
 
     let max = body.max_agents.unwrap_or(current.max_agents);
-    if max < 1 || max > fleet_orchestrator::domain::MAX_PROJECT_AGENTS {
+    let cap = fleet_db::repos::instance_settings::get(&state.db)
+        .await
+        .map(|s| s.max_agents_cap)
+        .unwrap_or(128)
+        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
+    if max < 1 || max > cap {
         return Err(AppError::bad_request(format!(
-            "max_agents must be 1–{}",
-            fleet_orchestrator::domain::MAX_PROJECT_AGENTS
+            "max_agents must be 1–{cap} (instance cap)"
         )));
     }
     let llm = body

@@ -27,14 +27,7 @@ BOOTSTRAP = REPO / "scripts" / "bootstrap-every-test.sh"
 EVERY = REPO / "scripts" / "run-every-test.sh"
 FLEET_DEV = REPO / "scripts" / "fleet-dev.sh"
 HUMAN = REPO / "scripts" / "human-test.sh"
-INSTALL = (
-    REPO
-    / "crates"
-    / "fleet-sandbox-driver"
-    / "sandbox-lab"
-    / "scripts"
-    / "install-full-suite-deps.sh"
-)
+INSTALL = REPO / "scripts" / "install-full-suite-deps.sh"
 FULL_SUITE = (
     REPO
     / "crates"

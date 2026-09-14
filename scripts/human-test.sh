@@ -4,7 +4,7 @@
 #   ./scripts/human-test.sh record [scenes…]
 #
 # Does NOT install packages. Missing cargo/docker/dx → run
-#   crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+#   scripts/install-full-suite-deps.sh
 # (no flags; PROFILE/ENABLE_* in repo-root .env).
 #
 # Usage:
@@ -25,7 +25,7 @@ cd "$ROOT"
 DEV="${ROOT}/scripts/fleet-dev.sh"
 REC="${ROOT}/tests/browser/record_demo.py"
 DOC="docs/human-testing.md"
-INSTALL="crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh"
+INSTALL="scripts/install-full-suite-deps.sh"
 UI_URL="${FLEET_UI_URL:-http://localhost:3030}"
 API_URL="${FLEET_API_URL:-http://127.0.0.1:8080}"
 

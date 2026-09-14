@@ -10,6 +10,21 @@ container** (KubePod / in-cluster, or Docker). Same pair, lease, and
 `work_claims` path — do not invent a second spawn. See
 [`../runners/run-on-pc-vs-container.md`](../runners/run-on-pc-vs-container.md).
 
+### Isolation (two axes)
+
+**agent_runtime** — where the agent runs (host process / TUI vs
+container or VM). Wire: `run_mode` `on_pc` | `in_container`. JSON alias
+`agent_runtime`.
+
+**workspace_location** — where the repo lives. Wire: workspace
+`min_isolation` `process` | `container` | `vm`. Settings JSON still
+uses `min_isolation` (`fleet_routes.rs`).
+
+Host `isolation` `native`/`sandboxed` is a derived label of
+agent_runtime (`on_pc`→`native`, `in_container`→`sandboxed`). PATCH
+`isolation` with `process`/`container`/`vm` is 400. Kind/container is
+assignable.
+
 Do not replace `fleet-driver`, `fleet-operator`,
 `FleetSandbox`, `work_claims`, or session `FLEET_*` tokens. This layer
 is a durable **machine** in front of them. The API is not a runner.

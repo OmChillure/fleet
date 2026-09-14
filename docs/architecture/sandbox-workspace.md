@@ -1,7 +1,13 @@
 # Sandbox layout — harness vs workspace (project env)
 
-This document refines **Layer 2 (workspace provision)** and how a sandbox is
-composed so that:
+This document is leftover lab notes (OpenCode / Pi / Redis compose). It is
+not how sandboxes run today. The product guest is
+[`fleet-driver`](../../crates/fleet-driver/) on a paired
+[`fleet-host`](../../crates/fleet-host/). Do not treat `sandbox-lab/` as
+the product sandbox.
+
+The sections below refine the historical **Layer 2 (workspace provision)**
+split so leftover lab tests still have a map:
 
 1. **Harness images stay stable** (`opencode` / `pi` / `codex` / `grok` agent images).
 2. **Project / dev environment setup is separate** — dependencies, language
@@ -12,8 +18,8 @@ Related:
 
 - Layers and components: [`README.md`](./README.md)
 - Commands/events: [`events.md`](./events.md), [`events-overview.md`](./events-overview.md)
-- Sandbox driver (current prototype): [`crates/fleet-sandbox-driver/`](../../crates/fleet-sandbox-driver/) ([`sandbox-lab/`](../../crates/fleet-sandbox-driver/sandbox-lab/), [`agents/`](../../crates/fleet-sandbox-driver/agents/))
-- Process worker: [`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md)
+- Leftover lab (not sandbox today): [`crates/fleet-sandbox-driver/sandbox-lab/`](../../crates/fleet-sandbox-driver/sandbox-lab/), [`agents/`](../../crates/fleet-sandbox-driver/agents/)
+- Product guest: [`crates/fleet-driver/README.md`](../../crates/fleet-driver/README.md)
 - Contracts: `ProvisionWorkspace` in `crates/agent-fleet-contracts`
 
 ---

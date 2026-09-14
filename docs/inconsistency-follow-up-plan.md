@@ -12,8 +12,21 @@ intent changed. Ops notes that are not code (VPS `.env`) are listed first.
 
 ## Already landed (this MR)
 
-Docs, config, and contract copy only. No schema move, no lab delete, no
-new provider, no Zenoh mesh.
+First pass was docs/config. The follow-up work below is now on the same
+branch (not split into more MRs).
+
+| Follow-up | Status |
+| --- | --- |
+| O1 VPS CORS + Caddy www→apex | Done on us-vmmedium (2026-09-14) |
+| Isolation two axes | Done (`agent_runtime` / `workspace_location`) |
+| Workspace persona vs roster specialist | Done |
+| Instance cap 128 / workspace default 16 | Done (`instance_settings` + Admin save) |
+| One migrator | Done (orch SQL copied into `fleet-db`; orch `migrate` calls `fleet_db::migrate`) |
+| Provider registry | Done (DeepSeek not registered) |
+| Lab leftover | Install moved to `scripts/`; old path is a wrapper; crate kept for tests |
+| Zenoh mid-run share | First slice: `fleet/*/run/*/share/**` + team_chat outbox |
+
+Docs, config, and contract copy from the first pass:
 
 | Decision | What this MR did |
 | --- | --- |

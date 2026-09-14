@@ -88,6 +88,7 @@ services:
       start_period: 10s
 
   zenohd:
+    # crate zenoh 1.10; image 1.2.1 (known skew; open+pubsub is the lock)
     image: eclipse/zenoh:1.2.1
     command: ["--listen", "tcp/0.0.0.0:7447"]
 

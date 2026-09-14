@@ -12,7 +12,8 @@ from pathlib import Path
 
 LAB = Path(__file__).resolve().parents[1]
 REPO = LAB.parents[2]
-SCRIPT = LAB / "scripts" / "install-full-suite-deps.sh"
+SCRIPT = REPO / "scripts" / "install-full-suite-deps.sh"
+WRAPPER = LAB / "scripts" / "install-full-suite-deps.sh"
 FULL_SUITE = LAB / "scripts" / "run-full-suite.sh"
 
 
@@ -572,6 +573,11 @@ class InstallContractTests(unittest.TestCase):
     def test_script_exists_and_executable(self):
         self.assertTrue(SCRIPT.is_file(), SCRIPT)
         self.assertTrue(SCRIPT.stat().st_mode & 0o111, "script must be executable")
+        self.assertTrue(WRAPPER.is_file(), WRAPPER)
+        self.assertTrue(WRAPPER.stat().st_mode & 0o111, "leftover wrapper must be executable")
+        wrap = WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("scripts/install-full-suite-deps.sh", wrap)
+        self.assertRegex(wrap, r"(?m)^exec ")
 
     def test_kind_rollout_after_load(self):
         kind = _enable_kind_cluster_block(SCRIPT.read_text(encoding="utf-8"))

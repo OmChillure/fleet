@@ -33,18 +33,23 @@ DB access goes through [`fleet-db`](../fleet-db/).
 | `GET` | `/api/workspaces` | access cookie | List memberships; ensures a default if none |
 | `POST` | `/api/workspaces` | access cookie | Create workspace; caller is `owner` |
 
-### Personas
+### Workspace personas
 
 Workspace-scoped agent roles (no LLM calls). Membership required.
+
+These are **not** agency-agents **roster specialists**
+(`GET /api/workspaces/{id}/fleet/personas` on the orchestrator BFF).
+Workspace personas persist `role_prompt` / tools / budget. Roster specialists
+are division / emoji / vibe cards. Seed keeps the **8 starters**.
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `GET` | `/api/workspaces/{id}/personas` | cookie | List (`?status=active\|archived`) |
-| `POST` | `/api/workspaces/{id}/personas` | cookie | Create custom persona |
+| `POST` | `/api/workspaces/{id}/personas` | cookie | Create custom workspace persona |
 | `GET` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Detail |
 | `PATCH` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Update fields |
 | `DELETE` | `/api/workspaces/{id}/personas/{persona_id}` | cookie | Soft-archive |
-| `POST` | `/api/workspaces/{id}/personas/seed-starters` | cookie | Idempotent insert of 8 starters |
+| `POST` | `/api/workspaces/{id}/personas/seed-starters` | cookie | Idempotent insert of 8 workspace-persona starters |
 
 Design: [`docs/components/personas/plan.html`](../../docs/components/personas/plan.html).
 

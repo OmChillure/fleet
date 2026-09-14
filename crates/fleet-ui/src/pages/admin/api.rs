@@ -201,6 +201,17 @@ pub async fn fetch_instance() -> Result<Value, String> {
     parse_json(authorized_get("/api/admin/instance").await?).await
 }
 
+pub async fn patch_instance_cap(max_agents_cap: i32) -> Result<Value, String> {
+    parse_json(
+        authorized_patch_json(
+            "/api/admin/instance",
+            &serde_json::json!({ "max_agents_cap": max_agents_cap }),
+        )
+        .await?,
+    )
+    .await
+}
+
 pub async fn fetch_work() -> Result<Value, String> {
     parse_json(authorized_get("/api/admin/work").await?).await
 }

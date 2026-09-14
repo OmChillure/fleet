@@ -11,7 +11,7 @@ Two roles:
 | **Agent** (the coding agent on the MR) | Keep `HUMAN_TEST_SCOPE.md` in sync (`surface_scope.py --write`) whenever the diff changes. Record those scenes on the **final merge tree**. **Review the film** (frames + `.webm`) for bugs, fill the Film review section, attach the `.webm`. Never commit videos. |
 
 Install is still one script with no flags
-(`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`)
+(`scripts/install-full-suite-deps.sh`)
 and repo-root `.env`. This page does not install packages.
 
 ---
@@ -231,7 +231,7 @@ really spans the product.
 | `crates/fleet-ui` chat history / live session view | `sessions` | Chat history list; open a fleet session only if one exists |
 | `crates/fleet-sandbox-driver` Rust, job JSON, handshake | `lab` | short host protocol run rendered and filmed (no LLM) |
 | `sandbox-lab/workspace/workspace_agent.py` | `lab` | same |
-| `sandbox-lab/scripts/install-full-suite-deps.sh`, compose, pins | `lab` | install-contract / compose pin output |
+| `scripts/install-full-suite-deps.sh`, compose, pins | `lab` | install-contract / compose pin output |
 | `crates/fleet-operator`, `infra/`, kind | `kind` | only if a kind cluster is up; otherwise say so in the MR and film `api` against the host API you did start |
 | Docs-only product wording | — | no video |
 | `docs/testing.md` / test harness only | — | no video unless you changed what the human sees |

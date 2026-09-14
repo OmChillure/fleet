@@ -1,4 +1,4 @@
-//! Workspace Settings: concurrent agents, members, isolation floor, LLM keys.
+//! Workspace Settings: concurrent agents, members, workspace location, LLM keys.
 //! Workspace `llm-keys` win when present; env (`XAI_API_KEY` / `grok login`) is fallback.
 
 use dioxus::prelude::*;
@@ -197,10 +197,10 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-6 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Isolation"
+                        "Workspace location"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Weakest isolation a host must offer (process < container < vm). This cannot flip Run on a PC into Run in a container."
+                        "Where the repo lives (process < container < vm). This is workspace_location, not agent_runtime — it cannot flip Run on a PC into Run in a container."
                     }
                     select {
                         class: field_class(),
@@ -214,10 +214,10 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Where new fleet jobs run"
+                        "Agent runtime"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Default for Start run and inbox. Chat stays Run on a PC. Kind / container jobs need Run in a container."
+                        "Where the agent runs — host process (TUI) or container/VM. Default for Start run and inbox. Chat stays Run on a PC. Kind / container jobs need Run in a container."
                     }
                     select {
                         class: field_class(),
