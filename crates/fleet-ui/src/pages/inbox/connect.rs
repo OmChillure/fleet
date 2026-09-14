@@ -4,7 +4,9 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::components::toast::show_toast;
-use crate::pages::integrations::{list_integrations, oauth_start_url};
+use crate::pages::integrations::{
+    find_integration, integration_is_connected, list_integrations, oauth_start_url,
+};
 
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
 
@@ -81,9 +83,8 @@ pub fn ConnectApp(
                 spawn(async move {
                     for _ in 0..OAUTH_POLL_ATTEMPTS {
                         if let Ok(list) = list_integrations(&ws).await {
-                            if let Some(i) = list
-                                .iter()
-                                .find(|i| i.id.eq_ignore_ascii_case(&provider) && i.connected)
+                            if let Some(i) = find_integration(&list, &provider)
+                                .filter(|i| integration_is_connected(i))
                             {
                                 connected.set(true);
                                 let label = i

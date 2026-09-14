@@ -7,7 +7,7 @@ use super::api::{InboxResponse, list_inbox, poll_inbox, start_monitor, stop_moni
 use super::catalog::{INBOX_APPS, InboxGroup};
 use crate::Route;
 use crate::components::toast::show_toast;
-use crate::pages::integrations::{IntegrationLogo, list_integrations};
+use crate::pages::integrations::{IntegrationLogo, integration_is_connected, list_integrations};
 
 fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
     resp.tickets
@@ -49,7 +49,7 @@ pub fn Inbox(workspace_id: String) -> Element {
                 }
                 if let Ok(list) = list_integrations(&ws).await {
                     for i in list {
-                        if i.connected {
+                        if integration_is_connected(&i) {
                             next_conn.insert(i.id.to_ascii_lowercase());
                         }
                     }
