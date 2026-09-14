@@ -350,11 +350,7 @@ pub fn served_platforms(inv: &PackageInventory) -> Vec<ServedPlatform> {
 
 fn short_sha(sha: &str) -> &str {
     let s = sha.trim();
-    if s.len() > 12 {
-        &s[..12]
-    } else {
-        s
-    }
+    if s.len() > 12 { &s[..12] } else { s }
 }
 
 /// The two files the plane serves and the box must report. Not `fleet-worker`.
@@ -1218,6 +1214,11 @@ pub fn apply_patch(mut host: HostPublic, patch: &HostPatch) -> HostPublic {
     if let Some(v) = patch.auto_update {
         // Plane-side allow bit. The box reads it from the next heartbeat;
         // it is not a runtime_settings apply, so do not light pending apply.
+        if v && !host.auto_update {
+            host.update_requested_at = Some("requested".into());
+        } else if !v && host.auto_update {
+            host.update_requested_at = None;
+        }
         host.auto_update = v;
     }
     if patch.request_update == Some(true) {
@@ -1382,10 +1383,7 @@ mod tests {
         host.current_jobs = 3;
         let reason = not_taking_reason(&host).expect("hold with running jobs");
         assert_no_pause(&reason);
-        assert!(
-            reason.contains("already running will finish"),
-            "{reason}"
-        );
+        assert!(reason.contains("already running will finish"), "{reason}");
     }
 
     #[test]
@@ -1825,10 +1823,7 @@ mod tests {
 
     #[test]
     fn coming_soon_provider_pick_returns_first_available() {
-        let providers = vec![
-            choice("openai", false, true),
-            choice("ollama", true, false),
-        ];
+        let providers = vec![choice("openai", false, true), choice("ollama", true, false)];
         let picked = resolve_provider_pick_after_change(&providers, "openai")
             .expect("coming-soon openai must snap to first available");
         assert_eq!(picked, "ollama");
@@ -1837,10 +1832,7 @@ mod tests {
 
     #[test]
     fn available_openai_pick_keeps_openai() {
-        let providers = vec![
-            choice("openai", true, false),
-            choice("ollama", true, false),
-        ];
+        let providers = vec![choice("openai", true, false), choice("ollama", true, false)];
         let picked = resolve_provider_pick_after_change(&providers, "openai")
             .expect("available openai must be kept");
         assert_eq!(picked, "openai");
@@ -2366,7 +2358,10 @@ mod tests {
         let unix = "curl -fsSL https://x.ai/cli/install.sh | bash";
         assert_eq!(provider_install_command("grok", None), unix);
         assert_eq!(provider_install_command("grok", Some("darwin")), unix);
-        assert_eq!(provider_install_command("grok", Some("linux-aarch64")), unix);
+        assert_eq!(
+            provider_install_command("grok", Some("linux-aarch64")),
+            unix
+        );
     }
 
     #[test]
@@ -2521,9 +2516,7 @@ mod tests {
         let error = host("e", "host", "error", "err");
         let offline = host("off", "host", "offline", "off");
         let unknown = host("u", "host", "mystery", "zzz");
-        let mut active = vec![
-            offline, unknown, online_z, plane, error, pending, online_a,
-        ];
+        let mut active = vec![offline, unknown, online_z, plane, error, pending, online_a];
         sort_hosts_for_list(&mut active);
         let ids: Vec<&str> = active.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["plane", "oa", "oz", "p", "e", "off", "u"]);
@@ -2926,6 +2919,34 @@ mod tests {
 
     /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
     #[test]
+    fn apply_patch_enable_auto_mints_stamp_disable_clears() {
+        let mut host = sample_host();
+        host.auto_update = false;
+        host.update_requested_at = Some("stale".into());
+        host = apply_patch(
+            host,
+            &HostPatch {
+                auto_update: Some(true),
+                ..HostPatch::default()
+            },
+        );
+        assert!(host.auto_update);
+        assert_eq!(host.update_requested_at.as_deref(), Some("requested"));
+        host = apply_patch(
+            host,
+            &HostPatch {
+                auto_update: Some(false),
+                ..HostPatch::default()
+            },
+        );
+        assert!(!host.auto_update);
+        assert!(
+            host.update_requested_at.is_none(),
+            "disable auto must unstick Update now"
+        );
+    }
+
+    #[test]
     fn apply_patch_request_update_marks_host() {
         let mut host = sample_host();
         host.auto_update = false;
@@ -2971,7 +2992,12 @@ mod tests {
         let cases = [
             (None, None, None, "neither"),
             (Some("box.local"), None, Some("box.local"), "hostname only"),
-            (None, Some("linux-x86_64"), Some("linux-x86_64"), "platform only"),
+            (
+                None,
+                Some("linux-x86_64"),
+                Some("linux-x86_64"),
+                "platform only",
+            ),
             (
                 Some("box.local"),
                 Some("linux-x86_64"),

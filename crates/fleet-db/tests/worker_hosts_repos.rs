@@ -7,9 +7,7 @@ use chrono::{Duration, Utc};
 use fleet_db::error::DbError;
 use fleet_db::models::{HostCpSettings, NewWorkClaim, NewWorkerHost};
 use fleet_db::repos::users::NewUser;
-use fleet_db::repos::worker_hosts::{
-    self, generate_pair_token, hash_token, PAIR_TOKEN_PREFIX,
-};
+use fleet_db::repos::worker_hosts::{self, PAIR_TOKEN_PREFIX, generate_pair_token, hash_token};
 use fleet_db::repos::{users, work_claims, workspaces};
 use serde_json::json;
 use uuid::Uuid;
@@ -1105,17 +1103,10 @@ async fn pair_placeholder_name_worker_becomes_hostname() {
     let expires = Utc::now() + Duration::hours(1);
     let (_pending, token) =
         create_pending_with_token(&pool, workspace_id, user_id, "worker", expires).await;
-    let paired = worker_hosts::consume_pair_token(
-        &pool,
-        &token,
-        "x1",
-        "linux-x86_64",
-        true,
-        false,
-        None,
-    )
-    .await
-    .expect("pair");
+    let paired =
+        worker_hosts::consume_pair_token(&pool, &token, "x1", "linux-x86_64", true, false, None)
+            .await
+            .expect("pair");
     assert_eq!(paired.host.name, "x1");
     assert_eq!(paired.host.hostname.as_deref(), Some("x1"));
 }
@@ -1493,7 +1484,9 @@ async fn two_machine_ids_same_hostname_stay_two_rows() {
     assert_eq!(a.host.id, first.id);
     assert_eq!(a.host.machine_id, Some(mid_a));
 
-    worker_hosts::revoke(&pool, first.id).await.expect("revoke first");
+    worker_hosts::revoke(&pool, first.id)
+        .await
+        .expect("revoke first");
 
     let (second, token_b) =
         create_pending_with_token(&pool, workspace_id, user_id, "box-b", expires).await;
@@ -2072,6 +2065,71 @@ async fn later_cp_patch_keeps_update_requested_at() {
         .expect("host");
     assert_eq!(loaded.update_requested_at, Some(at));
     assert!(loaded.paused);
+}
+
+/// catalog:unit-request-update — turning auto on mints a fresh stamp so an
+/// old AND-host still applies; turning auto off drops a leftover stamp.
+#[tokio::test]
+async fn toggling_auto_update_refreshes_or_clears_update_stamp() {
+    let pool = connect_and_migrate().await;
+    let (user_id, workspace_id) = seed_user_with_workspace(&pool).await;
+    let expires = Utc::now() + Duration::hours(1);
+    let (host, token) =
+        create_pending_with_token(&pool, workspace_id, user_id, "upd-toggle", expires).await;
+    pair_host(&pool, &token, "upd-toggle-box").await;
+
+    let off = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            auto_update: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("auto off");
+    assert!(
+        off.update_requested_at.is_none(),
+        "disable auto clears stamp"
+    );
+
+    let planted = Utc::now() - Duration::hours(1);
+    sqlx::query("UPDATE worker_hosts SET update_requested_at = $2 WHERE id = $1")
+        .bind(host.id)
+        .bind(planted)
+        .execute(&pool)
+        .await
+        .expect("plant leftover stamp");
+
+    let on = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            auto_update: Some(true),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("auto on");
+    let at = on
+        .update_requested_at
+        .expect("enabling auto must mint a fresh stamp");
+    assert!(at > planted, "fresh stamp, not the leftover");
+
+    let off_again = worker_hosts::patch_cp_settings(
+        &pool,
+        host.id,
+        &HostCpSettings {
+            auto_update: Some(false),
+            ..HostCpSettings::default()
+        },
+    )
+    .await
+    .expect("auto off again");
+    assert!(
+        off_again.update_requested_at.is_none(),
+        "disable auto must unstick Update now"
+    );
 }
 
 /// revoke of a never-paired pending marks unused pair tokens used;
@@ -3067,7 +3125,19 @@ async fn list_assignable_includes_when_only_one_plane_mode_on() {
         create_pending_with_token(&pool, workspace_id, user_id, "host-only", expires).await;
     pair_host(&pool, &host_token, "host-only-box").await;
     worker_hosts::heartbeat(
-        &pool, host_only.id, true, false, None, None, None, 1, None, None, None, None, None,
+        &pool,
+        host_only.id,
+        true,
+        false,
+        None,
+        None,
+        None,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("heartbeat host-only current_jobs=1");
@@ -3282,14 +3352,10 @@ async fn create_pending_normalizes_cluster_label() {
         Some(user_id),
     );
     new.labels = vec![" CLUSTER ".into(), "gpu".into()];
-    let created = worker_hosts::create_pending(
-        &pool,
-        &new,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect("create_pending");
+    let created =
+        worker_hosts::create_pending(&pool, &new, &hash_token(&generate_pair_token()), expires)
+            .await
+            .expect("create_pending");
     assert_eq!(
         created.labels,
         vec!["cluster".to_string(), "gpu".to_string()],
@@ -3341,14 +3407,10 @@ async fn patch_cp_settings_omitted_labels_keep_cluster() {
         Some(user_id),
     );
     new.labels = vec!["cluster".into()];
-    let created = worker_hosts::create_pending(
-        &pool,
-        &new,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect("create_pending");
+    let created =
+        worker_hosts::create_pending(&pool, &new, &hash_token(&generate_pair_token()), expires)
+            .await
+            .expect("create_pending");
     assert_eq!(created.labels, vec!["cluster".to_string()]);
 
     let patched = worker_hosts::patch_cp_settings(
@@ -3384,14 +3446,10 @@ async fn create_pending_preserves_non_cluster_label_case() {
         Some(user_id),
     );
     new.labels = vec!["GPU".into(), "Linux".into()];
-    let created = worker_hosts::create_pending(
-        &pool,
-        &new,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect("create_pending");
+    let created =
+        worker_hosts::create_pending(&pool, &new, &hash_token(&generate_pair_token()), expires)
+            .await
+            .expect("create_pending");
     assert_eq!(
         created.labels,
         vec!["GPU".to_string(), "Linux".to_string()],
@@ -3412,14 +3470,10 @@ async fn patch_cp_settings_empty_labels_clears_cluster() {
         Some(user_id),
     );
     new.labels = vec!["cluster".into()];
-    let created = worker_hosts::create_pending(
-        &pool,
-        &new,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect("create_pending");
+    let created =
+        worker_hosts::create_pending(&pool, &new, &hash_token(&generate_pair_token()), expires)
+            .await
+            .expect("create_pending");
     assert_eq!(created.labels, vec!["cluster".to_string()]);
 
     let cleared = worker_hosts::patch_cp_settings(
@@ -4529,7 +4583,11 @@ async fn reclaim_expired_leases_does_not_revive_done_or_dead() {
     .execute(&pool)
     .await
     .expect("backdate done/dead expiry");
-    assert_eq!(planted.rows_affected(), 2, "expected both finished rows aged");
+    assert_eq!(
+        planted.rows_affected(),
+        2,
+        "expected both finished rows aged"
+    );
 
     let before_done = work_claims::get(&pool, done_new.id)
         .await
@@ -4598,14 +4656,9 @@ async fn replace_pair_token_only_while_pending_and_invalidates_old() {
     let (host, old_token) =
         create_pending_with_token(&pool, workspace_id, user_id, "rotate", expires).await;
 
-    worker_hosts::replace_pair_token(
-        &pool,
-        host.id,
-        &hash_token(&generate_pair_token()),
-        expires,
-    )
-    .await
-    .expect("replace while pending");
+    worker_hosts::replace_pair_token(&pool, host.id, &hash_token(&generate_pair_token()), expires)
+        .await
+        .expect("replace while pending");
 
     let (_, used_at) = pair_token_hash_and_used_at(&pool, host.id, &old_token).await;
     assert!(
@@ -5289,19 +5342,7 @@ async fn heartbeat_omitted_advertised_after_zero_keeps_clamped_one() {
     );
 
     let omitted = worker_hosts::heartbeat(
-        &pool,
-        host.id,
-        true,
-        false,
-        None,
-        None,
-        None,
-        1,
-        None,
-        None,
-        None,
-        None,
-        None,
+        &pool, host.id, true, false, None, None, None, 1, None, None, None, None, None,
     )
     .await
     .expect("omit advertised");

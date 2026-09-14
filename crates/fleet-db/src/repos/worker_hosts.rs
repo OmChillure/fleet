@@ -10,9 +10,8 @@ use uuid::Uuid;
 use crate::error::{DbError, DbResult};
 use crate::models::{
     HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
-    WORKER_HOST_STATUS_DISABLED,
-    WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost, WorkerHostPairToken,
-    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
+    WorkerHostPairToken, normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
     parse_worker_host_run_mode, parse_worker_host_send_policy,
 };
 use crate::pool::map_query_err;
@@ -230,8 +229,15 @@ pub async fn patch_cp_settings(
         None => current.labels.clone(),
     };
     let auto_update = patch.auto_update.unwrap_or(current.auto_update);
+    // Enabling auto must mint a fresh stamp so an old host (local AND plane)
+    // still applies once. Disabling auto must drop a leftover stamp or the
+    // Update now button stays pressed forever.
     let update_requested_at = if patch.request_update == Some(true) {
         Some(Utc::now())
+    } else if patch.auto_update == Some(true) && !current.auto_update {
+        Some(Utc::now())
+    } else if patch.auto_update == Some(false) && current.auto_update {
+        None
     } else {
         current.update_requested_at
     };
@@ -906,6 +912,25 @@ pub async fn heartbeat_with_machine(
         .ok_or_else(|| DbError::NotFound("worker host not found".into()))
 }
 
+/// Drop a leftover Update-now stamp after the box is current.
+pub async fn clear_update_requested(pool: &PgPool, host_id: Uuid) -> DbResult<WorkerHost> {
+    let q = format!(
+        r#"
+        UPDATE worker_hosts
+        SET update_requested_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING {HOST_COLS}
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)?
+        .ok_or_else(|| DbError::NotFound("worker host not found".into()))
+}
+
 /// Pending create used `name = "worker"`. Once the box reports a hostname, use it.
 pub async fn adopt_hostname_if_placeholder(
     pool: &PgPool,
@@ -1300,12 +1325,8 @@ pub async fn list_visible_for_workspace(
     this_hostnames: &[String],
 ) -> DbResult<Vec<WorkerHost>> {
     let mut rows = list_for_workspace(pool, workspace_id).await?;
-    let extra = list_assignable_by_hostnames(
-        pool,
-        WORKER_HOST_OFFLINE_AFTER,
-        this_hostnames,
-    )
-    .await?;
+    let extra =
+        list_assignable_by_hostnames(pool, WORKER_HOST_OFFLINE_AFTER, this_hostnames).await?;
     for h in extra {
         if !rows.iter().any(|x| x.id == h.id) {
             rows.push(h);
@@ -1315,9 +1336,8 @@ pub async fn list_visible_for_workspace(
 }
 
 pub async fn set_run_mode(pool: &PgPool, host_id: Uuid, mode: &str) -> DbResult<WorkerHost> {
-    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
-        DbError::Conflict("run_mode must be on_pc or in_container".into())
-    })?;
+    let mode = parse_worker_host_run_mode(mode)
+        .ok_or_else(|| DbError::Conflict("run_mode must be on_pc or in_container".into()))?;
     let q = format!(
         r#"
         UPDATE worker_hosts
@@ -1454,10 +1474,7 @@ pub async fn list_send_allowlists_for_hosts(
     Ok(out)
 }
 
-pub async fn list_by_hostnames(
-    pool: &PgPool,
-    hostnames: &[String],
-) -> DbResult<Vec<WorkerHost>> {
+pub async fn list_by_hostnames(pool: &PgPool, hostnames: &[String]) -> DbResult<Vec<WorkerHost>> {
     let names = normalize_hostname_needles(hostnames);
     if names.is_empty() {
         return Ok(Vec::new());
@@ -1589,7 +1606,11 @@ mod effective_max_concurrent_tests {
     #[test]
     fn effective_max_concurrent_and_at_job_cap_unit_table() {
         let none = host(8, None, 0);
-        assert_eq!(effective_max_concurrent(&none), 8, "None advertised → plane 8");
+        assert_eq!(
+            effective_max_concurrent(&none),
+            8,
+            "None advertised → plane 8"
+        );
         assert!(!at_job_cap(&none));
 
         let adv_wins = host(8, Some(2), 1);
@@ -1602,7 +1623,11 @@ mod effective_max_concurrent_tests {
         assert!(at_job_cap(&plane_wins));
 
         let zero_adv = host(8, Some(0), 1);
-        assert_eq!(effective_max_concurrent(&zero_adv), 1, "advertised 0 is cap 1");
+        assert_eq!(
+            effective_max_concurrent(&zero_adv),
+            1,
+            "advertised 0 is cap 1"
+        );
         assert!(at_job_cap(&zero_adv));
 
         assert_eq!(
@@ -1626,10 +1651,7 @@ mod effective_max_concurrent_tests {
     fn at_job_cap_when_current_jobs_exceeds_effective() {
         let over = host(8, Some(2), 3);
         assert_eq!(effective_max_concurrent(&over), 2);
-        assert!(
-            at_job_cap(&over),
-            "current_jobs=3 >= min(8,2) is at cap"
-        );
+        assert!(at_job_cap(&over), "current_jobs=3 >= min(8,2) is at cap");
     }
 }
 
