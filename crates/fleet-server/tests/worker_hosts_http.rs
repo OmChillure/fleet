@@ -7952,6 +7952,21 @@ async fn install_bin_allowlist_rejects_control_plane_and_unknown_names() {
         host.raw
     );
     assert_eq!(host.raw.as_bytes(), host_payload);
+    let busted = call(
+        &app,
+        "GET",
+        "/install/worker/bin/linux-x86_64/fleet-host?h=c53195bf6e692ccf9064566c96301cdb63cb8d84b6b6ef22d348819dc6c1212b",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        busted.status,
+        StatusCode::OK,
+        "query-string cache bust must still serve the bin: {}",
+        busted.raw
+    );
+    assert_eq!(busted.raw.as_bytes(), host_payload);
 
     // Dist unset so lookup can reach workspace target/{release,debug}/{bin}.
     let (app_fallback, _) = app_with_state_dist(None).await;
