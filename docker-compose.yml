@@ -53,7 +53,7 @@ services:
       API_PUBLIC_BASE: http://localhost:8080
       UI_PUBLIC_BASE: http://localhost:3030
       DATA_DIR: /data
-      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-dev-bootstrap-secret-change-me}
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-}
       SIGNUP_TOKEN: ${SIGNUP_TOKEN:-}
       ZENOH_LOCATOR: tcp/zenohd:7447
       RUST_LOG: info,sqlx=warn,tower_http=info
@@ -90,8 +90,6 @@ services:
   zenohd:
     image: eclipse/zenoh:1.2.1
     command: ["--listen", "tcp/0.0.0.0:7447"]
-    ports:
-      - "7447:7447"
 
   host:
     build:
@@ -112,7 +110,7 @@ services:
       FLEET_HOST_RUN_HOST: "true"
       FLEET_HOST_RUN_CONTAINER: "false"
       FLEET_HARNESS: mock
-      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-dev-bootstrap-secret-change-me}
+      FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-}
       ZENOH_LOCATOR: tcp/zenohd:7447
       RUST_LOG: info
     volumes:

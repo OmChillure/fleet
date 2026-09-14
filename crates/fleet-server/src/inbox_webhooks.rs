@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::inbox_sources;
 use crate::state::AppState;
 use crate::tickets::{self, IngestItem};
 
@@ -165,6 +166,25 @@ async fn resolve_workspace(
             .await
             .map_err(|e| e.to_string())?
         {
+            if !inbox_sources::webhook_provider_allowed(
+                mon.follow_connected,
+                &mon.providers,
+                provider,
+            ) {
+                return Ok(None);
+            }
+            if mon.follow_connected && mon.providers.is_empty() {
+                let connected = fleet_db::repos::integrations::find_connected(
+                    &state.db,
+                    mon.workspace_id,
+                    provider,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if connected.is_none() {
+                    return Ok(None);
+                }
+            }
             if !token_path_signature_ok(state, provider, mon.workspace_id, token, headers, body)
                 .await?
             {
@@ -217,8 +237,8 @@ async fn match_github_app_signature(
     Ok(None)
 }
 
-/// Path token is the capability. Provider HMAC, when present, is checked
-/// against the stored app secret — never against `hook_token`.
+/// Path token is the capability. Providers with a signing scheme must present
+/// a valid signature. Missing header / missing secret / decrypt failure deny.
 async fn token_path_signature_ok(
     state: &AppState,
     provider: &str,
@@ -230,35 +250,30 @@ async fn token_path_signature_ok(
     match provider {
         "gitlab" => Ok(match header_str(headers, "x-gitlab-token") {
             Some(got) => secure_eq(got.trim(), token),
-            None => true,
+            None => false,
         }),
         "github" | "linear" | "slack" => {
             let stored = provider_signing_secret(state, workspace_id, provider).await?;
+            let Some(secret) = stored else {
+                return Ok(false);
+            };
             Ok(match provider {
                 "github" => match header_str(headers, "x-hub-signature-256") {
-                    Some(sig) => match stored.as_deref() {
-                        Some(secret) => github_signature_ok(secret, sig, body),
-                        None => true,
-                    },
-                    None => stored.is_none(),
+                    Some(sig) => github_signature_ok(&secret, sig, body),
+                    None => false,
                 },
                 "linear" => match header_str(headers, "linear-signature") {
-                    Some(sig) => match stored.as_deref() {
-                        Some(secret) => linear_signature_ok(secret, sig, body),
-                        None => true,
-                    },
-                    None => stored.is_none(),
+                    Some(sig) => linear_signature_ok(&secret, sig, body),
+                    None => false,
                 },
                 "slack" => match header_str(headers, "x-slack-signature") {
-                    Some(sig) => match stored.as_deref() {
-                        Some(secret) => slack_signature_ok(secret, headers, sig, body),
-                        None => slack_timestamp_fresh(headers),
-                    },
-                    None => stored.is_none(),
+                    Some(sig) => slack_signature_ok(&secret, headers, sig, body),
+                    None => false,
                 },
-                _ => true,
+                _ => false,
             })
         }
+        // Token + provider bind (checked in resolve_workspace) is the capability.
         _ => Ok(true),
     }
 }
@@ -274,13 +289,11 @@ async fn provider_signing_secret(
     else {
         return Ok(None);
     };
-    let Ok(plain) = state
+    let plain = state
         .integrations
         .credentials_key
         .decrypt(&app.client_secret)
-    else {
-        return Ok(None);
-    };
+        .map_err(|_| "webhook signing secret unavailable".to_string())?;
     let secret = plain
         .get("webhook_secret")
         .or_else(|| plain.get("signing_secret"))

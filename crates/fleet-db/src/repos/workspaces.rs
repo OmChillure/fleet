@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole, parse_min_isolation,
-    parse_worker_host_run_mode, parse_worker_host_send_policy,
+    parse_min_isolation, parse_worker_host_run_mode, parse_worker_host_send_policy, Workspace,
+    WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole,
 };
 use crate::pool::map_query_err;
 
@@ -594,6 +594,27 @@ pub async fn list_open_invites(
     sqlx::query_as::<_, WorkspaceInvite>(&q)
         .bind(workspace_id)
         .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn find_open_invite_by_token(
+    pool: &PgPool,
+    token: &str,
+    now: DateTime<Utc>,
+) -> DbResult<Option<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE token = $1
+          AND accepted_at IS NULL AND revoked_at IS NULL
+          AND expires_at > $2
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(token)
+        .bind(now)
+        .fetch_optional(pool)
         .await
         .map_err(map_query_err)
 }

@@ -179,6 +179,15 @@ pub(crate) async fn commit_files(http: &reqwest::Client, token: &str, args: &Val
         .get("default_branch")
         .and_then(|v| v.as_str())
         .unwrap_or("main");
+    if branch == default_branch || branch == "main" || branch == "master" {
+        return ProxyResult::err(
+            "github",
+            "commit_files",
+            "forbidden",
+            "refusing to commit to the default branch; pass a feature branch",
+            None,
+        );
+    }
     let base_branch = args
         .get("base_branch")
         .and_then(|v| v.as_str())
@@ -526,12 +535,7 @@ pub(crate) async fn create_pr(http: &reqwest::Client, token: &str, args: &Value)
         }
     };
     let origin = github_api_origin();
-    let (st, repo_body) = github_get(
-        http,
-        token,
-        &format!("{origin}/repos/{owner}/{repo}"),
-    )
-    .await;
+    let (st, repo_body) = github_get(http, token, &format!("{origin}/repos/{owner}/{repo}")).await;
     if !(200..300).contains(&st) {
         return upstream_err("create_pr", st, &repo_body);
     }

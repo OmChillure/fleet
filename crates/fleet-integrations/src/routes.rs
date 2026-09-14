@@ -1,16 +1,16 @@
 //! List / OAuth start / OAuth callback / disconnect.
 
-use axum::Json;
-use axum::Router;
 use axum::extract::{Form, FromRef, Path, Query, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
+use axum::Json;
+use axum::Router;
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{AppError, AppResult, require_user};
+use fleet_auth::{require_user, AppError, AppResult};
 use fleet_db::repos::{integrations as integ_repo, workspaces as workspace_repo};
-use fleet_db::{IntegrationConnectionPublic, repos::integrations::UpsertConnection};
+use fleet_db::{repos::integrations::UpsertConnection, IntegrationConnectionPublic};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -20,8 +20,8 @@ use crate::models::{
     DisconnectResponse, IntegrationAvailability, IntegrationListResponse, IntegrationView,
 };
 use crate::oauth::{
-    OAuthCallbackError, authorize_url, convert_manifest, exchange_code, github_install_url,
-    issue_oauth_state, manifest_form_html, verify_oauth_state,
+    authorize_url, convert_manifest, exchange_code, github_install_url, issue_oauth_state,
+    manifest_form_html, verify_oauth_state, OAuthCallbackError,
 };
 use crate::state::IntegrationsState;
 
@@ -52,7 +52,6 @@ where
             "/api/integrations/oauth/github/manifest/callback",
             get(github_manifest_callback),
         )
-
         .route(
             "/api/workspaces/{workspace_id}/integrations/{provider}",
             axum::routing::delete(disconnect_integration).patch(patch_integration_defaults),
@@ -172,7 +171,12 @@ async fn put_oauth_app(
     Path((workspace_id, provider)): Path<(Uuid, String)>,
     Json(body): Json<PutOauthAppBody>,
 ) -> AppResult<Json<PutOauthAppResponse>> {
-    let (user, _) = require_workspace_member(&state, &jar, workspace_id).await?;
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    if !matches!(ws.role.as_str(), "owner" | "admin") {
+        return Err(AppError::forbidden(
+            "owner or admin required to configure OAuth apps",
+        ));
+    }
     let provider = provider.trim().to_lowercase();
     let entry = find_provider(&provider)
         .ok_or_else(|| AppError::not_found(format!("unknown integration: {provider}")))?;
@@ -1383,7 +1387,7 @@ mod token_paste_tests {
     use super::*;
     use crate::config::IntegrationsConfig;
     use crate::crypto::CredentialsKey;
-    use axum::body::{Body, to_bytes};
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
 
@@ -1543,8 +1547,8 @@ mod token_paste_tests {
             client_secret: "trello-secret".into(),
             github_app_slug: None,
         };
-        let url = authorize_url("trello", &cfg, &client, "state-token")
-            .expect("trello authorize_url");
+        let url =
+            authorize_url("trello", &cfg, &client, "state-token").expect("trello authorize_url");
         assert!(
             url.contains("response_type=token"),
             "Trello authorize must request a fragment token, got {url}"

@@ -1,11 +1,11 @@
 //! Workspace members + email invites.
 
-use axum::Json;
-use axum::Router;
 use axum::extract::FromRef;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, patch};
+use axum::routing::{delete, get, patch, post};
+use axum::Json;
+use axum::Router;
 use axum_extra::extract::CookieJar;
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::repos::{users as user_repo, workspaces as workspace_repo};
@@ -37,6 +37,7 @@ where
             "/api/workspaces/{workspace_id}/invites/{invite_id}",
             delete(revoke_invite),
         )
+        .route("/api/invites/accept", post(accept_invite))
 }
 
 fn can_manage(role: &str) -> bool {
@@ -195,6 +196,8 @@ struct InviteJson {
     role: String,
     created_at: chrono::DateTime<Utc>,
     expires_at: chrono::DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
 }
 
 impl From<&WorkspaceInvite> for InviteJson {
@@ -205,6 +208,7 @@ impl From<&WorkspaceInvite> for InviteJson {
             role: i.role.clone(),
             created_at: i.created_at,
             expires_at: i.expires_at,
+            token: None,
         }
     }
 }
@@ -262,29 +266,12 @@ async fn create_invite(
         return Err(AppError::forbidden("admins can only invite members"));
     }
 
-    if let Some(existing) = user_repo::find_by_email_normalized(&state.db, &email).await? {
-        if workspace_repo::user_role(&state.db, workspace_id, existing.id)
+    if let Some(existing) = user_repo::find_by_email_normalized(&state.db, &email).await?
+        && workspace_repo::user_role(&state.db, workspace_id, existing.id)
             .await?
             .is_some()
-        {
-            return Err(AppError::conflict("user is already a member"));
-        }
-        let now = Utc::now();
-        workspace_repo::add_member(&state.db, workspace_id, existing.id, role, now).await?;
-        // Synthetic invite row so the UI can show “added”.
-        return Ok((
-            StatusCode::CREATED,
-            Json(CreateInviteResponse {
-                invite: InviteJson {
-                    id: existing.id,
-                    email,
-                    role: role.to_string(),
-                    created_at: now,
-                    expires_at: now,
-                },
-                added_existing_user: true,
-            }),
-        ));
+    {
+        return Err(AppError::conflict("user is already a member"));
     }
 
     let now = Utc::now();
@@ -296,7 +283,7 @@ async fn create_invite(
         workspace_id,
         email_normalized: email,
         role: role.to_string(),
-        token,
+        token: token.clone(),
         invited_by: actor.id,
         created_at: now,
         expires_at: now + ChronoDuration::days(14),
@@ -313,12 +300,64 @@ async fn create_invite(
                 AppError::from(e)
             }
         })?;
+    let mut json = InviteJson::from(&saved);
+    json.token = Some(token);
     Ok((
         StatusCode::CREATED,
         Json(CreateInviteResponse {
-            invite: InviteJson::from(&saved),
+            invite: json,
             added_existing_user: false,
         }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptInviteBody {
+    token: String,
+}
+
+async fn accept_invite(
+    State(state): State<AuthState>,
+    jar: CookieJar,
+    Json(body): Json<AcceptInviteBody>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let user = require_user(&state, &jar).await?;
+    let token = body.token.trim();
+    if token.is_empty() {
+        return Err(AppError::bad_request("token is required"));
+    }
+    let now = Utc::now();
+    let invite = workspace_repo::find_open_invite_by_token(&state.db, token, now)
+        .await?
+        .ok_or_else(|| AppError::not_found("invite not found"))?;
+    if invite.email_normalized != user.email_normalized {
+        return Err(AppError::forbidden("invite is for a different email"));
+    }
+    if workspace_repo::user_role(&state.db, invite.workspace_id, user.id)
+        .await?
+        .is_some()
+    {
+        let _ = workspace_repo::accept_invite(&state.db, invite.id, user.id, now).await?;
+        return Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "workspace_id": invite.workspace_id,
+                "already_member": true,
+            })),
+        ));
+    }
+    workspace_repo::add_member(&state.db, invite.workspace_id, user.id, &invite.role, now).await?;
+    if !workspace_repo::accept_invite(&state.db, invite.id, user.id, now).await? {
+        return Err(AppError::conflict("invite is no longer valid"));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "workspace_id": invite.workspace_id,
+            "role": invite.role,
+        })),
     ))
 }
 
@@ -347,9 +386,9 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{header, Request, StatusCode};
     use http_body_util::BodyExt;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -558,7 +597,12 @@ mod tests {
         let members = listed.body["members"].as_array().expect("members");
         assert_eq!(members.len(), 1, "{}", listed.body);
         assert_eq!(members[0]["user_id"].as_str(), Some(b_id.as_str()));
-        assert_eq!(members[0]["role"].as_str(), Some("owner"), "{}", listed.body);
+        assert_eq!(
+            members[0]["role"].as_str(),
+            Some("owner"),
+            "{}",
+            listed.body
+        );
     }
 
     #[tokio::test]

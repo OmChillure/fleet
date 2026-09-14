@@ -199,7 +199,7 @@ pub async fn monitor_tickets(
 
     let auto_launch = args
         .auto_launch
-        .unwrap_or_else(|| existing.as_ref().map(|m| m.auto_launch).unwrap_or(true));
+        .unwrap_or_else(|| existing.as_ref().map(|m| m.auto_launch).unwrap_or(false));
     let launch_limit = inbox_sources::clamp_launch_limit(args.launch_limit.unwrap_or_else(|| {
         existing
             .as_ref()
@@ -334,7 +334,6 @@ fn monitor_json(
         "auto_launch": monitor.auto_launch,
         "launch_limit": monitor.launch_limit,
         "poll_limit": monitor.poll_limit,
-        "hook_token": monitor.hook_token,
         "hook_url": hook_url_template(api_base, &monitor.hook_token),
         "last_poll_at": monitor.last_poll_at,
         "last_error": monitor.last_error,
@@ -2223,8 +2222,6 @@ pub async fn finish_and_launch(
     }))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2247,10 +2244,7 @@ mod tests {
     #[test]
     fn parse_ticket_ref_blank_or_provider_without_key_is_none() {
         for raw in ["", "  ", "jira:"] {
-            assert!(
-                parse_ticket_ref(raw).is_none(),
-                "expected None for {raw:?}"
-            );
+            assert!(parse_ticket_ref(raw).is_none(), "expected None for {raw:?}");
         }
     }
 
@@ -2523,8 +2517,8 @@ mod tests {
         assert!(item.run_id.is_none());
 
         // Finish: route B + inbox row from A.
-        let finish_err = require_ticket_workspace(&item, ws_b)
-            .expect_err("ticket from A must not finish via B");
+        let finish_err =
+            require_ticket_workspace(&item, ws_b).expect_err("ticket from A must not finish via B");
         assert_inbox_cross_ws_denied(finish_err);
         assert!(
             require_ticket_workspace(&item, ws_a).is_ok(),
@@ -2532,8 +2526,8 @@ mod tests {
         );
 
         // Monitor: not a member of A's workspace (B's session on A's route).
-        let monitor_err = require_workspace_role(None)
-            .expect_err("monitor on another workspace must 403");
+        let monitor_err =
+            require_workspace_role(None).expect_err("monitor on another workspace must 403");
         assert_inbox_cross_ws_denied(monitor_err);
         assert!(
             require_workspace_role(Some("member".into())).is_ok(),

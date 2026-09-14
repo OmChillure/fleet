@@ -21,18 +21,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{AppError, AppResult, AuthState, require_user};
+use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use fleet_db::User;
 use fleet_db::WorkerAgentRuntime;
-use fleet_db::repos::{chats as chat_repo, workspaces as workspace_repo};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::chat_tools::{
-    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool, execute_tool_with_retry,
-    rewrite_if_asked_to_continue, system_prompt_for_workspace, system_prompt_with_tools,
-    tool_definitions, wants_fleet_launch,
+    execute_tool, execute_tool_with_retry, rewrite_if_asked_to_continue,
+    system_prompt_for_workspace, system_prompt_with_tools, tool_definitions, wants_fleet_launch,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
 };
 use crate::state::AppState;
 
@@ -1552,7 +1552,7 @@ async fn chat_complete(
                     .to_string(),
             )
         })?;
-        crate::runner_chat::require_taking(&state, workspace_id, runner_id).await?;
+        crate::runner_chat::require_taking(&state, workspace_id, runner_id, user.id).await?;
         let model = body
             .model
             .as_ref()
@@ -1711,7 +1711,7 @@ async fn chat_stream(
     // 200 + type=error after enqueue / the 240s wait starts.
     if crate::runner_chat::runner_cli_provider(&provider) {
         if let Some(runner_id) = body.runner_id {
-            crate::runner_chat::require_taking(&state, workspace_id, runner_id).await?;
+            crate::runner_chat::require_taking(&state, workspace_id, runner_id, user.id).await?;
         }
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<ChatProgress>(64);
@@ -1938,7 +1938,7 @@ async fn run_chat_turn(
                     .to_string(),
             )
         })?;
-        crate::runner_chat::require_taking(state, workspace_id, runner_id).await?;
+        crate::runner_chat::require_taking(state, workspace_id, runner_id, user_id).await?;
         let model = body
             .model
             .as_ref()

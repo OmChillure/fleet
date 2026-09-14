@@ -1994,7 +1994,7 @@ async fn patch_auto_update_false_does_not_bump_settings_gen() {
         .await
         .expect("get")
         .expect("host");
-    assert!(before.auto_update, "paired host defaults auto-update on");
+    assert!(!before.auto_update, "paired host defaults auto-update off");
     let settings_gen = before.settings_gen;
 
     let off = worker_hosts::patch_cp_settings(

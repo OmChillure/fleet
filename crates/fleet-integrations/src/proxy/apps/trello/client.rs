@@ -63,26 +63,8 @@ pub(crate) fn map_card(c: &Value) -> Value {
     })
 }
 
-fn with_auth(url: &str, api_key: &str, token: &str) -> String {
-    let sep = if url.contains('?') { '&' } else { '?' };
-    format!(
-        "{url}{sep}key={}&token={}",
-        urlencoding(api_key),
-        urlencoding(token)
-    )
-}
-
-fn urlencoding(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+fn trello_oauth_header(api_key: &str, token: &str) -> String {
+    format!("OAuth oauth_consumer_key=\"{api_key}\", oauth_token=\"{token}\"")
 }
 
 pub(crate) async fn trello_get(
@@ -91,10 +73,11 @@ pub(crate) async fn trello_get(
     api_key: &str,
     path: &str,
 ) -> (u16, Value) {
-    let url = with_auth(&format!("{API}{path}"), api_key, token);
+    let url = format!("{API}{path}");
     match http
         .get(&url)
         .header("Accept", "application/json")
+        .header("Authorization", trello_oauth_header(api_key, token))
         .send()
         .await
     {
@@ -103,7 +86,7 @@ pub(crate) async fn trello_get(
             let body = res.json::<Value>().await.unwrap_or(json!({}));
             (status, body)
         }
-        Err(e) => (0, json!({ "error": e.to_string() })),
+        Err(_) => (0, json!({ "error": "transport error" })),
     }
 }
 
@@ -114,10 +97,11 @@ pub(crate) async fn trello_post(
     path: &str,
     body: &Value,
 ) -> (u16, Value) {
-    let url = with_auth(&format!("{API}{path}"), api_key, token);
+    let url = format!("{API}{path}");
     match http
         .post(&url)
         .header("Accept", "application/json")
+        .header("Authorization", trello_oauth_header(api_key, token))
         .json(body)
         .send()
         .await
@@ -127,7 +111,7 @@ pub(crate) async fn trello_post(
             let body = res.json::<Value>().await.unwrap_or(json!({}));
             (status, body)
         }
-        Err(e) => (0, json!({ "error": e.to_string() })),
+        Err(_) => (0, json!({ "error": "transport error" })),
     }
 }
 
@@ -138,10 +122,11 @@ pub(crate) async fn trello_put(
     path: &str,
     body: &Value,
 ) -> (u16, Value) {
-    let url = with_auth(&format!("{API}{path}"), api_key, token);
+    let url = format!("{API}{path}");
     match http
         .put(&url)
         .header("Accept", "application/json")
+        .header("Authorization", trello_oauth_header(api_key, token))
         .json(body)
         .send()
         .await
@@ -151,7 +136,7 @@ pub(crate) async fn trello_put(
             let body = res.json::<Value>().await.unwrap_or(json!({}));
             (status, body)
         }
-        Err(e) => (0, json!({ "error": e.to_string() })),
+        Err(_) => (0, json!({ "error": "transport error" })),
     }
 }
 

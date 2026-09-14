@@ -237,7 +237,7 @@ ensure_env() {
   fi
 
   if ! grep -qE '^FLEET_BOOTSTRAP_SECRET=' "$ROOT/.env"; then
-    echo "FLEET_BOOTSTRAP_SECRET=dev-bootstrap-secret-change-me" >>"$ROOT/.env"
+    echo "# FLEET_BOOTSTRAP_SECRET=" >>"$ROOT/.env"
     warn "Appended FLEET_BOOTSTRAP_SECRET for local fleet-host bootstrap"
   fi
 

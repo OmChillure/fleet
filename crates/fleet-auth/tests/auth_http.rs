@@ -894,7 +894,8 @@ async fn invite_adds_existing_user_ignoring_email_case() {
     )
     .await;
     assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
-    assert_eq!(invited.body["added_existing_user"], true);
+    assert_eq!(invited.body["added_existing_user"], false);
+    assert!(invited.body["invite"]["token"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -917,6 +918,21 @@ async fn pending_invite_joins_on_signup() {
 
     let created = signup(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let token = inv.body["invite"]["token"]
+        .as_str()
+        .expect("create invite returns token once")
+        .to_string();
+    let (guest_login, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(guest_login.status, StatusCode::OK, "{}", guest_login.body);
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&guest_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let members = call(
         &app,
@@ -936,7 +952,7 @@ async fn pending_invite_joins_on_signup() {
                 .as_str()
                 .is_some_and(|e| e.eq_ignore_ascii_case(&guest))
         })
-        .unwrap_or_else(|| panic!("guest must be a member after signup, before login: {}", members.body));
+        .unwrap_or_else(|| panic!("guest must be a member after token accept: {}", members.body));
     assert_eq!(
         guest_row["role"].as_str(),
         Some("admin"),
@@ -1040,6 +1056,20 @@ async fn signup_joins_every_pending_workspace_before_login() {
 
     let created = signup(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let (guest_login, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
+    assert_eq!(guest_login.status, StatusCode::OK, "{}", guest_login.body);
+    for inv in [&inv_a, &inv_b] {
+        let token = inv.body["invite"]["token"].as_str().unwrap();
+        let accepted = call(
+            &app,
+            "POST",
+            "/api/invites/accept",
+            Some(&guest_jar),
+            Some(json!({ "token": token })),
+        )
+        .await;
+        assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    }
 
     for (jar, ws, role) in [
         (&owner_a_jar, &ws_a, "admin"),
@@ -1102,6 +1132,16 @@ async fn signup_keeps_personal_workspace_and_invited() {
 
     let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+    let token = inv.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&guest_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
@@ -1139,13 +1179,23 @@ async fn pending_invite_joins_when_signup_email_case_differs() {
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     let (login_out, guest_jar) = login(&app, &lower, TEST_PASSWORD).await;
     assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+    let token = inv.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&guest_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     let ids = listed_workspace_ids(&listed);
     assert!(
         ids.contains(&ws.as_str()),
-        "signup with different email case must still consume the pending invite: {ids:?}"
+        "token accept must join after case-normalized signup: {ids:?}"
     );
 }
 
@@ -1211,13 +1261,23 @@ async fn login_accepts_pending_invites() {
 
     let (login_out, guest_jar) = login(&app, &guest, TEST_PASSWORD).await;
     assert_eq!(login_out.status, StatusCode::OK, "{}", login_out.body);
+    let token = inv.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&guest_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let listed = call(&app, "GET", "/api/workspaces", Some(&guest_jar), None).await;
     assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
     let ids = listed_workspace_ids(&listed);
     assert!(
         ids.contains(&ws.as_str()),
-        "login must accept pending invite and join workspace: {ids:?}"
+        "token accept must join workspace: {ids:?}"
     );
 
     let members = call(
@@ -1508,7 +1568,17 @@ async fn member_cannot_list_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], true);
+    assert_eq!(added.body["added_existing_user"], false);
+    let token = added.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let list = call(
         &app,
@@ -1557,7 +1627,17 @@ async fn member_cannot_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], true);
+    assert_eq!(added.body["added_existing_user"], false);
+    let token = added.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let revoke = call(
         &app,
@@ -1622,7 +1702,7 @@ async fn admin_can_list_and_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], true);
+    assert_eq!(added.body["added_existing_user"], false);
 
     let promoted = call(
         &app,
@@ -1856,7 +1936,7 @@ async fn invite_existing_member_is_already_a_member() {
     let app = app().await;
     let (_owner_email, owner_jar, owner_login) = signup_and_login(&app).await;
     let ws = workspace_id(&owner_login);
-    let (member_email, _member_jar, _) = signup_and_login(&app).await;
+    let (member_email, member_jar, _) = signup_and_login(&app).await;
 
     let first = call(
         &app,
@@ -1867,7 +1947,17 @@ async fn invite_existing_member_is_already_a_member() {
     )
     .await;
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
-    assert_eq!(first.body["added_existing_user"], true);
+    assert_eq!(first.body["added_existing_user"], false);
+    let token = first.body["invite"]["token"].as_str().unwrap();
+    let accepted = call(
+        &app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
 
     let again = call(
         &app,

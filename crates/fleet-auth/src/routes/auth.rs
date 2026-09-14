@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
-use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use axum_extra::extract::CookieJar;
 use chrono::{Duration as ChronoDuration, Utc};
 use fleet_db::repos::{sessions as session_repo, users as user_repo, workspaces as workspace_repo};
@@ -22,8 +22,8 @@ use crate::routes::workspaces::{
 };
 use crate::state::AuthState;
 use crate::tokens::{
-    ACCESS_COOKIE, REFRESH_COOKIE, decode_access_token, decode_access_token_for_logout,
-    generate_refresh_token, hash_refresh_token, issue_access_token,
+    decode_access_token, decode_access_token_for_logout, generate_refresh_token,
+    hash_refresh_token, issue_access_token, ACCESS_COOKIE, REFRESH_COOKIE,
 };
 
 /// Resolve the authenticated user from access-cookie JWT + live session row.
@@ -49,15 +49,11 @@ pub async fn require_user(state: &AuthState, jar: &CookieJar) -> AppResult<User>
     grant_env_instance_admin(state, user).await
 }
 
-/// Grant `instance_admin` when the email is listed in `INSTANCE_ADMIN_EMAILS`.
-/// Never revokes a flag that was set in the UI or a previous grant.
-pub async fn grant_env_instance_admin(state: &AuthState, user: User) -> AppResult<User> {
-    if user.instance_admin || !state.config.email_is_env_instance_admin(&user.email_normalized) {
-        return Ok(user);
-    }
-    user_repo::set_instance_admin(&state.db, user.id, true)
-        .await?
-        .ok_or_else(|| AppError::internal("failed to grant instance admin"))
+/// Env-listed emails are a *hint* for operators. They must not grant
+/// instance admin on unverified signup/login. Promote with
+/// `scripts/promote-instance-admin.sh` or `PATCH /api/admin/users`.
+pub async fn grant_env_instance_admin(_state: &AuthState, user: User) -> AppResult<User> {
+    Ok(user)
 }
 
 /// Cookie user who is an instance admin (after env grant).
@@ -231,17 +227,6 @@ pub async fn signup(
 
     let user = grant_env_instance_admin(&state, user).await?;
 
-    if let Err(e) =
-        workspace_repo::accept_pending_invites_for_user(&state.db, user_id, &email_normalized, now)
-            .await
-    {
-        tracing::warn!(
-            user_id = %user_id,
-            error = %e,
-            "signup: accept pending invites failed"
-        );
-    }
-
     let _ = headers;
     tracing::info!(
         user_id = %user_id,
@@ -304,21 +289,6 @@ pub async fn login(
 
     let (access, refresh, sid) =
         create_session_and_tokens(&state, &user, &headers, connect).await?;
-
-    if let Err(e) = workspace_repo::accept_pending_invites_for_user(
-        &state.db,
-        user.id,
-        &email_normalized,
-        Utc::now(),
-    )
-    .await
-    {
-        tracing::warn!(
-            user_id = %user.id,
-            error = %e,
-            "login: accept pending invites failed"
-        );
-    }
 
     let default_ws =
         ensure_default_workspace(&state, user.id, &user.email, user.display_name.as_deref())

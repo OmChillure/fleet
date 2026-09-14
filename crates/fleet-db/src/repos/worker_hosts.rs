@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    HostCpSettings, NewWorkerHost, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
-    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING, WorkerHost,
-    WorkerHostPairToken, normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
-    parse_worker_host_run_mode, parse_worker_host_send_policy,
+    normalize_gpu_name, normalize_host_labels, parse_worker_host_isolation,
+    parse_worker_host_run_mode, parse_worker_host_send_policy, HostCpSettings, NewWorkerHost,
+    WorkerHost, WorkerHostPairToken, WORKER_HOST_ISOLATION_SANDBOXED, WORKER_HOST_OFFLINE_AFTER,
+    WORKER_HOST_STATUS_DISABLED, WORKER_HOST_STATUS_ONLINE, WORKER_HOST_STATUS_PENDING,
 };
 use crate::pool::map_query_err;
 
@@ -760,6 +760,9 @@ fn sanitize_heartbeat_hardware(hardware: Option<serde_json::Value>) -> Option<se
     let Some(mut hardware) = hardware else {
         return None;
     };
+    if let Some(obj) = hardware.as_object_mut() {
+        obj.remove("addrs");
+    }
     let Some(gpus) = hardware.get_mut("gpus").and_then(|g| g.as_array_mut()) else {
         return Some(hardware);
     };

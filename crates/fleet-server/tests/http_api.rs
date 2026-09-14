@@ -6299,8 +6299,8 @@ async fn inbox_monitor_defaults_auto_launch() {
     .await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.body);
     assert_eq!(
-        first.body["auto_launch"], true,
-        "first monitor with omitted auto_launch must default true: {}",
+        first.body["auto_launch"], false,
+        "first monitor with omitted auto_launch must default false: {}",
         first.body
     );
 }

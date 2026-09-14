@@ -9,7 +9,7 @@ use fleet_auth::{require_user, AppError, AppResult, AuthState};
 use fleet_db::repos::worker_hosts::{self as host_repo};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{
-    NewWorkerHost, RUNNER_KIND_FLEET_CLOUD, RUNNER_KIND_PARTNERS, RUNNER_KIND_PUBLIC_CLOUD,
+    NewWorkerHost, RUNNER_KIND_FLEET_CLOUD, RUNNER_KIND_PUBLIC_CLOUD,
     WORKER_HOST_ISOLATION_SANDBOXED,
 };
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::worker_hosts::{created_payload, create_pair_material, require_owner};
+use crate::worker_hosts::{create_pair_material, created_payload, require_owner};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -147,8 +147,7 @@ async fn http_attach_byo_cloud(
         .and_then(|h| h.get("id"))
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
-    let raw = serde_json::to_vec(&body.credentials.unwrap_or(json!({})))
-        .unwrap_or_default();
+    let raw = serde_json::to_vec(&body.credentials.unwrap_or(json!({}))).unwrap_or_default();
     sqlx::query(
         r#"
         INSERT INTO cloud_credentials (id, workspace_id, provider, ciphertext, host_id)
@@ -221,11 +220,12 @@ async fn http_list_partner_offers(
         r#"
         SELECT id, host_id, verified
         FROM partner_offers
-        WHERE enabled
+        WHERE enabled AND workspace_id = $1
         ORDER BY created_at DESC
         LIMIT 50
         "#,
     )
+    .bind(workspace_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
@@ -271,8 +271,7 @@ async fn http_partner_borrow(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
-    let (offer_id, host_id, verified, enabled) =
-        row.ok_or_else(|| AppError::not_found("offer"))?;
+    let (offer_id, host_id, verified, enabled) = row.ok_or_else(|| AppError::not_found("offer"))?;
     if !enabled {
         return Err(AppError::bad_request("offer is not enabled"));
     }
@@ -293,14 +292,9 @@ async fn http_partner_borrow(
     .execute(&state.db)
     .await
     .map_err(|e| AppError::internal(e.to_string()))?;
-    // Cluster label lets tick assign the sandboxed host to the borrower.
-    sqlx::query("UPDATE worker_hosts SET labels = array_append(labels, 'cluster'), runner_kind = $2 WHERE id = $1 AND NOT ('cluster' = ANY(labels))")
-        .bind(host_id)
-        .bind(RUNNER_KIND_PARTNERS)
-        .execute(&state.db)
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
-    Ok(Json(json!({ "ok": true, "host_id": host_id, "verified": verified })))
+    Ok(Json(
+        json!({ "ok": true, "host_id": host_id, "verified": verified }),
+    ))
 }
 
 async fn http_partner_kill(
@@ -317,10 +311,12 @@ async fn http_partner_kill(
         .execute(&state.db)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
-    sqlx::query("UPDATE partner_leases SET status = 'killed', ended_at = $1 WHERE status = 'active'")
-        .bind(Utc::now())
-        .execute(&state.db)
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+    sqlx::query(
+        "UPDATE partner_leases SET status = 'killed', ended_at = $1 WHERE status = 'active'",
+    )
+    .bind(Utc::now())
+    .execute(&state.db)
+    .await
+    .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "killed": true })))
 }
