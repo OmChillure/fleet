@@ -266,12 +266,49 @@ async fn create_invite(
         return Err(AppError::forbidden("admins can only invite members"));
     }
 
-    if let Some(existing) = user_repo::find_by_email_normalized(&state.db, &email).await?
-        && workspace_repo::user_role(&state.db, workspace_id, existing.id)
+    if let Some(existing) = user_repo::find_by_email_normalized(&state.db, &email).await? {
+        if workspace_repo::user_role(&state.db, workspace_id, existing.id)
             .await?
             .is_some()
-    {
-        return Err(AppError::conflict("user is already a member"));
+        {
+            return Err(AppError::conflict("user is already a member"));
+        }
+        let now = Utc::now();
+        workspace_repo::add_member(&state.db, workspace_id, existing.id, role, now).await?;
+        let mut bytes = [0u8; 24];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let token = hex::encode(bytes);
+        let invite = WorkspaceInvite {
+            id: Uuid::now_v7(),
+            workspace_id,
+            email_normalized: email,
+            role: role.to_string(),
+            token: token.clone(),
+            invited_by: actor.id,
+            created_at: now,
+            expires_at: now + ChronoDuration::days(14),
+            accepted_at: Some(now),
+            accepted_user_id: Some(existing.id),
+            revoked_at: None,
+        };
+        let saved = workspace_repo::insert_invite(&state.db, &invite)
+            .await
+            .map_err(|e| {
+                if e.is_unique_violation() {
+                    AppError::conflict("an open invite already exists for that email")
+                } else {
+                    AppError::from(e)
+                }
+            })?;
+        let _ = workspace_repo::accept_invite(&state.db, saved.id, existing.id, now).await?;
+        let json = InviteJson::from(&saved);
+        return Ok((
+            StatusCode::CREATED,
+            Json(CreateInviteResponse {
+                invite: json,
+                added_existing_user: true,
+            }),
+        ));
     }
 
     let now = Utc::now();

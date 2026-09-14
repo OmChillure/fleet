@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 pub fn uses_official_cli(harness: &str) -> bool {
     matches!(
         harness.trim().to_ascii_lowercase().as_str(),
-        "grok" | "xai" | "claude" | "anthropic" | "ollama"
+        "grok" | "xai" | "claude" | "anthropic"
     )
 }
 
@@ -138,7 +138,12 @@ fn nonempty_model(model: &str) -> Option<String> {
 
 fn with_worker_rules(work_dir: &Path, prompt: &str) -> String {
     let mut out = String::new();
-    if let Ok(persona) = fs::read_to_string(work_dir.join("PERSONA.md"))
+    let persona = fs::read_to_string(work_dir.join("PERSONA.md")).ok().or_else(|| {
+        work_dir
+            .parent()
+            .and_then(|p| fs::read_to_string(p.join("PERSONA.md")).ok())
+    });
+    if let Some(persona) = persona
         && !persona.trim().is_empty()
     {
         out.push_str(persona.trim());
@@ -251,18 +256,30 @@ fn run_timeout(
     {
         let _ = stdin.write_all(text.as_bytes());
     }
+    let stdout_h = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut out, &mut buf);
+            buf
+        })
+    });
+    let stderr_h = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut err, &mut buf);
+            buf
+        })
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = std::io::Read::read_to_string(&mut out, &mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
-                }
+                let stdout = stdout_h
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                let stderr = stderr_h
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
                 if !status.success() {
                     let err = stderr.trim();
                     if err.is_empty() {
@@ -275,12 +292,16 @@ fn run_timeout(
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_h.map(|h| h.join());
+                let _ = stderr_h.map(|h| h.join());
                 bail!("{bin} timed out after {}s", timeout.as_secs());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(40)),
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_h.map(|h| h.join());
+                let _ = stderr_h.map(|h| h.join());
                 bail!("{bin}: {e}");
             }
         }
@@ -327,7 +348,7 @@ mod tests {
     fn official_providers() {
         assert!(uses_official_cli("grok"));
         assert!(uses_official_cli("Claude"));
-        assert!(uses_official_cli("ollama"));
+        assert!(!uses_official_cli("ollama"));
         assert!(!uses_official_cli("mock"));
         assert!(!uses_official_cli("grok-acp"));
     }

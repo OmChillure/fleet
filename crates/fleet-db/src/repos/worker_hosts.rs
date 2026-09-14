@@ -1076,6 +1076,27 @@ pub async fn replace_pair_token(
     Ok(host)
 }
 
+/// Any workspace: this durable box id is already paired.
+pub async fn find_any_by_machine_id(
+    pool: &PgPool,
+    machine_id: Uuid,
+) -> DbResult<Option<WorkerHost>> {
+    let q = format!(
+        r#"
+        SELECT {HOST_COLS}
+        FROM worker_hosts
+        WHERE machine_id = $1
+        ORDER BY paired_at ASC NULLS LAST, created_at ASC, id ASC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, WorkerHost>(&q)
+        .bind(machine_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Host already paired on this workspace with this durable box id.
 pub async fn find_by_machine_id(
     pool: &PgPool,

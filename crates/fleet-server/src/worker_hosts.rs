@@ -433,9 +433,15 @@ async fn clear_update_request_if_current(state: &AppState, host: WorkerHost) -> 
     if host.update_requested_at.is_none() {
         return host;
     }
-    let public = host
-        .as_public(Utc::now())
-        .with_desired(desired_for(state, &host));
+    let desired = desired_for(state, &host);
+    // Withheld desired (this-machine already on package / plane bake) is
+    // UNKNOWN, not CURRENT — still treat as applied so Update requested clears.
+    if desired.is_none() {
+        return host_repo::clear_update_requested(&state.db, host.id)
+            .await
+            .unwrap_or(host);
+    }
+    let public = host.as_public(Utc::now()).with_desired(desired);
     if public.software_status != WORKER_SOFTWARE_STATUS_CURRENT {
         return host;
     }
@@ -1217,12 +1223,19 @@ async fn http_bootstrap(
     if platform.is_empty() {
         return Err(AppError::bad_request("platform is required"));
     }
-    let workspace_id = body
-        .workspace_id
-        .ok_or_else(|| AppError::bad_request("workspace_id is required"))?;
+    let workspace_id = match body.workspace_id {
+        Some(id) => id,
+        None => workspace_repo::first_id(&state.db)
+            .await?
+            .ok_or_else(|| AppError::conflict("no_workspace"))?,
+    };
     workspace_repo::min_isolation(&state.db, workspace_id).await?;
     let machine_id = parse_machine_id(body.machine_id.as_deref());
-    if machine_id.is_some() {
+    if let Some(mid) = machine_id
+        && host_repo::find_any_by_machine_id(&state.db, mid)
+            .await?
+            .is_some()
+    {
         return Err(AppError::forbidden(
             "bootstrap cannot rotate an existing host; pair with the current machine token",
         ));

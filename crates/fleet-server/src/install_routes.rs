@@ -77,8 +77,11 @@ async fn get_worker_bin(
     State(state): State<AppState>,
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
-    let path = lookup_worker_bin(&state, &platform, &bin)?;
     let ct = worker_bin_content_type(&bin);
+    if let Some(hash) = synthesized_sha256_sidecar(&state, &platform, &bin) {
+        return Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], hash).into_response());
+    }
+    let path = lookup_worker_bin(&state, &platform, &bin)?;
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -399,14 +402,31 @@ fn synthesize_manifest_from_bins(
     })
 }
 
+fn synthesized_sha256_sidecar(state: &AppState, platform: &str, bin: &str) -> Option<String> {
+    let stem = bin.strip_suffix(".sha256")?;
+    if lookup_worker_bin(state, platform, bin).is_ok() {
+        return None;
+    }
+    let path = lookup_worker_bin(state, platform, stem).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    use sha2::{Digest, Sha256};
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
 fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).ok()?;
     let sha = hex::encode(Sha256::digest(&bytes));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let version = if name.starts_with("fleet-driver") {
+        crate::package_versions::fleet_driver_package_version()
+    } else {
+        crate::package_versions::fleet_host_package_version()
+    };
     Some(fleet_db::WorkerBinMeta {
         sha256: sha,
         size: bytes.len() as u64,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(version.to_string()),
     })
 }
 
