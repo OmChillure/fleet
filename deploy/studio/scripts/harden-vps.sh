@@ -39,14 +39,16 @@ sudo sshd -t
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq ufw fail2ban unattended-upgrades
+sudo apt-get install -y -qq ufw fail2ban unattended-upgrades cron
+sudo systemctl enable --now cron || true
 
 # Keep 22 open before enabling the firewall.
+# 80/443 are allowlisted to Cloudflare in fleet-docker-fw + ufw cf* rules.
+# Do not `ufw allow 80/443` from Anywhere — that bypasses the CF pin if
+# DOCKER-USER is missing.
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow OpenSSH
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
 sudo ufw --force enable
 
 sudo systemctl enable --now fail2ban

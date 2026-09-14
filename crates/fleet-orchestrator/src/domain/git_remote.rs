@@ -55,15 +55,10 @@ pub fn validate_git_url(url: &str) -> Result<(), GitRemoteError> {
             "repo_url must not start with '-'".into(),
         ));
     }
-    let ok = url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("ssh://")
-        || url.starts_with("git://")
-        || url.starts_with("file://")
-        || url.starts_with("git@");
+    let ok = url.starts_with("https://") || url.starts_with("ssh://") || url.starts_with("git@");
     if !ok {
         return Err(GitRemoteError::Invalid(
-            "repo_url must be an http(s), ssh, git, file, or git@ URL".into(),
+            "repo_url must be an https, ssh, or git@ URL".into(),
         ));
     }
     // Cookie GET /fleet and spawn FLEET_REPO_URL echo this string; do not persist user:pass@.
@@ -168,6 +163,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_file_http_and_git_schemes() {
+        for bad in [
+            "file:///data/repo.git",
+            "http://git.internal/r.git",
+            "git://git.internal/r.git",
+        ] {
+            let msg = err_text(Some(bad), None);
+            assert!(
+                msg.contains("https"),
+                "scheme {bad:?} must require https/ssh: {msg}"
+            );
+        }
+    }
+
+    #[test]
     fn https_ok() {
         let r = parse_project_git_remote(Some("https://github.com/acme/app.git"), Some("develop"))
             .unwrap()
@@ -190,6 +200,9 @@ mod tests {
             "not a url",
             "-e evil",
             "ftp://example.com/r.git",
+            "http://example.com/r.git",
+            "file:///etc/passwd",
+            "git://example.com/r.git",
             "https://example.com/has space.git",
             "javascript:alert(1)",
             "https://user:unique-secret@example.test/acme.git",

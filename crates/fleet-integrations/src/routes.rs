@@ -71,6 +71,30 @@ async fn require_workspace_member(
     Ok((user, ws))
 }
 
+fn require_owner_or_admin(ws: &fleet_db::WorkspaceWithRole) -> AppResult<()> {
+    if matches!(ws.role.as_str(), "owner" | "admin") {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(
+            "owner or admin required to change integrations",
+        ))
+    }
+}
+
+/// Cookie GET that starts OAuth must not be followable from another site.
+fn reject_cross_site_oauth_nav(headers: &axum::http::HeaderMap) -> AppResult<()> {
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+    {
+        if site.eq_ignore_ascii_case("cross-site") {
+            return Err(AppError::forbidden("oauth start must be same-site"));
+        }
+    }
+    Ok(())
+}
+
 fn enrich_views(
     workspace_id: Uuid,
     connections: &[fleet_db::IntegrationConnection],
@@ -218,8 +242,10 @@ async fn put_oauth_app(
 async fn oauth_start(
     State(state): State<IntegrationsState>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Path((workspace_id, provider)): Path<(Uuid, String)>,
 ) -> AppResult<Response> {
+    reject_cross_site_oauth_nav(&headers)?;
     let (user, _) = require_workspace_member(&state, &jar, workspace_id).await?;
     let provider = provider.trim().to_lowercase();
     let entry = require_available_provider(&provider)?;
@@ -245,7 +271,8 @@ async fn oauth_start_with_app(
     Path((workspace_id, provider)): Path<(Uuid, String)>,
     Form(form): Form<OauthAppForm>,
 ) -> AppResult<Response> {
-    let (user, _) = require_workspace_member(&state, &jar, workspace_id).await?;
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    require_owner_or_admin(&ws)?;
     let provider = provider.trim().to_lowercase();
     require_available_provider(&provider)?;
 
@@ -1013,7 +1040,8 @@ async fn disconnect_integration(
     jar: CookieJar,
     Path((workspace_id, provider)): Path<(Uuid, String)>,
 ) -> AppResult<Json<DisconnectResponse>> {
-    let (user, _) = require_workspace_member(&state, &jar, workspace_id).await?;
+    let (user, ws) = require_workspace_member(&state, &jar, workspace_id).await?;
+    require_owner_or_admin(&ws)?;
     let provider = provider.trim().to_lowercase();
 
     if !catalog::is_known_provider(&provider) {

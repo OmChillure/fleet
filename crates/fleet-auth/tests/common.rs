@@ -226,7 +226,8 @@ pub async fn call_with_proxy_ips(
         builder = builder.header(header::CONTENT_TYPE, "application/json");
     }
     builder = builder.header("x-forwarded-for", xff);
-    builder = builder.header("x-real-ip", real_ip);
+    builder = builder.header("x-real-ip", xff);
+    builder = builder.header("cf-connecting-ip", real_ip);
     call_finish(app, builder, body).await
 }
 
