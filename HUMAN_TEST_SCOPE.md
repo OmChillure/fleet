@@ -46,7 +46,10 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes — `GET /health` git_sha and UI `/fleet-git-sha.txt` == `b9ddbccd5f7dd791443792216cbb974777515943` (this branch HEAD at film time). Clip: `.tmp/demos/20260914T033306Z-fleet-runners-k8s.webm`.
+- Frames + webm inspected: yes — all 20 frames under `.tmp/demos/20260914T033306Z-frames/` plus the `.webm`.
+- Bugs found:
+  - Recorder flagged “self-hosted missing who-can-send radios”. Frame `11-runners-list.png` is the empty state (no paired worker in the demo workspace); radios live on a host card. Not a regression from this change.
+  - Yellow “OS builds not on fleet-host 0.0.3” is the host stack’s debug bins vs `runner-packages.toml` (addressed in this MR by bumping `windows-x86_64-rev` to 3).
+  - k8s scene `kubectl` against no Kind cluster (API group NotFound). Expected on this host; not introduced here.
+  - No leaked secrets, no error toasts on signup/login/fleet fixture/tick/cancel.
