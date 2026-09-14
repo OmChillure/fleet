@@ -423,12 +423,27 @@ fn fleet(ws: &str, suffix: &str) -> String {
 }
 
 /// Pair + machine heartbeat so the host is online with `advertised_host=true`.
+/// Process-only advertise cannot take the workspace default `container` pin.
 async fn create_pair_and_heartbeat(
     app: &axum::Router,
     jar: &CookieJar,
     ws: &str,
     name: &str,
 ) -> (Uuid, String) {
+    let iso = call(
+        app,
+        "PATCH",
+        &fleet(ws, "/settings"),
+        Some(jar),
+        Some(json!({ "min_isolation": "process" })),
+    )
+    .await;
+    assert_eq!(
+        iso.status,
+        StatusCode::OK,
+        "min_isolation=process for process-only host: {}",
+        iso.body
+    );
     let created = call(
         app,
         "POST",

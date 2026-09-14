@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
@@ -23,6 +25,7 @@ use uuid::Uuid;
 const TEST_PASSWORD: &str = "correct-horse";
 const TEST_ADMIN_TOKEN: &str = "test-admin";
 const TEST_JWT_SECRET: &str = "dev-change-me-to-a-long-random-secret-at-least-32-chars";
+const TEST_WEBHOOK_SECRET: &str = "test-webhook-secret";
 
 fn require_database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -2144,6 +2147,24 @@ async fn create_chat_conversation(
         .as_str()
         .unwrap_or_else(|| panic!("conversation.id: {}", created.body))
         .to_string()
+}
+
+/// List hides threads with no messages (failed first turn is deleted/hidden).
+async fn seed_conversation_preview(state: &AppState, conversation_id: &str) {
+    let cid = Uuid::parse_str(conversation_id).expect("conversation uuid");
+    fleet_db::repos::chats::insert_message(
+        &state.db,
+        Uuid::now_v7(),
+        cid,
+        "user",
+        "preview",
+        None,
+        None,
+        &json!([]),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("preview message");
 }
 
 /// GET /chat/status with no runner_id is control-plane OpenAI + Gemini only.
@@ -6678,6 +6699,53 @@ async fn seed_inbox_connection(state: &AppState, workspace_id: Uuid, provider: &
     )
     .await
     .expect("seed connection");
+    let client_secret = state
+        .integrations
+        .credentials_key
+        .encrypt(&json!({ "webhook_secret": TEST_WEBHOOK_SECRET }))
+        .expect("encrypt oauth app");
+    fleet_db::repos::integrations::upsert_oauth_app(
+        &state.db,
+        workspace_id,
+        provider,
+        "test-client",
+        &client_secret,
+        None,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("seed oauth app webhook_secret");
+}
+
+fn hmac_sha256_hex(secret: &str, data: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn github_webhook_headers(body: &[u8]) -> Vec<(String, String)> {
+    let sig = hmac_sha256_hex(TEST_WEBHOOK_SECRET, body);
+    vec![
+        ("x-github-event".into(), "issues".into()),
+        ("x-hub-signature-256".into(), format!("sha256={sig}")),
+    ]
+}
+
+fn slack_webhook_headers(body: &[u8]) -> Vec<(String, String)> {
+    let ts = chrono::Utc::now().timestamp().to_string();
+    let mut msg = Vec::from(b"v0:");
+    msg.extend_from_slice(ts.as_bytes());
+    msg.push(b':');
+    msg.extend_from_slice(body);
+    let sig = format!("v0={}", hmac_sha256_hex(TEST_WEBHOOK_SECRET, &msg));
+    vec![
+        ("x-slack-request-timestamp".into(), ts),
+        ("x-slack-signature".into(), sig),
+    ]
+}
+
+fn header_pairs(owned: &[(String, String)]) -> Vec<(&str, &str)> {
+    owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
 }
 
 #[tokio::test]
@@ -6751,12 +6819,14 @@ async fn inbox_webhook_lists_upserted_ticket() {
     let token = hook_token_from_monitor(&started.body);
     assert!(!token.is_empty());
 
+    let body = github_issue_body();
+    let hdrs = github_webhook_headers(&body);
     let ok = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/github/{token}"),
-        &[("x-github-event", "issues")],
-        github_issue_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
@@ -6814,12 +6884,14 @@ async fn inbox_webhook_pinned_slack_still_ingests_slack() {
     .await;
     assert_eq!(pin.status, StatusCode::OK, "{}", pin.body);
 
+    let body = slack_message_body();
+    let hdrs = slack_webhook_headers(&body);
     let slack = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/slack/{token}"),
-        &[],
-        slack_message_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(slack.status, StatusCode::OK, "{}", slack.body);
@@ -6863,12 +6935,14 @@ async fn inbox_webhook_disabled_monitor_ingests_zero() {
     let token = hook_token_from_monitor(&stopped.body);
     assert!(!token.is_empty());
 
+    let body = github_issue_body();
+    let hdrs = github_webhook_headers(&body);
     let hook = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/github/{token}"),
-        &[("x-github-event", "issues")],
-        github_issue_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(hook.status, StatusCode::OK, "{}", hook.body);
