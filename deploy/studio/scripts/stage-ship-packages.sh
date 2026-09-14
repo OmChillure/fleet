@@ -81,7 +81,7 @@ stage_one() {
   local have
   have="$(manifest_sha "${dest}" || true)"
   if platform_complete "${dest}"; then
-    if python3 "${REPO}/scripts/runner-release.py" platform-ok "${DIST}" "${plat}"; then
+    if python3 "${WORKDIR}/scripts/runner-release.py" platform-ok "${DIST}" "${plat}"; then
       log "worker ${plat}: staged hashes match [release], skip"
       return 0
     fi
@@ -113,7 +113,7 @@ ship_dist() {
 }
 
 if [[ "${SHIP_ONLY:-0}" == 1 ]]; then
-  python3 "${REPO}/scripts/runner-release.py" check --require-all "${DIST}"
+  python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
   ship_dist
   exit 0
 fi
@@ -125,7 +125,7 @@ stage_one windows-x86_64 --windows
 
 log "worker darwin-arm64 / darwin-x86_64: not built here (no macOS cross from Linux)"
 
-python3 "${REPO}/scripts/runner-release.py" check --require-all "${DIST}"
+python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
 
 if [[ "${STAGE_ONLY:-0}" == 1 ]]; then
   log "worker-dist staged locally (${DIST}); not shipping until plane is healthy"
