@@ -244,6 +244,7 @@ fn assert_tick_report_zero(r: &TickReport, label: &str) {
     assert_eq!(r.reviews_bounced, 0, "{label}={r:?}");
     assert_eq!(r.cancel_tasks, 0, "{label}={r:?}");
     assert_eq!(r.retry_promoted, 0, "{label}={r:?}");
+    assert_eq!(r.orphans_recovered, 0, "{label}={r:?}");
     assert_eq!(r.reaped, 0, "{label}={r:?}");
     assert_eq!(r.runs_terminated, 0, "{label}={r:?}");
     assert_eq!(r.external_synced, 0, "{label}={r:?}");

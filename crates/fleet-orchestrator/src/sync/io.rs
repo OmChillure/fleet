@@ -256,38 +256,9 @@ impl ExternalBoardSync for IoBoardSync {
                     "asana.add_comment",
                 );
             }
-            "slack" => {
-                if let Some((channel, ts)) = key.split_once(':') {
-                    log_io(
-                        inv.invoke(
-                            ws,
-                            "slack".into(),
-                            "post_message".into(),
-                            json!({
-                                "channel": channel,
-                                "text": body,
-                                "thread_ts": ts,
-                            }),
-                        )
-                        .await,
-                        "slack.post_message",
-                    );
-                }
-            }
-            "teams" => {
-                if let Some((chat_id, _)) = key.split_once(':') {
-                    log_io(
-                        inv.invoke(
-                            ws,
-                            "teams".into(),
-                            "send_chat_message".into(),
-                            json!({ "chat_id": chat_id, "text": body }),
-                        )
-                        .await,
-                        "teams.send_chat_message",
-                    );
-                }
-            }
+            // Chat threads are not a board. Tick is every 5s; posting here
+            // floods the source message. Terminal write-back replies once.
+            "slack" | "teams" => {}
             "notion" => {
                 log_io(
                     inv.invoke(
@@ -626,6 +597,25 @@ mod tests {
         assert_eq!(gh.2["owner"], "acme");
         assert_eq!(gh.2["repo"], "app");
         assert_eq!(gh.2["number"], 12);
+    }
+
+    #[tokio::test]
+    async fn slack_and_teams_in_progress_do_not_post() {
+        let (rec, sync) = wired_rec();
+        let ws = uuid::Uuid::new_v4();
+        sync.sync_task_status(item(ws, "slack", "C1:1.1", "in_progress"))
+            .await
+            .unwrap();
+        sync.sync_task_status(item(ws, "teams", "T1:1", "assigned"))
+            .await
+            .unwrap();
+        let calls = rec.calls.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|(p, _, _)| p == "slack" || p == "teams"),
+            "chat providers must not post on every tick: {calls:?}"
+        );
     }
 
     #[tokio::test]

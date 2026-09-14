@@ -49,6 +49,7 @@ pub struct TickReport {
     pub reviews_bounced: usize,
     pub cancel_tasks: usize,
     pub retry_promoted: usize,
+    pub orphans_recovered: usize,
     pub reaped: usize,
     pub runs_terminated: usize,
     /// Tasks successfully pushed to ExternalBoardSync this tick.
@@ -360,6 +361,12 @@ impl TickRunner {
         report.retry_promoted = self
             .store
             .promote_retry_wait(project_id, chrono::Utc::now())
+            .await? as usize;
+
+        // Step 5c — assigned/in_progress with no live session → ready
+        report.orphans_recovered = self
+            .store
+            .recover_orphaned_active_tasks(project_id)
             .await? as usize;
 
         snap = self.store.load_board_snapshot(project_id).await?;

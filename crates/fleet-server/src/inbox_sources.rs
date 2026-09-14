@@ -354,6 +354,101 @@ pub fn item_matches_filters(filters: &Value, provider: &str, key: &str) -> bool 
     }
 }
 
+/// Slack history/event rows that are not user work (joins, bots, topic changes).
+pub fn slack_message_is_noise(subtype: Option<&str>, text: &str) -> bool {
+    if slack_system_subtype(subtype) {
+        return true;
+    }
+    slack_system_text(text)
+}
+
+fn slack_system_subtype(subtype: Option<&str>) -> bool {
+    matches!(
+        subtype.unwrap_or("").trim(),
+        "channel_join"
+            | "channel_leave"
+            | "channel_topic"
+            | "channel_purpose"
+            | "channel_name"
+            | "channel_archive"
+            | "channel_unarchive"
+            | "group_join"
+            | "group_leave"
+            | "group_topic"
+            | "group_purpose"
+            | "group_name"
+            | "group_archive"
+            | "group_unarchive"
+            | "bot_message"
+            | "message_changed"
+            | "message_deleted"
+            | "pinned_item"
+            | "unpinned_item"
+            | "ekm_access_denied"
+            | "channel_posting_permissions"
+            | "reminder_add"
+    )
+}
+
+fn slack_system_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.starts_with("Fleet run ") {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    const TAILS: &[&str] = &[
+        "has joined the channel",
+        "has left the channel",
+        "has joined the group",
+        "has left the group",
+        "set the channel topic",
+        "set the channel purpose",
+        "set the channel description",
+        "renamed the channel",
+    ];
+    TAILS
+        .iter()
+        .any(|needle| lower == *needle || lower.ends_with(&format!(" {needle}")))
+}
+
+/// Channel + history/event row → inbox key/title/summary, or none if noise.
+pub fn slack_inbox_item(channel: &str, message: &Value) -> Option<(String, String, String)> {
+    if channel.trim().is_empty() {
+        return None;
+    }
+    let ts = message.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+    if ts.is_empty() {
+        return None;
+    }
+    let subtype = message.get("subtype").and_then(|v| v.as_str());
+    let text = message
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() || slack_message_is_noise(subtype, text) {
+        return None;
+    }
+    Some((
+        format!("{channel}:{ts}"),
+        text.chars().take(80).collect(),
+        text.chars().take(4000).collect(),
+    ))
+}
+
+/// Per-channel Slack history: skip a bad channel; fail only if none succeeded.
+pub fn slack_poll_outcome(
+    ok_channels: usize,
+    ingested: usize,
+    channel_errors: &[String],
+) -> Result<usize, String> {
+    if ok_channels == 0 && !channel_errors.is_empty() {
+        Err(channel_errors.join("; "))
+    } else {
+        Ok(ingested)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +824,59 @@ mod tests {
             Some("board-1"),
             "legacy trello_boards must land as filters.trello.boards[0]"
         );
+    }
+
+    #[test]
+    fn slack_join_and_bot_are_noise() {
+        assert!(slack_message_is_noise(
+            Some("channel_join"),
+            "<@U1> has joined the channel"
+        ));
+        assert!(slack_message_is_noise(
+            None,
+            "vinicius has joined the channel"
+        ));
+        assert!(slack_message_is_noise(
+            Some("bot_message"),
+            "hello from a bot"
+        ));
+        assert!(slack_message_is_noise(None, "Fleet run abc started"));
+        assert!(!slack_message_is_noise(
+            None,
+            "please look at the weather-app ticket"
+        ));
+        assert!(
+            !slack_message_is_noise(None, "has anyone joined the standup?"),
+            "user text that only mentions joining must still ingest"
+        );
+    }
+
+    #[test]
+    fn slack_inbox_item_skips_join_keeps_user_text() {
+        let join = json!({
+            "ts": "1.1",
+            "subtype": "channel_join",
+            "text": "<@U1> has joined the channel"
+        });
+        assert!(slack_inbox_item("C1", &join).is_none());
+        let user = json!({
+            "ts": "2.2",
+            "text": "please look at weather-app"
+        });
+        let (key, title, summary) = slack_inbox_item("C1", &user).expect("user message");
+        assert_eq!(key, "C1:2.2");
+        assert_eq!(title, "please look at weather-app");
+        assert_eq!(summary, "please look at weather-app");
+    }
+
+    #[test]
+    fn slack_poll_skips_one_bad_channel_when_another_ok() {
+        assert_eq!(
+            slack_poll_outcome(1, 5, &["Cbad: Slack API: not_in_channel".into()]).unwrap(),
+            5
+        );
+        let err = slack_poll_outcome(0, 0, &["Cbad: Slack API: not_in_channel".into()]).unwrap_err();
+        assert!(err.contains("not_in_channel"), "{err}");
+        assert_eq!(slack_poll_outcome(1, 0, &[]).unwrap(), 0);
     }
 }
