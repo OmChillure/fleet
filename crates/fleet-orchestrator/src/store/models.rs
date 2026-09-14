@@ -27,7 +27,7 @@ pub struct ProjectConfigRow {
     pub repo_url: Option<String>,
     /// Branch, tag, or commit checked out after clone. Default `main`.
     pub git_ref: String,
-    /// `off` | `ollama` — Grok is env-only, never stored here.
+    /// `off` | `ollama` — composer/llm-keys choose Grok; this column is the no-chat fallback.
     pub fleet_llm: String,
     pub fleet_llm_model: String,
     pub updated_at: DateTime<Utc>,

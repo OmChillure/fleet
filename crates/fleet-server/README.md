@@ -33,16 +33,16 @@ dx serve --package fleet-ui --port 3030
 | `GET`/`POST` `/api/workspaces` | [`fleet-auth`](../fleet-auth/) |
 | `/api/workspaces/{id}/integrations…` | [`fleet-integrations`](../fleet-integrations/) — OAuth connect platforms for AI |
 | `/api/integrations/oauth/callback/{provider}` | OAuth callbacks (GitHub, Slack, …) |
-| `GET /api/workspaces/{id}/chat/status` | Providers: Grok (xAI) + Ollama + model lists |
-| `POST /api/workspaces/{id}/chat` | Chat via Grok or Ollama + tools (multi-agent, integration proxy) |
-| `GET /api/workspaces/{id}/fleet/workers` | Sandboxes = worker sessions (stub backend MVP) |
+| `GET /api/workspaces/{id}/chat/status` | Runner heartbeat inventory (`?runner_id=`) or control-plane keys |
+| `POST /api/workspaces/{id}/chat` | Chat via the selected provider + tools (multi-agent, integration proxy) |
+| `GET /api/workspaces/{id}/fleet/workers` | Sandboxes = guest sessions on a paired `fleet-host` |
 | `GET/POST …/fleet/*` | Cookie fleet control plane (tick, fixture, tasks, runs) |
 
 Chat tools (same process as orchestrator):
 
 - **Fleet:** `list_*`, `launch_agent_task` (single), `launch_agent_plan` (multi-task fan-out + multi-tick)
 - **Integrations:** `list_integrations`, `get_integration`, `integration_query` (all OAuth apps: GitHub/Jira/Linear/Slack/Figma/Notion/Drive/Teams/Discord)
-- Sandboxes are ephemeral (stub): spawn → complete → destroy → wipe workdir
+- Tick leases to a paired `fleet-host`; the API does not local-spawn
 - Tokens decrypt only on the control plane; never injected into sandbox env
 
 ---
@@ -60,10 +60,11 @@ See [`.env.example`](../../.env.example).
 | `JWT_REFRESH_TTL_SECS` | `604800` | Refresh cookie / session TTL |
 | `HOST` | `127.0.0.1` | Bind address (use an IP; `localhost` is not a valid `SocketAddr` host) |
 | `PORT` | `8080` | Bind port (also accepts legacy `AUTH_PORT`) |
-| `CORS_ORIGINS` | `http://localhost:3030,http://127.0.0.1:3030` | Comma-separated UI origins; credentials enabled |
+| `CORS_ORIGINS` | loopback on `FLEET_UI_PORT` | Comma-separated UI origins; loopback ports follow `FLEET_UI_PORT` |
 | `COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `COOKIE_SAMESITE` | `Lax` | `Strict` / `Lax` / `None` (`None` needs Secure) |
-| `API_PUBLIC_BASE` / `UI_PUBLIC_BASE` | `http://localhost:8080` / `:3030` | OAuth redirect + popup messaging |
+| `API_PUBLIC_BASE` / `UI_PUBLIC_BASE` | `http://localhost:$PORT` / `$FLEET_UI_PORT` | OAuth. Loopback follows listen ports; a public hostname is left alone |
+| `WORKER_PUBLIC_BASE` | unset = `API_PUBLIC_BASE` | Pair + guest phone-home. Not the OAuth URL |
 | `{PROVIDER}_CLIENT_ID` / `_SECRET` | unset | Optional per-provider OAuth apps (see `.env.example`) |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama for workspace chat |
 | `OLLAMA_MODEL` | unset (first installed) | Default model name, e.g. `llama3.2` |
@@ -72,7 +73,7 @@ See [`.env.example`](../../.env.example).
 | `GROK_ENABLED` | `true` | Set `false` to disable Grok |
 | `GROK_AUTH_PATH` | `~/.grok/auth.json` | Grok CLI session (`grok login`) |
 | `XAI_API_KEY` | unset | Optional fallback if no CLI session |
-| `FLEET_MAX_AGENTS` | `16` | Concurrent jobs across paired hosts (hard max 256). Extra plan tasks queue |
+| `FLEET_MAX_AGENTS` | `16` | Workspace live count (instance hard cap 128). Extra plan tasks queue |
 | `TICK_INTERVAL_S` | `5` | Background ticker interval for queued work |
 
 The API does not run sandboxes; pair a `fleet-host`.

@@ -15,12 +15,6 @@ if [[ -f "$REPO/.env" ]]; then
   . "$REPO/.env"
   set +a
 fi
-if [[ -f "$REPO/.env.local" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$REPO/.env.local"
-  set +a
-fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$REPO/.tmp/ms-playwright}"
 
 TREE="$(bash "$REPO/scripts/tree-id.sh")"

@@ -1,25 +1,23 @@
 # Fleet Orchestrator (Rust)
 
-Project-scoped **orchestration service** for Agent Fleet. Pure-logic control plane after a `WorkPlan` is accepted.
+Project-scoped **orchestration library** for Agent Fleet. Served by `fleet-server`
+(`HOST`/`PORT`, usually `:8080`). There is no standalone binary.
 
-Design: [`artifacts/orchestration-service-design.md`](artifacts/orchestration-service-design.md)
+Design notes (historical): [`docs/references/old-product-visions/artifacts/orchestration-service-design.md`](../../docs/references/old-product-visions/artifacts/orchestration-service-design.md)
 
-## Technology (MVP)
+## Technology
 
 | Layer | Choice | Why |
 | --- | --- | --- |
-| Language | **Rust** (1.75+, edition 2021) | Safety, static binary, async control plane |
+| Language | **Rust** (workspace edition 2024, rust-version 1.88) | Safety, static binary, async control plane |
 | Async | **Tokio** | Tick loop + IO |
-| Database | **PostgreSQL 16** | Source of truth, advisory locks (later), TX materialize |
-| SQL | **SQLx** (runtime-checked queries) | Async Postgres without heavy ORM |
-| Migrations | `sqlx::migrate!` + `migrations/` | Forward-only greenfield |
+| Database | **PostgreSQL 16** | Source of truth |
+| SQL | **SQLx** | Async Postgres |
+| Migrations | moving into [`fleet-db/migrations`](../fleet-db/migrations/) | One `_sqlx_migrations` owner |
 | IDs | **UUIDv5** stable board tasks | Idempotent rematerialize |
-| Sandbox | `SandboxRuntime` + **`stub`** / **`process`** / **`k8s`** | In-process fake, exec + pidfile, or `FleetSandbox` CRs |
-| Notify / sync | `NotificationSink` noops; `ExternalBoardSync` log wired in tick | PR8 webhooks still open; PR10 landed |
-| Auth (later HTTP) | `ADMIN_TOKEN` / session worker tokens (SHA-256) | Design K24/K31 |
-| Leadership | **Single process per DB** | Do not scale replicas in MVP |
-
-**Stack note:** The design doc originally suggested Go for MVP speed; this repo implements orchestration in **Rust** as the chosen production language. Domain semantics are unchanged.
+| Guest | paired `fleet-host` starts `fleet-driver` | Process or container isolation on the runner |
+| Auth | Cookie BFF `/api/workspaces/{id}/fleet/*`; `/v1` is worker + `ADMIN_TOKEN` | Product UI never calls `/v1` for humans |
+| Leadership | **Single process per DB** | Do not scale replicas |
 
 ## Layout
 
@@ -57,7 +55,7 @@ Host port **5433** maps to container 5432 (avoids clashing with a local Postgres
 cp .env.example .env   # edit as needed
 docker compose up -d postgres
 set -a && source .env && set +a
-cargo run
+cargo run -p fleet-server   # binds HOST/PORT (default :8080)
 ```
 
 **Landed:** PR5a–c tick, PR6 HTTP API (+ OpenAPI), PR7 process sandbox, PR9 fixtures + E2E, PR10 external board sync wiring.  
@@ -106,7 +104,8 @@ OpenAPI: [`api/openapi.yaml`](api/openapi.yaml) — also served at `GET /openapi
 export DATABASE_URL=postgres://fleet:fleet@localhost:5433/fleet?sslmode=disable
 export ADMIN_TOKEN=dev-admin-token-change-me
 export DATA_DIR=/tmp/fleet-data
-export HTTP_ADDR=127.0.0.1:8081
+export HOST=127.0.0.1
+export PORT=8080
 cargo run -p fleet-server
 ```
 

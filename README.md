@@ -67,23 +67,26 @@ dx serve --package fleet-ui --port 3030
 3. **App shell** requires a live session (`GET /api/auth/me`). Unauthenticated
    visits to app routes redirect to `/login`.
 4. **Sidebar** has a workspace switcher (list + create). Nav sections: Chat,
-   Monitoring, Agents, Workspace (Integrations, Settings, Workers). Links stay
-   under the current workspace id.
+   Monitoring, Agents, Runners (self-hosted / cloud / partners), Workspace
+   (Integrations, Settings). `/{workspace_id}/workers` redirects to self-hosted.
 5. **Toasts** (bottom-right) for success / error across login, signup, and
    integrations. **OAuth tokens** are AES-256-GCM encrypted at rest.
 6. **Chat** supports **Grok (CLI auth)** and **local Ollama**. Grok reads
    `~/.grok/auth.json` from `grok login` (same idea as Claude Code credentials);
-   model is `grok-4.5`. Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
+   The Grok model is whatever `grok models` lists first on that runner (not pinned).
+   Ollama: `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
+   Chat supports every major provider the runner or control-plane key can reach
+   (Grok, Claude, Ollama, OpenAI, Gemini, …; add more as demand arrives).
    Grok / Claude / Ollama run on a paired runner’s official CLI. The control
    plane still executes fleet tools (`list_agent_personas`, `launch_agent_plan`,
    `integration_query`) from that reply so Slack → GitHub → Notion works
    without tokens leaving the plane. Plan `outputs` write back when a run ends.
-   Live workers
-   message each other mid-run (`send_message` / `ask_teammate`, or
-   `./fleet-tool.sh chat-post` / `chat-list`), share `work/`,
-   and reviewers can `request_changes` to bounce work back. Worker models run on
+   Live guests
+   message each other mid-run (`team_chat_post` / `team_chat_list` with `kind`,
+   or `./fleet-tool.sh chat-post` / `chat-list`), share `work/`,
+   and reviewers can `request_changes` to bounce work back. Guest models run on
    the paired runner's official CLI (same as chat), using the **Chat composer**
-   provider (Grok / Claude / Ollama). Settings Ollama /
+   provider. Settings Ollama /
    `FLEET_AGENT_BACKEND=grok` only select the harness when a run has no chat
    model. Without a paired runner the task stays ready; without a harness,
    sandboxes use mock.
@@ -97,7 +100,7 @@ dx serve --package fleet-ui --port 3030
    `FleetSandbox` CRs; the operator makes pods. Finished workdirs are kept 15
    minutes for SessionDetail / artifacts, then wiped. OAuth tokens never enter
    the sandbox.
-8. **Workers** (`/{workspace_id}/workers`): add a worker, copy the install
+8. **Runners** (`/{workspace_id}/runners/self-hosted`): add a runner, copy the install
    command and one-time pair token. The machine pairs outbound (no inbound
    port). Tick enqueues a claim for an online matching host; otherwise the
    task stays ready.
@@ -123,15 +126,14 @@ dx serve --package fleet-ui --port 3030
 | `GET` | `/api/workspaces/{id}/integrations/{provider}/oauth/start` | Start OAuth (302 to provider) |
 | `GET` | `/api/integrations/oauth/callback/{provider}` | OAuth callback → encrypt + store tokens |
 | `DELETE` | `/api/workspaces/{id}/integrations/{provider}` | Disconnect + wipe secrets |
-| `GET` | `/api/workspaces/{id}/chat/status` | Providers (Grok, Ollama, OpenAI, Claude) + model lists |
+| `GET` | `/api/workspaces/{id}/chat/status` | Runner inventory (`?runner_id=`) or control-plane OpenAI/Gemini keys |
 | `GET`/`POST` | `/api/workspaces/{id}/chat/conversations` | List / create saved chats |
 | `GET`/`DELETE` | `/api/workspaces/{id}/chat/conversations/{cid}` | Load / delete a chat |
-| `POST` | `/api/workspaces/{id}/chat/conversations/{cid}/pause` | Stop an in-flight turn (user line already saved) |
 | `POST` | `/api/workspaces/{id}/chat` | Chat turn (persisted; fleet + integration tools) |
 | `POST` | `/api/workspaces/{id}/chat/stream` | Same turn as NDJSON stream (`status`/`delta`/`action`/`done`) |
 | `GET` | `/api/workspaces/{id}/fleet/workers` | Sandboxes (worker sessions) |
 | `GET`/`POST` | `/api/workspaces/{id}/worker-hosts` | List / create paired worker hosts (owner; pair token once) |
-| `GET` | `/api/workspaces/{id}/fleet/tickets` | Ticket inbox (Start monitor follows connected apps and auto-launches by kind) |
+| `GET`/`POST` | `/api/workspaces/{id}/inbox` | Ticket inbox (Start monitor follows connected apps and auto-launches by kind) |
 | `POST` | `/api/workspaces/{id}/fleet/tasks/{task_id}/resume` | HITL resume a blocked task |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/kill` | Kill a live sandbox |
 | `POST` | `/api/workspaces/{id}/fleet/sessions/{session_id}/replace` | Kill the sandbox, keep the task (new agent). Body `{ worker_profile, reason }` swaps the persona. |
@@ -154,7 +156,7 @@ UI app routes (workspace-scoped):
 | Path | Page |
 | --- | --- |
 | `/{workspace_id}/dashboard` | Workforce (goals, approvals, board) |
-| `/{workspace_id}/chat` | New chat (Grok / Ollama + tools; auto-saved) |
+| `/{workspace_id}/chat` | New chat (runner + control-plane providers; auto-saved) |
 | `/{workspace_id}/chat/{conversation_id}` | Resume a saved chat |
 | `/{workspace_id}/fleet` | Fleet control plane UI |
 | `/{workspace_id}/sessions` | Chat history (list / open / delete) |
@@ -166,11 +168,14 @@ UI app routes (workspace-scoped):
 | `/{workspace_id}/inbox` | Ticket inbox (monitor + finish) |
 | `/{workspace_id}/integrations` | OAuth connect (GitHub, GitLab, Trello, Asana, Slack, Notion, …) |
 | `/admin` | Instance admin (users, all runners, health). Not workspace-scoped |
-| `/{workspace_id}/settings` | Concurrent agents + fleet LLM (Ollama; Grok is env-only) |
-| `/{workspace_id}/runners/self-hosted` | Paired worker hosts (create + install/pair token) |
-| `/{workspace_id}/runners/cloud` | Cloud runners placeholder |
+| `/{workspace_id}/settings` | Concurrent agents (default 16; instance cap 128) + members + fleet LLM fallback |
+| `/{workspace_id}/runners/self-hosted` | Paired runner hosts (create + install/pair token) |
+| `/{workspace_id}/runners/cloud` | Fleet Cloud / BYO attach |
 | `/{workspace_id}/runners/partners` | Partner runners + trust disclaimer |
 | `/{workspace_id}/workers` | Redirects to self-hosted runners |
+
+Internal workspace crates (`fleet-orchestrator`, `fleet-bus`, `fleet-chat-md`,
+`fleet-runners-view`) are listed in the root [`Cargo.toml`](Cargo.toml).
 
 Crate docs: [`fleet-server`](crates/fleet-server/README.md),
 [`fleet-auth`](crates/fleet-auth/README.md),

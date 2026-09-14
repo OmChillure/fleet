@@ -1,4 +1,5 @@
-//! Workspace Settings: concurrent agents + local fleet LLM (Ollama). Grok is env-only.
+//! Workspace Settings: concurrent agents, members, isolation floor, LLM keys.
+//! Workspace `llm-keys` win when present; env (`XAI_API_KEY` / `grok login`) is fallback.
 
 use dioxus::prelude::*;
 
@@ -182,7 +183,7 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 if grok_env() {
                     p { class: "mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-[var(--app-fg)]",
-                        "This API process has FLEET_AGENT_BACKEND=grok as a fallback label. Fleet workers still run on a paired runner — pick Grok / Claude / Ollama in Chat and select that box."
+                        "This API process has FLEET_AGENT_BACKEND=grok as a fallback label. Guests still run on a paired runner — pick the provider in Chat (or store a workspace LLM key). Settings here is only the no-chat fallback."
                     }
                 } else if let Some(b) = effective().filter(|b| b != "off") {
                     p { class: "mt-4 text-xs text-[var(--app-muted)]",

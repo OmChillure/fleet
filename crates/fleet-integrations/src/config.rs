@@ -20,7 +20,29 @@ fn env_url_or_localhost(key: &str, port: u16) -> String {
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
+        .map(|url| rewrite_loopback_port(&url, port).unwrap_or(url))
         .unwrap_or_else(|| format!("http://localhost:{port}"))
+}
+
+/// Loopback `http(s)://localhost|127.0.0.1|[::1][:old]` follows `port`.
+/// A public hostname is left unchanged (VPS `https://agentfleet.studio`).
+fn rewrite_loopback_port(url: &str, port: u16) -> Option<String> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        ("https", r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        ("http", r)
+    } else {
+        return None;
+    };
+    let (hostport, path) = rest
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap_or((rest, String::new()));
+    let host = hostport.split(':').next().unwrap_or(hostport);
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+        return None;
+    }
+    Some(format!("{scheme}://{host}:{port}{path}"))
 }
 
 /// One OAuth application's client credentials.
@@ -333,6 +355,52 @@ mod tests {
         let cfg = cfg.expect("from_env");
         assert_eq!(cfg.api_public_base, "http://localhost:18280");
         assert_eq!(cfg.ui_public_base, "http://localhost:13230");
+    }
+
+    #[test]
+    fn loopback_public_bases_follow_listen_ports_public_hosts_stay() {
+        let _guard = env_lock().lock().expect("env lock");
+        let keys = [
+            "API_PUBLIC_BASE",
+            "UI_PUBLIC_BASE",
+            "PORT",
+            "FLEET_API_PORT",
+            "AUTH_PORT",
+            "FLEET_UI_PORT",
+            "JWT_SECRET",
+        ];
+        let prev: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, env::var(k).ok())).collect();
+        unsafe {
+            for k in keys {
+                env::remove_var(k);
+            }
+            env::set_var("PORT", "18080");
+            env::set_var("FLEET_UI_PORT", "13030");
+            env::set_var("API_PUBLIC_BASE", "http://localhost:8080");
+            env::set_var("UI_PUBLIC_BASE", "http://127.0.0.1:3030");
+            env::set_var("JWT_SECRET", "valid-secret-at-least-32-characters-long!");
+        }
+        let loopback = IntegrationsConfig::from_env();
+        unsafe {
+            env::set_var("API_PUBLIC_BASE", "https://agentfleet.studio");
+            env::set_var("UI_PUBLIC_BASE", "https://agentfleet.studio");
+        }
+        let public = IntegrationsConfig::from_env();
+        unsafe {
+            for (k, v) in prev {
+                match v {
+                    Some(v) => env::set_var(k, v),
+                    None => env::remove_var(k),
+                }
+            }
+        }
+        let loopback = loopback.expect("loopback rewrite");
+        assert_eq!(loopback.api_public_base, "http://localhost:18080");
+        assert_eq!(loopback.ui_public_base, "http://127.0.0.1:13030");
+        let public = public.expect("public host stays");
+        assert_eq!(public.api_public_base, "https://agentfleet.studio");
+        assert_eq!(public.ui_public_base, "https://agentfleet.studio");
     }
 
     #[test]

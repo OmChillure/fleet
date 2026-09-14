@@ -50,17 +50,18 @@ Product vision: **primary interface is Web**. CLI/TUI remain optional later.
 
 | Path | Purpose | UI status |
 | --- | --- | --- |
-| `/{workspace_id}/dashboard` | Fleet overview | Live team board + chat |
-| `/{workspace_id}/chat` | Talk to the fleet | Composer + local messages |
+| `/{workspace_id}/dashboard` | Workforce | Goals, approvals, board |
+| `/{workspace_id}/chat` | Talk to the fleet | Composer + persist + stream |
 | `/{workspace_id}/fleet` | Orchestrator control plane | Live control UI |
-| `/{workspace_id}/sessions` | Chat history / sessions | Empty placeholder |
-| `/{workspace_id}/agents` | Roles, models, budgets | Empty placeholder |
-| `/{workspace_id}/sandboxes` | Sandbox health / resources | Empty placeholder |
+| `/{workspace_id}/sessions` | Chat history | Saved conversations |
+| `/{workspace_id}/agents` | Workspace personas + roster specialists | Catalog + seed starters |
+| `/{workspace_id}/sandboxes` | Live guest sessions | Paired `fleet-host` |
 | `/{workspace_id}/cases` | Durable cases | List + detail, observe, cancel |
+| `/{workspace_id}/inbox` | Ticket inbox | Apps + filters |
 | `/{workspace_id}/integrations` | Connect platforms via OAuth | Catalog + connect flow |
 | `/admin` | Instance admin | Users, all runners, health (instance_admin only) |
-| `/{workspace_id}/settings` | Workspace preferences | Concurrent agents + local fleet LLM (no git URL) |
-| `/{workspace_id}/workers` | Self-hosted workers | Add worker + one-time pair token |
+| `/{workspace_id}/settings` | Workspace preferences | Agents cap, members, LLM keys, min isolation |
+| `/{workspace_id}/runners/self-hosted` | Paired runners | Add host + one-time pair token |
 
 ```text
 Marketing                          App shell
@@ -77,7 +78,7 @@ Marketing                          App shell
 
 **Auth gate:** `AppShell` calls `GET /api/auth/me` on mount; unauthorized → `/login`.
 
-**Sidebar sections:** Chat · Monitoring · Agents · Workspace.
+**Sidebar sections:** Chat · Monitoring · Agents · Runners · Workspace · Instance.
 
 ---
 
@@ -99,7 +100,8 @@ crates/fleet-ui/src/
     dashboard/ fleet/ sessions/ agents/ sandboxes/
     integrations/         # catalog + oauth_done
     settings/
-    workers/              # /{ws}/workers (paired hosts)
+    runners/              # /{ws}/runners/self-hosted|cloud|partners
+    inbox/                # /{ws}/inbox
     shared/               # EmptyPage
 ```
 
@@ -176,12 +178,12 @@ Use **`http://localhost:3030`** in the browser (match `CORS_ORIGINS`).
 | Done | Routes, app shell, feature folders |
 | Done | Login + signup; JWT cookies; toasts |
 | Done | Default workspace; list/create; workspace-scoped URLs |
-| Done | Chat page UI (local placeholder replies) |
+| Done | Chat persist + NDJSON stream (runner + control-plane providers) |
 | Done | Integrations OAuth UI + connect refresh |
-| Partial | Fleet page control plane |
-| Not done | Chat backend / streaming |
-| Not done | Live dashboard / sessions streams |
-| Not done | Theme persistence (localStorage) |
+| Done | Fleet cookie BFF (tasks, runs, tick, replace) |
+| Done | Sessions = chat history; `/{ws}/sessions/{id}` = live guest |
+| Done | Agents, inbox, runners (self-hosted / cloud / partners) |
+| Done | Theme persistence (`localStorage` `fleet-theme`) |
 
 ---
 

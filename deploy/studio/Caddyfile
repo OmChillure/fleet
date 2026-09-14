@@ -13,6 +13,8 @@
 
 :443 {
 	tls /etc/caddy/certs/origin.crt /etc/caddy/certs/origin.key
+	@www host www.agentfleet.studio
+	redir @www https://agentfleet.studio{uri} permanent
 	request_body {
 		max_size 2MB
 	}

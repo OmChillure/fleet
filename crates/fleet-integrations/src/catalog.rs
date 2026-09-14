@@ -74,7 +74,6 @@ pub fn catalog() -> Vec<IntegrationView> {
             connected: false,
             connection: None,
         },
-        // --- Coming soon ---
         IntegrationView {
             id: "gitlab".into(),
             name: "GitLab".into(),

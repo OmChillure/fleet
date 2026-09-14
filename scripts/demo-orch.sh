@@ -2,16 +2,16 @@
 # PR9: E2E demo against standalone fleet-orchestrator or fleet-server (/v1).
 #
 # Env:
-#   FLEET_ORCH_URL  default http://127.0.0.1:8081 (standalone orch) or :8080 for server
+#   FLEET_ORCH_URL  default http://127.0.0.1:8080 (fleet-server; /v1 worker + automation)
 #   ADMIN_TOKEN     required for /v1 (default matches .env.example)
 #   SCENARIO        happy|cancel|all  (default happy)
 #
 # Examples:
 #   ADMIN_TOKEN=dev-admin-token-change-me ./scripts/demo-orch.sh
-#   SCENARIO=all FLEET_ORCH_URL=http://127.0.0.1:8081 ./scripts/demo-orch.sh
+#   SCENARIO=all FLEET_ORCH_URL=http://127.0.0.1:8080 ./scripts/demo-orch.sh
 set -euo pipefail
 
-BASE="${FLEET_ORCH_URL:-http://127.0.0.1:8081}"
+BASE="${FLEET_ORCH_URL:-http://127.0.0.1:8080}"
 TOKEN="${ADMIN_TOKEN:-dev-admin-token-change-me}"
 AUTH="Authorization: Bearer ${TOKEN}"
 SCENARIO="${SCENARIO:-happy}"

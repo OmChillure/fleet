@@ -2306,7 +2306,7 @@ async fn configure_fleet_tool(
         .unwrap_or(current.fleet_llm.as_str());
     if !matches!(llm, "off" | "ollama") {
         return Err(AppError::bad_request(
-            "fleet_llm must be off or ollama (Grok is env-only)",
+            "fleet_llm must be off or ollama (Grok uses composer / llm-keys / env fallback)",
         ));
     }
     let model = arguments
