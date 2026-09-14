@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `bbb4c6944b9bb3e484e07bec4a411e337acafd43`
-- Tree-id: `bbb4c6944b9bb3e484e07bec4a411e337acafd43-5dd6265b9e18`
+- Tree-id: `aa6755a069f38534c8b5e38f1a14d065997e48c7`
 
 ## Scenes
 
@@ -51,7 +51,9 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: `aa6755a069f38534c8b5e38f1a14d065997e48c7` (`GET /health` `git_sha` and UI `/fleet-git-sha.txt` both match). Clip: `.tmp/demos/20260914T005428Z-inbox-integrations.webm`
+- Frames + webm inspected: yes — `04-inbox-empty`, `05-inbox-after-start-monitor`, `06-inbox-github-setup`, `07-inbox-ticket-visible`, `08-inbox-after-finish`, `10-integrations-search-git`, plus the `.webm`
+- Bugs found:
+  - Start monitor with no connected app correctly 400s (`no listen source connected`) and shows that toast. Expected.
+  - Start run on the seeded GitHub issue 400s (`no paired runner taking jobs`) on this isolated host stack (`:18080`/`:13030`). The issue row stays Open. Not a page-layout bug — this worktree has no paired fleet-host. The GitHub page, setup walkthrough, Connect, repo filter, and issue row (`#1 Demo inbox ticket`) all rendered.
+  - GitHub issue list sits below the setup cards; first paint on 1400×900 needs a scroll to reach Start run.
