@@ -7,17 +7,70 @@ pub enum InboxKind {
     Page,
 }
 
+/// How this app shows up in a software team's day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InboxGroup {
+    Code,
+    Board,
+    Chat,
+    Docs,
+}
+
+impl InboxGroup {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Code => "Source control",
+            Self::Board => "Issue trackers",
+            Self::Chat => "Chat",
+            Self::Docs => "Docs",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::Code => {
+                "Open issues become Fleet runs. Agents implement them and open a PR or MR."
+            }
+            Self::Board => {
+                "Tickets and cards become a work + review run. Status stays on the board."
+            }
+            Self::Chat => {
+                "One message becomes one ops job. Fleet replies in the channel when it finishes."
+            }
+            Self::Docs => {
+                "A shared page becomes an analysis run — read-through, not a code change."
+            }
+        }
+    }
+
+    pub const ALL: [InboxGroup; 4] = [Self::Code, Self::Board, Self::Chat, Self::Docs];
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InboxAppInfo {
     pub id: &'static str,
     pub name: &'static str,
     pub kind: InboxKind,
+    pub group: InboxGroup,
     /// One sentence: what shows up here.
     pub blurb: &'static str,
+    /// What this app is in the user's job.
+    pub work: &'static str,
+    /// What Fleet does with items from this app.
+    pub fleet_does: &'static str,
+    /// What lands back in the source app.
+    pub outcome: &'static str,
+    /// Three-step loop shown on the page.
+    pub flow: &'static [&'static str],
     pub filter_label: &'static str,
     pub filter_placeholder: &'static str,
+    /// Monitor filter is stored and applied on poll. False = no fake box.
+    pub has_filter: bool,
+    pub filter_save: &'static str,
+    pub examples: &'static [&'static str],
     /// Numbered setup, first visit.
     pub steps: &'static [&'static str],
+    pub hook_title: &'static str,
     pub hook_help: &'static str,
     pub empty: &'static str,
     pub action: &'static str,
@@ -28,16 +81,29 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "github",
         name: "GitHub",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Code,
         blurb: "Open issues from your repos show up here. Starting one launches a Fleet run to work on it.",
+        work: "Your team files bugs and feature work as GitHub issues on the repo that owns the code.",
+        fleet_does: "Start run launches a coding agent plus a reviewer. They use the GitHub connection to read the issue, change the repo, and open a pull request.",
+        outcome: "A PR on the issue’s repo, plus a comment back on the issue when the run finishes.",
+        flow: &[
+            "Issue is open on a repo the GitHub App can see",
+            "Start run → coding + review agents",
+            "PR opened; Fleet comments on the issue",
+        ],
         filter_label: "Only these repositories (optional)",
-        filter_placeholder: "acme/api, acme/web",
+        filter_placeholder: "acme/api, acme/web — or paste a github.com URL",
+        has_filter: true,
+        filter_save: "Save repos",
+        examples: &["acme/api", "acme/web"],
         steps: &[
-            "Connect GitHub under Workspace → Integrations if the green Connected badge is not there yet.",
+            "Connect GitHub on this page if the green Connected badge is not there yet.",
             "On GitHub.com open Settings → Applications → Agent Fleet (or your app name) and allow the repositories you want Fleet to see.",
             "If you only want some of those repos here, type them below as owner/name (for example acme/api). Leave the box empty to use every repo the app can already see.",
-            "Click Save, then Refresh. Open issues appear below. Start run turns one issue into a Fleet job.",
+            "Click Save repos, then Refresh. Open issues appear below. Start run turns one issue into a Fleet job.",
         ],
-        hook_help: "Optional, faster than Refresh: in each GitHub repo go to Settings → Webhooks → Add webhook. Paste this URL, content type JSON, events “Issues”.",
+        hook_title: "Push issues here without waiting for Refresh",
+        hook_help: "In each GitHub repo: Settings → Webhooks → Add webhook. Paste this URL, content type application/json, events “Issues”.",
         empty: "No open issues yet. Finish the steps above, then Refresh. If the list is still empty, the GitHub App may not have access to those repos.",
         action: "Start run",
     },
@@ -45,16 +111,29 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "gitlab",
         name: "GitLab",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Code,
         blurb: "Open issues from your GitLab projects show up here.",
+        work: "GitLab issues live next to the project. Your team already tracks bugs and MRs there.",
+        fleet_does: "Start run launches coding + review. Agents use the GitLab connection to read the issue and open a merge request.",
+        outcome: "A merge request on that project, with a note back on the issue.",
+        flow: &[
+            "Issue is open on a project the token can read",
+            "Start run → coding + review agents",
+            "Merge request opened on the project",
+        ],
         filter_label: "Only these projects (optional)",
         filter_placeholder: "group/project, other-group/app",
+        has_filter: true,
+        filter_save: "Save projects",
+        examples: &["group/api", "group/web"],
         steps: &[
-            "Connect GitLab under Workspace → Integrations.",
+            "Connect GitLab on this page.",
             "The token must be allowed to read issues on the projects you care about.",
             "Optional: list projects below as group/name. Empty means every project the token can list.",
-            "Save, then Refresh. Start run launches a Fleet job for that issue.",
+            "Save projects, then Refresh. Start run launches a Fleet job for that issue.",
         ],
-        hook_help: "Optional: in the GitLab project, Settings → Webhooks, paste this URL for Issue events.",
+        hook_title: "GitLab issue webhook",
+        hook_help: "In the GitLab project: Settings → Webhooks. Paste this URL and enable Issue events.",
         empty: "No open issues yet. Connect GitLab, check project access, then Refresh.",
         action: "Start run",
     },
@@ -62,16 +141,28 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "bitbucket",
         name: "Bitbucket",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Code,
         blurb: "Open issues from Bitbucket repos show up here.",
-        filter_label: "Only these repositories (optional)",
-        filter_placeholder: "workspace/repo",
-        steps: &[
-            "Connect Bitbucket under Workspace → Integrations.",
-            "Give the connection access to the repositories you want.",
-            "Optional: list workspace/repo names below. Empty means every repo the token can see.",
-            "Save, then Refresh.",
+        work: "Bitbucket Cloud holds the repo and its issue tracker. Fleet lists every repo the connection can see.",
+        fleet_does: "Start run launches coding + review against that workspace/repo issue.",
+        outcome: "Agents work the issue and can open a pull request on the same repo.",
+        flow: &[
+            "Issue is open on a Bitbucket repo",
+            "Start run → coding + review agents",
+            "Pull request on that workspace/repo",
         ],
-        hook_help: "Optional: add this URL as a Bitbucket repository webhook for issue events.",
+        filter_label: "",
+        filter_placeholder: "",
+        has_filter: false,
+        filter_save: "Save",
+        examples: &[],
+        steps: &[
+            "Connect Bitbucket on this page with the Atlassian account that owns the workspace.",
+            "Grant the connection access to the repositories whose issues you want Fleet to pick up.",
+            "Refresh. Every open issue those repos expose is listed below.",
+        ],
+        hook_title: "Bitbucket issue webhook",
+        hook_help: "In the Bitbucket repo: Repository settings → Webhooks. Add this URL for issue events.",
         empty: "No open issues yet. Connect Bitbucket and Refresh.",
         action: "Start run",
     },
@@ -79,15 +170,32 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "jira",
         name: "Jira",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Board,
         blurb: "Jira issues that match your search show up here.",
-        filter_label: "Which issues? (Jira search)",
-        filter_placeholder: "Leave empty for “not Done”. Or type a Jira search such as project = ENG AND status != Done",
-        steps: &[
-            "Connect Jira under Workspace → Integrations.",
-            "Below you can leave the box empty to pull issues that are not Done. If you know Jira search (JQL), type a query instead — same language you use in Jira’s issue search bar.",
-            "Save, then Refresh. Start run launches a Fleet job for that issue.",
+        work: "Jira is the sprint board. Engineers already live in JQL, issue keys like ENG-142, and status categories.",
+        fleet_does: "Start run takes one issue and runs work + review. Agents can transition or comment through the Jira connection.",
+        outcome: "The issue stays the source of truth. Fleet comments when the run finishes.",
+        flow: &[
+            "Issue matches your JQL (default: not Done)",
+            "Start run → work + review",
+            "Comment / status update back on the issue",
         ],
-        hook_help: "Optional: in Jira, add an outgoing webhook to this URL for issue updates.",
+        filter_label: "Which issues? (Jira search)",
+        filter_placeholder: "Leave empty for “not Done”. Or type JQL such as project = ENG AND status != Done",
+        has_filter: true,
+        filter_save: "Save search",
+        examples: &[
+            "statusCategory != Done ORDER BY updated DESC",
+            "assignee = currentUser() AND statusCategory != Done",
+            "project = ENG AND status != Done",
+        ],
+        steps: &[
+            "Connect Jira on this page with the Atlassian site that holds the project.",
+            "Leave the search empty to pull issues that are not Done. Or type the same JQL you use in Jira’s issue search bar.",
+            "Save search, then Refresh. Start run launches a Fleet job for that issue.",
+        ],
+        hook_title: "Jira outgoing webhook",
+        hook_help: "In Jira, add an outgoing webhook (or automation rule) that POSTs issue updates to this URL.",
         empty: "No matching issues. Connect Jira, adjust the search if you set one, then Refresh.",
         action: "Start run",
     },
@@ -95,15 +203,28 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "linear",
         name: "Linear",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Board,
         blurb: "Linear issues show up here (for example ENG-123).",
+        work: "Linear issues are keyed by team (ENG-123). Cycles and teams are how the product team already plans.",
+        fleet_does: "Start run launches work + review for that identifier. Agents can comment on the Linear issue.",
+        outcome: "The Linear issue stays open as the tracker; Fleet reports back on it.",
+        flow: &[
+            "Issue is open on a team the token can see",
+            "Start run → work + review",
+            "Note posted on ENG-123",
+        ],
         filter_label: "Only these teams (optional)",
         filter_placeholder: "ENG, DES",
+        has_filter: true,
+        filter_save: "Save teams",
+        examples: &["ENG", "DES"],
         steps: &[
-            "Connect Linear under Workspace → Integrations.",
+            "Connect Linear on this page.",
             "Optional: type team keys below (the letters on issues, like ENG). Empty means every team the token can see.",
-            "Save, then Refresh.",
+            "Save teams, then Refresh.",
         ],
-        hook_help: "Optional: in Linear, Settings → API → Webhooks, paste this URL.",
+        hook_title: "Linear webhook",
+        hook_help: "In Linear: Settings → API → Webhooks. Paste this URL.",
         empty: "No issues yet. Connect Linear and Refresh.",
         action: "Start run",
     },
@@ -111,15 +232,29 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "trello",
         name: "Trello",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Board,
         blurb: "Cards from your Trello boards show up here.",
-        filter_label: "Only these boards (optional)",
-        filter_placeholder: "Board ids from the board URL",
-        steps: &[
-            "Connect Trello under Workspace → Integrations.",
-            "Optional: paste board ids (from the board URL) to limit which boards Fleet reads. Empty means every board the token can see.",
-            "Save, then Refresh.",
+        work: "Trello boards are the lightweight kanban. A card is the unit of work, not an issue key.",
+        fleet_does: "Start run treats a card as a ticket: work + review. Agents can comment on the card.",
+        outcome: "The card stays on the board. Fleet comments when the run finishes.",
+        flow: &[
+            "Card is open on a board the token can see",
+            "Start run → work + review",
+            "Comment on the card",
         ],
-        hook_help: "Optional: add this URL as a Trello board webhook.",
+        filter_label: "Only these boards (optional)",
+        filter_placeholder: "Board id from the board URL (trello.com/b/<id>/…)",
+        has_filter: true,
+        filter_save: "Save boards",
+        examples: &[],
+        steps: &[
+            "Connect Trello on this page.",
+            "Open a board in Trello. The URL looks like trello.com/b/AbCdEfGh/name — the AbCdEfGh part is the board id.",
+            "Paste those ids below to limit which boards Fleet reads. Empty means every board the token can see.",
+            "Save boards, then Refresh.",
+        ],
+        hook_title: "Trello board webhook",
+        hook_help: "Add this URL as a Trello board webhook so new cards arrive without Refresh.",
         empty: "No cards yet. Connect Trello and Refresh.",
         action: "Start run",
     },
@@ -127,14 +262,27 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "asana",
         name: "Asana",
         kind: InboxKind::Ticket,
+        group: InboxGroup::Board,
         blurb: "Open Asana tasks show up here.",
-        filter_label: "Only these projects (optional)",
-        filter_placeholder: "Leave empty to use every project the token can see",
+        work: "Asana tasks are assigned work across projects. Fleet lists incomplete tasks the token can see.",
+        fleet_does: "Start run launches work + review for that task. Agents can comment on the Asana task.",
+        outcome: "The task stays in Asana. Fleet comments when the run finishes.",
+        flow: &[
+            "Incomplete task in a workspace the token can see",
+            "Start run → work + review",
+            "Comment on the Asana task",
+        ],
+        filter_label: "",
+        filter_placeholder: "",
+        has_filter: false,
+        filter_save: "Save",
+        examples: &[],
         steps: &[
-            "Connect Asana under Workspace → Integrations.",
+            "Connect Asana on this page with the workspace that holds the projects.",
             "Refresh to pull open tasks. Start run launches a Fleet job for that task.",
         ],
-        hook_help: "Optional: add this URL as an Asana webhook if your plan supports it.",
+        hook_title: "Asana webhook",
+        hook_help: "Add this URL as an Asana webhook if your plan supports it. Refresh is enough to start.",
         empty: "No tasks yet. Connect Asana and Refresh.",
         action: "Start run",
     },
@@ -142,16 +290,29 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "slack",
         name: "Slack",
         kind: InboxKind::Message,
+        group: InboxGroup::Chat,
         blurb: "Messages from Slack channels the bot is in show up here. One message becomes one small job.",
+        work: "Slack is where the team pings for help. A message in #eng is a request, not a ticket.",
+        fleet_does: "Handle turns that message into one ops task. Fleet replies in the channel when the job finishes (it skips its own “Fleet run …” replies).",
+        outcome: "A reply in the same channel — not a PR, unless the message asked for one.",
+        flow: &[
+            "Invite the Slack app into the channel",
+            "Handle → one ops task",
+            "Fleet replies in the channel",
+        ],
         filter_label: "Only these channels (optional)",
         filter_placeholder: "#eng or C0123456789",
+        has_filter: true,
+        filter_save: "Save channels",
+        examples: &["#eng", "#support"],
         steps: &[
-            "Connect Slack under Workspace → Integrations if you have not already.",
+            "Connect Slack on this page if you have not already.",
             "In Slack, open the channel you care about and type /invite @your-app-name (the name you gave the Slack app). Until the bot is a member, Slack will not let Fleet read or post there.",
             "Optional: list those channels below by name (#eng) or by channel ID. Leave the box empty to use every channel the bot is already in.",
-            "Save, then Refresh. Handle turns one message into a Fleet job.",
+            "Save channels, then Refresh. Handle turns one message into a Fleet job.",
         ],
-        hook_help: "Optional: in the Slack app, Event Subscriptions, paste this Request URL so new messages arrive without Refresh.",
+        hook_title: "Slack Event Subscriptions",
+        hook_help: "In the Slack app: Event Subscriptions → Request URL. Paste this URL so new messages arrive without Refresh. Subscribe to message.channels.",
         empty: "No messages yet. Invite the Slack app into a channel, then Refresh.",
         action: "Handle",
     },
@@ -159,33 +320,58 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "teams",
         name: "Microsoft Teams",
         kind: InboxKind::Message,
-        blurb: "Messages from Teams channels the app can read show up here.",
-        filter_label: "Only these channels (optional)",
-        filter_placeholder: "Channel names or ids",
-        steps: &[
-            "Connect Microsoft Teams under Workspace → Integrations.",
-            "Add the app to the team or channel you want Fleet to read.",
-            "Optional: list those channels below. Empty means every channel the app can already see.",
-            "Save, then Refresh.",
+        group: InboxGroup::Chat,
+        blurb: "Messages from Teams chats the app can read show up here.",
+        work: "Teams is the Microsoft 365 chat. Fleet reads chats the connected account can already see.",
+        fleet_does: "Handle turns one message into one ops task. Fleet can post back through the Teams connection.",
+        outcome: "A reply in that chat — same idea as Slack, on Microsoft 365.",
+        flow: &[
+            "Connect the Microsoft account that sits in the team",
+            "Handle → one ops task",
+            "Reply posted in the chat",
         ],
-        hook_help: "Optional: point a Teams outgoing webhook at this URL.",
-        empty: "No messages yet. Add the Teams app to a channel, then Refresh.",
+        filter_label: "",
+        filter_placeholder: "",
+        has_filter: false,
+        filter_save: "Save",
+        examples: &[],
+        steps: &[
+            "Connect Microsoft Teams on this page with the work account that is a member of the team.",
+            "Add the app to the team or chat you want Fleet to read, if your tenant requires it.",
+            "Refresh. Messages from chats that account can list appear below.",
+        ],
+        hook_title: "Teams outgoing webhook",
+        hook_help: "Point a Teams outgoing webhook at this URL if you want pushes instead of Refresh.",
+        empty: "No messages yet. Add the Teams app to a chat, then Refresh.",
         action: "Handle",
     },
     InboxAppInfo {
         id: "notion",
         name: "Notion",
         kind: InboxKind::Page,
+        group: InboxGroup::Docs,
         blurb: "Pages from shared Notion databases show up here. Analyze starts a read-through job.",
-        filter_label: "Only these databases (optional)",
-        filter_placeholder: "Database ids from the Notion URL",
-        steps: &[
-            "Connect Notion under Workspace → Integrations.",
-            "In Notion, share each database with the Agent Fleet connection (same as sharing a page with a person).",
-            "Optional: paste those database ids below (from the database URL). Empty means every database the connection can see.",
-            "Save, then Refresh.",
+        work: "Specs, briefs, and meeting notes live in Notion databases. Fleet does not guess which pages — you share them with the connection.",
+        fleet_does: "Analyze starts a read-through job (not a coding run). Agents read the page through the Notion connection.",
+        outcome: "An analysis result. The page is the source; Fleet does not rewrite your wiki unless you ask in Chat.",
+        flow: &[
+            "Share the database with the Agent Fleet connection",
+            "Analyze → one analysis task",
+            "Read-through written back as a run result",
         ],
-        hook_help: "Notion does not always need a webhook. Refresh is enough for most workspaces.",
+        filter_label: "Only these databases (optional)",
+        filter_placeholder: "Database id from the Notion URL",
+        has_filter: true,
+        filter_save: "Save databases",
+        examples: &[],
+        steps: &[
+            "Connect Notion on this page.",
+            "In Notion, share each database with the Agent Fleet connection (same as sharing a page with a person).",
+            "Optional: paste those database ids below (the 32-character id in the database URL). Empty means every database the connection can see.",
+            "Save databases, then Refresh.",
+        ],
+        hook_title: "Refresh is enough",
+        hook_help: "Notion does not always need a webhook. Refresh pulls shared pages. You can still paste this URL if you use a Notion automation.",
         empty: "No pages yet. Share a database with the Notion connection, then Refresh.",
         action: "Analyze",
     },
@@ -193,16 +379,28 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         id: "confluence",
         name: "Confluence",
         kind: InboxKind::Page,
+        group: InboxGroup::Docs,
         blurb: "Confluence pages show up here. Analyze starts a read-through job.",
-        filter_label: "Only these spaces (optional)",
-        filter_placeholder: "SPACE keys",
-        steps: &[
-            "Connect Confluence under Workspace → Integrations.",
-            "The token must be allowed to view the spaces you care about.",
-            "Optional: list space keys below. Empty means every space the token can see.",
-            "Save, then Refresh.",
+        work: "Confluence spaces are the company wiki. Pages are the unit of knowledge, not tickets.",
+        fleet_does: "Analyze starts a read-through of that page. Agents use the Confluence connection to fetch the body.",
+        outcome: "An analysis run. The wiki page stays as-is unless you ask for an edit in Chat.",
+        flow: &[
+            "Page is in a space the token can view",
+            "Analyze → one analysis task",
+            "Read-through written as a run result",
         ],
-        hook_help: "Optional: add this URL as a Confluence webhook for page events.",
+        filter_label: "",
+        filter_placeholder: "",
+        has_filter: false,
+        filter_save: "Save",
+        examples: &[],
+        steps: &[
+            "Connect Confluence on this page with the Atlassian site that holds the spaces.",
+            "The token must be allowed to view the spaces you care about.",
+            "Refresh. Pages the token can search are listed below.",
+        ],
+        hook_title: "Confluence page webhook",
+        hook_help: "Add this URL as a Confluence webhook for page events if you want pushes. Refresh is enough to start.",
         empty: "No pages yet. Connect Confluence and Refresh.",
         action: "Analyze",
     },
@@ -302,9 +500,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
         );
     }
     if lower.contains("not_connected") {
-        return format!(
-            "{name} is not connected yet. Open Workspace → Integrations and connect it."
-        );
+        return format!("{name} is not connected yet. Use Connect {name} on this page.");
     }
     let cleaned = rest
         .replace("Slack API:", "")
@@ -330,9 +526,25 @@ mod tests {
         let gh = inbox_app("github").expect("github");
         assert_eq!(slack.kind, InboxKind::Message);
         assert_eq!(gh.kind, InboxKind::Ticket);
+        assert_eq!(slack.group, InboxGroup::Chat);
+        assert_eq!(gh.group, InboxGroup::Code);
+        assert!(slack.has_filter);
+        assert!(gh.has_filter);
         assert!(slack.steps.len() >= 3);
         assert!(gh.steps.len() >= 3);
         assert!(!is_inbox_app("figma"));
+        // These providers have no monitor filter on poll — do not show a fake box.
+        assert!(!inbox_app("bitbucket").expect("bb").has_filter);
+        assert!(!inbox_app("teams").expect("teams").has_filter);
+        assert!(!inbox_app("asana").expect("asana").has_filter);
+        assert!(!inbox_app("confluence").expect("conf").has_filter);
+        assert!(inbox_app("jira").expect("jira").examples.len() >= 2);
+        for app in INBOX_APPS {
+            assert_eq!(app.flow.len(), 3, "{} needs a 3-step loop", app.id);
+            assert!(!app.work.is_empty(), "{}", app.id);
+            assert!(!app.fleet_does.is_empty(), "{}", app.id);
+            assert!(!app.outcome.is_empty(), "{}", app.id);
+        }
     }
 
     #[test]
