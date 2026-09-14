@@ -1,10 +1,10 @@
-//! Inbox index: one card per app. Each app has its own page.
+//! Inbox index: work-tools hub, grouped the way a team already uses the apps.
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{InboxResponse, list_inbox, poll_inbox, start_monitor, stop_monitor};
-use super::catalog::{INBOX_APPS, InboxKind};
+use super::catalog::{INBOX_APPS, InboxGroup};
 use crate::Route;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{IntegrationLogo, list_integrations};
@@ -14,14 +14,6 @@ fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
         .iter()
         .filter(|t| t.provider.eq_ignore_ascii_case(provider))
         .count()
-}
-
-fn kind_label(kind: InboxKind) -> &'static str {
-    match kind {
-        InboxKind::Ticket => "Issues / cards",
-        InboxKind::Message => "Messages",
-        InboxKind::Page => "Pages",
-    }
 }
 
 #[component]
@@ -69,16 +61,13 @@ pub fn Inbox(workspace_id: String) -> Element {
         }
     });
 
-    let mut apps: Vec<_> = INBOX_APPS.iter().collect();
-    apps.sort_by_key(|a| (!connected().contains(a.id), a.name.to_ascii_lowercase()));
-
     rsx! {
-        div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
+        div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-5 overflow-auto p-4 md:p-5",
             div { class: "flex flex-wrap items-start justify-between gap-3",
                 div {
                     h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]", "Inbox" }
                     p { class: "mt-1 max-w-xl text-sm text-[var(--app-muted)]",
-                        "Work from Slack, GitHub, and the other apps you connect lands here. Each app is set up differently — open one and we walk you through it."
+                        "Plug Agent Fleet into the apps your team already uses. Each page walks the connect, what Fleet watches, and what a run does in that product — issues become PRs, Slack messages become ops jobs, Notion pages become analysis."
                     }
                     p { class: "mt-0.5 text-xs text-[var(--app-muted)]", "{status_line}" }
                 }
@@ -149,35 +138,49 @@ pub fn Inbox(workspace_id: String) -> Element {
                 }
             }
             p { class: "m-0 text-xs text-[var(--app-muted)]",
-                "Start monitor checks connected apps on a schedule. Refresh now checks once. Open an app below to connect it and choose what Fleet should watch — Slack is channels, GitHub is issues."
+                "Start monitor checks connected apps on a schedule. Refresh now checks once. Open an app to connect it and finish setup there — Slack is channels, GitHub is issues."
             }
 
-            ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
-                for app in apps {
-                    {
-                        let on = connected().contains(app.id);
-                        let n = *counts().get(app.id).unwrap_or(&0);
-                        let kind = kind_label(app.kind);
-                        rsx! {
-                            li { key: "{app.id}",
-                                Link {
-                                    to: Route::InboxApp {
-                                        workspace_id: workspace_id.clone(),
-                                        provider: app.id.to_string(),
-                                    },
-                                    class: "flex h-full items-start gap-3 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 text-inherit no-underline hover:bg-[var(--app-bg-hover)]",
-                                    IntegrationLogo { icon: app.id.to_string(), name: app.name.to_string() }
-                                    div { class: "min-w-0",
-                                        p { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                                            "{app.name}"
-                                        }
-                                        p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
-                                            if on { "Connected" } else { "Not connected" }
-                                            " · {kind}"
-                                            if n > 0 { " · {n} open" }
-                                        }
-                                        p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]",
-                                            "{app.blurb}"
+            for group in InboxGroup::ALL {
+                {
+                    let mut apps: Vec<_> = INBOX_APPS.iter().filter(|a| a.group == group).collect();
+                    apps.sort_by_key(|a| (!connected().contains(a.id), a.name.to_ascii_lowercase()));
+                    rsx! {
+                        section { key: "{group.title()}",
+                            h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                                "{group.title()}"
+                            }
+                            p { class: "mt-1 mb-3 text-xs text-[var(--app-muted)]",
+                                "{group.subtitle()}"
+                            }
+                            ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
+                                for app in apps {
+                                    {
+                                        let on = connected().contains(app.id);
+                                        let n = *counts().get(app.id).unwrap_or(&0);
+                                        rsx! {
+                                            li { key: "{app.id}",
+                                                Link {
+                                                    to: Route::InboxApp {
+                                                        workspace_id: workspace_id.clone(),
+                                                        provider: app.id.to_string(),
+                                                    },
+                                                    class: "flex h-full items-start gap-3 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4 text-inherit no-underline hover:bg-[var(--app-bg-hover)]",
+                                                    IntegrationLogo { icon: app.id.to_string(), name: app.name.to_string() }
+                                                    div { class: "min-w-0",
+                                                        p { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                                                            "{app.name}"
+                                                        }
+                                                        p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
+                                                            if on { "Connected" } else { "Not connected" }
+                                                            if n > 0 { " · {n} open" }
+                                                        }
+                                                        p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]",
+                                                            "{app.outcome}"
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

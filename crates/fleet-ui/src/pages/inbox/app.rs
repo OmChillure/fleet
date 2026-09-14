@@ -1,32 +1,22 @@
-//! One inbox app: that provider's filters, copy, and item layout.
+//! Dispatch to the per-app inbox page.
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{
-    InboxResponse, MonitorPatch, TicketRow, finish_ticket, list_inbox, poll_inbox, update_monitor,
-};
+use super::api::{InboxResponse, TicketRow, list_inbox};
 use super::catalog::{explain_error, hook_url_for, inbox_app};
-use super::experience::{experience, repo_issue_parts, row_kicker, slack_parts};
+use super::shared::{PageData, apply_rows};
+use super::views;
 use crate::Route;
-use crate::clipboard::copy_text;
-use crate::components::toast::show_toast;
-use crate::pages::integrations::{IntegrationLogo, list_integrations};
-
-fn csv_list(raw: String) -> Vec<String> {
-    raw.split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+use crate::pages::integrations::list_integrations;
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     let Some(m) = resp.monitor.as_ref() else {
         return String::new();
     };
     match provider {
-        "github" | "bitbucket" => m.github_repos.join(", "),
-        "slack" | "teams" => m.slack_channels.join(", "),
+        "github" => m.github_repos.join(", "),
+        "slack" => m.slack_channels.join(", "),
         "jira" => m.jira_jql.clone().unwrap_or_default(),
         "notion" => m.notion_databases.join(", "),
         "gitlab" => m.gitlab_projects.join(", "),
@@ -36,54 +26,20 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     }
 }
 
-fn patch_for(provider: &str, raw: String) -> MonitorPatch {
-    let list = csv_list(raw.clone());
-    match provider {
-        "github" | "bitbucket" => MonitorPatch {
-            github_repos: Some(list),
-            ..MonitorPatch::default()
-        },
-        "slack" | "teams" => MonitorPatch {
-            slack_channels: Some(list),
-            ..MonitorPatch::default()
-        },
-        "jira" => MonitorPatch {
-            jira_jql: Some(raw),
-            ..MonitorPatch::default()
-        },
-        "notion" => MonitorPatch {
-            notion_databases: Some(list),
-            ..MonitorPatch::default()
-        },
-        "gitlab" => MonitorPatch {
-            gitlab_projects: Some(list),
-            ..MonitorPatch::default()
-        },
-        "linear" => MonitorPatch {
-            linear_teams: Some(list),
-            ..MonitorPatch::default()
-        },
-        "trello" => MonitorPatch {
-            trello_boards: Some(list),
-            ..MonitorPatch::default()
-        },
-        _ => MonitorPatch::default(),
-    }
-}
-
 #[component]
 pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     let provider = provider.trim().to_ascii_lowercase();
     let info = inbox_app(&provider);
 
-    let mut rows = use_signal(Vec::<TicketRow>::new);
+    let rows = use_signal(Vec::<TicketRow>::new);
     let mut filter = use_signal(String::new);
     let mut status_line = use_signal(|| "Loading…".to_string());
     let mut last_error = use_signal(|| None::<String>);
     let mut hook_url = use_signal(String::new);
     let mut connected = use_signal(|| false);
-    let mut busy = use_signal(|| false);
-    let mut finish_error = use_signal(|| None::<(String, String)>);
+    let mut account = use_signal(String::new);
+    let busy = use_signal(|| false);
+    let finish_error = use_signal(|| None::<(String, String)>);
     let mut seeded = use_signal(|| false);
 
     let ws_list = workspace_id.clone();
@@ -109,27 +65,39 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                             filter.set(filter_value(&prov, &resp));
                             seeded.set(true);
                         }
-                        let mine: Vec<_> = resp
-                            .tickets
-                            .into_iter()
-                            .filter(|t| t.provider.eq_ignore_ascii_case(&prov))
-                            .collect();
-                        status_line.set(if mine.is_empty() {
-                            "Nothing here yet".into()
-                        } else if mine.len() == 1 {
-                            "1 item waiting".into()
-                        } else {
-                            format!("{} items waiting", mine.len())
-                        });
-                        rows.set(mine);
+                        if let Some(info) = inbox_app(&prov) {
+                            apply_rows(
+                                resp,
+                                &prov,
+                                PageData {
+                                    info,
+                                    rows,
+                                    filter,
+                                    status_line,
+                                    last_error,
+                                    hook_url,
+                                    connected,
+                                    account,
+                                    busy,
+                                    finish_error,
+                                },
+                            );
+                        }
                     }
                     Err(e) => status_line.set(e.message()),
                 }
                 if let Ok(list) = list_integrations(&ws).await {
-                    connected.set(
-                        list.iter()
-                            .any(|i| i.connected && i.id.eq_ignore_ascii_case(&prov)),
-                    );
+                    if let Some(i) = list.iter().find(|i| i.id.eq_ignore_ascii_case(&prov)) {
+                        connected.set(i.connected);
+                        account.set(
+                            i.connection
+                                .as_ref()
+                                .and_then(|c| c.account_label.clone())
+                                .unwrap_or_default(),
+                        );
+                    } else {
+                        connected.set(false);
+                    }
                 }
                 TimeoutFuture::new(8000).await;
             }
@@ -151,337 +119,17 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
         };
     };
 
-    let exp = experience(info);
-    let hook_for_app = hook_url();
-    let chips = csv_list(filter());
-    let on = connected();
-
-    rsx! {
-        div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
-            div { class: "flex flex-wrap items-start justify-between gap-3",
-                div { class: "flex min-w-0 items-start gap-3",
-                    IntegrationLogo { icon: info.id.to_string(), name: info.name.to_string() }
-                    div {
-                        Link {
-                            to: Route::Inbox { workspace_id: workspace_id.clone() },
-                            class: "text-xs text-[var(--app-muted)] no-underline hover:underline",
-                            "Inbox"
-                        }
-                        h1 { class: "m-0 text-2xl font-bold tracking-tight text-[var(--app-fg)]",
-                            "{info.name}"
-                        }
-                        p { class: "mt-1 text-sm text-[var(--app-muted)]", "{info.blurb}" }
-                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                            if on {
-                                "Connected · "
-                            } else {
-                                "Not connected yet · "
-                            }
-                            "{status_line}"
-                        }
-                    }
-                }
-                button {
-                    class: "rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",
-                    r#type: "button",
-                    disabled: busy(),
-                    onclick: {
-                        let ws = workspace_id.clone();
-                        let prov = provider.clone();
-                        move |_| {
-                            if busy() { return; }
-                            busy.set(true);
-                            let ws = ws.clone();
-                            let prov = prov.clone();
-                            spawn(async move {
-                                match poll_inbox(&ws).await {
-                                    Ok(_) => show_toast().success(format!("Checked {}.", info.name)),
-                                    Err(e) => show_toast().error(e.message()),
-                                }
-                                if let Ok(resp) = list_inbox(&ws).await {
-                                    if let Some(m) = resp.monitor.as_ref() {
-                                        last_error.set(
-                                            m.last_error
-                                                .as_deref()
-                                                .and_then(|e| explain_error(e, &prov)),
-                                        );
-                                    }
-                                    let mine: Vec<_> = resp
-                                        .tickets
-                                        .into_iter()
-                                        .filter(|t| t.provider.eq_ignore_ascii_case(&prov))
-                                        .collect();
-                                    status_line.set(if mine.is_empty() {
-                                        "Nothing here yet".into()
-                                    } else if mine.len() == 1 {
-                                        "1 item waiting".into()
-                                    } else {
-                                        format!("{} items waiting", mine.len())
-                                    });
-                                    rows.set(mine);
-                                }
-                                busy.set(false);
-                            });
-                        }
-                    },
-                    "Refresh now"
-                }
-            }
-
-            if !on {
-                p { class: "rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-[var(--app-fg)]",
-                    "This page stays empty until {info.name} is connected. "
-                    Link {
-                        to: Route::Integrations { workspace_id: workspace_id.clone() },
-                        class: "font-medium underline",
-                        "Open Integrations and connect {info.name}"
-                    }
-                    "."
-                }
-            }
-
-            if let Some(err) = last_error() {
-                p { class: "rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300",
-                    "{err}"
-                }
-            }
-
-            section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                    "How to set up {info.name}"
-                }
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "Each app connects a different way. Follow these steps once."
-                }
-                ol { class: "mt-3 mb-0 list-decimal space-y-2 pl-5 text-sm text-[var(--app-fg)]",
-                    for (i, step) in info.steps.iter().enumerate() {
-                        li { key: "{i}", "{step}" }
-                    }
-                }
-            }
-
-            section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
-                h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                    "What should Fleet watch?"
-                }
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "{info.filter_label}. Leave the box empty to use everything this connection can already see."
-                }
-                if info.id == "jira" {
-                    textarea {
-                        class: "mt-3 min-h-20 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
-                        value: "{filter}",
-                        placeholder: "{info.filter_placeholder}",
-                        oninput: move |e| filter.set(e.value()),
-                    }
-                } else {
-                    if !chips.is_empty() {
-                        ul { class: "mt-3 m-0 flex list-none flex-wrap gap-1.5 p-0",
-                            for c in chips {
-                                li { class: "rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[11px] text-[var(--app-fg)]",
-                                    "{c}"
-                                }
-                            }
-                        }
-                    }
-                    input {
-                        class: "mt-3 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-fg)]",
-                        value: "{filter}",
-                        placeholder: "{info.filter_placeholder}",
-                        oninput: move |e| filter.set(e.value()),
-                    }
-                }
-                button {
-                    class: "mt-3 rounded-lg border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] disabled:opacity-50",
-                    r#type: "button",
-                    disabled: busy(),
-                    onclick: {
-                        let ws = workspace_id.clone();
-                        let prov = provider.clone();
-                        move |_| {
-                            if busy() { return; }
-                            busy.set(true);
-                            let ws = ws.clone();
-                            let patch = patch_for(&prov, filter());
-                            spawn(async move {
-                                match update_monitor(&ws, &patch).await {
-                                    Ok(_) => show_toast().success("Saved."),
-                                    Err(e) => show_toast().error(e.message()),
-                                }
-                                busy.set(false);
-                            });
-                        }
-                    },
-                    "Save"
-                }
-            }
-
-            if !hook_for_app.is_empty() {
-                section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
-                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Faster updates (optional)"
-                    }
-                    p { class: "mt-1 text-xs text-[var(--app-muted)]", "{info.hook_help}" }
-                    p { class: "mt-3 break-all font-mono text-[11px] text-[var(--app-fg)]",
-                        "{hook_for_app}"
-                    }
-                    button {
-                        class: "mt-2 rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-sm text-[var(--app-fg)]",
-                        r#type: "button",
-                        onclick: move |_| {
-                            if copy_text(&hook_for_app) {
-                                show_toast().success(format!("Copied the {} URL.", info.name));
-                            } else {
-                                show_toast().error("Could not copy. Select the URL and copy it yourself.");
-                            }
-                        },
-                        "Copy URL"
-                    }
-                }
-            }
-
-            if rows().is_empty() {
-                p { class: "rounded-2xl border border-dashed {exp.accent} p-8 text-center text-sm text-[var(--app-muted)]",
-                    "{info.empty}"
-                }
-            } else {
-                ul { class: "m-0 list-none space-y-2 p-0",
-                    for t in rows() {
-                        {
-                            let kicker = row_kicker(info.id, &t);
-                            let action = info.action;
-                            let preview = t
-                                .summary
-                                .clone()
-                                .filter(|s| !s.is_empty() && s != &t.title);
-                            let (ch, _) = slack_parts(&t.key);
-                            let (repo, num) = repo_issue_parts(&t.key);
-                            let is_msg = matches!(info.id, "slack" | "teams");
-                            let is_repo = matches!(info.id, "github" | "gitlab" | "bitbucket");
-                            let is_issue_key = matches!(info.id, "jira" | "linear");
-                            rsx! {
-                                li {
-                                    key: "{t.provider}:{t.key}",
-                                    class: "flex flex-wrap items-start justify-between gap-3 rounded-xl border {exp.accent} bg-[var(--app-bg-elevated)] px-4 py-3",
-                                    div { class: "min-w-0 flex-1",
-                                        if is_msg {
-                                            p { class: "m-0 font-mono text-[11px] text-[var(--app-muted)]",
-                                                "#{ch}"
-                                            }
-                                            p { class: "m-0 mt-1 text-sm text-[var(--app-fg)]",
-                                                "{t.title}"
-                                            }
-                                        }
-                                        if is_repo {
-                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
-                                                span { class: "font-mono text-[var(--app-muted)]", "{num}" }
-                                                "  {t.title}"
-                                            }
-                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
-                                                "{repo} · {t.state}"
-                                            }
-                                        }
-                                        if is_issue_key {
-                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
-                                                span { class: "mr-2 inline-block rounded bg-[var(--app-bg)] px-1.5 py-0.5 font-mono text-[11px]",
-                                                    "{t.key}"
-                                                }
-                                                "{t.title}"
-                                            }
-                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
-                                                "{t.state}"
-                                            }
-                                        }
-                                        if !is_msg && !is_repo && !is_issue_key {
-                                            p { class: "m-0 text-sm font-medium text-[var(--app-fg)]",
-                                                "{t.title}"
-                                            }
-                                            p { class: "m-0 mt-0.5 font-mono text-[11px] text-[var(--app-muted)]",
-                                                "{kicker}"
-                                            }
-                                        }
-                                        if let Some(prev) = preview {
-                                            p { class: "m-0 mt-1 line-clamp-2 text-xs text-[var(--app-muted)]",
-                                                "{prev}"
-                                            }
-                                        }
-                                        if let Some(url) = &t.url {
-                                            a {
-                                                class: "mt-1 inline-block text-[11px] text-[var(--app-muted)] underline",
-                                                href: "{url}",
-                                                target: "_blank",
-                                                rel: "noreferrer",
-                                                "Open in {info.name}"
-                                            }
-                                        }
-                                    }
-                                    if t.run_id.is_none() && t.state == "open" {
-                                        div { class: "flex min-w-0 flex-col items-end gap-1",
-                                            button {
-                                                class: "rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-sm font-semibold text-[var(--app-bg)] disabled:opacity-50",
-                                                r#type: "button",
-                                                disabled: busy(),
-                                                onclick: {
-                                                    let ws = workspace_id.clone();
-                                                    let provider = t.provider.clone();
-                                                    let key = t.key.clone();
-                                                    move |_| {
-                                                        if busy() { return; }
-                                                        busy.set(true);
-                                                        finish_error.set(None);
-                                                        let ws = ws.clone();
-                                                        let provider = provider.clone();
-                                                        let key = key.clone();
-                                                        spawn(async move {
-                                                            match finish_ticket(&ws, &provider, &key).await {
-                                                                Ok(_) => show_toast().success("Fleet launched."),
-                                                                Err(e) => {
-                                                                    finish_error.set(Some((
-                                                                        format!("{provider}:{key}"),
-                                                                        e.message(),
-                                                                    )));
-                                                                }
-                                                            }
-                                                            if let Ok(resp) = list_inbox(&ws).await {
-                                                                let mine: Vec<_> = resp
-                                                                    .tickets
-                                                                    .into_iter()
-                                                                    .filter(|t| t.provider.eq_ignore_ascii_case(&provider))
-                                                                    .collect();
-                                                                status_line.set(if mine.is_empty() {
-                                                                    "Nothing here yet".into()
-                                                                } else if mine.len() == 1 {
-                                                                    "1 item waiting".into()
-                                                                } else {
-                                                                    format!("{} items waiting", mine.len())
-                                                                });
-                                                                rows.set(mine);
-                                                            }
-                                                            busy.set(false);
-                                                        });
-                                                    }
-                                                },
-                                                "{action}"
-                                            }
-                                            if let Some((id, msg)) = finish_error() {
-                                                if id == format!("{}:{}", t.provider, t.key) {
-                                                    p { class: "m-0 max-w-56 text-right text-[11px] text-red-400",
-                                                        "{msg}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else if let Some(run) = &t.run_id {
-                                        span { class: "font-mono text-[11px] text-[var(--app-muted)]",
-                                            "run {run}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let data = PageData {
+        info,
+        rows,
+        filter,
+        status_line,
+        last_error,
+        hook_url,
+        connected,
+        account,
+        busy,
+        finish_error,
+    };
+    views::render(&workspace_id, info, data)
 }
