@@ -17,7 +17,6 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-
 /// GET with credentials; silent refresh once on 401.
 async fn authorized_get(path: &str) -> Result<reqwest::Response, IntegrationsError> {
     let first = with_credentials(client().get(api_url(path)))
@@ -61,6 +60,7 @@ pub struct ConnectionPublic {
     pub status: String,
     #[serde(default)]
     pub account_label: Option<String>,
+    #[serde(default)]
     pub connected: bool,
     #[serde(default)]
     pub last_error: Option<String>,
@@ -98,9 +98,25 @@ pub struct Integration {
     pub oauth_callback_url: Option<String>,
     #[serde(default)]
     pub oauth_app_create_url: Option<String>,
+    #[serde(default)]
     pub connected: bool,
     #[serde(default)]
     pub connection: Option<ConnectionPublic>,
+}
+
+/// Catalog `connected` can lag the nested connection row. Either is enough.
+pub fn integration_is_connected(i: &Integration) -> bool {
+    if i.connected {
+        return true;
+    }
+    i.connection
+        .as_ref()
+        .is_some_and(|c| c.connected || c.status.eq_ignore_ascii_case("connected"))
+}
+
+pub fn find_integration<'a>(list: &'a [Integration], provider: &str) -> Option<&'a Integration> {
+    list.iter()
+        .find(|i| i.id.eq_ignore_ascii_case(provider.trim()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,5 +241,64 @@ pub async fn disconnect_integration(
     } else {
         let _ = parse_json_or_error::<ErrorBody>(res).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_row_counts_as_connected_when_flag_is_false() {
+        let i = Integration {
+            id: "slack".into(),
+            name: "Slack".into(),
+            description: String::new(),
+            category: "hitl".into(),
+            category_label: "HITL".into(),
+            availability: "available".into(),
+            icon: "slack".into(),
+            docs_url: None,
+            auth_method: "oauth".into(),
+            oauth_configured: true,
+            oauth_start_path: None,
+            oauth_callback_url: None,
+            oauth_app_create_url: None,
+            connected: false,
+            connection: Some(ConnectionPublic {
+                id: "1".into(),
+                workspace_id: "w".into(),
+                provider: "slack".into(),
+                status: "connected".into(),
+                account_label: Some("agent-fleet".into()),
+                connected: true,
+                last_error: None,
+                defaults: ConnectionDefaults::default(),
+            }),
+        };
+        assert!(integration_is_connected(&i));
+        assert!(find_integration(std::slice::from_ref(&i), "Slack").is_some());
+    }
+
+    #[test]
+    fn disconnected_without_row_is_not_connected() {
+        let i = Integration {
+            id: "slack".into(),
+            name: "Slack".into(),
+            description: String::new(),
+            category: "hitl".into(),
+            category_label: "HITL".into(),
+            availability: "available".into(),
+            icon: "slack".into(),
+            docs_url: None,
+            auth_method: "oauth".into(),
+            oauth_configured: true,
+            oauth_start_path: None,
+            oauth_callback_url: None,
+            oauth_app_create_url: None,
+            connected: false,
+            connection: None,
+        };
+        assert!(!integration_is_connected(&i));
     }
 }

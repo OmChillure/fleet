@@ -8,7 +8,7 @@ use super::catalog::{explain_error, hook_url_for, inbox_app};
 use super::shared::{PageData, apply_rows};
 use super::views;
 use crate::Route;
-use crate::pages::integrations::list_integrations;
+use crate::pages::integrations::{find_integration, integration_is_connected, list_integrations};
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     let Some(m) = resp.monitor.as_ref() else {
@@ -41,6 +41,34 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     let busy = use_signal(|| false);
     let finish_error = use_signal(|| None::<(String, String)>);
     let mut seeded = use_signal(|| false);
+
+    let ws_conn = workspace_id.clone();
+    let prov_conn = provider.clone();
+    use_future(move || {
+        let ws = ws_conn.clone();
+        let prov = prov_conn.clone();
+        async move {
+            loop {
+                match list_integrations(&ws).await {
+                    Ok(list) => {
+                        if let Some(i) = find_integration(&list, &prov) {
+                            connected.set(integration_is_connected(i));
+                            account.set(
+                                i.connection
+                                    .as_ref()
+                                    .and_then(|c| c.account_label.clone())
+                                    .unwrap_or_default(),
+                            );
+                        } else {
+                            connected.set(false);
+                        }
+                    }
+                    Err(_) => {}
+                }
+                TimeoutFuture::new(8000).await;
+            }
+        }
+    });
 
     let ws_list = workspace_id.clone();
     let prov_list = provider.clone();
@@ -85,19 +113,6 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                         }
                     }
                     Err(e) => status_line.set(e.message()),
-                }
-                if let Ok(list) = list_integrations(&ws).await {
-                    if let Some(i) = list.iter().find(|i| i.id.eq_ignore_ascii_case(&prov)) {
-                        connected.set(i.connected);
-                        account.set(
-                            i.connection
-                                .as_ref()
-                                .and_then(|c| c.account_label.clone())
-                                .unwrap_or_default(),
-                        );
-                    } else {
-                        connected.set(false);
-                    }
                 }
                 TimeoutFuture::new(8000).await;
             }

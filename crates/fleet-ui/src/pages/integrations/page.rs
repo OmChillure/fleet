@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    Integration, disconnect_integration, list_integrations, oauth_start_url,
-    patch_integration_defaults,
+    Integration, disconnect_integration, integration_is_connected, list_integrations,
+    oauth_start_url, patch_integration_defaults,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
@@ -271,7 +271,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                             let ws_disconnect = workspace_id.clone();
                             let ws_connect = workspace_id.clone();
                             let available = integ.availability == "available";
-                            let connected = integ.connected;
+                            let connected = integration_is_connected(&integ);
                             let is_connecting =
                                 connecting_provider().as_deref() == Some(integ.id.as_str());
                             let is_busy = busy_provider().as_deref() == Some(integ.id.as_str());
@@ -656,7 +656,7 @@ async fn refresh_until_connected(
             Ok(list) => {
                 let done = list
                     .iter()
-                    .any(|i| i.id.eq_ignore_ascii_case(provider) && i.connected);
+                    .any(|i| i.id.eq_ignore_ascii_case(provider) && integration_is_connected(i));
                 items.set(list);
                 if done {
                     return true;
@@ -719,7 +719,7 @@ async fn poll_until_connected(
         if let Ok(list) = list_integrations(workspace_id).await {
             let done = list
                 .iter()
-                .any(|i| i.id.eq_ignore_ascii_case(provider) && i.connected);
+                .any(|i| i.id.eq_ignore_ascii_case(provider) && integration_is_connected(i));
             items.set(list);
             if done {
                 connecting_provider.set(None);
