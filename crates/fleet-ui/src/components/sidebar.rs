@@ -45,6 +45,8 @@ pub fn Sidebar() -> Element {
     // Collapsible sections — start with Chat + Monitoring open.
     let mut expanded =
         use_signal(|| std::collections::HashSet::from([NavSection::Chat, NavSection::Monitoring]));
+    // Second nest under Monitoring → Inbox. Open by default so the apps show.
+    let mut inbox_open = use_signal(|| true);
 
     // Ensure the section for the active route stays open while navigating.
     use_effect(move || {
@@ -75,6 +77,12 @@ pub fn Sidebar() -> Element {
             if set.insert(section) {
                 expanded.set(set);
             }
+        }
+        if matches!(
+            use_route::<Route>(),
+            Route::Inbox { .. } | Route::InboxApp { .. }
+        ) {
+            inbox_open.set(true);
         }
     });
 
@@ -349,8 +357,21 @@ pub fn Sidebar() -> Element {
                         to: Route::Cases { workspace_id: workspace_id.clone() },
                         label: "Cases",
                     }
-                    NavInbox {
-                        workspace_id: workspace_id.clone(),
+                    NavBranch {
+                        to: Route::Inbox { workspace_id: workspace_id.clone() },
+                        label: "Inbox",
+                        expanded: inbox_open(),
+                        on_toggle: move |_| inbox_open.set(!inbox_open()),
+                        for app in INBOX_APPS.iter().copied() {
+                            NavSubLink {
+                                key: "{app.id}",
+                                to: Route::InboxApp {
+                                    workspace_id: workspace_id.clone(),
+                                    provider: app.id.to_string(),
+                                },
+                                label: app.name,
+                            }
+                        }
                     }
                 }
 
@@ -639,34 +660,6 @@ fn UserFooter(user: Option<UserPublic>, workspace_id: String) -> Element {
     }
 }
 
-/// Inbox, then a second indent of each app (Slack, GitHub, …).
-#[component]
-fn NavInbox(workspace_id: String) -> Element {
-    rsx! {
-        div { class: "flex flex-col",
-            Link {
-                class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
-                to: Route::Inbox { workspace_id: workspace_id.clone() },
-                active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
-                "Inbox"
-            }
-            div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
-                for app in INBOX_APPS {
-                    Link {
-                        class: "block rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
-                        to: Route::InboxApp {
-                            workspace_id: workspace_id.clone(),
-                            provider: app.id.to_string(),
-                        },
-                        active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
-                        "{app.name}"
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[component]
 fn NavAccordion(
     title: &'static str,
@@ -707,6 +700,44 @@ fn NavSubLink(to: Route, label: &'static str) -> Element {
             to,
             active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
             "{label}"
+        }
+    }
+}
+
+/// Second nest: a link plus a chevron, then indented children.
+/// Same idea as [`NavAccordion`], without a section icon. Children are
+/// passed from the caller (a `for` inside this component does not paint).
+#[component]
+fn NavBranch(
+    to: Route,
+    label: &'static str,
+    expanded: bool,
+    on_toggle: EventHandler<MouseEvent>,
+    children: Element,
+) -> Element {
+    rsx! {
+        div { class: "flex flex-col",
+            div { class: "flex items-center",
+                Link {
+                    class: "min-w-0 flex-1 rounded-md px-2 py-1 text-sm text-[var(--app-muted)] transition hover:bg-[var(--app-bg-hover)] hover:text-[var(--app-fg)]",
+                    to,
+                    active_class: "bg-[var(--app-bg-elevated)] font-medium text-[var(--app-fg)]",
+                    "{label}"
+                }
+                button {
+                    class: "shrink-0 rounded-md px-1 py-1 text-[10px] text-[var(--app-muted)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    "aria-label": if expanded { "Collapse Inbox apps" } else { "Expand Inbox apps" },
+                    "aria-expanded": if expanded { "true" } else { "false" },
+                    onclick: move |e| on_toggle.call(e),
+                    if expanded { "▾" } else { "▸" }
+                }
+            }
+            if expanded {
+                div { class: "ml-2.5 flex flex-col border-l border-[var(--app-border)] pl-1.5",
+                    {children}
+                }
+            }
         }
     }
 }

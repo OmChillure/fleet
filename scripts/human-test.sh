@@ -277,7 +277,7 @@ cmd_guide() {
     "Complete sets completed; Fail sets failed; both hide Observe / Decide now / Complete / Fail / Cancel." || return 0
 
   pause_step "Inbox" \
-    "/{ws}/inbox — card per app. Left nav: Monitoring → Inbox → Slack / GitHub / … (second nest)." \
+    "/{ws}/inbox — card per app. Left nav: Monitoring ▾ → Inbox ▾ → Slack / GitHub / … (second nest, chevron)." \
     "Open GitHub: numbered setup, watch box, webhook URL must say /webhooks/github/ not {provider}." \
     "Slack error (not_in_channel) must not appear on GitHub. Slack page explains invite the bot." \
     "Start monitor on the index checks connected apps on a schedule. Refresh now checks once." \
