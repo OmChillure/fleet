@@ -6,20 +6,11 @@ use fleet_runners_view::{
     BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
-<<<<<<< HEAD
-    identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    is_home_workspace, not_taking_reason, provider_install_command, runtime_line,
-    settings_draft_dirty,
-    shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
-    status_label, trimmed_host_name, update_now_label, update_requested, verify_install_command,
-    widgets_locked, windows_verify_install_command, worker_id_label, BEHAVIOR_LABEL,
-=======
     identity_line, in_removed_list, is_control_plane, is_home_workspace, is_removed, jobs_line,
     last_seen_label, not_taking_reason, provider_install_command, runtime_line,
     settings_draft_dirty, shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line,
     stale_package_warning, status_label, trimmed_host_name, update_now_label, update_requested,
-    widgets_locked, worker_id_label,
->>>>>>> 062aaeb (feat: land remaining inconsistency follow-ups on one branch)
+    verify_install_command, widgets_locked, windows_verify_install_command, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 

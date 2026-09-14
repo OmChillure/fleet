@@ -12,8 +12,9 @@ intent changed. Ops notes that are not code (VPS `.env`) are listed first.
 
 ## Already landed (this MR)
 
-First pass was docs/config. The follow-up work below is now on the same
-branch (not split into more MRs).
+First pass (docs/config + the “MR is the green light” rule) merged via
+MR 77. This branch is the remaining product work, rebased onto current
+`main`.
 
 | Follow-up | Status |
 | --- | --- |
