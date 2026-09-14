@@ -1,8 +1,7 @@
 //! Per-IP sliding windows for signup/login.
 //!
-//! Prefer `X-Real-IP` (last proxy `$remote_addr`), then the right-most valid
-//! `X-Forwarded-For` hop, then the connecting socket. Skip only when none of
-//! those exist (in-process oneshot tests with no proxy headers).
+//! Only `CF-Connecting-IP` (set by Cloudflare) or the connecting socket.
+//! Do not trust `X-Real-IP` / `X-Forwarded-For` — clients can set those.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -10,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, FromRequestParts};
-use axum::http::HeaderMap;
 use axum::http::request::Parts;
+use axum::http::HeaderMap;
 
 use crate::error::{AppError, AppResult};
 
@@ -63,17 +62,8 @@ fn header_ip(headers: &HeaderMap, name: &str) -> Option<String> {
         .and_then(parse_ip_token)
 }
 
-fn xff_rightmost(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').rev().find_map(parse_ip_token))
-}
-
 pub fn client_ip(headers: &HeaderMap, connect: Option<SocketAddr>) -> Option<String> {
-    header_ip(headers, "x-real-ip")
-        .or_else(|| xff_rightmost(headers))
-        .or_else(|| connect.map(|a| a.ip().to_string()))
+    header_ip(headers, "cf-connecting-ip").or_else(|| connect.map(|a| a.ip().to_string()))
 }
 
 /// Positive `AUTH_*_RATE_MAX` env, else `default`. Zero/invalid keep the default.
@@ -155,9 +145,25 @@ mod tests {
     }
 
     #[test]
-    fn xff_uses_rightmost_valid_hop() {
-        let h = headers(&[("x-forwarded-for", "1.2.3.4, 198.51.100.20")]);
-        assert_eq!(client_ip(&h, None).as_deref(), Some("198.51.100.20"));
+    fn cf_connecting_ip_wins_over_spoofed_forwarded_headers() {
+        let h = headers(&[
+            ("x-real-ip", "203.0.113.9"),
+            ("x-forwarded-for", "198.51.100.20"),
+            ("cf-connecting-ip", "192.0.2.44"),
+        ]);
+        assert_eq!(client_ip(&h, None).as_deref(), Some("192.0.2.44"));
+    }
+
+    #[test]
+    fn spoofed_x_real_ip_is_ignored() {
+        let h = headers(&[("x-real-ip", "203.0.113.9")]);
+        assert!(client_ip(&h, None).is_none());
+        let addr: SocketAddr = "198.51.100.9:443".parse().unwrap();
+        assert_eq!(
+            client_ip(&h, Some(addr)).as_deref(),
+            Some("198.51.100.9"),
+            "without CF-Connecting-IP, use the TCP peer, not X-Real-IP"
+        );
     }
 
     #[test]
@@ -174,7 +180,7 @@ mod tests {
     fn evicts_empty_windows() {
         let action = "evict-empty-window";
         let ip = "203.0.113.50";
-        let h = headers(&[("x-real-ip", ip)]);
+        let h = headers(&[("cf-connecting-ip", ip)]);
         let window = Duration::from_millis(250);
         check(action, &h, None, 2, window).unwrap();
         check(action, &h, None, 2, window).unwrap();
@@ -192,8 +198,8 @@ mod tests {
         let action = "drop-expired-foreign";
         let ip_a = "203.0.113.52";
         let ip_b = "203.0.113.53";
-        let ha = headers(&[("x-real-ip", ip_a)]);
-        let hb = headers(&[("x-real-ip", ip_b)]);
+        let ha = headers(&[("cf-connecting-ip", ip_a)]);
+        let hb = headers(&[("cf-connecting-ip", ip_b)]);
         let window = Duration::from_millis(1);
         check(action, &ha, None, 5, window).unwrap();
         assert_eq!(window_len(action, ip_a), 1);

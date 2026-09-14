@@ -4,6 +4,7 @@
 
 {
 	auto_https off
+	admin off
 }
 
 :80 {
