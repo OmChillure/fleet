@@ -598,6 +598,23 @@ pub async fn list_open_invites(
         .map_err(map_query_err)
 }
 
+pub async fn find_invite_by_token(
+    pool: &PgPool,
+    token: &str,
+) -> DbResult<Option<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE token = $1
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(token)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 pub async fn find_open_invite_by_token(
     pool: &PgPool,
     token: &str,

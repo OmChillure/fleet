@@ -266,6 +266,7 @@ async fn create_invite(
         return Err(AppError::forbidden("admins can only invite members"));
     }
 
+    let mut added_existing_user = false;
     if let Some(existing) = user_repo::find_by_email_normalized(&state.db, &email).await? {
         if workspace_repo::user_role(&state.db, workspace_id, existing.id)
             .await?
@@ -275,40 +276,7 @@ async fn create_invite(
         }
         let now = Utc::now();
         workspace_repo::add_member(&state.db, workspace_id, existing.id, role, now).await?;
-        let mut bytes = [0u8; 24];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        let token = hex::encode(bytes);
-        let invite = WorkspaceInvite {
-            id: Uuid::now_v7(),
-            workspace_id,
-            email_normalized: email,
-            role: role.to_string(),
-            token: token.clone(),
-            invited_by: actor.id,
-            created_at: now,
-            expires_at: now + ChronoDuration::days(14),
-            accepted_at: Some(now),
-            accepted_user_id: Some(existing.id),
-            revoked_at: None,
-        };
-        let saved = workspace_repo::insert_invite(&state.db, &invite)
-            .await
-            .map_err(|e| {
-                if e.is_unique_violation() {
-                    AppError::conflict("an open invite already exists for that email")
-                } else {
-                    AppError::from(e)
-                }
-            })?;
-        let _ = workspace_repo::accept_invite(&state.db, saved.id, existing.id, now).await?;
-        let json = InviteJson::from(&saved);
-        return Ok((
-            StatusCode::CREATED,
-            Json(CreateInviteResponse {
-                invite: json,
-                added_existing_user: true,
-            }),
-        ));
+        added_existing_user = true;
     }
 
     let now = Utc::now();
@@ -343,7 +311,7 @@ async fn create_invite(
         StatusCode::CREATED,
         Json(CreateInviteResponse {
             invite: json,
-            added_existing_user: false,
+            added_existing_user,
         }),
     ))
 }
@@ -364,9 +332,32 @@ async fn accept_invite(
         return Err(AppError::bad_request("token is required"));
     }
     let now = Utc::now();
-    let invite = workspace_repo::find_open_invite_by_token(&state.db, token, now)
-        .await?
-        .ok_or_else(|| AppError::not_found("invite not found"))?;
+    let invite = match workspace_repo::find_open_invite_by_token(&state.db, token, now).await? {
+        Some(inv) => inv,
+        None => {
+            let prior = workspace_repo::find_invite_by_token(&state.db, token)
+                .await?
+                .ok_or_else(|| AppError::not_found("invite not found"))?;
+            if prior.email_normalized != user.email_normalized {
+                return Err(AppError::forbidden("invite is for a different email"));
+            }
+            if prior.accepted_at.is_some()
+                && workspace_repo::user_role(&state.db, prior.workspace_id, user.id)
+                    .await?
+                    .is_some()
+            {
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "workspace_id": prior.workspace_id,
+                        "already_member": true,
+                    })),
+                ));
+            }
+            return Err(AppError::not_found("invite not found"));
+        }
+    };
     if invite.email_normalized != user.email_normalized {
         return Err(AppError::forbidden("invite is for a different email"));
     }
