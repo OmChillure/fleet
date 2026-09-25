@@ -990,6 +990,7 @@ pub async fn execute_tool(
                     slack_channels: None,
                     notion_databases: None,
                     gitlab_projects: None,
+                    gitea_repos: None,
                     linear_teams: None,
                     trello_boards: None,
                     auto_launch: None,

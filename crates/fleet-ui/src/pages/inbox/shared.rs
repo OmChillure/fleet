@@ -75,6 +75,14 @@ pub fn patch_for(provider: &str, raw: String) -> MonitorPatch {
             ),
             ..MonitorPatch::default()
         },
+        "gitea" => MonitorPatch {
+            gitea_repos: Some(
+                list.into_iter()
+                    .filter_map(|s| normalize_owner_name(&s).or(Some(s)))
+                    .collect(),
+            ),
+            ..MonitorPatch::default()
+        },
         "gitlab" => MonitorPatch {
             gitlab_projects: Some(
                 list.into_iter()

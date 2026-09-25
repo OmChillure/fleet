@@ -141,6 +141,7 @@ async fn run() -> anyhow::Result<()> {
     let oauth_configured: Vec<&str> = [
         ("github", config.integrations.github.is_some()),
         ("gitlab", config.integrations.gitlab.is_some()),
+        ("gitea", config.integrations.gitea.is_some()),
         ("slack", config.integrations.slack.is_some()),
         ("linear", config.integrations.linear.is_some()),
         ("jira", config.integrations.jira.is_some()),

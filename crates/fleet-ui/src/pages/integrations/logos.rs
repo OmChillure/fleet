@@ -56,6 +56,10 @@ fn logo_for(icon: &str) -> (&'static str, Option<Asset>) {
             "bg-[#FC6D26]",
             Some(asset!("/assets/integrations/gitlab.svg")),
         ),
+        "gitea" => (
+            "bg-[#609926]",
+            Some(asset!("/assets/integrations/gitea.svg")),
+        ),
         "bitbucket" => (
             "bg-[#0052CC]",
             Some(asset!("/assets/integrations/bitbucket.svg")),

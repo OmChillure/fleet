@@ -35,6 +35,8 @@ pub struct MonitorArgs {
     #[serde(default)]
     pub gitlab_projects: Option<Vec<String>>,
     #[serde(default)]
+    pub gitea_repos: Option<Vec<String>>,
+    #[serde(default)]
     pub linear_teams: Option<Vec<String>>,
     #[serde(default)]
     pub trello_boards: Option<Vec<String>>,
@@ -181,7 +183,7 @@ pub async fn monitor_tickets(
         .as_ref()
         .map(|m| m.filters.clone())
         .unwrap_or_else(|| json!({}));
-    let filters = inbox_sources::merge_filters(
+    let mut filters = inbox_sources::merge_filters(
         &existing_filters,
         args.filters.as_ref(),
         args.github_repos.as_deref(),
@@ -192,6 +194,10 @@ pub async fn monitor_tickets(
         args.linear_teams.as_deref(),
         args.trello_boards.as_deref(),
     );
+    if let Some(repos) = args.gitea_repos.as_deref() {
+        let repos: Vec<&str> = repos.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        filters["gitea"] = json!({ "repos": repos });
+    }
     let github_repos = inbox_sources::github_repos(&filters);
     let jira_jql = inbox_sources::jira_jql(&filters);
     let slack_channels = inbox_sources::slack_channels(&filters);
@@ -333,6 +339,7 @@ fn monitor_json(
         "slack_channels": inbox_sources::slack_channels(&monitor.filters),
         "notion_databases": inbox_sources::notion_databases(&monitor.filters),
         "gitlab_projects": inbox_sources::string_list(&monitor.filters, "gitlab", "projects"),
+        "gitea_repos": inbox_sources::gitea_repos(&monitor.filters),
         "linear_teams": inbox_sources::string_list(&monitor.filters, "linear", "teams"),
         "trello_boards": inbox_sources::string_list(&monitor.filters, "trello", "boards"),
         "auto_launch": monitor.auto_launch,
@@ -582,6 +589,17 @@ pub async fn poll_workspace(state: &AppState, workspace_id: Uuid, force: bool) -
                     &caller,
                     item_limit,
                     &inbox_sources::linear_teams(filters),
+                )
+                .await
+            }
+            "gitea" => {
+                poll_gitea(
+                    state,
+                    workspace_id,
+                    &caller,
+                    item_limit,
+                    target_limit,
+                    &inbox_sources::gitea_repos(filters),
                 )
                 .await
             }
@@ -1256,6 +1274,103 @@ async fn poll_gitlab(
                     url: i.get("web_url").and_then(|v| v.as_str()).map(|s| s.into()),
                     summary: i
                         .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .chars()
+                        .take(4000)
+                        .collect(),
+                    provider_closed: i.get("state").and_then(|v| v.as_str()) == Some("closed"),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+async fn poll_gitea(
+    state: &AppState,
+    workspace_id: Uuid,
+    caller: &ProxyCaller,
+    item_limit: usize,
+    target_limit: usize,
+    repos: &[String],
+) -> Result<usize, String> {
+    let mut targets: Vec<String> = repos
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if targets.is_empty() {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "gitea",
+            "list_repos",
+            json!({ "per_page": target_limit }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        if let Some(arr) = listed.data.get("items").and_then(|v| v.as_array()) {
+            for r in arr {
+                if let Some(name) = r
+                    .get("full_name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    targets.push(name.to_string());
+                }
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let mut n = 0usize;
+    for repo in targets.iter().take(target_limit) {
+        let listed = proxy_op(
+            state,
+            workspace_id,
+            caller,
+            "gitea",
+            "list_issues",
+            json!({ "repo": repo, "state": "open", "per_page": item_limit }),
+        )
+        .await;
+        if !listed.ok {
+            return Err(listed.summary);
+        }
+        let items = listed
+            .data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for i in items {
+            let number = i.get("number").and_then(|v| v.as_u64());
+            let Some(number) = number else { continue };
+            let key = format!("{repo}#{number}");
+            let title = i
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untitled")
+                .to_string();
+            ticket_repo::upsert_inbox(
+                &state.db,
+                &UpsertInbox {
+                    workspace_id,
+                    provider: "gitea".into(),
+                    external_key: key,
+                    title,
+                    url: i.get("html_url").and_then(|v| v.as_str()).map(|s| s.into()),
+                    summary: i
+                        .get("body")
+                        .or_else(|| i.get("description"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .chars()
