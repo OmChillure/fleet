@@ -1214,6 +1214,82 @@ class Demo:
         pause(p, 800)
         self.snap("sandboxes")
 
+    def _film_verify_offline(self) -> None:
+        """Show the offline-card check. The list rewrite is display-only."""
+        p = self.page
+        ws = ""
+        parts = [x for x in urlparse(p.url).path.split("/") if x]
+        if parts:
+            ws = parts[0]
+
+        def handle(route) -> None:
+            req = route.request
+            if req.method != "GET":
+                route.continue_()
+                return
+            resp = route.fetch()
+            try:
+                data = resp.json()
+            except Exception:
+                route.fulfill(
+                    status=resp.status,
+                    headers={"content-type": resp.headers.get("content-type", "application/json")},
+                    body=resp.text(),
+                )
+                return
+            hosts = list(data.get("hosts") or [])
+            workspace_id = ws
+            if hosts and hosts[0].get("workspace_id"):
+                workspace_id = str(hosts[0]["workspace_id"])
+            hosts.insert(
+                0,
+                {
+                    "id": "00000000-0000-4000-8000-000000000570",
+                    "workspace_id": workspace_id,
+                    "name": "5700g",
+                    "status": "offline",
+                    "kind": "host",
+                },
+            )
+            data["hosts"] = hosts
+            if not str(data.get("worker_public_base") or "").strip():
+                data["worker_public_base"] = API
+            route.fulfill(
+                status=resp.status,
+                headers={"content-type": "application/json"},
+                body=json.dumps(data),
+            )
+
+        p.route("**/api/workspaces/*/worker-hosts", handle)
+        try:
+            p.reload(wait_until="networkidle")
+            pause(p, 800)
+            card = p.locator("button").filter(has_text="5700g")
+            if card.count() == 0:
+                self.bug("offline verify card was not listed")
+                return
+            card.first.click()
+            pause(p, 800)
+            self.snap("verify-offline")
+            body = p.inner_text("body")
+            if "Verify installation" not in body:
+                self.bug("offline card missing Verify installation")
+            pre = p.locator("pre").filter(has_text="verify.sh")
+            if pre.count() == 0:
+                self.bug("offline card missing verify.sh command")
+            else:
+                command = pre.first.inner_text()
+                if "FLEET_PAIR_TOKEN" in command:
+                    self.bug("verify command must not include a pair token")
+                copy = pre.first.locator("xpath=..").get_by_role("button", name="Copy")
+                if copy.count() and copy.first.is_visible():
+                    copy.first.click()
+                    pause(p, 500)
+                    self.dismiss_toasts()
+            self.snap("verify-command")
+        finally:
+            p.unroute("**/api/workspaces/*/worker-hosts")
+
     def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
         p = self.page
@@ -1274,6 +1350,8 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
                 self.snap("pair-dismissed")
+        if rel == "/runners/self-hosted":
+            self._film_verify_offline()
         pending_card = p.locator("button").filter(has_text="Waiting to pair")
         if pending_card.count() == 0:
             pending_card = p.locator("button").filter(

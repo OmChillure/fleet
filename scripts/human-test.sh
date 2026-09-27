@@ -223,7 +223,8 @@ cmd_guide() {
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
     "Click the pencil in the right panel to rename; Enter saves, Escape cancels." \
-    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." || return 0
+    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." \
+    "An offline card (no heartbeat for 90s) opens Verify installation. Paste the command on that computer. It is read-only: not_installed or bins_missing means the program is gone; service_disabled means the unit will not start at login; service_stopped means it is enabled but down; service_running means the process is up and the card is a reachability problem. It does not re-pair. A pending or online card does not show that block." || return 0
 
   pause_step "Workers" \
     "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \

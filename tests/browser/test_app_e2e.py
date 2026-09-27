@@ -989,6 +989,57 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertRegex(card, r"id [0-9a-f]{8}")
         self.assertRegex(card.lower(), r"jobs\s+0\s*/\s*4")
         self.assertNotIn("Advertised", pending_text)
+        # Pending is not offline. The verify block is only for a silent machine.
+        self.assertNotIn("Verify installation", pending_text)
+
+    def test_05b_offline_card_shows_verify_install(self) -> None:
+        """Offline card offers the read-only check. The command has no pair token."""
+        base = getattr(type(self), "workspace_url", None)
+        self.assertIsNotNone(base, "signup/login must run first")
+        page = self.page
+
+        def rewrite(route) -> None:
+            if route.request.method != "GET":
+                route.continue_()
+                return
+            resp = route.fetch()
+            data = resp.json()
+            hosts = list(data.get("hosts") or [])
+            workspace_id = hosts[0]["workspace_id"] if hosts else ""
+            hosts.insert(
+                0,
+                {
+                    "id": "00000000-0000-4000-8000-000000000570",
+                    "workspace_id": workspace_id,
+                    "name": "5700g",
+                    "status": "offline",
+                    "kind": "host",
+                },
+            )
+            data["hosts"] = hosts
+            if not str(data.get("worker_public_base") or "").strip():
+                data["worker_public_base"] = API
+            route.fulfill(
+                status=resp.status,
+                headers={"content-type": "application/json"},
+                body=json.dumps(data),
+            )
+
+        page.route("**/api/workspaces/*/worker-hosts", rewrite)
+        try:
+            page.goto(f"{base}/runners/self-hosted", wait_until="networkidle")
+            page.wait_for_selector("h1")
+            card = open_host_panel(page, "5700g", timeout_ms=15_000)
+            text = card.first.inner_text()
+            self.assertIn("Verify installation", text)
+            self.assertIn("install/worker/verify.sh", text)
+            self.assertIn("install/worker/verify.ps1", text)
+            command = page.locator("pre").filter(has_text="verify.sh").first.inner_text()
+            self.assertNotIn("FLEET_PAIR_TOKEN", command)
+            self.assertIn("service_disabled", text)
+            self.assertIn("bins_missing", text)
+        finally:
+            page.unroute("**/api/workspaces/*/worker-hosts")
 
     def test_15_cancel_discards_pending_worker(self) -> None:
         base = getattr(type(self), "workspace_url", None)
