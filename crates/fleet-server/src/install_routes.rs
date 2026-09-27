@@ -28,6 +28,8 @@ const DARWIN_X86_64: &str = include_str!("../../../scripts/install-worker/darwin
 const FREEBSD_AMD64: &str = include_str!("../../../scripts/install-worker/freebsd-amd64.sh");
 const WINDOWS_X86_64: &str = include_str!("../../../scripts/install-worker/windows-x86_64.ps1");
 const WINDOWS_ARM64: &str = include_str!("../../../scripts/install-worker/windows-arm64.ps1");
+const VERIFY_SH: &str = include_str!("../../../scripts/install-worker/verify.sh");
+const VERIFY_PS1: &str = include_str!("../../../scripts/install-worker/verify.ps1");
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -531,6 +533,8 @@ fn served_scripts() -> &'static [(&'static str, &'static str)] {
         ("freebsd-amd64.sh", FREEBSD_AMD64),
         ("windows-x86_64.ps1", WINDOWS_X86_64),
         ("windows-arm64.ps1", WINDOWS_ARM64),
+        ("verify.sh", VERIFY_SH),
+        ("verify.ps1", VERIFY_PS1),
     ]
 }
 
@@ -674,7 +678,9 @@ mod tests {
     fn served_unix_platform_scripts_export_matching_fleet_platform() {
         let mut stems = Vec::new();
         for (name, body) in served_scripts() {
-            if !name.ends_with(".sh") || matches!(*name, "install-worker.sh" | "_unix_common.sh") {
+            if !name.ends_with(".sh")
+                || matches!(*name, "install-worker.sh" | "_unix_common.sh" | "verify.sh")
+            {
                 continue;
             }
             let stem = name
@@ -1010,6 +1016,10 @@ exit 22
                 !body.contains("API_PUBLIC_BASE"),
                 "{name} must not reference API_PUBLIC_BASE (OAuth / public API)"
             );
+            // verify.sh / verify.ps1 only read the local install. They do not pair.
+            if name.starts_with("verify.") {
+                continue;
+            }
             assert!(
                 body.contains("FLEET_URL"),
                 "{name} must take the pair URL via FLEET_URL (WORKER_PUBLIC_BASE)"

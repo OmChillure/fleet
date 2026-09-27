@@ -128,6 +128,7 @@ class InstallWorkerTests(unittest.TestCase):
             "darwin-arm64.sh",
             "darwin-x86_64.sh",
             "freebsd-amd64.sh",
+            "verify.sh",
         ):
             r = subprocess.run(
                 ["sh", "-n", str(SCRIPT_DIR / name)],
@@ -2358,5 +2359,129 @@ class InstallWorkerTests(unittest.TestCase):
             self.assertIn("--force", raw, name)
 
 
+class VerifyInstallTests(unittest.TestCase):
+    """Read-only verdicts: deleted install vs disabled vs stopped vs running."""
+
+    def _run(self, home: Path, bindir: Path) -> subprocess.CompletedProcess[str]:
+        env = {
+            "HOME": str(home),
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "FLEET_HOST_CONFIG_DIR": str(home / ".config" / "fleet-host"),
+        }
+        return subprocess.run(
+            ["sh", str(SCRIPT_DIR / "verify.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def _fakes(self, bindir: Path, *, enabled: str, active: str, process: bool) -> None:
+        bindir.mkdir(parents=True)
+        (bindir / "systemctl").write_text(
+            "#!/bin/sh\n"
+            "cmd=\n"
+            "for a in \"$@\"; do\n"
+            "  case \"$a\" in\n"
+            "    is-enabled|is-active) cmd=$a ;;\n"
+            "  esac\n"
+            "done\n"
+            f"if [ \"$cmd\" = is-enabled ]; then echo {enabled}; "
+            f"[ {enabled} = enabled ]; exit; fi\n"
+            f"if [ \"$cmd\" = is-active ]; then echo {active}; "
+            f"[ {active} = active ]; exit; fi\n"
+            "echo unexpected >&2\n"
+            "exit 99\n",
+            encoding="utf-8",
+        )
+        (bindir / "pgrep").write_text(
+            "#!/bin/sh\n" + ("exit 0\n" if process else "exit 1\n"),
+            encoding="utf-8",
+        )
+        os.chmod(bindir / "systemctl", 0o755)
+        os.chmod(bindir / "pgrep", 0o755)
+
+    def _verdict(self, proc: subprocess.CompletedProcess[str]) -> str:
+        for line in proc.stdout.splitlines():
+            if line.startswith("verdict:"):
+                return line.split(":", 1)[1].strip()
+        self.fail(proc.stdout + proc.stderr)
+
+    def test_empty_home_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bindir = home / "fakebin"
+            self._fakes(bindir, enabled="disabled", active="inactive", process=False)
+            proc = self._run(home, bindir)
+            self.assertEqual(proc.returncode, 4, proc.stdout + proc.stderr)
+            self.assertEqual(self._verdict(proc), "not_installed")
+            self.assertNotIn("flm_", proc.stdout)
+
+    def test_config_without_binary_is_bins_missing_and_hides_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = home / ".config" / "fleet-host"
+            cfg.mkdir(parents=True)
+            (cfg / "config.toml").write_text("run_host = true\n", encoding="utf-8")
+            (cfg / "machine.token").write_text("flm_secretvalue\n", encoding="utf-8")
+            bindir = home / "fakebin"
+            self._fakes(bindir, enabled="disabled", active="inactive", process=False)
+            proc = self._run(home, bindir)
+            self.assertEqual(proc.returncode, 4, proc.stdout + proc.stderr)
+            self.assertEqual(self._verdict(proc), "bins_missing")
+            self.assertIn("token:           present", proc.stdout)
+            self.assertNotIn("flm_secretvalue", proc.stdout)
+
+    def test_disabled_unit_is_service_disabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bin_path = home / ".local" / "bin" / "fleet-host"
+            bin_path.parent.mkdir(parents=True)
+            bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(bin_path, 0o755)
+            unit = home / ".config" / "systemd" / "user" / "fleet-host.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+            bindir = home / "fakebin"
+            self._fakes(bindir, enabled="disabled", active="inactive", process=False)
+            proc = self._run(home, bindir)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertEqual(self._verdict(proc), "service_disabled")
+            self.assertIn("systemctl --user enable --now fleet-host", proc.stdout)
+
+    def test_enabled_inactive_is_service_stopped(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bin_path = home / ".local" / "bin" / "fleet-host"
+            bin_path.parent.mkdir(parents=True)
+            bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(bin_path, 0o755)
+            unit = home / ".config" / "systemd" / "user" / "fleet-host.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+            bindir = home / "fakebin"
+            self._fakes(bindir, enabled="enabled", active="inactive", process=False)
+            proc = self._run(home, bindir)
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertEqual(self._verdict(proc), "service_stopped")
+            self.assertIn("systemctl --user start fleet-host", proc.stdout)
+
+    def test_running_process_wins_over_disabled_unit(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bin_path = home / ".local" / "bin" / "fleet-host"
+            bin_path.parent.mkdir(parents=True)
+            bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(bin_path, 0o755)
+            unit = home / ".config" / "systemd" / "user" / "fleet-host.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+            bindir = home / "fakebin"
+            self._fakes(bindir, enabled="disabled", active="inactive", process=True)
+            proc = self._run(home, bindir)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(self._verdict(proc), "service_running")
+
+
 if __name__ == "__main__":
     unittest.main()
+

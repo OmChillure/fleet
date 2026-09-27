@@ -932,6 +932,7 @@ async fn http_list(
             "fleet-host": crate::package_versions::fleet_host_version(),
             "fleet-driver": crate::package_versions::fleet_driver_version(),
         },
+        "worker_public_base": worker_api_base(&state),
     })))
 }
 

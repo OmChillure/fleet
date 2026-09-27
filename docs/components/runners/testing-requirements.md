@@ -64,6 +64,13 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 - Do not mark a layer done because a neighboring test exists. The row
   is the unit of coverage.
 
+**Verify installation.** The offline-card check is read-only and does not
+take a job. Layer 1 is `VerifyInstallTests` plus the command-string unit.
+Layer 2 is `test_05b_offline_card_shows_verify_install` and the runners
+film. Layer 3 is **n/a**: the script does not pair, heartbeat, or lease,
+and a guest VM would only re-run the same disk checks the lab test already
+locks.
+
 **Send-ACL and run-mode.** Who may send work to a PC (only me / people I
 allow / anyone in the workspace) and the guest use case (**Run on a PC**
 vs **Run in a container**) need the same three layers as every other
