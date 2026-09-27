@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 fn run_stdout_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(bin)
+    let mut cmd = Command::new(bin);
+    crate::platform::hide_console(&mut cmd);
+    let mut child = cmd
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -493,12 +495,8 @@ fn probe_gemini() -> AgentProbe {
         .unwrap_or(false);
     let logged_in = key || cli_session;
     let models = if logged_in {
-        env_model_list("GEMINI_MODELS").unwrap_or_else(|| {
-            vec![
-                "gemini-2.5-flash".into(),
-                "gemini-2.0-flash".into(),
-            ]
-        })
+        env_model_list("GEMINI_MODELS")
+            .unwrap_or_else(|| vec!["gemini-2.5-flash".into(), "gemini-2.0-flash".into()])
     } else {
         vec![]
     };
@@ -768,10 +766,7 @@ mod tests {
     #[test]
     fn parse_cli_model_ids_skips_name_even_when_prefix_matches() {
         let raw = "NAME\n  - gpt-4o\n";
-        assert_eq!(
-            parse_cli_model_ids(raw, &["gpt-", "name"]),
-            vec!["gpt-4o"]
-        );
+        assert_eq!(parse_cli_model_ids(raw, &["gpt-", "name"]), vec!["gpt-4o"]);
     }
 
     #[test]

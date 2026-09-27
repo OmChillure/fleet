@@ -370,7 +370,9 @@ pub async fn pull_guest_proof(namespace: &str, cr_name: &str, dest: &Path) {
         "artifacts/transcript.md",
         "artifacts/result.json",
     ] {
-        let out = tokio::process::Command::new("kubectl")
+        let mut kubectl = tokio::process::Command::new("kubectl");
+        crate::platform::hide_console_tokio(&mut kubectl);
+        let out = kubectl
             .args([
                 "-n",
                 namespace,
@@ -552,7 +554,10 @@ mod tests {
             spec.env.get("FLEET_ORCHESTRATOR_URL").unwrap(),
             &opts.worker_api_url
         );
-        assert_eq!(spec.env.get("FLEET_API_BASE").unwrap(), &opts.worker_api_url);
+        assert_eq!(
+            spec.env.get("FLEET_API_BASE").unwrap(),
+            &opts.worker_api_url
+        );
     }
 
     #[test]
@@ -652,11 +657,8 @@ mod tests {
         payload
             .env
             .insert("FLEET_WORK_CMD".into(), "echo host-only".into());
-        let env = crate::spawn::child_env_for_isolated_guest(
-            &payload,
-            &extra,
-            Path::new(POD_WORK_DIR),
-        );
+        let env =
+            crate::spawn::child_env_for_isolated_guest(&payload, &extra, Path::new(POD_WORK_DIR));
         let spec = spec_from_payload(&payload, &env, &sample_opts()).unwrap();
         assert!(
             !spec.env.contains_key("FLEET_MOCK_ACP_BIN"),

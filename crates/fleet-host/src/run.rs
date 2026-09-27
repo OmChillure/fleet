@@ -134,16 +134,18 @@ fn persist_pair(cfg: &mut LocalConfig, url: &str, resp: &PairResponse) -> Result
 
 /// Pair is a handshake. Offline after 90s unless `fleet-host run` is up.
 fn start_run_after_pair() {
-    let user = std::process::Command::new("systemctl")
+    let mut user_cmd = std::process::Command::new("systemctl");
+    crate::platform::hide_console(&mut user_cmd);
+    let user = user_cmd
         .args(["--user", "enable", "--now", "fleet-host"])
         .status();
     if matches!(user, Ok(s) if s.success()) {
         println!("started systemd user unit fleet-host");
         return;
     }
-    let sys = std::process::Command::new("systemctl")
-        .args(["enable", "--now", "fleet-host"])
-        .status();
+    let mut sys_cmd = std::process::Command::new("systemctl");
+    crate::platform::hide_console(&mut sys_cmd);
+    let sys = sys_cmd.args(["enable", "--now", "fleet-host"]).status();
     if matches!(sys, Ok(s) if s.success()) {
         println!("started systemd unit fleet-host");
         return;
@@ -237,6 +239,7 @@ pub fn acquire_run_lock() -> Result<crate::paths::RunLock> {
 }
 
 pub async fn run() -> Result<()> {
+    crate::platform::detach_console();
     let cfg = LocalConfig::load_or_default()?;
     init_tracing(&cfg.log_level);
     let _run_lock = acquire_run_lock()?;
@@ -386,7 +389,8 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                     break;
                 }
                 let n = jobs.lock().await.len() as u32;
-                match client.heartbeat(&cfg, n, None, update_state.is_updating(), take_install_ack()).await {
+                let apply_err = update_state.apply_error();
+                match client.heartbeat(&cfg, n, apply_err.as_deref(), update_state.is_updating(), take_install_ack()).await {
                     Ok(resp) => {
                         record_last_heartbeat(true, "ok");
                         let mut eff = effective.lock().await;
@@ -442,12 +446,15 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                             let state2 = update_state.clone();
                             let n2 = n;
                             tokio::spawn(async move {
-                                let _ = client2.heartbeat(&cfg2, n2, None, true, None).await;
+                                let prior = state2.apply_error();
+                                let _ = client2
+                                    .heartbeat(&cfg2, n2, prior.as_deref(), true, None)
+                                    .await;
                                 let dest = match update::install_dir() {
                                     Ok(p) => p,
                                     Err(e) => {
                                         warn!(error = %e, "update: no install dir");
-                                        state2.finish();
+                                        state2.note_fail(&e.to_string());
                                         return;
                                     }
                                 };
@@ -461,23 +468,27 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                                     &ApplyOptions::production(),
                                 )
                                 .await;
-                                state2.finish();
                                 match result {
                                     Ok(update::ApplyOutcome::Noop)
                                     | Ok(update::ApplyOutcome::QuietNoPrebuilt) => {
+                                        state2.finish_ok();
                                         state2.updating.store(
                                             false,
                                             std::sync::atomic::Ordering::SeqCst,
                                         );
                                     }
                                     Ok(update::ApplyOutcome::ChildrenSwapped) => {
+                                        state2.finish_ok();
                                         info!("applied child-bin update");
                                     }
                                     Ok(update::ApplyOutcome::HostRestartPending) => {
+                                        state2.finish_ok();
                                         info!("host-bin update staged");
                                     }
                                     Err(e) => {
                                         warn!(error = %e, "auto-update apply failed");
+                                        let msg = e.to_string();
+                                        state2.note_fail(&msg);
                                         state2.updating.store(
                                             false,
                                             std::sync::atomic::Ordering::SeqCst,
@@ -486,6 +497,9 @@ async fn run_loop(mut cfg: LocalConfig, url: String, token: String) -> Result<()
                                             false,
                                             std::sync::atomic::Ordering::SeqCst,
                                         );
+                                        let _ = client2
+                                            .heartbeat(&cfg2, n2, Some(&msg), false, None)
+                                            .await;
                                     }
                                 }
                             });
