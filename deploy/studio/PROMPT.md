@@ -47,8 +47,8 @@ https://agentfleet.studio. Both of these must equal that commit:
 6. On **docker build / compile** failure:
    - Diagnose from the journal / docker output. Do not retry the same
      broken archive in a loop.
-   - Fix in a **new worktree** of the product repo based on `origin/main`.
-     Never edit the operator checkout in place.
+   - Fix on a branch in **this same checkout**. Do not create another
+     worktree or another directory under `/code`.
    - Push a branch. Open the MR with `scripts/open-mr.sh` or
      `~/.grok/skills/open-mr/scripts/open-mr.sh` only after that fix's
      author bar is green. Do not merge it. Do not force-push `main`.

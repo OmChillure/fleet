@@ -223,14 +223,16 @@ def cmd_register(
     dest: Path,
     *,
     keep_author_revs: bool = False,
+    deployer_revs: bool = False,
     baseline: Path | None = None,
 ) -> int:
     """Rewrite [release] hashes from staged bins.
 
     Default bumps a per-OS rev when that OS hash changes. ``keep_author_revs``
     writes the staged hashes at the rev already in ``toml_path`` and fails
-    when a hash differs from ``baseline`` (the previous commit's toml) but
-    that rev did not increase. A line bump still requires every rev to be 0.
+    when a hash differs from ``baseline`` but that rev did not increase.
+    ``deployer_revs`` is the same, except the deployer bumps the rev itself
+    when the author did not. A line bump still requires every rev to be 0.
     """
     staged = hashes_from_dist(dest)
     miss = _staged_complete(staged)
@@ -275,13 +277,18 @@ def cmd_register(
                 revs[plat] = author_rev
             elif author_rev > prev_rev:
                 revs[plat] = author_rev
+            elif deployer_revs:
+                revs[plat] = prev_rev + 1
+                print(
+                    f"deployer rev {plat}/{bin_} {prev_rev} -> {prev_rev + 1} "
+                    f"({display_version(version, prev_rev + 1)})"
+                )
             else:
                 shown = display_version(version, author_rev)
                 errors.append(
                     f"{plat}/{bin_} hash changed but {shown} did not bump "
                     f"{plat}-rev (still {author_rev}, previous {prev_rev}). "
-                    f"Bump that rev, or bump the line (resets every OS rev to 0). "
-                    f"The deployer writes the hash; it does not invent the rev."
+                    f"Bump that rev before merge, or bump the line (resets every OS rev to 0)."
                 )
                 revs[plat] = author_rev
         releases[bin_] = BinRelease(
@@ -311,6 +318,7 @@ def main(argv: list[str]) -> int:
     toml_path = root / "runner-packages.toml"
     require = "--require-all" in argv
     keep_revs = "--keep-author-revs" in argv
+    deployer_revs = "--deployer-revs" in argv
     baseline: Path | None = None
     rest: list[str] = []
     skip_next = False
@@ -318,7 +326,7 @@ def main(argv: list[str]) -> int:
         if skip_next:
             skip_next = False
             continue
-        if a in ("--require-all", "--keep-author-revs"):
+        if a in ("--require-all", "--keep-author-revs", "--deployer-revs"):
             continue
         if a == "--baseline":
             if i + 1 >= len(argv[2:]):
@@ -335,7 +343,11 @@ def main(argv: list[str]) -> int:
         return cmd_check(toml_path, dest, require)
     if cmd == "register":
         return cmd_register(
-            toml_path, dest, keep_author_revs=keep_revs, baseline=baseline
+            toml_path,
+            dest,
+            keep_author_revs=keep_revs or deployer_revs,
+            deployer_revs=deployer_revs,
+            baseline=baseline,
         )
     if cmd == "platform-ok":
         if len(rest) < 2:

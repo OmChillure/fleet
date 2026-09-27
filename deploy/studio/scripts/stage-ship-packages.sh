@@ -145,6 +145,10 @@ stage_one windows-x86_64 --windows
 
 log "worker darwin-arm64 / darwin-x86_64: not built here (no macOS cross from Linux)"
 
+# Register with the deploy checkout's script. The archive copy does not
+# know about --deployer-revs until that commit is what we are building.
+cp "${REPO}/scripts/runner-release.py" "${WORKDIR}/scripts/runner-release.py"
+
 if [[ "${REBUILT}" == 1 ]]; then
   baseline="$(mktemp)"
   followup="${STATE_DIR}/runner-packages.followup.toml"
@@ -155,14 +159,28 @@ if [[ "${REBUILT}" == 1 ]]; then
   else
     cp "${WORKDIR}/runner-packages.toml" "${baseline}"
   fi
-  python3 "${WORKDIR}/scripts/runner-release.py" register --keep-author-revs \
+  python3 "${WORKDIR}/scripts/runner-release.py" register --deployer-revs \
     --baseline "${baseline}" "${DIST}"
   rm -f "${baseline}"
   cp "${WORKDIR}/runner-packages.toml" "${STATE_DIR}/runner-packages.followup.toml"
   printf '%s\n' "${SHA}" > "${STATE_DIR}/runner-release-followup"
-  log "registered runner hashes at the author's revs (${STATE_DIR}/runner-packages.followup.toml)"
+  log "registered runner hashes (${STATE_DIR}/runner-packages.followup.toml)"
 elif [[ "${KEPT_STALE}" == 1 ]]; then
-  apply_followup_lock
+  baseline="$(mktemp)"
+  followup="${STATE_DIR}/runner-packages.followup.toml"
+  if [[ -f "${followup}" ]]; then
+    cp "${followup}" "${baseline}"
+  elif git -C "${REPO}" cat-file -e "${SHA}^:runner-packages.toml" 2>/dev/null; then
+    git -C "${REPO}" show "${SHA}^:runner-packages.toml" > "${baseline}"
+  else
+    cp "${WORKDIR}/runner-packages.toml" "${baseline}"
+  fi
+  python3 "${WORKDIR}/scripts/runner-release.py" register --deployer-revs \
+    --baseline "${baseline}" "${DIST}"
+  rm -f "${baseline}"
+  cp "${WORKDIR}/runner-packages.toml" "${STATE_DIR}/runner-packages.followup.toml"
+  printf '%s\n' "${SHA}" > "${STATE_DIR}/runner-release-followup"
+  log "registered kept bins; bumped any rev the author missed"
 fi
 
 python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"

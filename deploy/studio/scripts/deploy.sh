@@ -33,9 +33,6 @@ VPS_SSH_OPTS="-o ControlMaster=auto -o ControlPath=${CTL} -o ControlPersist=60"
 cleanup() {
   ssh -i "${VPS_DEPLOY_KEY}" -o ControlPath="${CTL}" -O exit "${VPS_DEPLOY_USER}@${VPS_HOST}" >/dev/null 2>&1 || true
   rm -f "${CTL}"
-  if [[ -n "${WORKDIR:-}" && -d "${WORKDIR}" ]]; then
-    rm -rf "${WORKDIR}"
-  fi
 }
 trap cleanup EXIT
 
@@ -133,24 +130,29 @@ fi
 
 log "deploying ${SHORT}"
 
-if [[ "${SKIP_BUILD}" != 1 ]]; then
-  WORKDIR="$(mktemp -d "${ROOT}/.build.XXXXXX")"
-  log "materializing ${SHORT} into ${WORKDIR}"
-  if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
-    rsync -a --delete \
-      --exclude target --exclude .git --exclude data --exclude tmp --exclude .tmp \
-      --exclude node_modules --exclude '*.pyc' --exclude __pycache__ \
-      "${REPO}/" "${WORKDIR}/"
-  else
-    git -C "${REPO}" archive "${SHA}" | tar -x -C "${WORKDIR}"
-    # origin/main Dockerfile omitted this until the tree includes it; include_str! needs it.
-    if [[ -f "${WORKDIR}/runner-packages.toml" ]] \
-      && ! grep -q 'COPY runner-packages.toml' "${WORKDIR}/Dockerfile"; then
-      sed -i '/COPY crates \.\/crates/a COPY runner-packages.toml ./' "${WORKDIR}/Dockerfile"
-      log "patched Dockerfile to COPY runner-packages.toml"
-    fi
-  fi
+# One directory, reused. cargo target/ stays between deploys. Do not
+# mktemp another tree under /code.
+WORKDIR="${STATE_DIR}/build"
+mkdir -p "${WORKDIR}"
+log "updating reused build dir ${WORKDIR} to ${SHORT}"
+STAGE="$(mktemp -d /tmp/fleet-archive.XXXXXX)"
+if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
+  rsync -a --delete \
+    --exclude target --exclude .git --exclude data --exclude tmp --exclude .tmp \
+    --exclude node_modules --exclude '*.pyc' --exclude __pycache__ \
+    "${REPO}/" "${STAGE}/"
+else
+  git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE}"
+fi
+if [[ -f "${STAGE}/runner-packages.toml" ]] \
+  && ! grep -q 'COPY runner-packages.toml' "${STAGE}/Dockerfile"; then
+  sed -i '/COPY crates \.\/crates/a COPY runner-packages.toml ./' "${STAGE}/Dockerfile"
+  log "patched Dockerfile to COPY runner-packages.toml"
+fi
+rsync -a --delete --exclude target --exclude .git "${STAGE}/" "${WORKDIR}/"
+rm -rf "${STAGE}"
 
+if [[ "${SKIP_BUILD}" != 1 ]]; then
   log "building ${API_IMAGE}:${SHORT} and ${UI_IMAGE}:${SHORT}"
   fail=0
   docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
@@ -181,28 +183,66 @@ fi
 
 # Host/driver packages for install + auto-update. Rebuild a platform only
 # when those crates changed. After a failed UI build we never get here.
-STAGE_SRC="${WORKDIR:-${REPO}}"
-if [[ -z "${WORKDIR:-}" ]]; then
-  STAGE_SRC="$(mktemp -d "${ROOT}/.build.XXXXXX")"
-  git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE_SRC}"
-fi
+STAGE_SRC="${WORKDIR}"
 if ! STAGE_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
   fail_notify "worker package stage failed"
   exit 1
 fi
-if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
-  if [[ -z "${WORKDIR:-}" ]]; then
-    rm -rf "${STAGE_SRC}"
+
+# Author should bump the per-OS rev before merge. If that was missed,
+# register already bumped it. Commit that lock onto main and ship the
+# new commit so the image git_sha matches the rev bump.
+if [[ "${PROVE_ONLY:-0}" != 1 ]]; then
+  recorded="$(mktemp)"
+  git -C "${REPO}" show "${SHA}:runner-packages.toml" > "${recorded}" 2>/dev/null || true
+  if [[ ! -s "${recorded}" ]] || ! cmp -s "${recorded}" "${WORKDIR}/runner-packages.toml"; then
+    log "runner lock changed; committing rev bump onto origin/main"
+    git -C "${REPO}" fetch --quiet origin main
+    rev_wt="$(mktemp -d /tmp/fleet-revcommit.XXXXXX)"
+    git -C "${REPO}" worktree add --detach "${rev_wt}" origin/main
+    cp "${WORKDIR}/runner-packages.toml" "${rev_wt}/runner-packages.toml"
+    git -C "${rev_wt}" add runner-packages.toml
+    git -C "${rev_wt}" commit -m "$(cat <<'EOF'
+chore: bump runner revs the author missed
+
+The deployer rebuilt a ship platform whose bytes changed and the
+per-OS rev was not bumped. It owns that bump and records the hashes
+of the bins it built. Pre-merge still asks the author to bump the rev.
+EOF
+)"
+    new_sha="$(git -C "${rev_wt}" rev-parse HEAD)"
+    git -C "${REPO}" push origin "${new_sha}:refs/heads/main"
+    git -C "${REPO}" worktree remove --force "${rev_wt}"
+    SHA="${new_sha}"
+    SHORT="${SHA:0:12}"
+    log "main is ${SHORT}; rebuilding images so git_sha matches"
+    STAGE="$(mktemp -d /tmp/fleet-archive.XXXXXX)"
+    git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE}"
+    rsync -a --delete --exclude target --exclude .git "${STAGE}/" "${WORKDIR}/"
+    rm -rf "${STAGE}"
+    fail=0
+    docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
+      -f "${WORKDIR}/Dockerfile" -t "${API_IMAGE}:${SHA}" "${WORKDIR}" &
+    api_pid=$!
+    docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
+      -f "${WORKDIR}/Dockerfile.ui" -t "${UI_IMAGE}:${SHA}" "${WORKDIR}" &
+    ui_pid=$!
+    wait "${api_pid}" || fail=1
+    wait "${ui_pid}" || fail=1
+    if [[ "${fail}" -ne 0 ]]; then
+      fail_notify "rebuild after rev bump failed"
+      exit 1
+    fi
   fi
+  rm -f "${recorded}"
+fi
+
+if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
   mkdir -p "${STATE_DIR}/ship-proof"
   printf 'ok %s\n' "${SHA}" > "${STATE_DIR}/ship-proof/${SHA}"
   log "ship proof ok ${SHORT} (images and runner packages built; not shipped)"
   exit 0
 fi
-if [[ -z "${WORKDIR:-}" ]]; then
-  rm -rf "${STAGE_SRC}"
-fi
-
 log "shipping images to ${VPS_HOST}"
 docker save "${API_IMAGE}:${SHA}" "${UI_IMAGE}:${SHA}" \
   | zstd -T0 \

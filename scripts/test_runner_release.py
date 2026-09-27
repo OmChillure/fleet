@@ -183,6 +183,20 @@ class RunnerReleaseTests(unittest.TestCase):
         self.assertEqual(rel.revs["linux-aarch64"], 0)
         self.assertEqual(rel.children["linux-x86_64"], new_h)
         self.assertEqual(rel.parent, rr.parent_digest(rel.children))
+        toml_path.write_text(toml(0))
+        self.assertEqual(
+            rr.cmd_register(
+                toml_path,
+                dest / "dist",
+                keep_author_revs=True,
+                deployer_revs=True,
+                baseline=baseline,
+            ),
+            0,
+        )
+        rel = rr.parse_bin_release(toml_path.read_text(), "fleet-host")
+        self.assertEqual(rel.revs["linux-x86_64"], 1)
+        self.assertEqual(rel.children["linux-x86_64"], new_h)
 
 
 if __name__ == "__main__":

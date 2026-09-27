@@ -192,6 +192,8 @@ That writes `~/.local/state/vps-fleet/ship-proof/<commit>` and does not
 contact the VPS. Hashes come from those bins. The author bumps
 `[versions]`, `[verify]`, and the per-OS `-rev` in `runner-packages.toml`
 when a runner change should become the package hosts are asked to run.
+That bump belongs in the merge. If it was missed, the deployer commits the
+rev bump onto `main` and deploys that commit.
 `./scripts/run-every-test.sh --prepare-kind` is the lab bake when this
 change has a live or browser run. It is not the ship gate.
 
