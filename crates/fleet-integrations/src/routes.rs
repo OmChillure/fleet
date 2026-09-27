@@ -23,6 +23,7 @@ use crate::oauth::{
     authorize_url, convert_manifest, exchange_code, github_install_url, issue_oauth_state,
     manifest_form_html, verify_oauth_state, OAuthCallbackError,
 };
+use crate::proxy::{ProxyCaller, ProxyRequest};
 use crate::state::IntegrationsState;
 
 /// Workspace integrations + OAuth. Host must provide [`IntegrationsState`].
@@ -251,6 +252,28 @@ async fn oauth_start(
     let entry = require_available_provider(&provider)?;
 
     if let Some(client) = resolve_oauth_client(&state, workspace_id, &provider).await? {
+        if provider == "github" && github_installation_present(&state, workspace_id).await {
+            let revived = crate::proxy::invoke(
+                &state.db,
+                &state.config.credentials_key,
+                ProxyRequest {
+                    workspace_id,
+                    provider: "github".into(),
+                    operation: "list_repos".into(),
+                    args: serde_json::json!({ "per_page": 20 }),
+                    caller: ProxyCaller::Chat { user_id: user.id },
+                },
+            )
+            .await;
+            if revived.ok {
+                tracing::info!(%workspace_id, "github reconnect confirmed the existing installation");
+                return Ok(oauth_popup_close_html(
+                    &state.config.ui_public_base,
+                    Some("github"),
+                    None,
+                ));
+            }
+        }
         return redirect_to_provider(&state.config, &user.id, workspace_id, &provider, &client);
     }
 
@@ -344,6 +367,17 @@ fn oauth_start_unconfigured(
         &config.callback_url(provider),
         &format!("/api/workspaces/{workspace_id}/integrations/{provider}/oauth/start"),
     )))
+}
+
+async fn github_installation_present(state: &IntegrationsState, workspace_id: Uuid) -> bool {
+    match integ_repo::find_proxy_connection(&state.db, workspace_id, "github").await {
+        Ok(Some(conn)) => conn
+            .config
+            .get("installation_id")
+            .and_then(|v| v.as_i64())
+            .is_some_and(|id| id > 0),
+        _ => false,
+    }
 }
 
 fn redirect_to_provider(

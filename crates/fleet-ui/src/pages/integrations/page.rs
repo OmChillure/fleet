@@ -280,9 +280,24 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 .as_ref()
                                 .and_then(|c| c.account_label.clone())
                                 .unwrap_or_default();
+                            let repos = integ
+                                .connection
+                                .as_ref()
+                                .map(crate::pages::integrations::api::granted_repos)
+                                .unwrap_or_default();
+                            let last_error = integ
+                                .connection
+                                .as_ref()
+                                .and_then(|c| c.last_error.clone())
+                                .filter(|s| !s.trim().is_empty());
+                            let reconnect = !connected && last_error.is_some();
 
                             let subtitle = if connected && !account.is_empty() {
-                                account.clone()
+                                if repos.is_empty() {
+                                    account.clone()
+                                } else {
+                                    format!("{account} · {}", repos.join(", "))
+                                }
                             } else if is_connecting {
                                 "Connecting…".to_string()
                             } else if !available {
@@ -325,6 +340,8 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 span { class: "truncate", "{subtitle}" }
                                                 if connected {
                                                     span { class: "text-emerald-400/90", "· Connected" }
+                                                } else if reconnect {
+                                                    span { class: "text-red-300/90", "· Error" }
                                                 }
                                             }
                                         }
@@ -336,6 +353,8 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 disabled: is_connecting,
                                                 title: if is_connecting {
                                                     "Waiting for authorization in the other tab…"
+                                                } else if reconnect {
+                                                    "Check the existing app install and reconnect"
                                                 } else {
                                                     "Sign in with the provider and grant permissions"
                                                 },
@@ -381,6 +400,8 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 if is_connecting {
                                                     Spinner {}
                                                     span { "Connecting" }
+                                                } else if reconnect {
+                                                    span { "Reconnect" }
                                                 } else {
                                                     span { "Connect" }
                                                 }
@@ -430,6 +451,13 @@ pub fn Integrations(workspace_id: String) -> Element {
 
                                     p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
                                         "{integ.description}"
+                                    }
+                                    if let Some(err) = last_error.as_deref() {
+                                        if !connected {
+                                            p { class: "mt-2 text-xs leading-snug text-red-300/90",
+                                                "{err}"
+                                            }
+                                        }
                                     }
                                     if connected {
                                         IntegrationDefaults {

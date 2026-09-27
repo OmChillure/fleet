@@ -26,7 +26,7 @@ pub use types::{MAX_PROXY_DATA_BYTES, ProxyCaller, ProxyRequest, ProxyResult};
 use std::time::Duration;
 
 use fleet_db::PgPool;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::crypto::CredentialsKey;
 
@@ -166,6 +166,30 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
                 );
             }
         }
+        if provider == "github" && operation == "list_repos" {
+            let repos: Vec<&str> = result.data["items"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.get("full_name").and_then(|v| v.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Err(e) = fleet_db::repos::integrations::set_granted_repos(
+                pool,
+                workspace_id,
+                &provider,
+                &json!(repos),
+            )
+            .await
+            {
+                tracing::error!(
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "failed to store granted github repos"
+                );
+            }
+        }
     } else if result.error_code.as_deref() == Some("token_expired") {
         if let Err(e) = fleet_db::repos::integrations::mark_error(
             pool,
@@ -244,6 +268,11 @@ async fn resolve_access_token(
             ));
         }
     };
+    let creds = if provider == "github" {
+        refresh_github_user_credentials(pool, key, http, conn, creds).await
+    } else {
+        creds
+    };
     match creds.get("access_token").and_then(|v| v.as_str()) {
         Some(t) if !t.trim().is_empty() => Ok(t.to_string()),
         _ => Err(ProxyResult::err(
@@ -253,6 +282,63 @@ async fn resolve_access_token(
             format!("{provider} connection has no access_token — reconnect"),
             None,
         )),
+    }
+}
+
+async fn refresh_github_user_credentials(
+    pool: &PgPool,
+    key: &CredentialsKey,
+    http: &reqwest::Client,
+    conn: &fleet_db::IntegrationConnection,
+    creds: Value,
+) -> Value {
+    let expires_at = creds.get("expires_at").and_then(|v| v.as_i64());
+    let refresh = creds
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let (Some(expires_at), Some(refresh)) = (expires_at, refresh) else {
+        return creds;
+    };
+    if chrono::Utc::now().timestamp() + 60 < expires_at {
+        return creds;
+    }
+    let app = match fleet_db::repos::integrations::get_oauth_app(pool, conn.workspace_id, "github")
+        .await
+    {
+        Ok(Some(app)) => app,
+        _ => return creds,
+    };
+    let plain = match key.decrypt(&app.client_secret) {
+        Ok(v) => v,
+        Err(_) => return creds,
+    };
+    let Some(client_secret) = plain.get("client_secret").and_then(|v| v.as_str()) else {
+        return creds;
+    };
+    match crate::oauth::refresh_github_user_token(http, &app.client_id, client_secret, refresh)
+        .await
+    {
+        Ok(fresh) => {
+            if let Ok(sealed) = key.encrypt(&fresh) {
+                let _ = fleet_db::repos::integrations::update_credentials(
+                    pool,
+                    conn.workspace_id,
+                    "github",
+                    &sealed,
+                )
+                .await;
+            }
+            fresh
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %conn.workspace_id,
+                error = %e,
+                "github user token refresh failed"
+            );
+            creds
+        }
     }
 }
 

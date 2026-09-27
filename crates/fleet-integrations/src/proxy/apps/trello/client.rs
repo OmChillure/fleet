@@ -165,7 +165,7 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "upstream error".into());
-    let code = if status == 401 || status == 403 {
+    let code = if status == 401 {
         "token_expired"
     } else {
         "upstream"

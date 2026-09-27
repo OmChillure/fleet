@@ -65,6 +65,8 @@ pub struct ConnectionPublic {
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
+    pub config: serde_json::Value,
+    #[serde(default)]
     pub defaults: ConnectionDefaults,
 }
 
@@ -105,6 +107,20 @@ pub struct Integration {
 }
 
 /// Catalog `connected` can lag the nested connection row. Either is enough.
+/// Repo full names stored on a GitHub App connection. Empty when unknown.
+pub fn granted_repos(conn: &ConnectionPublic) -> Vec<String> {
+    conn.config
+        .get("granted_repos")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn integration_is_connected(i: &Integration) -> bool {
     if i.connected {
         return true;
@@ -273,6 +289,7 @@ mod tests {
                 account_label: Some("agent-fleet".into()),
                 connected: true,
                 last_error: None,
+                config: serde_json::json!({ "granted_repos": ["acme/app"] }),
                 defaults: ConnectionDefaults::default(),
             }),
         };
@@ -300,5 +317,24 @@ mod tests {
             connection: None,
         };
         assert!(!integration_is_connected(&i));
+    }
+
+    #[test]
+    fn granted_repos_reads_config_names() {
+        let conn = ConnectionPublic {
+            id: "1".into(),
+            workspace_id: "w".into(),
+            provider: "github".into(),
+            status: "connected".into(),
+            account_label: Some("vinybrun".into()),
+            connected: true,
+            last_error: None,
+            config: serde_json::json!({ "granted_repos": ["vinybrun/agent-fleet-test-repo", ""] }),
+            defaults: ConnectionDefaults::default(),
+        };
+        assert_eq!(
+            granted_repos(&conn),
+            vec!["vinybrun/agent-fleet-test-repo".to_string()]
+        );
     }
 }

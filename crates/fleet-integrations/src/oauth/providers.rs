@@ -193,28 +193,77 @@ async fn exchange_github(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::bad_request("GitHub did not return an access token"))?
         .to_string();
-    let scope = body
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let token_type = body
-        .get("token_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("bearer")
-        .to_string();
 
     let account_label = fetch_github_login(&http, &access_token).await;
 
     Ok(TokenBundle {
-        credentials: json!({
-            "access_token": access_token,
-            "token_type": token_type,
-            "scope": scope,
-        }),
+        credentials: github_stored_credentials(&body, chrono::Utc::now().timestamp()),
         config: json!({ "provider": "github" }),
         account_label,
     })
+}
+
+/// Persist the user access token and, when GitHub sent one, the refresh token.
+/// GitHub App user tokens expire in about eight hours.
+pub(crate) fn github_stored_credentials(body: &Value, now: i64) -> Value {
+    let mut creds = json!({
+        "access_token": body.get("access_token").and_then(|v| v.as_str()).unwrap_or(""),
+        "token_type": body.get("token_type").and_then(|v| v.as_str()).unwrap_or("bearer"),
+        "scope": body.get("scope").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    if let Some(refresh) = body.get("refresh_token").and_then(|v| v.as_str()) {
+        if !refresh.is_empty() {
+            creds["refresh_token"] = json!(refresh);
+        }
+    }
+    if let Some(secs) = body.get("expires_in").and_then(|v| v.as_i64()) {
+        if secs > 0 {
+            creds["expires_at"] = json!(now + secs);
+        }
+    }
+    if let Some(secs) = body.get("refresh_token_expires_in").and_then(|v| v.as_i64()) {
+        if secs > 0 {
+            creds["refresh_expires_at"] = json!(now + secs);
+        }
+    }
+    creds
+}
+
+/// Exchange a GitHub App refresh token for a new user access token.
+pub(crate) async fn refresh_github_user_token(
+    http: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<Value, String> {
+    let res = http
+        .post("https://github.com/login/oauth/access_token")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::USER_AGENT, "agent-fleet")
+        .json(&json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("github refresh: {e}"))?;
+    let status = res.status().as_u16();
+    let body: Value = res.json().await.unwrap_or(json!({}));
+    if !(200..300).contains(&status) || body.get("access_token").and_then(|v| v.as_str()).is_none()
+    {
+        let msg = body
+            .get("error_description")
+            .or_else(|| body.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("refresh failed");
+        return Err(format!("GitHub refresh {status}: {msg}"));
+    }
+    Ok(github_stored_credentials(
+        &body,
+        chrono::Utc::now().timestamp(),
+    ))
 }
 
 async fn fetch_github_login(http: &reqwest::Client, token: &str) -> Option<String> {
@@ -1116,4 +1165,39 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod github_token_tests {
+    use super::github_stored_credentials;
+    use serde_json::json;
+
+    #[test]
+    fn stores_refresh_token_and_expiry() {
+        let creds = github_stored_credentials(
+            &json!({
+                "access_token": "ghu_new",
+                "token_type": "bearer",
+                "scope": "",
+                "refresh_token": "ghr_refresh",
+                "expires_in": 28800,
+                "refresh_token_expires_in": 15897600
+            }),
+            1_000,
+        );
+        assert_eq!(creds["access_token"], "ghu_new");
+        assert_eq!(creds["refresh_token"], "ghr_refresh");
+        assert_eq!(creds["expires_at"], 1_000 + 28800);
+        assert_eq!(creds["refresh_expires_at"], 1_000 + 15897600);
+    }
+
+    #[test]
+    fn omits_refresh_when_github_did_not_send_one() {
+        let creds = github_stored_credentials(
+            &json!({ "access_token": "gho_classic", "token_type": "bearer", "scope": "repo" }),
+            50,
+        );
+        assert!(creds.get("refresh_token").is_none());
+        assert!(creds.get("expires_at").is_none());
+    }
 }

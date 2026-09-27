@@ -901,12 +901,12 @@ pub async fn poll_due_workspaces(state: &AppState) {
 }
 
 async fn connected_task_providers(state: &AppState, workspace_id: Uuid) -> AppResult<Vec<String>> {
-    let rows = integ_repo::list_for_workspace(&state.db, workspace_id)
+    let rows = integ_repo::list_inbox_providers(&state.db, workspace_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(rows
         .into_iter()
-        .map(|c| c.provider.to_ascii_lowercase())
+        .map(|p| p.to_ascii_lowercase())
         .filter(|p| inbox_sources::is_inbox_provider(p))
         .collect())
 }
