@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `bb33982fe4dcae03a93146c8c15e4d6d6205b6a8`
-- Tree-id: `8341e4de896bc8ff16f8f48fe06285d68e79aba9`
+- Tree-id: `3f57aa08106964a5171e43f9eecb26e199eacc60`
 
 ## Scenes
 
@@ -40,7 +40,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes, `3f57aa08106964a5171e43f9eecb26e199eacc60`. API `/health` git_sha and UI `/fleet-git-sha.txt` matched. Clip: `.tmp/demos/20260927T183657Z-runners-lab.webm` (not committed).
+- Frames + webm inspected: runners list, pair panel, copy toast, offline 5700g card, verify command copy toast, hold/resume, lab protocol page.
+- Bugs found:
+  - none in the product. Signup 201, login 200, create worker 200, settings PATCH 200. The offline card shows Verify installation, both commands, and the four verdicts. Copy toasts "Command copied." The pending card does not show that block. No error toast, no token in the verify command.
