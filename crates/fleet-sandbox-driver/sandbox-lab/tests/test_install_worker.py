@@ -2481,6 +2481,118 @@ class VerifyInstallTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertEqual(self._verdict(proc), "service_running")
 
+    def test_repair_rewrites_url_keeps_token_and_pings(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = home / ".config" / "fleet-host"
+            cfg.mkdir(parents=True)
+            (cfg / "config.toml").write_text(
+                'control_plane_url = "http://old.example"\n', encoding="utf-8"
+            )
+            (cfg / "machine.token").write_text("flm_secretvalue\n", encoding="utf-8")
+            (cfg / "machine.id").write_text("same-id\n", encoding="utf-8")
+            bin_path = home / ".local" / "bin" / "fleet-host"
+            bin_path.parent.mkdir(parents=True)
+            bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(bin_path, 0o755)
+            unit = home / ".config" / "systemd" / "user" / "fleet-host.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+            bindir = home / "fakebin"
+            bindir.mkdir()
+            (bindir / "systemctl").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$SC_LOG\"\n"
+                "case \" $* \" in\n"
+                "  *\" is-enabled \"*) echo disabled; exit 1 ;;\n"
+                "  *\" is-active \"*) echo inactive; exit 3 ;;\n"
+                "  *\" enable \"*) exit 0 ;;\n"
+                "  *\" restart \"*) exit 0 ;;\n"
+                "  *) echo unexpected >&2; exit 99 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            (bindir / "pgrep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bindir / "curl").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$CURL_LOG\"\n"
+                "printf '%s' '{\"status\":\"ok\",\"git_sha\":\"abc\"}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(bindir / "systemctl", 0o755)
+            os.chmod(bindir / "pgrep", 0o755)
+            os.chmod(bindir / "curl", 0o755)
+            sc_log = home / "sc.log"
+            curl_log = home / "curl.log"
+            env = {
+                "HOME": str(home),
+                "PATH": f"{bindir}:/usr/bin:/bin",
+                "FLEET_HOST_CONFIG_DIR": str(cfg),
+                "FLEET_URL": "http://new.example",
+                "FLEET_VERIFY_REPAIR": "1",
+                "SC_LOG": str(sc_log),
+                "CURL_LOG": str(curl_log),
+            }
+            proc = subprocess.run(
+                ["sh", str(SCRIPT_DIR / "verify.sh")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("plane_command_ping: reachable status=ok git_sha=abc", proc.stdout)
+            self.assertIn("repair:          same token", proc.stdout)
+            self.assertNotIn("flm_secretvalue", proc.stdout)
+            self.assertEqual((cfg / "machine.token").read_text(encoding="utf-8"), "flm_secretvalue\n")
+            self.assertEqual((cfg / "machine.id").read_text(encoding="utf-8"), "same-id\n")
+            self.assertIn('control_plane_url = "http://new.example"', (cfg / "config.toml").read_text(encoding="utf-8"))
+            self.assertIn("restart fleet-host", sc_log.read_text(encoding="utf-8"))
+            self.assertIn("http://new.example/health", curl_log.read_text(encoding="utf-8"))
+
+    def test_repair_no_keeps_old_plane_and_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg = home / ".config" / "fleet-host"
+            cfg.mkdir(parents=True)
+            (cfg / "config.toml").write_text(
+                'control_plane_url = "http://old.example"\n', encoding="utf-8"
+            )
+            (cfg / "machine.token").write_text("flm_secretvalue\n", encoding="utf-8")
+            bin_path = home / ".local" / "bin" / "fleet-host"
+            bin_path.parent.mkdir(parents=True)
+            bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(bin_path, 0o755)
+            bindir = home / "fakebin"
+            bindir.mkdir()
+            (bindir / "systemctl").write_text("#!/bin/sh\necho unexpected >&2\nexit 99\n", encoding="utf-8")
+            (bindir / "pgrep").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bindir / "curl").write_text(
+                "#!/bin/sh\nprintf '%s' '{\"status\":\"ok\",\"git_sha\":\"abc\"}'\nexit 0\n",
+                encoding="utf-8",
+            )
+            for name in ("systemctl", "pgrep", "curl"):
+                os.chmod(bindir / name, 0o755)
+            env = {
+                "HOME": str(home),
+                "PATH": f"{bindir}:/usr/bin:/bin",
+                "FLEET_HOST_CONFIG_DIR": str(cfg),
+                "FLEET_URL": "http://new.example",
+                "FLEET_VERIFY_REPAIR": "0",
+            }
+            proc = subprocess.run(
+                ["sh", str(SCRIPT_DIR / "verify.sh")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("plane:           different", proc.stdout)
+            self.assertIn("repair:          offered", proc.stdout)
+            self.assertIn('control_plane_url = "http://old.example"', (cfg / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual((cfg / "machine.token").read_text(encoding="utf-8"), "flm_secretvalue\n")
+            self.assertNotIn("flm_secretvalue", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

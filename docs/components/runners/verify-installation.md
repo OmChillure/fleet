@@ -5,8 +5,9 @@ sent a heartbeat for 90 seconds. The control plane never learns whether
 the install was deleted, the service was disabled, or the process simply
 stopped. Those facts are only on the computer.
 
-Do not re-pair to find out. Re-pair rotates the machine token. The check
-below is read-only.
+Do not re-pair to find out. Re-pair rotates the machine token. The command
+prints a verdict, pings the control plane, and can repair with the token
+already on disk. Repair runs only if you answer y. It does not mint a token.
 
 ## On the card
 
@@ -15,15 +16,20 @@ origin is `WORKER_PUBLIC_BASE` (the same origin the install command uses).
 Paste the matching one in a terminal **on that computer**.
 
 ```sh
-curl -fsSL "$ORIGIN/install/worker/verify.sh" | sh
+curl -fsSL "$ORIGIN/install-worker.sh" | FLEET_URL="$ORIGIN" sh -s -- verify
 ```
 
 ```powershell
-irm "$ORIGIN/install/worker/verify.ps1" | iex
+$env:FLEET_URL="$ORIGIN"; $env:FLEET_ACTION="verify"; irm "$ORIGIN/install-worker.ps1" | iex
 ```
 
-The script does not start, stop, enable, or pair. It does not print
-`machine.token`. The last two lines are the result:
+`repair` is the same script with `sh -s -- repair` (or `FLEET_ACTION=repair`). It keeps the machine token. `install` is the default and is the only action that uses a pair token.
+
+The script does not pair and does not print `machine.token`. It pings
+`/health` on the URL in `config.toml` and on `FLEET_URL` from the command.
+When the program and the token are both present it asks whether to repair:
+write that URL and restart the service, keeping the same token. The result
+lines include:
 
 ```text
 verdict:         service_disabled

@@ -18,7 +18,11 @@ if (Test-Path -LiteralPath $tokenFile) {
     $existing = ([string](Get-Content -Raw -LiteralPath $tokenFile -ErrorAction SilentlyContinue)).Trim()
     if ($existing) { $alreadyPaired = $true }
 }
-if (-not $pairToken -and -not $alreadyPaired) {
+$FleetAction = if ($env:FLEET_ACTION) { $env:FLEET_ACTION } else { "install" }
+if ($FleetAction -ne "install" -and $FleetAction -ne "verify" -and $FleetAction -ne "repair") {
+    throw "FLEET_ACTION must be install, verify, or repair"
+}
+if ($FleetAction -eq "install" -and -not $pairToken -and -not $alreadyPaired) {
     throw "FLEET_PAIR_TOKEN is not set"
 }
 if ($pairToken) {
@@ -191,6 +195,73 @@ function Save-Url([string]$Url, [string]$Dest) {
         return
     }
     Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 -Uri $Url -OutFile $Dest
+}
+
+if ($FleetAction -eq "verify" -or $FleetAction -eq "repair") {
+    $configUrl = Get-PairedControlPlane $cfgDir
+    $commandUrl = if ($Origin) { $Origin.TrimEnd("/") } else { "" }
+    function Ping-PlaneUrl([string]$url) {
+        if ($url -notmatch '^https?://') { return "not configured" }
+        try {
+            $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri ($url.TrimEnd("/") + "/health")
+            if ($resp.StatusCode -eq 200) { return "reachable" }
+            return "unreachable"
+        } catch { return "unreachable" }
+    }
+    $configPing = Ping-PlaneUrl $configUrl
+    $commandPing = Ping-PlaneUrl $commandUrl
+    $different = $commandUrl -and ($commandUrl -ne $configUrl)
+    Write-Host "fleet-host verify"
+    if ($alreadyPaired) { Write-Host "token:           present" } else { Write-Host "token:           missing" }
+    if ($configUrl) { Write-Host "plane_config:    $configUrl" } else { Write-Host "plane_config:    missing" }
+    Write-Host "plane_config_ping: $configPing"
+    if ($commandUrl) {
+        Write-Host "plane_command:   $commandUrl"
+        Write-Host "plane_command_ping: $commandPing"
+    }
+    if ($different) { Write-Host "plane:           different" } elseif ($configUrl) { Write-Host "plane:           same" } else { Write-Host "plane:           missing" }
+    $do = $false
+    if ($FleetAction -eq "repair" -or $env:FLEET_VERIFY_REPAIR -eq "1") { $do = $true }
+    elseif ($env:FLEET_VERIFY_REPAIR -eq "0") { $do = $false }
+    elseif ($alreadyPaired -and -not [Console]::IsInputRedirected) {
+        $prompt = if ($different) { "Switch control plane from $configUrl to $commandUrl and restart with the same token? [y/N]" } else { "Restart fleet-host with the same token? This does not switch planes. [y/N]" }
+        $ans = Read-Host $prompt
+        if ($ans -match '^(y|yes)$') { $do = $true }
+    } elseif ($alreadyPaired) {
+        Write-Host "repair:          offered"
+        Write-Host "repair_next:     Re-run and answer y, or set FLEET_ACTION=repair. The machine token stays. It does not re-pair."
+    }
+    if ($do -and $alreadyPaired) {
+        $target = if ($commandUrl) { $commandUrl } else { $configUrl }
+        $before = [System.IO.File]::ReadAllBytes($tokenFile)
+        $toml = Join-Path $cfgDir "config.toml"
+        $lines = @()
+        $done = $false
+        if (Test-Path -LiteralPath $toml) {
+            foreach ($line in [System.IO.File]::ReadAllLines($toml)) {
+                if ($line -match '^\s*control_plane_url\s*=') {
+                    $lines += "control_plane_url = `"$target`""
+                    $done = $true
+                } else { $lines += $line }
+            }
+        }
+        if (-not $done) { $lines += "control_plane_url = `"$target`"" }
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        [System.IO.File]::WriteAllLines($toml, $lines)
+        $after = [System.IO.File]::ReadAllBytes($tokenFile)
+        if (-not [System.Linq.Enumerable]::SequenceEqual($before, $after)) {
+            throw "machine.token changed while writing the URL; not pairing"
+        }
+        $exe = Join-Path $BinDir "fleet-host.exe"
+        if (Test-Path -LiteralPath $exe) {
+            Get-Process -Name fleet-host -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Process -FilePath $exe -ArgumentList "run" -WindowStyle Hidden
+        }
+        Write-Host "repair:          same token"
+        Write-Host "repair_url:      $target"
+        exit 0
+    }
+    exit 0
 }
 
 Write-Host "Agent Fleet worker installer"

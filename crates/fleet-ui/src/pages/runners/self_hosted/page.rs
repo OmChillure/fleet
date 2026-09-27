@@ -563,7 +563,7 @@ fn VerifyInstallBlock(verify_base: String) -> Element {
                 "Verify installation"
             }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                "Offline means this card has had no heartbeat for 90 seconds. Fleet cannot see whether the install was removed or the service is disabled. On that computer, paste the command. It only reads the disk and the service. It does not start anything and it does not re-pair."
+                "Offline means this card has had no heartbeat for 90 seconds. Paste the command on that computer. It prints the verdict, pings the control plane, and can repair with the token already on disk. It does not mint a new token."
             }
             label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
                 "Linux, macOS, FreeBSD"
@@ -607,11 +607,8 @@ fn VerifyInstallBlock(verify_base: String) -> Element {
                     "Copy"
                 }
             }
-            ul { class: "mt-3 mb-0 list-disc space-y-1 pl-4 text-xs text-[var(--app-muted)]",
-                li { "verdict not_installed or bins_missing — the install is gone. Add worker and paste the install command. If the output says token present, that reinstall keeps the same machine. Do not re-pair." }
-                li { "verdict service_disabled — the install is there and the service will not start at login. Run the next line it prints (systemctl --user enable --now fleet-host on a normal Linux install)." }
-                li { "verdict service_stopped — the install is there and the service is enabled, but the process is down. Run the next line it prints." }
-                li { "verdict service_running — this computer is up. A card that stays offline cannot reach the control plane. Read last_heartbeat in the output." }
+            p { class: "mt-3 mb-0 text-xs text-[var(--app-muted)]",
+                "The verdict, what it means, the plane ping, and the repair question are printed by the command."
             }
         }
     }
