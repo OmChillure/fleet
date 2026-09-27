@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `d29218d959f4ef05a110975578306df2a5fabf47`
-- Tree-id: `f635fb112db5c335beb2c31bf753f6657b25f998-6f0ccb1a81be`
+- Tree-id: `26856bc535c76b3ab3a49658f9772f14f8bc8f65`
 
 ## Scenes
 
@@ -31,7 +31,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
+- Recorded on final merge tree: `26856bc535c76b3ab3a49658f9772f14f8bc8f65` scene `runners`. Identity matched `GET /health` and `/fleet-git-sha.txt`. This commit only fills the review.
+- Frames + webm inspected: `.tmp/demos/20260927T222808Z-runners.webm` and `20260927T222808Z-frames`. Signup 201, login 200, add worker 200, settings PATCH 200. Offline card shows Verify installation, both commands, and Command copied. Pending card has no verify block. Email demo.f006500d41@example.test.
 - Bugs found: 
-  - (none / list them)
+  - none
