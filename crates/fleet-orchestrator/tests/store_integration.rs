@@ -72,6 +72,7 @@ fn sample_body(project_id: Uuid) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            run_mode: "on_pc".into(),
             ..Default::default()
         },
     }
@@ -1011,9 +1012,9 @@ async fn complete_spawn_failure_voids_claims_and_rejects_late_worker() {
     let slug = format!("sf{}", project.id.as_simple());
     sqlx::query(
         r#"
-        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
-        VALUES ($1, $2, $3, now(), now())
-        ON CONFLICT (id) DO NOTHING
+        INSERT INTO workspaces (id, slug, name, min_isolation, created_at, updated_at)
+        VALUES ($1, $2, $3, 'process', now(), now())
+        ON CONFLICT (id) DO UPDATE SET min_isolation = 'process'
         "#,
     )
     .bind(project.id)
@@ -1125,6 +1126,7 @@ fn independent_plan(project_id: Uuid, ids: &[&str]) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::Leave,
             auto_sync_external: false,
+            run_mode: "on_pc".into(),
             ..Default::default()
         },
     }

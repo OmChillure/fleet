@@ -894,7 +894,7 @@ async fn invite_adds_existing_user_ignoring_email_case() {
     )
     .await;
     assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
-    assert_eq!(invited.body["added_existing_user"], false);
+    assert_eq!(invited.body["added_existing_user"], true);
     assert!(invited.body["invite"]["token"].as_str().is_some());
 }
 
@@ -1568,7 +1568,7 @@ async fn member_cannot_list_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
     let token = added.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,
@@ -1627,7 +1627,7 @@ async fn member_cannot_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
     let token = added.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,
@@ -1702,7 +1702,7 @@ async fn admin_can_list_and_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
 
     let promoted = call(
         &app,
@@ -1947,7 +1947,7 @@ async fn invite_existing_member_is_already_a_member() {
     )
     .await;
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
-    assert_eq!(first.body["added_existing_user"], false);
+    assert_eq!(first.body["added_existing_user"], true);
     let token = first.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,

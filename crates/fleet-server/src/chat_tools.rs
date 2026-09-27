@@ -1549,6 +1549,12 @@ pub fn build_multi_task_plan(
     }
 }
 
+async fn workspace_default_run_mode(state: &AppState, workspace_id: Uuid) -> String {
+    fleet_db::repos::workspaces::default_run_mode(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string())
+}
+
 async fn ensure_project(state: &AppState, workspace_id: Uuid) -> AppResult<()> {
     state
         .orch
@@ -2479,6 +2485,7 @@ async fn launch_agent_task(
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
     plan.policy.requested_by = Some(user_id);
+    plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     accept_and_drive_plan(
         state,
         workspace_id,
@@ -2578,6 +2585,7 @@ async fn launch_agent_plan(
     }
     stamp_plan_llm(&mut plan, llm);
     plan.policy.requested_by = Some(user_id);
+    plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     if let Err(e) = validate::validate_plan(&plan) {
         return Err(AppError::bad_request(e.to_string()));
     }
