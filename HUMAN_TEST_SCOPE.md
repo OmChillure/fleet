@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `bb33982fe4dcae03a93146c8c15e4d6d6205b6a8`
-- Tree-id: `ff0e768c8a7d17ef8aa1cb34f2a4d165e7f5aa03`
+- Tree-id: `9df94c9aae6d387dbcd8884afd896eb9e6952ead-2727d88afd1c`
 
 ## Scenes
 
@@ -52,8 +52,18 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `crates/fleet-db/src/repos/workspaces.rs` | `auth`, `workspace` |
 | `crates/fleet-driver/src/official_cli.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-host/src/spawn.rs` | `runners` |
+| `crates/fleet-orchestrator/tests/api_integration.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/e2e_matrix.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/guest_harness_claim.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_picker_product.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/host_update_tick.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/mock_runner.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/orchestrator_url_snapshot.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/store_integration.rs` | `fleet` |
+| `crates/fleet-orchestrator/tests/tick_integration.rs` | `fleet` |
 | `crates/fleet-server/src/cases.rs` | `cases` |
 | `crates/fleet-server/src/chat.rs` | `chat` |
+| `crates/fleet-server/src/chat_tools.rs` | `chat` |
 | `crates/fleet-server/src/install_routes.rs` | `runners` |
 | `crates/fleet-server/src/runners.rs` | `cloud`, `partners` |
 | `crates/fleet-server/src/tickets.rs` | `inbox` |

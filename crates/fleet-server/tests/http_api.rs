@@ -2195,7 +2195,7 @@ async fn chat_conversation_get_delete_as_teammate_is_404() {
 /// Two members each own a thread; list is user_id-scoped, not workspace-wide.
 #[tokio::test]
 async fn chat_conversations_list_is_user_scoped() {
-    let app = app().await;
+    let (app, state) = app_with_state().await;
     let (_owner_email, owner_jar, ws) = signup_and_login(&app).await;
     let member_jar = invite_existing_member(&app, &owner_jar, &ws).await;
     let owner_cid = create_chat_conversation(
@@ -2212,6 +2212,22 @@ async fn chat_conversations_list_is_user_scoped() {
         &format!("member-{}", Uuid::new_v4()),
     )
     .await;
+    // Empty threads stay off the list. A saved line is what makes the row visible.
+    for cid in [&owner_cid, &member_cid] {
+        fleet_db::repos::chats::insert_message(
+            &state.db,
+            Uuid::now_v7(),
+            Uuid::parse_str(cid).expect("cid"),
+            "user",
+            "hello",
+            None,
+            None,
+            &json!({}),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("insert message");
+    }
     let list_path = chat_conversations_path(&ws);
 
     let owner_list = call(&app, "GET", &list_path, Some(&owner_jar), None).await;
@@ -2570,6 +2586,8 @@ async fn launch_agent_task_with_host_already_paired_does_not_claim_waiting() {
     let (app, state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let (user_id, workspace_id) = authed_user_and_workspace(&app, &jar, &ws).await;
+    // Column default is container; this fixture pairs a process-only PC.
+    patch_min_isolation(&app, &jar, &ws, "process").await;
     let _machine = pair_test_host(&app, &jar, &ws).await;
 
     let (content, action) = fleet_server::chat_tools::execute_tool(

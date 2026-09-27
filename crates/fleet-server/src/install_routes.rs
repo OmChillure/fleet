@@ -368,18 +368,27 @@ fn synthesize_manifest_from_bins(
     } else {
         "fleet-driver"
     };
+    // An explicit dist dir is the only package. Do not treat cargo target
+    // bins as staged when that directory has no manifest and no binaries.
+    let exe_dir = current_exe_dir();
+    let target_dir = workspace_target_dir();
+    let (exe, target) = if state.worker_dist_dir.is_some() {
+        (None, None)
+    } else {
+        (exe_dir.as_deref(), target_dir.as_deref())
+    };
     let host_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         host_name,
         &native_platform_id(),
     )?;
     let driver_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         driver_name,
         &native_platform_id(),
@@ -415,6 +424,30 @@ fn synthesized_sha256_sidecar(state: &AppState, platform: &str, bin: &str) -> Op
 
 fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    struct Entry {
+        path: PathBuf,
+        len: u64,
+        modified: Option<SystemTime>,
+        meta: fleet_db::WorkerBinMeta,
+    }
+    // Admin runner lists call this once per host. Debug fleet-host is hundreds
+    // of MB, so a same-file hit must not re-read and hash.
+    static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+    let fs_meta = std::fs::metadata(path).ok()?;
+    let len = fs_meta.len();
+    let modified = fs_meta.modified().ok();
+    if let Ok(guard) = CACHE.lock() {
+        if let Some(hit) = guard
+            .iter()
+            .find(|e| e.path == path && e.len == len && e.modified == modified)
+        {
+            return Some(hit.meta.clone());
+        }
+    }
     let bytes = std::fs::read(path).ok()?;
     let sha = hex::encode(Sha256::digest(&bytes));
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -423,11 +456,20 @@ fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
     } else {
         crate::package_versions::fleet_host_package_version()
     };
-    Some(fleet_db::WorkerBinMeta {
+    let meta = fleet_db::WorkerBinMeta {
         sha256: sha,
         size: bytes.len() as u64,
         version: Some(version.to_string()),
-    })
+    };
+    if let Ok(mut guard) = CACHE.lock() {
+        guard.push(Entry {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            meta: meta.clone(),
+        });
+    }
+    Some(meta)
 }
 
 /// Every staged `manifest.json` under `FLEET_WORKER_DIST_DIR` (one per platform).

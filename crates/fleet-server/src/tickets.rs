@@ -339,6 +339,7 @@ fn monitor_json(
         "auto_launch": monitor.auto_launch,
         "launch_limit": monitor.launch_limit,
         "poll_limit": monitor.poll_limit,
+        "hook_token": monitor.hook_token,
         "hook_url": hook_url_template(api_base, &monitor.hook_token),
         "last_poll_at": monitor.last_poll_at,
         "last_error": monitor.last_error,

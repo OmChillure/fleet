@@ -43,9 +43,9 @@ async fn seed_workspace(store: &Store, project_id: Uuid) {
     let slug = format!("ti{}", project_id.as_simple());
     sqlx::query(
         r#"
-        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
-        VALUES ($1, $2, $3, now(), now())
-        ON CONFLICT (id) DO NOTHING
+        INSERT INTO workspaces (id, slug, name, min_isolation, created_at, updated_at)
+        VALUES ($1, $2, $3, 'process', now(), now())
+        ON CONFLICT (id) DO UPDATE SET min_isolation = 'process'
         "#,
     )
     .bind(project_id)
@@ -137,6 +137,7 @@ fn chain_plan(project_id: Uuid) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::FailRun,
             auto_sync_external: false,
+            run_mode: "on_pc".into(),
             ..Default::default()
         },
     }
@@ -592,6 +593,7 @@ fn independent_plan(project_id: Uuid, ids: &[&str]) -> WorkPlanBody {
             max_agents_override: None,
             on_task_fail: OnTaskFailPolicy::Leave,
             auto_sync_external: false,
+            run_mode: "on_pc".into(),
             ..Default::default()
         },
     }

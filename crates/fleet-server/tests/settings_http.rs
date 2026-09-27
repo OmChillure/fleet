@@ -413,14 +413,14 @@ fn fleet(ws: &str, suffix: &str) -> String {
 }
 
 #[tokio::test]
-async fn fleet_settings_get_min_isolation_defaults_process() {
+async fn fleet_settings_get_min_isolation_defaults_container() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
 
     let got = call(&app, "GET", &fleet(&ws, "/settings"), Some(&jar), None).await;
     assert_eq!(got.status, StatusCode::OK, "{}", got.body);
     assert_eq!(
-        got.body["min_isolation"], "process",
+        got.body["min_isolation"], "container",
         "new workspace default min_isolation: {}",
         got.body
     );
