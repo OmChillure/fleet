@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `fef3724b124b27619b76de23d871b45d56585065`
-- Tree-id: `fef3724b124b27619b76de23d871b45d56585065-16fd85eea480`
+- Tree-id: `193d3f42fa5e06cdbe3401bf818a9fb3235697b5`
 
 ## Scenes
 
@@ -32,7 +32,9 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes, `193d3f42fa5e06cdbe3401bf818a9fb3235697b5` (API and UI git_sha). Clip: `.tmp/demos/20260927T194553Z-runners.webm`. This film-review section is the only later edit.
+- Frames + webm inspected: yes. Signup, login, empty Self-hosted, Add worker, pair command, Copy toast, worker card, hold, resume.
+- Bugs found:
+  - The empty page has no send-work control; that control is "Who can send work" on the worker card (Only me). The recorder was skipping Add worker. Fixed before this clip.
+  - The amber package banner lists every staged OS not on 0.0.3, including linux-x86_64. That is this machine's `FLEET_WORKER_DIST_DIR`, whose hashes do not match the lock. The deployer registers those hashes; this clip does not.
+  - Provider install lines in the worker drawer are clipped at the edge of the panel. Pre-existing layout, not part of this change.
