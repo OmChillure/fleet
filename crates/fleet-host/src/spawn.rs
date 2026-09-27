@@ -7,14 +7,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use agent_fleet_contracts::ExecutorKind;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::client::{JobRuntime, SpawnPayload};
-use crate::config::{merge_child_env, ContainerBackend, LocalConfig};
+use crate::config::{ContainerBackend, LocalConfig, merge_child_env};
 use crate::platform::{command_exists, hypervisor_on_path, in_cluster, kubeconfig_present};
 
 const WORKER_TOKEN_KEY: &str = "FLEET_WORKER_TOKEN";
@@ -283,7 +283,9 @@ fn sigterm_pid(pid: u32) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let status = std::process::Command::new("taskkill")
+        let mut kill = std::process::Command::new("taskkill");
+        crate::platform::hide_console(&mut kill);
+        let status = kill
             .args(["/PID", &pid.to_string()])
             .status()
             .context("taskkill")?;
@@ -456,6 +458,7 @@ async fn run_host(cfg: &LocalConfig, payload: &SpawnPayload, cwd: &Path) -> Resu
         .with_context(|| format!("stderr.log in {}", cwd.display()))?;
 
     let mut cmd = Command::new(&bin);
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -560,6 +563,7 @@ async fn run_docker(cfg: &LocalConfig, payload: &SpawnPayload, session_dir: &Pat
         .await;
 
     let mut cmd = Command::new("docker");
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -578,7 +582,9 @@ async fn docker_rm_f(name: &str) -> Result<()> {
     if !command_exists("docker") {
         bail!("docker not on PATH; cannot rm {name}");
     }
-    let out = Command::new("docker")
+    let mut rm = Command::new("docker");
+    crate::platform::hide_console_tokio(&mut rm);
+    let out = rm
         .args(["rm", "-f", name])
         .output()
         .await
@@ -757,6 +763,7 @@ async fn run_vm_with(
         .with_context(|| format!("stderr.log in {}", session_dir.display()))?;
     info!(bin = qemu, cwd = %session_dir.display(), "spawn vm worker");
     let mut cmd = Command::new(qemu);
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.args(&args[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -1164,9 +1171,11 @@ mod tests {
             std::fs::read_to_string(dir.path().join("work/app.rs")).unwrap(),
             "fn main() {}\n"
         );
-        assert!(std::fs::read_to_string(dir.path().join("PERSONA.md"))
-            .unwrap()
-            .contains("coder"));
+        assert!(
+            std::fs::read_to_string(dir.path().join("PERSONA.md"))
+                .unwrap()
+                .contains("coder")
+        );
         assert!(dir.path().join("fleet-tool.sh").is_file());
     }
 

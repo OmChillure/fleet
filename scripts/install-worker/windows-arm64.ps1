@@ -225,10 +225,12 @@ foreach ($bin in @("fleet-host.exe", "fleet-driver.exe")) {
     if ($want -and (Test-Path $dest)) {
         Write-Host "local $bin is stale; downloading again"
     }
-    $note = Format-Bytes (Get-RemoteLength $url)
+    $fetch = $url
+    if ($want) { $fetch = "$url`?h=$want" }
+    $note = Format-Bytes (Get-RemoteLength $fetch)
     Write-Host "downloading $bin$note"
     try {
-        Save-Url $url $tmp
+        Save-Url $fetch $tmp
         if ($want) {
             Write-Host "verifying $bin"
             $got = Get-LocalSha256 $tmp

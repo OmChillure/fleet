@@ -2,12 +2,72 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::config::{ContainerBackend, LocalConfig};
 
 /// Detect `linux-x86_64`, `darwin-arm64`, … Never panics.
 pub fn detect_platform() -> String {
-    map_uname(&uname_s(), &uname_m(), is_musl())
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                windows_platform_id()
+            }
+            #[cfg(not(windows))]
+            {
+                map_uname(&uname_s(), &uname_m(), is_musl())
+            }
+        })
+        .clone()
+}
+
+#[cfg(windows)]
+fn windows_platform_id() -> String {
+    match std::env::consts::ARCH {
+        "x86_64" => "windows-x86_64".into(),
+        "aarch64" => "windows-arm64".into(),
+        other => format!("windows-{other}"),
+    }
+}
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Console-subsystem children (`hostname.exe`, `taskkill`, `wmic`,
+/// `powershell`, Git `uname`) open a visible window unless this is set.
+pub(crate) fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+pub(crate) fn hide_console_tokio(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+/// Drop the console inherited from a `.cmd` / installer so `run` is silent.
+/// `pair` / `status` keep their console. Children still need [`hide_console`].
+pub fn detach_console() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn FreeConsole() -> i32;
+        }
+        unsafe {
+            let _ = FreeConsole();
+        }
+    }
 }
 
 /// Map uname `-s`/`-m` plus musl to the install-worker / staged-dist id.
@@ -80,6 +140,7 @@ fn looks_like_windows(s: &str) -> bool {
     u == "WINDOWS" || u.starts_with("MINGW") || u.starts_with("MSYS") || u.starts_with("CYGWIN")
 }
 
+#[cfg(not(windows))]
 fn uname_s() -> String {
     if let Some(s) = run_uname(&["-s"]) {
         return s;
@@ -90,6 +151,7 @@ fn uname_s() -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn uname_m() -> String {
     if let Some(s) = run_uname(&["-m"]) {
         return s;
@@ -97,8 +159,11 @@ fn uname_m() -> String {
     std::env::consts::ARCH.to_string()
 }
 
+#[cfg(not(windows))]
 fn run_uname(args: &[&str]) -> Option<String> {
-    let out = Command::new("uname").args(args).output().ok()?;
+    let mut cmd = Command::new("uname");
+    hide_console(&mut cmd);
+    let out = cmd.args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -106,29 +171,60 @@ fn run_uname(args: &[&str]) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// `uname -n`, then `$HOSTNAME`.
+/// `COMPUTERNAME` / `HOSTNAME` first so Windows heartbeat does not spawn
+/// `hostname.exe` (console subsystem) every 10s.
 pub fn hostname() -> String {
-    if let Some(s) = run_uname(&["-n"]) {
-        return s;
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED.get_or_init(hostname_uncached).clone()
+}
+
+fn hostname_uncached() -> String {
+    hostname_from_env(
+        std::env::var("COMPUTERNAME").ok().as_deref(),
+        std::env::var("HOSTNAME").ok().as_deref(),
+    )
+    .unwrap_or_else(hostname_from_process)
+}
+
+fn hostname_from_env(computername: Option<&str>, hostname_env: Option<&str>) -> Option<String> {
+    for raw in [computername, hostname_env] {
+        if let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
     }
-    if let Ok(out) = Command::new("hostname").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
+    None
+}
+
+fn hostname_from_process() -> String {
+    #[cfg(not(windows))]
+    {
+        if let Some(s) = run_uname(&["-n"]) {
+            return s;
+        }
+        if let Ok(out) = {
+            let mut cmd = Command::new("hostname");
+            hide_console(&mut cmd);
+            cmd.output()
+        } {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
             }
         }
     }
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "unknown".into())
+    "unknown".into()
 }
 
+#[cfg(not(windows))]
 fn is_musl() -> bool {
     if Path::new("/etc/alpine-release").is_file() {
         return true;
     }
-    if let Ok(out) = Command::new("ldd").arg("/bin/sh").output() {
+    let mut ldd = Command::new("ldd");
+    hide_console(&mut ldd);
+    if let Ok(out) = ldd.arg("/bin/sh").output() {
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -268,5 +364,24 @@ mod tests {
         let host = hostname();
         assert!(!host.is_empty(), "hostname must be non-empty");
         assert!(!host.contains('\n'), "hostname must be a single token");
+    }
+
+    #[test]
+    fn detach_console_is_safe_to_call() {
+        detach_console();
+        detach_console();
+    }
+
+    #[test]
+    fn hostname_from_env_prefers_computername_skips_blank() {
+        assert_eq!(
+            hostname_from_env(Some("X1"), Some("other")).as_deref(),
+            Some("X1")
+        );
+        assert_eq!(
+            hostname_from_env(Some("  "), Some("box")).as_deref(),
+            Some("box")
+        );
+        assert_eq!(hostname_from_env(Some("  "), Some("\t")), None);
     }
 }

@@ -269,7 +269,9 @@ fn kill_cli_child(child: &mut std::process::Child) {
     #[cfg(windows)]
     {
         let pid = child.id();
-        let _ = Command::new("taskkill")
+        let mut kill = Command::new("taskkill");
+        crate::platform::hide_console(&mut kill);
+        let _ = kill
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

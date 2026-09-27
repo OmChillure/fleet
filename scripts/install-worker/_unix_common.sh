@@ -253,10 +253,14 @@ install_bins_from_cp() {
             fi
             info "local $bin is stale; downloading again"
         fi
-        bytes=$(content_length "$base/$bin" || true)
+        bin_url="$base/$bin"
+        if [ -n "$want" ]; then
+            bin_url="$base/$bin?h=$want"
+        fi
+        bytes=$(content_length "$bin_url" || true)
         note=$(size_note "$bytes")
         info "downloading $bin$note"
-        if fetch_to "$base/$bin" "$dest.tmp"; then
+        if fetch_to "$bin_url" "$dest.tmp"; then
             if [ -n "$want" ]; then
                 info "verifying $bin"
                 got=$(norm_sha "$(file_sha256 "$dest.tmp")")
