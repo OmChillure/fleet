@@ -2104,8 +2104,8 @@ async fn invite_existing_member(app: &axum::Router, owner_jar: &CookieJar, ws: &
     );
     assert_eq!(
         invited.body["added_existing_user"],
-        false,
-        "invite of an existing user is pending until accept: {}",
+        true,
+        "invite of an existing user joins them now: {}",
         invited.body
     );
     let token = invited.body["invite"]["token"]

@@ -2430,6 +2430,7 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
                 "platform": "linux-x86_64",
                 "advertised_host": true,
                 "advertised_container": false,
+                "machine_id": _hid,
                 "workspace_id": ws
             })),
         )
@@ -9193,7 +9194,15 @@ async fn new_pair_token_does_not_invalidate_other_hosts_unused_token() {
 /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
 #[tokio::test]
 async fn request_update_marks_host() {
-    let app = app().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plat = dir.path().join("linux-x86_64");
+    std::fs::create_dir_all(&plat).unwrap();
+    std::fs::write(
+        plat.join("manifest.json"),
+        r#"{"git_sha":"staged","platform":"linux-x86_64","bins":{"fleet-host":{"sha256":"abc","version":"9.9.9"},"fleet-driver":{"sha256":"def","version":"9.9.9"}}}"#,
+    )
+    .unwrap();
+    let app = app_with_state_dist(Some(dir.path().to_path_buf())).await.0;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
     let host_path = format!("{}/{host_id}", hosts_path(&ws));
@@ -9572,7 +9581,6 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(TEST_BOOTSTRAP_SECRET)).await;
     let (_email, _jar, ws) = signup_and_login(&app).await;
     let hostname = format!("cluster-host-{}", Uuid::new_v4());
-    let machine_id = Uuid::new_v4();
     let first = call_bearer(
         &app,
         "POST",
@@ -9617,7 +9625,7 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
             "platform": "linux-x86_64",
             "advertised_host": false,
             "advertised_container": true,
-            "machine_id": machine_id,
+            "machine_id": host_id,
             "workspace_id": ws
         })),
     )
