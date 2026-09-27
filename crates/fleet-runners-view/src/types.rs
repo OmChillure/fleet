@@ -217,6 +217,9 @@ pub struct PackageInventory {
     pub plane_git_sha: Option<String>,
     #[serde(default)]
     pub package_versions: PackageVersions,
+    /// Control-plane origin that serves `/install/worker/verify.sh`.
+    #[serde(default)]
+    pub worker_public_base: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

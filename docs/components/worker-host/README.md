@@ -482,6 +482,12 @@ fleet-host status
 fleet-host unpair
 ```
 
+`fleet-host status` only works when the binary is still on `PATH`, and it
+does not say whether the service is disabled. The official check for an
+offline card is the read-only script on
+[Runners → Self-hosted](../runners/verify-installation.md). It does not
+re-pair.
+
 `pair` writes `~/.config/fleet-host/config.toml` (create dirs `0700`)
 and `~/.config/fleet-host/machine.token` (`0600`).
 
