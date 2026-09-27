@@ -1079,8 +1079,8 @@ async fn invite_existing_member(
     );
     assert_eq!(
         invited.body["added_existing_user"],
-        false,
-        "invite of an existing user is pending until accept: {}",
+        true,
+        "invite of an existing user adds them immediately: {}",
         invited.body
     );
     let token = invited.body["invite"]["token"]

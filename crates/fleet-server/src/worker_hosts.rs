@@ -435,17 +435,19 @@ async fn clear_update_request_if_current(state: &AppState, host: WorkerHost) -> 
     if host.update_requested_at.is_none() {
         return host;
     }
-    let desired = desired_for(state, &host);
-    // Withheld desired (this-machine already on package / plane bake) is
-    // UNKNOWN, not CURRENT — still treat as applied so Update requested clears.
-    if desired.is_none() {
-        return host_repo::clear_update_requested(&state.db, host.id)
-            .await
-            .unwrap_or(host);
-    }
-    let public = host.as_public(Utc::now()).with_desired(desired);
-    if public.software_status != WORKER_SOFTWARE_STATUS_CURRENT {
+    // No staged package is not "already applied". Only a withhold (this
+    // machine is on the plane bake) or a current report clears the request.
+    let Some(staged) =
+        crate::install_routes::load_platform_manifest(state, host.platform.as_deref())
+    else {
         return host;
+    };
+    let withheld = should_withhold_desired(&host, &staged, &local_hostname(), plane_git_sha());
+    if !withheld {
+        let public = host.as_public(Utc::now()).with_desired(Some(staged));
+        if public.software_status != WORKER_SOFTWARE_STATUS_CURRENT {
+            return host;
+        }
     }
     host_repo::clear_update_requested(&state.db, host.id)
         .await
@@ -1247,6 +1249,16 @@ async fn http_bootstrap(
             .await?
             .is_some()
     {
+        return Err(AppError::forbidden(
+            "bootstrap cannot rotate an existing host; pair with the current machine token",
+        ));
+    }
+    let named = host_repo::list_by_hostnames(&state.db, &[hostname.to_string()]).await?;
+    if named.iter().any(|h| {
+        h.workspace_id == workspace_id
+            && h.paired_at.is_some()
+            && h.status != fleet_db::WORKER_HOST_STATUS_DISABLED
+    }) {
         return Err(AppError::forbidden(
             "bootstrap cannot rotate an existing host; pair with the current machine token",
         ));

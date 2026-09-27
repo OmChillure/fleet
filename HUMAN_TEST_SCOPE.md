@@ -6,21 +6,23 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `d29218d959f4ef05a110975578306df2a5fabf47`
-- Tree-id: `872ce1ccf11c82c3afc6e3d92ea8acc1e0240f01`
+- Tree-id: `f635fb112db5c335beb2c31bf753f6657b25f998-6f0ccb1a81be`
 
 ## Scenes
 
-- _(none — no product surface in the diff)_
+- `runners`
 
 ## Pause steps
 
+- Runners / Self-hosted
+- Workers
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
-| — | — |
+| `crates/fleet-server/src/worker_hosts.rs` | `runners` |
 
 ## Film review (agent fills after recording)
 
@@ -29,7 +31,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: no product scene. Scope is empty; the change is `fleet-stack up` restarting caddy, locked by `deploy/studio/tests/test_fleet_stack_up.sh`.
-- Frames + webm inspected: no frames. There is no scene to film.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
 - Bugs found: 
-  - none
+  - (none / list them)
