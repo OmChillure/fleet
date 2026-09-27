@@ -406,6 +406,30 @@ pub fn build_network_policy(
         ..Default::default()
     };
 
+    if sb.spec.egress_mode() == "open" {
+        return NetworkPolicy {
+            metadata: ObjectMeta {
+                name: Some(np_name),
+                namespace: sb.namespace(),
+                labels: Some(labels.clone()),
+                owner_references: Some(owner),
+                ..Default::default()
+            },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: LabelSelector {
+                    match_labels: Some(BTreeMap::from([(LABEL_SANDBOX.to_string(), name)])),
+                    match_expressions: None,
+                },
+                policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
+                ingress: Some(vec![]),
+                egress: Some(vec![NetworkPolicyEgressRule {
+                    to: None,
+                    ports: None,
+                }]),
+            }),
+        };
+    }
+
     let mut egress = vec![
         NetworkPolicyEgressRule {
             to: Some(vec![dns_peer]),
@@ -559,10 +583,7 @@ mod tests {
     }
 
     fn pod_env_map(pod: &Pod) -> BTreeMap<String, String> {
-        pod.spec
-            .as_ref()
-            .unwrap()
-            .containers[0]
+        pod.spec.as_ref().unwrap().containers[0]
             .env
             .as_ref()
             .unwrap()
@@ -625,9 +646,7 @@ mod tests {
     #[test]
     fn spec_env_overrides_injected_defaults_and_empty_image_uses_cfg() {
         let mut sb = sample_sb();
-        sb.spec
-            .env
-            .insert("FLEET_WORK_DIR".into(), "/other".into());
+        sb.spec.env.insert("FLEET_WORK_DIR".into(), "/other".into());
         sb.spec.image = "".into();
         let mut cfg = sample_cfg();
         cfg.worker_image_default = "fleet-worker:from-cfg".into();
@@ -847,7 +866,22 @@ mod tests {
             &cfg,
         );
 
-        // Unknown mode is not a hole: only `allowlist` adds CIDRs.
+        let open = build_network_policy(&sb_with_net("open", &[]), "fsb-demo-t1", &cfg);
+        let open_rules = egress_rules(&open);
+        assert_eq!(
+            open_rules.len(),
+            1,
+            "open is one allow-all rule: {open_rules:?}"
+        );
+        assert!(
+            open_rules[0]
+                .to
+                .as_ref()
+                .is_none_or(|peers| peers.is_empty()),
+            "open egress must omit destinations: {open_rules:?}"
+        );
+
+        // Unknown mode is not a hole: only `allowlist` adds CIDRs, and `open` is explicit.
         let unknown = build_network_policy(&sb_with_net("all", &mixed), "fsb-demo-t1", &cfg);
         assert_dns_plus_api_only(&unknown, &cfg);
 

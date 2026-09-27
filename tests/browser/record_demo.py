@@ -1121,6 +1121,31 @@ class Demo:
             self.bug("Settings missing API keys for Run in a container")
         self.snap("run-mode-and-keys")
 
+        if "Network" not in p.inner_text("body"):
+            self.bug("Settings missing Network")
+        else:
+            net = p.locator("select").filter(has=p.locator("option[value='inherit']"))
+            if net.count() == 0:
+                self.bug("Settings missing network posture select")
+            else:
+                net.first.scroll_into_view_if_needed()
+                net.first.select_option("open")
+                save = p.get_by_role("button", name="Save", exact=True)
+                with self.expect_http("PATCH", "/fleet/settings", status="200"):
+                    save.first.click()
+                try:
+                    p.get_by_text("Settings saved.", exact=True).wait_for(timeout=10_000)
+                except Exception:
+                    self.bug("Network save produced no 'Settings saved.' toast")
+                self.dismiss_toasts()
+                p.reload(wait_until="networkidle")
+                pause(p, 800)
+                net = p.locator("select").filter(has=p.locator("option[value='inherit']"))
+                got = net.first.input_value() if net.count() else ""
+                if got != "open":
+                    self.bug(f"network posture did not persist (got {got!r})")
+                self.snap("network-open")
+
         heading = p.get_by_role("heading", name="Members", exact=True)
         if heading.count() == 0:
             raise RuntimeError("Settings page missing Members heading")
