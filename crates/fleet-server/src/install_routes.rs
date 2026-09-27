@@ -77,8 +77,11 @@ async fn get_worker_bin(
     State(state): State<AppState>,
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
-    let path = lookup_worker_bin(&state, &platform, &bin)?;
     let ct = worker_bin_content_type(&bin);
+    if let Some(hash) = synthesized_sha256_sidecar(&state, &platform, &bin) {
+        return Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], hash).into_response());
+    }
+    let path = lookup_worker_bin(&state, &platform, &bin)?;
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -365,18 +368,27 @@ fn synthesize_manifest_from_bins(
     } else {
         "fleet-driver"
     };
+    // An explicit dist dir is the only package. Do not treat cargo target
+    // bins as staged when that directory has no manifest and no binaries.
+    let exe_dir = current_exe_dir();
+    let target_dir = workspace_target_dir();
+    let (exe, target) = if state.worker_dist_dir.is_some() {
+        (None, None)
+    } else {
+        (exe_dir.as_deref(), target_dir.as_deref())
+    };
     let host_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         host_name,
         &native_platform_id(),
     )?;
     let driver_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         driver_name,
         &native_platform_id(),
@@ -399,15 +411,65 @@ fn synthesize_manifest_from_bins(
     })
 }
 
+fn synthesized_sha256_sidecar(state: &AppState, platform: &str, bin: &str) -> Option<String> {
+    let stem = bin.strip_suffix(".sha256")?;
+    if lookup_worker_bin(state, platform, bin).is_ok() {
+        return None;
+    }
+    let path = lookup_worker_bin(state, platform, stem).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    use sha2::{Digest, Sha256};
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
 fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    struct Entry {
+        path: PathBuf,
+        len: u64,
+        modified: Option<SystemTime>,
+        meta: fleet_db::WorkerBinMeta,
+    }
+    // Admin runner lists call this once per host. Debug fleet-host is hundreds
+    // of MB, so a same-file hit must not re-read and hash.
+    static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+    let fs_meta = std::fs::metadata(path).ok()?;
+    let len = fs_meta.len();
+    let modified = fs_meta.modified().ok();
+    if let Ok(guard) = CACHE.lock() {
+        if let Some(hit) = guard
+            .iter()
+            .find(|e| e.path == path && e.len == len && e.modified == modified)
+        {
+            return Some(hit.meta.clone());
+        }
+    }
     let bytes = std::fs::read(path).ok()?;
     let sha = hex::encode(Sha256::digest(&bytes));
-    Some(fleet_db::WorkerBinMeta {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let version = if name.starts_with("fleet-driver") {
+        crate::package_versions::fleet_driver_package_version()
+    } else {
+        crate::package_versions::fleet_host_package_version()
+    };
+    let meta = fleet_db::WorkerBinMeta {
         sha256: sha,
         size: bytes.len() as u64,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    })
+        version: Some(version.to_string()),
+    };
+    if let Ok(mut guard) = CACHE.lock() {
+        guard.push(Entry {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            meta: meta.clone(),
+        });
+    }
+    Some(meta)
 }
 
 /// Every staged `manifest.json` under `FLEET_WORKER_DIST_DIR` (one per platform).

@@ -124,11 +124,13 @@ pub fn normalize_notion_id(raw: &str) -> Option<String> {
     if s.is_empty() {
         return None;
     }
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let path = s.split(['?', '#']).next().unwrap_or(s);
+    let last = path.rsplit('/').next().unwrap_or(path);
+    let hex: String = last.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     if hex.len() >= 32 {
         Some(hex[hex.len() - 32..].to_string())
-    } else if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && s.len() >= 8 {
-        Some(s.to_string())
+    } else if last.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && last.len() >= 8 {
+        Some(last.to_string())
     } else {
         None
     }
@@ -219,6 +221,6 @@ mod tests {
         let notion =
             normalize_notion_id("https://www.notion.so/acme/2942d3a0b1c24e0aa1b2c3d4e5f60718?v=1")
                 .expect("notion");
-        assert_eq!(notion.len(), 32);
+        assert_eq!(notion, "2942d3a0b1c24e0aa1b2c3d4e5f60718");
     }
 }

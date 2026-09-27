@@ -1245,10 +1245,8 @@ class Demo:
         add = p.get_by_role("button", name="Add worker")
         if add.count() == 0:
             self.bug("self-hosted missing Add worker")
-        body_before = p.inner_text("body")
-        if "Only me" not in body_before and "Who can send work" not in body_before:
-            self.bug("self-hosted missing who-can-send radios (Only me / shared PC)")
-        else:
+        elif add.first.is_visible():
+            # "Who can send work" is on a worker card, not the empty page.
             with self.expect_http("POST", "/worker-hosts", status=("200", "201")):
                 add.first.click()
             pause(p, 1500)
@@ -1286,6 +1284,9 @@ class Demo:
             card.first.click()
             pause(p, 800)
             self.snap("card-open")
+            card_body = p.inner_text("body")
+            if "Only me" not in card_body and "Who can send work" not in card_body:
+                self.bug("worker card missing who-can-send control (Only me / shared PC)")
         popular = p.get_by_text("Popular models")
         if popular.count() and popular.first.is_visible():
             filt = p.get_by_placeholder("Filter the current top 50")

@@ -13,6 +13,8 @@ Deploy **agent-fleet** `origin/main` to the VPS. Then stop.
 
 - Product checkout: repo root (parent of `deploy/studio`)
 - Ship tool: `deploy/studio/scripts/deploy.sh` (only way images reach the VPS)
+- Ship proof, before merge: `PROVE_ONLY=1 DEPLOY_SHA=<commit> ./scripts/deploy.sh` (no VPS contact)
+- Runner hashes: author bumps versions and per-OS revs; this script registers hashes from the bins it built. A follow-up toml lands in `~/.local/state/vps-fleet/runner-packages.followup.toml`. Open an MR with it. Do not merge it here.
 - Live: https://agentfleet.studio
 - Identity: `GET /health` `git_sha` **and** `GET /fleet-git-sha.txt` must equal the shipped commit
 - State: `~/.local/state/vps-fleet/` (`deployed-sha`, `grok-status`, `grok-session`, `grok-report`)

@@ -40,9 +40,9 @@ async fn seed_workspace(store: &Store, project_id: Uuid) {
     let slug = format!("mr{}", project_id.as_simple());
     sqlx::query(
         r#"
-        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
-        VALUES ($1, $2, $3, now(), now())
-        ON CONFLICT (id) DO NOTHING
+        INSERT INTO workspaces (id, slug, name, min_isolation, created_at, updated_at)
+        VALUES ($1, $2, $3, 'process', now(), now())
+        ON CONFLICT (id) DO UPDATE SET min_isolation = 'process'
         "#,
     )
     .bind(project_id)
@@ -121,6 +121,7 @@ fn ollama_plan(project_id: Uuid) -> WorkPlanBody {
             auto_sync_external: false,
             llm_provider: Some("ollama".into()),
             llm_model: Some(TEST_MODEL.into()),
+            run_mode: "on_pc".into(),
             ..Default::default()
         },
     }

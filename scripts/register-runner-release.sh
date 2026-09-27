@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# After bumping a bin's [versions]/[verify]/[release.BIN].version and
-# restaging, write that bin's per-OS sha256s + parent into the toml.
+# Local helper. Auto-bumps a per-OS rev when the staged hash changed.
+# The deployer does not use this: it registers with --keep-author-revs
+# so the author's rev is the version decision.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${FLEET_WORKER_DIST_DIR:-$ROOT/.tmp/vms/dist}"

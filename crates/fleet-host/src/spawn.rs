@@ -441,6 +441,9 @@ pub async fn run_claim_with(
         },
         JobRuntime::Vm => run_vm(cfg, payload, &session_dir).await,
     };
+    if result.is_ok() {
+        let _ = publish_guest_proof(payload, &session_dir).await;
+    }
     wipe_session_dir(&session_dir);
     result
 }
