@@ -1289,6 +1289,8 @@ class Demo:
             self.snap("verify-command")
         finally:
             p.unroute("**/api/workspaces/*/worker-hosts")
+            p.reload(wait_until="networkidle")
+            pause(p, 600)
 
     def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
