@@ -95,7 +95,7 @@ The domain currently resolves to Cloudflare, not the VPS — point it here:
 2. A `www` → `82.39.213.33` (proxied)
 3. SSL/TLS → **Full** (not Flexible, not Full strict)
 
-Leave the records orange-clouded. Visitors use Cloudflare’s cert; origin uses a self-signed cert on :443. HTTP :80 redirects to HTTPS (requires SSL mode **Full**).
+Leave the records orange-clouded. Visitors use Cloudflare’s cert; origin uses a self-signed cert on :443. HTTP :80 redirects to HTTPS (requires SSL mode **Full**). The `:443` site redirects `www.agentfleet.studio` to the apex. `fleet-stack up` restarts the caddy container afterwards, because the Caddyfile is a bind mount and compose will not recreate caddy when only that file changes.
 
 ## Hardening
 
