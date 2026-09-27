@@ -13,9 +13,12 @@
 # rev=1. A Windows-only fix bumps windows-x86_64-rev only. Bumping the line
 # version to 0.0.4 resets every OS rev to 0.
 #
-# If a staged binary's sha256 is not registered, check/deploy fail. For one
-# OS: bump that <os>-rev, restage that OS, register. For all OS: bump
-# [versions] and [release.BIN].version, restage, register.
+# The author bumps [versions], [verify], and the per-OS -rev when a runner
+# change should become the package hosts are asked to run. The author does
+# not fill hashes and does not restage. The deployer builds the three ship
+# platforms and registers hashes with register --keep-author-revs. A hash
+# change whose rev did not increase fails that register. A line bump resets
+# every OS rev to 0.
 #
 #   fleet-host   — pair / heartbeat / lease / official CLI chat
 #   fleet-driver — process worker (ACP)

@@ -123,7 +123,7 @@ literal expected values are the replacement.
 | --- | --- |
 | Fast | Units run on every save. Integration is the next gate, not the first. |
 | Isolated | No order dependence. Unique emails / UUIDs per case (`auth.{uuid}@example.test`). |
-| Repeatable | Same result on this machine and in the bookworm ship image. |
+| Repeatable | Same result on this machine. The deployer re-proves the bookworm ship image. |
 | Self-validating | Pass or fail. No log-reading to decide. |
 | Timely | Written in the same change as the behavior. |
 
@@ -427,13 +427,16 @@ API-only identity is how an old UI went green — require the UI file too.
 `scripts/tree-id.sh`. After any code change, rebuild before treating
 live/e2e/human-test as valid.
 
-### QA-R27. Last pass is the ship image
+### QA-R27. The deployer proves the ship image
 
 **Must.** Host `just test` can be green while
 `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) does not compile
-(OpenSSL, glibc, sqlx). The last compile and test pass before an MR runs
-in that image. `./scripts/run-every-test.sh --prepare-kind` already does
-both.
+(OpenSSL, glibc, sqlx). The author does not run that `docker build`.
+The deployer does, with `PROVE_ONLY=1 DEPLOY_SHA=<commit>` in
+`deploy/studio/scripts/deploy.sh`, before the SHA is mergeable. That
+same pass builds the three ship runner platforms and registers their
+hashes. `./scripts/run-every-test.sh --prepare-kind` is the lab bake
+when a live or browser run needs it, not the ship gate.
 
 ### QA-R28. Ignored means ignored on purpose
 
@@ -616,7 +619,7 @@ Copy into the MR if useful. Cite the rule id.
 **Before merge**
 
 - [ ] `just test` and `just test-integration` green on this tree
-- [ ] Last compile in the bookworm ship image (`QA-R27`)
+- [ ] Deployer ship proof for this SHA (`QA-R27`), not an author `docker build`
 - [ ] `HUMAN_TEST_SCOPE.md` regenerated; film reviewed if required (`QA-R34`–`R35`)
 - [ ] No red hidden by ignore / `|| true` / foreign stack (`QA-R28`)
 

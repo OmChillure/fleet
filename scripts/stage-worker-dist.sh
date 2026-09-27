@@ -632,5 +632,6 @@ case "$MODE" in
     ;;
 esac
 
-# Deploy / register-runner-release.sh run the fail-closed check after all
-# shipped OS packages exist. A single-platform stage cannot update the parent.
+# The deployer runs runner-release.py check after the three ship platforms
+# exist. A single-platform stage cannot update the parent. --all is a
+# local lab build; deploy/studio does not pass --all.

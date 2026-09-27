@@ -7,6 +7,8 @@ Windows-only bytes become 0.0.3.1; Linux stays 0.0.3. A line bump to
 
   check           — fail if a table is inconsistent, or staged bins do not match
   register        — rewrite children, revs, parents from a dist dir
+                    --keep-author-revs keeps the toml rev and fails if a
+                    hash changed vs --baseline without a rev bump
   platform-ok     — exit 0 if DIST/PLATFORM hashes match [release]
   display-version — print line or line.rev for BIN PLATFORM
 """
@@ -175,10 +177,10 @@ def cmd_check(toml_path: Path, dest: Path | None, require_all: bool) -> int:
                     shown = display_version(rel.version, rel.revs.get(plat, 0))
                     errors.append(
                         f"{plat}/{bin_} hash changed ({sha}) but {shown} is still "
-                        f"registered as {want}. Keep line {rel.version} and bump "
-                        f"[release.{bin_}].{plat}-rev, or bump the line to the next "
-                        f"0.0.N (resets all OS revs). Then restage that OS and "
-                        f"scripts/register-runner-release.sh"
+                        f"registered as {want}. The author bumps "
+                        f"[release.{bin_}].{plat}-rev (or the line, which resets "
+                        f"every OS rev to 0). The deployer restages and registers "
+                        f"the hash with --keep-author-revs."
                     )
     if errors:
         print("runner-release: FAIL", file=sys.stderr)
@@ -212,39 +214,87 @@ def cmd_platform_ok(toml_path: Path, dest: Path, plat: str) -> int:
     return 0
 
 
-def cmd_register(toml_path: Path, dest: Path) -> int:
+def _staged_complete(staged: dict[str, dict[str, str]]) -> list[str]:
+    return [f"{p}/{b}" for b in BINS for p in SHIP_PLATFORMS if p not in staged.get(b, {})]
+
+
+def cmd_register(
+    toml_path: Path,
+    dest: Path,
+    *,
+    keep_author_revs: bool = False,
+    baseline: Path | None = None,
+) -> int:
+    """Rewrite [release] hashes from staged bins.
+
+    Default bumps a per-OS rev when that OS hash changes. ``keep_author_revs``
+    writes the staged hashes at the rev already in ``toml_path`` and fails
+    when a hash differs from ``baseline`` (the previous commit's toml) but
+    that rev did not increase. A line bump still requires every rev to be 0.
+    """
     staged = hashes_from_dist(dest)
-    miss = [f"{p}/{b}" for b in BINS for p in SHIP_PLATFORMS if p not in staged.get(b, {})]
+    miss = _staged_complete(staged)
     if miss:
         print("register: staged dist missing " + ", ".join(miss), file=sys.stderr)
         return 1
     text = toml_path.read_text()
     pkg = parse_versions(text, "versions")
+    base_text = baseline.read_text() if baseline is not None and baseline.is_file() else text
     releases: dict[str, BinRelease] = {}
+    errors: list[str] = []
     for bin_ in BINS:
         version = pkg.get(bin_) or ""
         if not version:
             print(f"register: [versions].{bin_} missing", file=sys.stderr)
             return 1
-        prev = parse_bin_release(text, bin_)
-        line_bumped = prev.version != version
+        author = parse_bin_release(text, bin_)
+        prev = parse_bin_release(base_text, bin_)
+        line_bumped = bool(prev.version) and prev.version != version
         revs: dict[str, int] = {}
         for plat in SHIP_PLATFORMS:
             sha = staged[bin_].get(plat, "")
-            old = prev.children.get(plat, "")
-            old_rev = int(prev.revs.get(plat, 0))
+            prev_sha = prev.children.get(plat, "")
+            prev_rev = int(prev.revs.get(plat, 0))
+            author_rev = int(author.revs.get(plat, 0))
+            if not keep_author_revs:
+                if line_bumped:
+                    revs[plat] = 0
+                elif sha and prev_sha and sha != prev_sha:
+                    revs[plat] = prev_rev + 1
+                else:
+                    revs[plat] = author_rev
+                continue
             if line_bumped:
+                if author_rev != 0:
+                    errors.append(
+                        f"{plat}/{bin_}: line bumped to {version} but {plat}-rev is "
+                        f"{author_rev}; a line bump resets every OS rev to 0"
+                    )
                 revs[plat] = 0
-            elif sha and old and sha != old:
-                revs[plat] = old_rev + 1
+            elif not prev_sha or sha == prev_sha:
+                revs[plat] = author_rev
+            elif author_rev > prev_rev:
+                revs[plat] = author_rev
             else:
-                revs[plat] = old_rev
+                shown = display_version(version, author_rev)
+                errors.append(
+                    f"{plat}/{bin_} hash changed but {shown} did not bump "
+                    f"{plat}-rev (still {author_rev}, previous {prev_rev}). "
+                    f"Bump that rev, or bump the line (resets every OS rev to 0). "
+                    f"The deployer writes the hash; it does not invent the rev."
+                )
+                revs[plat] = author_rev
         releases[bin_] = BinRelease(
             version=version,
             parent=parent_digest(staged[bin_]),
-            children=staged[bin_],
+            children=dict(staged[bin_]),
             revs=revs,
         )
+    if errors:
+        print("runner-release: FAIL", file=sys.stderr)
+        for e in errors:
+            print(f"  {e}", file=sys.stderr)
+        return 1
     toml_path.write_text(rewrite_releases(text, releases))
     for bin_, rel in releases.items():
         bits = [display_version(rel.version, rel.revs.get(p, 0)) + f"@{p}" for p in SHIP_PLATFORMS]
@@ -260,14 +310,33 @@ def main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parents[1]
     toml_path = root / "runner-packages.toml"
     require = "--require-all" in argv
-    rest = [a for a in argv[2:] if a != "--require-all"]
+    keep_revs = "--keep-author-revs" in argv
+    baseline: Path | None = None
+    rest: list[str] = []
+    skip_next = False
+    for i, a in enumerate(argv[2:]):
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("--require-all", "--keep-author-revs"):
+            continue
+        if a == "--baseline":
+            if i + 1 >= len(argv[2:]):
+                print("usage: --baseline TOML", file=sys.stderr)
+                return 2
+            baseline = Path(argv[2:][i + 1])
+            skip_next = True
+            continue
+        rest.append(a)
     dest = Path(rest[0]) if rest else Path(
         __import__("os").environ.get("FLEET_WORKER_DIST_DIR", str(root / ".tmp/vms/dist"))
     )
     if cmd == "check":
         return cmd_check(toml_path, dest, require)
     if cmd == "register":
-        return cmd_register(toml_path, dest)
+        return cmd_register(
+            toml_path, dest, keep_author_revs=keep_revs, baseline=baseline
+        )
     if cmd == "platform-ok":
         if len(rest) < 2:
             print("usage: runner-release.py platform-ok DIST PLATFORM", file=sys.stderr)

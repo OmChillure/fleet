@@ -59,20 +59,21 @@ until there is a bootable guest.
 ## Rules
 
 - All tests must pass before a merge to main. `just test` and
-  `just test-integration` (and the ship-image builds below) must be
-  green. Do not merge red tests, ignored failures, or `|| true`.
+  `just test-integration` must be green. Do not merge red tests,
+  ignored failures, or `|| true`. The bookworm ship-image compile is
+  the deployer's `PROVE_ONLY=1` proof, not an author `docker build`.
 - All tests must be relevant. A test locks a live contract, not
   error-string copy, a removed product fiction, or a tautology.
   If a test is not relevant, decide whether the test or the code should change.
   Do not keep a stale assertion to stay green, and do not delete a live
   contract because the code fails it.
-- Before you open an MR, the last compile and test pass must run **in the
-  ship image** (`Dockerfile` / `Dockerfile.ui`, `rust:1.88-bookworm`), not
-  only host `cargo` / `just test`. Host-only green is how a tree that does
-  not build in VPS/Kind reaches `main`.
-  `docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile .`
-  (and `-f Dockerfile.ui`); `./scripts/run-every-test.sh --prepare-kind`
-  already does both.
+- Before you open an MR, `just test` and `just test-integration` are
+  green on this tree. The deployer, not the author, compiles
+  `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) via
+  `PROVE_ONLY=1 DEPLOY_SHA=<commit> deploy/studio/scripts/deploy.sh`.
+  The MR is mergeable only after that proof exits 0. Host-only green
+  is not that proof. `./scripts/run-every-test.sh --prepare-kind` is
+  the lab bake when this change has a live or browser run.
 - Rust behavior is tested in Rust. Python tests the Python workspace agent and compose/kind YAML.
 - No silent `eprintln!("skip"); return;` in `crates/**/tests/*.rs`. Missing `DATABASE_URL` panics with a one-line how-to.
 - Do not use `|| true` around `cargo test`.
