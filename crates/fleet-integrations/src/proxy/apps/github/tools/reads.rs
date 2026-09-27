@@ -1,24 +1,43 @@
 //! GitHub read tools.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::client::*;
 use crate::proxy::types::ProxyResult;
 
-pub(crate) async fn list_repos(http: &reqwest::Client, token: &str, args: &Value) -> ProxyResult {
+pub(crate) async fn list_repos(
+    http: &reqwest::Client,
+    token: &str,
+    args: &Value,
+    config: &Value,
+) -> ProxyResult {
     let per_page = args
         .get("per_page")
         .and_then(|v| v.as_u64())
         .unwrap_or(20)
         .clamp(1, 50);
     let origin = github_api_origin();
-    let url = format!("{origin}/user/repos?per_page={per_page}&sort=updated");
+    // GitHub App installation tokens 403 on GET /user/repos. The install's
+    // own repository list is the call that matches "app is allowed".
+    let installation = config
+        .get("installation_id")
+        .and_then(|v| v.as_i64())
+        .filter(|id| *id > 0);
+    let url = if installation.is_some() {
+        format!("{origin}/installation/repositories?per_page={per_page}")
+    } else {
+        format!("{origin}/user/repos?per_page={per_page}&sort=updated")
+    };
     let (status, body) = github_get(http, token, &url).await;
     if !(200..300).contains(&status) {
         return upstream_err("list_repos", status, &body);
     }
-    let items: Vec<Value> = body
-        .as_array()
+    let repos = if installation.is_some() {
+        body.get("repositories").and_then(|v| v.as_array())
+    } else {
+        body.as_array()
+    };
+    let items: Vec<Value> = repos
         .map(|arr| {
             arr.iter()
                 .map(|r| {
@@ -431,13 +450,17 @@ mod list_repos_tests {
     }
 
     async fn dispatch_list_repos(origin: &str, args: Value) -> ProxyResult {
+        dispatch_list_repos_with(origin, args, json!({})).await
+    }
+
+    async fn dispatch_list_repos_with(origin: &str, args: Value, config: Value) -> ProxyResult {
         let _guard = OriginGuard;
         TEST_GITHUB_API_BASE.with(|c| *c.borrow_mut() = Some(origin.to_string()));
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
             .expect("http");
-        dispatch("github", &http, LEAK, "list_repos", &args, &json!({})).await
+        dispatch("github", &http, LEAK, "list_repos", &args, &config).await
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -458,7 +481,11 @@ mod list_repos_tests {
             json!("acme/app"),
             "must map full_name: {result:?}"
         );
-        assert_eq!(item["private"], json!(false), "must map private: {result:?}");
+        assert_eq!(
+            item["private"],
+            json!(false),
+            "must map private: {result:?}"
+        );
         assert_eq!(
             item["html_url"],
             json!("https://github.com/acme/app"),
@@ -518,6 +545,60 @@ mod list_repos_tests {
             "token_expired must not echo token: {dump}"
         );
         assert!(sink.hits() > 0, "401 must hit the sink: {result:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_list_repos_403_does_not_expire_the_connection() {
+        let sink = GitHubListSink::bind(
+            403,
+            json!({ "message": "Resource not accessible by integration" }),
+        );
+        let result = dispatch_list_repos(&sink.origin, json!({})).await;
+        assert!(!result.ok, "403 must be ok:false: {result:?}");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("upstream"),
+            "a permissions 403 must not be token_expired: {result:?}"
+        );
+        assert_eq!(result.provider_status, Some(403), "{result:?}");
+        assert!(
+            result
+                .summary
+                .contains("Resource not accessible by integration"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_list_repos_installation_uses_installation_repositories() {
+        let sink = GitHubListSink::bind(
+            200,
+            json!({ "total_count": 1, "repositories": [mapped_repo()] }),
+        );
+        let result = dispatch_list_repos_with(
+            &sink.origin,
+            json!({}),
+            json!({ "installation_id": 161434524 }),
+        )
+        .await;
+        assert!(result.ok, "installation list must be ok: {result:?}");
+        assert_eq!(result.data["count"], json!(1), "{result:?}");
+        assert_eq!(
+            result.data["items"][0]["full_name"],
+            json!("acme/app"),
+            "{result:?}"
+        );
+        let req = sink.last_request().unwrap_or_default();
+        assert!(
+            req.contains("/installation/repositories"),
+            "installation id must list installation repos: {req}"
+        );
+        assert!(
+            !req.contains("/user/repos"),
+            "installation list must not call /user/repos: {req}"
+        );
+        let dump = serde_json::to_string(&result).expect("serialize");
+        assert!(!dump.contains(LEAK), "must not echo token: {dump}");
     }
 
     #[tokio::test(flavor = "current_thread")]

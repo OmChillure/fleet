@@ -1,6 +1,6 @@
 //! GitHub HTTP client helpers (control plane only).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::proxy::types::ProxyResult;
 
@@ -205,13 +205,61 @@ pub(crate) async fn github_patch(
     }
 }
 
+/// App JWT → installation access token. `pem` is the GitHub App private key.
+pub(crate) async fn mint_installation_token(
+    http: &reqwest::Client,
+    app_id: i64,
+    pem: &str,
+    installation_id: i64,
+) -> Result<String, (u16, String)> {
+    #[derive(serde::Serialize)]
+    struct AppClaims {
+        iat: i64,
+        exp: i64,
+        iss: String,
+    }
+    let now = chrono::Utc::now().timestamp();
+    let claims = AppClaims {
+        iat: now - 60,
+        exp: now + 540,
+        iss: app_id.to_string(),
+    };
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes())
+        .map_err(|e| (0, format!("github app key: {e}")))?;
+    let jwt = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &key,
+    )
+    .map_err(|e| (0, format!("github app jwt: {e}")))?;
+    let url = format!(
+        "{}/app/installations/{installation_id}/access_tokens",
+        github_api_origin()
+    );
+    let (status, body) = github_post(http, &jwt, &url, &json!({})).await;
+    if !(200..300).contains(&status) {
+        let msg = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("could not mint installation token");
+        return Err((status, msg.to_string()));
+    }
+    body.get("token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or((status, "installation token missing".into()))
+}
+
 pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
     let msg = body
         .get("message")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("error").and_then(|v| v.as_str()))
         .unwrap_or("upstream error");
-    let code = if status == 401 || status == 403 {
+    // 401 is a dead token. 403 "Resource not accessible by integration" is a
+    // repo the installation was not granted — that must not disconnect GitHub.
+    let code = if status == 401 {
         "token_expired"
     } else {
         "upstream"

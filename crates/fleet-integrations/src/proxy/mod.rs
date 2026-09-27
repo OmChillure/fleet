@@ -21,14 +21,13 @@ mod types;
 
 pub use apps::{dispatch, operations_catalog_text, operations_for, supported_providers};
 pub use sanitize::{contains_secret_keys, sanitize_value};
-pub use types::{ProxyCaller, ProxyRequest, ProxyResult, MAX_PROXY_DATA_BYTES};
+pub use types::{MAX_PROXY_DATA_BYTES, ProxyCaller, ProxyRequest, ProxyResult};
 
 use std::time::Duration;
 
 use fleet_db::PgPool;
 use serde_json::Value;
 
-use crate::credentials_for;
 use crate::crypto::CredentialsKey;
 
 /// Workspace + provider used to load credentials.
@@ -87,7 +86,9 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
     }
 
     let conn =
-        match fleet_db::repos::integrations::find_connected(pool, workspace_id, &provider).await {
+        match fleet_db::repos::integrations::find_proxy_connection(pool, workspace_id, &provider)
+            .await
+        {
             Ok(Some(c)) => c,
             Ok(None) => return not_connected(&provider, &operation),
             Err(e) => {
@@ -106,47 +107,7 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
                 );
             }
         };
-
-    let creds = match credentials_for(pool, workspace_id, &provider, key).await {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            return ProxyResult::err(
-                &provider,
-                &operation,
-                "not_connected",
-                format!("{provider} credentials missing — reconnect the integration"),
-                None,
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                workspace_id = %workspace_id,
-                provider = %provider,
-                error = %e,
-                "proxy decrypt failed"
-            );
-            return ProxyResult::err(
-                &provider,
-                &operation,
-                "decrypt_failed",
-                "failed to decrypt credentials (check INTEGRATIONS_ENCRYPTION_KEY)",
-                None,
-            );
-        }
-    };
-
-    let access_token = match creds.get("access_token").and_then(|v| v.as_str()) {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => {
-            return ProxyResult::err(
-                &provider,
-                &operation,
-                "token_missing",
-                format!("{provider} connection has no access_token — reconnect"),
-                None,
-            );
-        }
-    };
+    let was_error = conn.status == "error";
 
     let http = match reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -163,6 +124,11 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
                 None,
             );
         }
+    };
+
+    let access_token = match resolve_access_token(pool, key, &http, &conn, &operation).await {
+        Ok(token) => token,
+        Err(err) => return err,
     };
 
     tracing::info!(
@@ -185,10 +151,21 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
     .await;
 
     drop(access_token);
-    drop(creds);
 
     if result.ok {
         result.data = sanitize_value(&result.data);
+        if was_error {
+            if let Err(e) =
+                fleet_db::repos::integrations::clear_error(pool, workspace_id, &provider).await
+            {
+                tracing::error!(
+                    workspace_id = %workspace_id,
+                    provider = %provider,
+                    error = %e,
+                    "failed to clear integration error after a successful call"
+                );
+            }
+        }
     } else if result.error_code.as_deref() == Some("token_expired") {
         if let Err(e) = fleet_db::repos::integrations::mark_error(
             pool,
@@ -228,6 +205,143 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
     );
 
     result
+}
+
+async fn resolve_access_token(
+    pool: &PgPool,
+    key: &CredentialsKey,
+    http: &reqwest::Client,
+    conn: &fleet_db::IntegrationConnection,
+    operation: &str,
+) -> Result<String, ProxyResult> {
+    let provider = conn.provider.as_str();
+    let installation_id = conn
+        .config
+        .get("installation_id")
+        .and_then(|v| v.as_i64())
+        .filter(|id| *id > 0);
+    if provider == "github" {
+        if let Some(installation_id) = installation_id {
+            return github_installation_token(pool, key, http, conn, installation_id, operation)
+                .await;
+        }
+    }
+    let creds = match key.decrypt(&conn.credentials) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                workspace_id = %conn.workspace_id,
+                provider,
+                error = %e,
+                "proxy decrypt failed"
+            );
+            return Err(ProxyResult::err(
+                provider,
+                operation,
+                "decrypt_failed",
+                "failed to decrypt credentials (check INTEGRATIONS_ENCRYPTION_KEY)",
+                None,
+            ));
+        }
+    };
+    match creds.get("access_token").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() => Ok(t.to_string()),
+        _ => Err(ProxyResult::err(
+            provider,
+            operation,
+            "token_missing",
+            format!("{provider} connection has no access_token — reconnect"),
+            None,
+        )),
+    }
+}
+
+async fn github_installation_token(
+    pool: &PgPool,
+    key: &CredentialsKey,
+    http: &reqwest::Client,
+    conn: &fleet_db::IntegrationConnection,
+    installation_id: i64,
+    operation: &str,
+) -> Result<String, ProxyResult> {
+    let provider = conn.provider.as_str();
+    let app = match fleet_db::repos::integrations::get_oauth_app(pool, conn.workspace_id, provider)
+        .await
+    {
+        Ok(Some(app)) => app,
+        Ok(None) => {
+            return Err(ProxyResult::err(
+                provider,
+                operation,
+                "upstream",
+                "GitHub App is not stored for this workspace",
+                None,
+            ));
+        }
+        Err(e) => {
+            tracing::error!(
+                workspace_id = %conn.workspace_id,
+                error = %e,
+                "load github app failed"
+            );
+            return Err(ProxyResult::err(
+                provider,
+                operation,
+                "internal",
+                "failed to load GitHub App",
+                None,
+            ));
+        }
+    };
+    let plain = match key.decrypt(&app.client_secret) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                workspace_id = %conn.workspace_id,
+                error = %e,
+                "decrypt github app failed"
+            );
+            return Err(ProxyResult::err(
+                provider,
+                operation,
+                "decrypt_failed",
+                "failed to decrypt GitHub App key",
+                None,
+            ));
+        }
+    };
+    let pem = plain
+        .get("pem")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let app_id = plain.get("github_app_id").and_then(|v| v.as_i64());
+    let (Some(pem), Some(app_id)) = (pem, app_id) else {
+        return Err(ProxyResult::err(
+            provider,
+            operation,
+            "upstream",
+            "GitHub App record has no installation key",
+            None,
+        ));
+    };
+    match apps::github::mint_installation_token(http, app_id, pem, installation_id).await {
+        Ok(token) => Ok(token),
+        Err((status, msg)) => {
+            let code = if status == 401 {
+                "token_expired"
+            } else {
+                "upstream"
+            };
+            let status = (status > 0).then_some(status);
+            Err(ProxyResult::err(
+                provider,
+                operation,
+                code,
+                format!("GitHub API {}: {msg}", status.unwrap_or(0)),
+                status,
+            ))
+        }
+    }
 }
 
 /// Format a proxy result as markdown for embedding into agent task specs.
@@ -280,8 +394,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::thread;
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind create_pr sink");
@@ -440,10 +554,7 @@ mod tests {
                     "append_blocks",
                 ],
             ),
-            (
-                "google_drive",
-                &["list_files", "get_file", "export_file"],
-            ),
+            ("google_drive", &["list_files", "get_file", "export_file"]),
             (
                 "teams",
                 &[
@@ -554,15 +665,7 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .build()
             .expect("http");
-        let missing = dispatch(
-            "github",
-            &http,
-            "token",
-            "merge_pr",
-            &json!({}),
-            &json!({}),
-        )
-        .await;
+        let missing = dispatch("github", &http, "token", "merge_pr", &json!({}), &json!({})).await;
         assert!(
             !missing.ok,
             "merge_pr missing owner/number must be ok:false: {missing:?}"
@@ -639,7 +742,10 @@ mod tests {
             &json!({}),
         )
         .await;
-        assert!(!unknown.ok, "unknown github op must be ok:false: {unknown:?}");
+        assert!(
+            !unknown.ok,
+            "unknown github op must be ok:false: {unknown:?}"
+        );
         assert_eq!(
             unknown.error_code.as_deref(),
             Some("unknown_op"),

@@ -91,6 +91,36 @@ pub async fn find_connected(
         .map_err(map_query_err)
 }
 
+/// Connected row, or a GitHub App row parked at `error` while the installation
+/// id is still stored. A permissions 403 used to flip that status; the app
+/// install is still the credential.
+pub async fn find_proxy_connection(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+) -> DbResult<Option<IntegrationConnection>> {
+    let q = format!(
+        r#"
+        SELECT {COLS}
+        FROM integration_connections
+        WHERE workspace_id = $1 AND provider = $2
+          AND (
+            status = 'connected'
+            OR (
+              status = 'error'
+              AND COALESCE(config->>'installation_id', '') <> ''
+            )
+          )
+        "#
+    );
+    sqlx::query_as::<_, IntegrationConnection>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Insert or re-connect a provider for a workspace (replaces credentials).
 pub async fn upsert(pool: &PgPool, new: &UpsertConnection) -> DbResult<IntegrationConnection> {
     let q = format!(
@@ -229,6 +259,26 @@ pub async fn mark_error(
         )));
     }
     Ok(())
+}
+
+/// A successful installation call undoes a permissions error. Credentials stay.
+pub async fn clear_error(pool: &PgPool, workspace_id: Uuid, provider: &str) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE integration_connections
+        SET status = 'connected',
+            last_error = NULL,
+            updated_at = now(),
+            version = version + 1
+        WHERE workspace_id = $1 AND provider = $2 AND status = 'error'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
 }
 
 pub async fn list_oauth_apps(

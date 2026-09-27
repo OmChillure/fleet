@@ -76,7 +76,7 @@ pub async fn dispatch(
     config: &Value,
 ) -> ProxyResult {
     match provider {
-        "github" => github::invoke(http, access_token, operation, args).await,
+        "github" => github::invoke(http, access_token, operation, args, config).await,
         "gitlab" => gitlab::invoke(http, access_token, operation, args).await,
         "jira" => {
             let cloud_id = config
