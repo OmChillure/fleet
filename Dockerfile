@@ -33,7 +33,7 @@ ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release --locked -p fleet-server -p fleet-host \
+    cargo build --release --locked -p fleet-server -p fleet-host -p fleet-driver --bins \
     && mkdir -p /out \
     && cp target/release/fleet-server \
           target/release/fleet-host \
