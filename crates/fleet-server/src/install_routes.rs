@@ -1016,6 +1016,10 @@ exit 22
                 !body.contains("API_PUBLIC_BASE"),
                 "{name} must not reference API_PUBLIC_BASE (OAuth / public API)"
             );
+            // verify.sh / verify.ps1 only read the local install. They do not pair.
+            if name.starts_with("verify.") {
+                continue;
+            }
             assert!(
                 body.contains("FLEET_URL"),
                 "{name} must take the pair URL via FLEET_URL (WORKER_PUBLIC_BASE)"
