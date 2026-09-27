@@ -2401,7 +2401,7 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
         .as_str()
         .unwrap_or_else(|| panic!("create pair_token: {}", created.body))
         .to_string();
-    let hid = created.body["host"]["id"]
+    let _hid = created.body["host"]["id"]
         .as_str()
         .expect("host.id")
         .to_string();

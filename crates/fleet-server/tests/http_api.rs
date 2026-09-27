@@ -2149,24 +2149,6 @@ async fn create_chat_conversation(
         .to_string()
 }
 
-/// List hides threads with no messages (failed first turn is deleted/hidden).
-async fn seed_conversation_preview(state: &AppState, conversation_id: &str) {
-    let cid = Uuid::parse_str(conversation_id).expect("conversation uuid");
-    fleet_db::repos::chats::insert_message(
-        &state.db,
-        Uuid::now_v7(),
-        cid,
-        "user",
-        "preview",
-        None,
-        None,
-        &json!([]),
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("preview message");
-}
-
 /// GET /chat/status with no runner_id is control-plane OpenAI + Gemini only.
 #[tokio::test]
 async fn chat_status_without_runner_id_is_openai_only() {
