@@ -4,6 +4,10 @@
 #
 #   ./scripts/deploy.sh           # deploy origin/main if SHA changed
 #   FORCE=1 ./scripts/deploy.sh   # rebuild and ship even if SHA matches
+#   PROVE_ONLY=1 DEPLOY_SHA=<sha> ./scripts/deploy.sh
+#       Build the bookworm images and the three ship runner platforms
+#       for that commit. Do not contact the VPS. An MR is mergeable
+#       only after this exits 0 for that SHA.
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -80,7 +84,18 @@ done
 EOF
 }
 
-if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
+if [[ -n "${DEPLOY_SHA:-}" && "${PROVE_ONLY:-0}" != 1 ]]; then
+  log "DEPLOY_SHA is only valid with PROVE_ONLY=1"
+  exit 1
+fi
+if [[ -n "${DEPLOY_SHA:-}" ]]; then
+  if ! git -C "${REPO}" cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null; then
+    log "fetching ${DEPLOY_SHA}"
+    git -C "${REPO}" fetch --quiet "${GIT_REMOTE}" "${DEPLOY_SHA}"
+  fi
+  SHA="$(git -C "${REPO}" rev-parse "${DEPLOY_SHA}^{commit}")"
+  log "proving ${SHA}"
+elif [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
   SHA="$(bash "${REPO}/scripts/tree-id.sh")"
   log "deploying local worktree ${SHA}"
 else
@@ -93,12 +108,21 @@ fail_notify() {
   notify_desktop critical "Agent Fleet deploy failed" "${SHORT}: $*"
 }
 
-LAST_LOCAL="$(cat "${STATE_DIR}/deployed-sha" 2>/dev/null || true)"
-LAST_REMOTE="$(vps_deploy_ssh "cat '${VPS_STACK_DIR}/DEPLOYED_SHA' 2>/dev/null || true")"
+if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
+  if [[ "${SHA}" == *-* ]]; then
+    log "refuse to prove a dirty tree-id ${SHA}"
+    exit 1
+  fi
+  log "prove-only ${SHORT}; not contacting the VPS"
+  LAST_REMOTE=""
+else
+  LAST_LOCAL="$(cat "${STATE_DIR}/deployed-sha" 2>/dev/null || true)"
+  LAST_REMOTE="$(vps_deploy_ssh "cat '${VPS_STACK_DIR}/DEPLOYED_SHA' 2>/dev/null || true")"
 
-if [[ "${FORCE}" != 1 && "${SHA}" == "${LAST_LOCAL}" && "${SHA}" == "${LAST_REMOTE}" ]]; then
-  log "already deployed ${SHORT}; nothing to do"
-  exit 0
+  if [[ "${FORCE}" != 1 && "${SHA}" == "${LAST_LOCAL}" && "${SHA}" == "${LAST_REMOTE}" ]]; then
+    log "already deployed ${SHORT}; nothing to do"
+    exit 0
+  fi
 fi
 
 # A leftover worktree id (sha-sha) is not origin/main. Keep a patch by
@@ -165,6 +189,15 @@ fi
 if ! STAGE_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
   fail_notify "worker package stage failed"
   exit 1
+fi
+if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
+  if [[ -z "${WORKDIR:-}" ]]; then
+    rm -rf "${STAGE_SRC}"
+  fi
+  mkdir -p "${STATE_DIR}/ship-proof"
+  printf 'ok %s\n' "${SHA}" > "${STATE_DIR}/ship-proof/${SHA}"
+  log "ship proof ok ${SHORT} (images and runner packages built; not shipped)"
+  exit 0
 fi
 if [[ -z "${WORKDIR:-}" ]]; then
   rm -rf "${STAGE_SRC}"

@@ -159,8 +159,8 @@ extra test names here.
 
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
-| Header is Current fleet-host version / Current fleet-driver version | `runner-packages.toml` `[verify]` + `package_versions` | No bake SHA / “Current runner build” | After bump `[versions]` + `[verify]` + restage, both OS cards show the same number |
-| Amber banner if any required OS is not on both current versions | `stale_package_warning` | Banner names the OS list | Restage `--all` clears it |
+| Header is Current fleet-host version / Current fleet-driver version | `runner-packages.toml` `[verify]` + `package_versions` | No bake SHA / “Current runner build” | After the author bumps `[versions]` + `[verify]` and the deployer restages the three ship platforms, those OS cards show the same number |
+| Amber banner if any staged required OS is not on both current versions | `stale_package_warning` | Banner names the OS list | Never-staged OS (musl, armv7, windows-arm64) are omitted. The deployer does not build them |
 | Card lists fleet-host and fleet-driver versions | `software_bin_rows` | current/behind/missing per binary | Windows and Linux with the same version compare equal |
 | Plane `/health.git_sha` is not a runner version | plane-bake skip only | No false outdated after API rebuild | n/a |
 
@@ -179,7 +179,7 @@ extra test names here.
 | Behavior | 1. Unit / regular | 2. e2e | 3. Real-life |
 | --- | --- | --- | --- |
 | Heartbeat reports bake id + bins + hardware | Host JSON; repo persist | Card software + specs | Guest report matches staged / hardware |
-| current / behind / unknown vs staged manifest | `compute_software_status` | Software flag on the card | Install old package → behind; restage+update → current |
+| current / behind / unknown vs staged manifest | `compute_software_status` | Software flag on the card | Install old package → behind; deployer restage + update → current |
 | Never treat a file hash as the bake id | `software_build_id` | Card does not show bin SHA as version | n/a |
 | Stage per-platform manifests | Stage script / install routes | Header lists served platforms | Guest for each platform installs that package |
 | `machine.id` survives update + reinstall | Reclaim on pair; host file persist (`paths.rs` unit) | Same id after re-pair | Guest update/reinstall keeps id |

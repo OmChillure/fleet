@@ -37,13 +37,14 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   install endpoints still serve scripts; binary GET returns 404 with a
   build hint. Dev can set `FLEET_WORKER_BUILD_FROM_SOURCE=1` on the
   **machine** (not the CP) so the platform script runs `cargo build`.
-- Identity: served binaries, if any, should match `scripts/tree-id.sh`
-  (same fail-closed rule as API/UI images). Stage writes `manifest.json`
-  next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
-  outdated” compares against `[verify]` in `runner-packages.toml` (staging
-  writes `[versions]`). Host and driver each have `[release.BIN]` with
-  their own line version (0.0.3) plus a per-OS rev (windows 0.0.3.1).
-  A line bump to 0.0.4 resets every OS rev. Not `/health.git_sha`.
+- Identity: the deployer stamps the commit it built into `manifest.json`
+  (`FLEET_GIT_SHA`). Worker “current / outdated” compares against
+  `[verify]` in `runner-packages.toml`. The author bumps `[versions]`,
+  `[verify]`, and the per-OS `-rev`. The deployer fills `[release]`
+  hashes from the bins it published. Display is `0.0.3` when rev=0 and
+  `0.0.3.1` when rev=1. A line bump resets every OS rev. Not
+  `/health.git_sha`. The ship platforms are linux-x86_64, linux-aarch64,
+  and windows-x86_64.
 
 ### Worker machine
 

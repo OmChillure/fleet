@@ -126,11 +126,13 @@ Protocol (checklist, when to film, which scene maps to which crate):
 ## Merge requests and review
 
 **Opening an MR is the green light to merge.** Do not create the GitLab
-MR until every merge requirement below is done on the **final tree**
-(ship-image compile, `just test` / `just test-integration`, relevant
-locks, `HUMAN_TEST_SCOPE.md` + film when this is not a small tweak).
-A branch can exist locally. The MR must not. Starting a long bake and
-then opening the MR while it runs is not done — wait, or do not open.
+MR until every author requirement below is done on the **final tree**
+(`just test` / `just test-integration`, relevant locks,
+`HUMAN_TEST_SCOPE.md` + film when this is not a small tweak). A branch
+can exist locally. The MR must not. The bookworm ship-image compile is
+the deployer's proof (`PROVE_ONLY=1` in `deploy/studio/scripts/deploy.sh`),
+not a command the author runs before opening the MR. The MR is mergeable
+only after that proof exists for this SHA.
 
 Ship work through a **GitLab merge request** and **ask for a peer review on
 Slack**. That is the default.
@@ -141,7 +143,9 @@ install, tests, sandbox/lab, or operator scripts, it is not a small tweak
 — finish the merge bar, then open an MR and ask on Slack.
 
 Do not merge unless a human asks you to merge. The human should not have
-to ask whether tests, ship images, or the film are still pending.
+to ask whether tests or the film are still pending. Do not merge until
+`deploy/studio` has a green ship proof for this SHA
+(`~/.local/state/vps-fleet/ship-proof/<sha>`).
 
 All tests must pass before a merge to main. `just test` and
 `just test-integration` must be green on the merge tree. Do not merge
@@ -155,20 +159,23 @@ If a test is not relevant, decide whether the test or the code should change.
 Do not keep a stale assertion to stay green, and do not delete a live
 contract because the code fails it.
 
-The last compile and test pass before you open the MR must run **in the
-ship image**, not only on the host. VPS and Kind build
-`Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`). Host `cargo` /
-`just test` can be green while that image does not compile (OpenSSL,
-glibc, sqlx migration versions, locked bins). That is how a tree that
-cannot ship reached `main`.
+The author does not `docker build` the ship images and does not stage
+runner binaries or fill `[release]` hashes. Host `just test` can be
+green while `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) does
+not compile. The deployer proves that compile, and builds the three
+ship platforms (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`),
+with:
 
 ```bash
-docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile .
-docker build --build-arg FLEET_GIT_SHA="$(scripts/tree-id.sh)" -f Dockerfile.ui .
+PROVE_ONLY=1 DEPLOY_SHA=<commit> deploy/studio/scripts/deploy.sh
 ```
 
-`./scripts/run-every-test.sh --prepare-kind` already does those builds.
-A host-only green is not enough to open the MR.
+That writes `~/.local/state/vps-fleet/ship-proof/<commit>` and does not
+contact the VPS. Hashes come from those bins. The author bumps
+`[versions]`, `[verify]`, and the per-OS `-rev` in `runner-packages.toml`
+when a runner change should become the package hosts are asked to run.
+`./scripts/run-every-test.sh --prepare-kind` is the lab bake when this
+change has a live or browser run. It is not the ship gate.
 
 ## Demo video (agent records it)
 
