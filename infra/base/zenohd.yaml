@@ -1,5 +1,6 @@
 # Control-plane Zenoh router. Hosts and the API connect as clients.
 # Do not put a locator in untrusted sandbox pods.
+# crate zenoh 1.10; image 1.2.1 (known skew; open+pubsub is the lock)
 apiVersion: apps/v1
 kind: Deployment
 metadata:

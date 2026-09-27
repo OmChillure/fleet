@@ -585,7 +585,7 @@ async fn v1_admin_mutating_routes_401_without_bearer() {
                     "status": "accepted",
                     "source": "fixture",
                     "tasks": [],
-                    "policy": { "on_task_fail": "fail_run" }
+                    "policy": { "on_task_fail": "fail_run", "run_mode": "on_pc" }
                 }
             })),
         ),

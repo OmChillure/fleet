@@ -14,7 +14,7 @@ pub const WORKER_HOST_STATUS_ONLINE: &str = "online";
 pub const WORKER_HOST_STATUS_DISABLED: &str = "disabled";
 pub const WORKER_HOST_STATUS_ERROR: &str = "error";
 
-/// Native host process (v1). Only this isolation is assignable.
+/// Paired fleet-host machine (vs this API process).
 pub const WORKER_HOST_KIND_HOST: &str = "host";
 pub const WORKER_HOST_KIND_CONTROL_PLANE: &str = "control_plane";
 pub const RUNNER_KIND_SELF_HOSTED: &str = "self_hosted";
@@ -25,8 +25,9 @@ pub const RUNNER_KIND_PARTNERS: &str = "partners";
 /// Bootstrap-only guest label. HTTP PATCH must not stamp this.
 pub const WORKER_HOST_LABEL_CLUSTER: &str = "cluster";
 
+/// Derived host label of agent_runtime `on_pc`.
 pub const WORKER_HOST_ISOLATION_NATIVE: &str = "native";
-/// Placeholder self-hosted sandbox. Not assignable; no k8s executor in v1.
+/// Derived host label of agent_runtime `in_container`. Kind/container is assignable.
 pub const WORKER_HOST_ISOLATION_SANDBOXED: &str = "sandboxed";
 
 /// Only the pairer (`created_by`) may send work to this PC.
@@ -39,7 +40,7 @@ pub const WORKER_HOST_SEND_WORKSPACE: &str = "workspace";
 pub const WORKER_HOST_RUN_ON_PC: &str = "on_pc";
 pub const WORKER_HOST_RUN_IN_CONTAINER: &str = "in_container";
 
-/// `on_pc` | `in_container`. Other values are rejected.
+/// `on_pc` | `in_container` (agent_runtime). Other values are rejected.
 pub fn parse_worker_host_run_mode(raw: &str) -> Option<&'static str> {
     match raw.trim() {
         WORKER_HOST_RUN_ON_PC => Some(WORKER_HOST_RUN_ON_PC),
@@ -76,7 +77,8 @@ pub fn parse_worker_host_send_policy(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// `native` or `sandboxed`. Other values are rejected.
+/// `native` or `sandboxed` (derived labels of agent_runtime).
+/// `process`/`container`/`vm` are workspace_location, not host isolation.
 pub fn parse_worker_host_isolation(raw: &str) -> Option<&'static str> {
     match raw.trim() {
         WORKER_HOST_ISOLATION_NATIVE => Some(WORKER_HOST_ISOLATION_NATIVE),
@@ -124,7 +126,7 @@ pub struct WorkerHost {
     pub enabled: bool,
     pub paused: bool,
     pub drain: bool,
-    /// `native` or `sandboxed` (assignable when container/VM is advertised).
+    /// Derived label of agent_runtime: `on_pc`→`native`, `in_container`→`sandboxed`.
     pub isolation: String,
     #[serde(default = "default_runner_kind")]
     pub runner_kind: String,
@@ -169,8 +171,8 @@ pub struct WorkerHost {
     /// Who may send work to this PC (`owner_only` | `allowlist` | `workspace`).
     #[serde(default = "default_send_policy")]
     pub send_policy: String,
-    /// `on_pc` | `in_container`.
-    #[serde(default = "default_run_mode")]
+    /// `on_pc` | `in_container`. Product name: agent_runtime.
+    #[serde(default = "default_run_mode", alias = "agent_runtime")]
     pub run_mode: String,
     pub created_at: DateTime<Utc>,
     pub paired_at: Option<DateTime<Utc>>,
@@ -210,7 +212,7 @@ impl WorkerHost {
         }
     }
 
-    /// Tick / lease assignment: only native isolation is v1.
+    /// Stored host isolation is the derived `native` label (`on_pc`).
     pub fn is_native_isolation(&self) -> bool {
         self.isolation == WORKER_HOST_ISOLATION_NATIVE
     }
@@ -258,6 +260,7 @@ pub struct WorkerHostPublic {
     pub enabled: bool,
     pub paused: bool,
     pub drain: bool,
+    /// Derived label of agent_runtime (`native` | `sandboxed`).
     #[serde(default = "default_isolation")]
     pub isolation: String,
     pub allow_host: bool,
@@ -323,8 +326,12 @@ pub struct WorkerHostPublic {
     /// Pairer. Used with `send_policy` (only me).
     #[serde(default)]
     pub created_by: Option<Uuid>,
+    /// `on_pc` | `in_container`. Product name: agent_runtime.
     #[serde(default = "default_run_mode")]
     pub run_mode: String,
+    /// Same wire value as `run_mode`.
+    #[serde(default = "default_run_mode")]
+    pub agent_runtime: String,
 }
 
 /// Official CLI on a runner. Never includes tokens.
@@ -519,6 +526,11 @@ fn enrich_reported_gpus(hw: &mut WorkerHardwarePublic) {
 
 impl WorkerHostPublic {
     pub fn from_host(host: &WorkerHost, now: DateTime<Utc>) -> Self {
+        let run_mode = if parse_worker_host_run_mode(&host.run_mode).is_some() {
+            host.run_mode.clone()
+        } else {
+            WORKER_HOST_RUN_ON_PC.to_string()
+        };
         Self {
             id: host.id,
             workspace_id: host.workspace_id,
@@ -591,11 +603,8 @@ impl WorkerHostPublic {
                 WORKER_HOST_SEND_OWNER_ONLY.to_string()
             },
             created_by: host.created_by,
-            run_mode: if parse_worker_host_run_mode(&host.run_mode).is_some() {
-                host.run_mode.clone()
-            } else {
-                WORKER_HOST_RUN_ON_PC.to_string()
-            },
+            run_mode: run_mode.clone(),
+            agent_runtime: run_mode,
         }
     }
 
@@ -819,7 +828,7 @@ pub struct HostCpSettings {
     pub enabled: Option<bool>,
     pub paused: Option<bool>,
     pub drain: Option<bool>,
-    /// `native` or `sandboxed`. `None` leaves the column unchanged.
+    /// `native` or `sandboxed` (derived agent_runtime label). `None` leaves the column unchanged.
     pub isolation: Option<String>,
     pub allow_host: Option<bool>,
     pub allow_container: Option<bool>,
@@ -981,6 +990,34 @@ mod public_view_tests {
         );
         assert_eq!(parse_worker_host_isolation("k8s"), None);
         assert_eq!(parse_worker_host_isolation(""), None);
+        assert_eq!(parse_worker_host_isolation("process"), None);
+        assert_eq!(parse_worker_host_isolation("container"), None);
+        assert_eq!(parse_worker_host_isolation("vm"), None);
+    }
+
+    #[test]
+    fn parse_worker_host_isolation_rejects_process() {
+        assert_eq!(
+            parse_worker_host_isolation("process"),
+            None,
+            "process is workspace_location, not host isolation"
+        );
+        assert_eq!(parse_worker_host_isolation("container"), None);
+        assert_eq!(parse_worker_host_isolation("vm"), None);
+        assert_eq!(parse_worker_host_isolation("on_pc"), None);
+        assert_eq!(parse_worker_host_isolation("in_container"), None);
+    }
+
+    #[test]
+    fn as_public_json_aliases_run_mode_as_agent_runtime() {
+        let mut boxed = host(WORKER_HOST_STATUS_ONLINE, Some(Utc::now()));
+        boxed.run_mode = WORKER_HOST_RUN_IN_CONTAINER.into();
+        let public = boxed.as_public(Utc::now());
+        assert_eq!(public.run_mode, WORKER_HOST_RUN_IN_CONTAINER);
+        assert_eq!(public.agent_runtime, WORKER_HOST_RUN_IN_CONTAINER);
+        let v = serde_json::to_value(&public).expect("json");
+        assert_eq!(v["run_mode"], "in_container");
+        assert_eq!(v["agent_runtime"], "in_container");
     }
 
     #[test]
@@ -1147,10 +1184,7 @@ mod public_view_tests {
                 "machine_token",
                 "should-never-leave",
             ] {
-                assert!(
-                    !blob.contains(secret),
-                    "{label} leaked {secret}: {blob}"
-                );
+                assert!(!blob.contains(secret), "{label} leaked {secret}: {blob}");
             }
         }
     }
@@ -1170,8 +1204,7 @@ mod public_view_tests {
             "from_host must leave desired unset; host_json attaches via with_desired"
         );
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            public.software_status, WORKER_SOFTWARE_STATUS_UNKNOWN,
             "from_host hardcodes unknown; with_desired recomputes against a staged manifest"
         );
     }
@@ -1242,14 +1275,10 @@ mod public_view_tests {
             "reported software must appear so unknown is not the never-reported path"
         );
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            public.software_status, WORKER_SOFTWARE_STATUS_UNKNOWN,
             "desired_for withhold or no staged platform must not flag Update"
         );
-        assert!(
-            !public.outdated,
-            "unknown is never outdated"
-        );
+        assert!(!public.outdated, "unknown is never outdated");
     }
 
     #[test]
@@ -1452,8 +1481,7 @@ mod public_view_tests {
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_BEHIND,
+            public.software_status, WORKER_SOFTWARE_STATUS_BEHIND,
             "matching bake without reported bins is behind when the package lists host+driver"
         );
         assert!(
@@ -1697,8 +1725,7 @@ mod public_view_tests {
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_BEHIND,
+            public.software_status, WORKER_SOFTWARE_STATUS_BEHIND,
             "bake-only report against a staged host+driver package is behind"
         );
         assert!(
@@ -1713,8 +1740,7 @@ mod public_view_tests {
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_UNKNOWN,
+            public.software_status, WORKER_SOFTWARE_STATUS_UNKNOWN,
             "a never-reported box stays unknown even when a package is staged"
         );
         assert!(
@@ -1736,8 +1762,7 @@ mod public_view_tests {
             .as_public(Utc::now())
             .with_desired(Some(sample_manifest("aaa")));
         assert_eq!(
-            public.software_status,
-            WORKER_SOFTWARE_STATUS_CURRENT,
+            public.software_status, WORKER_SOFTWARE_STATUS_CURRENT,
             "matching fleet-host+fleet-driver hashes are current"
         );
         assert!(

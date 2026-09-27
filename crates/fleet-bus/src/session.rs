@@ -111,4 +111,18 @@ mod tests {
         .expect("endpoints json");
         assert_eq!(endpoints, [locator]);
     }
+
+    #[tokio::test]
+    async fn live_connect_skips_without_zenohd() {
+        if locator_from_env().is_some() {
+            return;
+        }
+        let opened = try_open_from_env()
+            .await
+            .expect("unset ZENOH_LOCATOR is not an error");
+        assert!(
+            opened.is_none(),
+            "open must skip when ZENOH_LOCATOR is unset (no zenohd)"
+        );
+    }
 }

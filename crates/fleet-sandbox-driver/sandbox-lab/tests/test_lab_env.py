@@ -9,7 +9,7 @@ from pathlib import Path
 from lab_env import env_flag, resolve_flags
 
 _INSTALL = (
-    Path(__file__).resolve().parents[1] / "scripts" / "install-full-suite-deps.sh"
+    Path(__file__).resolve().parents[4] / "scripts" / "install-full-suite-deps.sh"
 )
 
 

@@ -4,17 +4,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult};
+use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
 use fleet_db::repos::workspaces as workspace_repo;
-use fleet_db::TicketInboxItem;
 use fleet_integrations::proxy::{ProxyCaller, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::inbox_sources::{self, InboxKind, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT};
+use crate::inbox_sources::{self, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT, InboxKind};
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -1974,11 +1974,7 @@ async fn fetch_ticket_details(
         _ => return None,
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
-    if result.ok {
-        Some(result.data)
-    } else {
-        None
-    }
+    if result.ok { Some(result.data) } else { None }
 }
 
 fn ticket_spec_md(item: &TicketInboxItem, live: Option<&Value>) -> String {
@@ -2153,7 +2149,7 @@ pub async fn finish_and_launch(
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", 3)
+        .ensure_project(workspace_id, "workspace fleet", 16)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     let ticket_kind = matches!(

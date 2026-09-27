@@ -66,7 +66,7 @@ usage() {
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     err "missing required command: $1"
-    err "Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh"
+    err "Run scripts/install-full-suite-deps.sh"
     err "(no arguments; PROFILE/ENABLE_* in repo-root .env). Do not patch around it."
     return 1
   fi

@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use fleet_auth::{AuthConfig, ACCESS_COOKIE, REFRESH_COOKIE};
@@ -23,6 +25,7 @@ use uuid::Uuid;
 const TEST_PASSWORD: &str = "correct-horse";
 const TEST_ADMIN_TOKEN: &str = "test-admin";
 const TEST_JWT_SECRET: &str = "dev-change-me-to-a-long-random-secret-at-least-32-chars";
+const TEST_WEBHOOK_SECRET: &str = "test-webhook-secret";
 
 fn require_database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -38,6 +41,19 @@ fn require_database_url() -> String {
 
 fn unique_email() -> String {
     format!("srv.{}@example.test", Uuid::new_v4())
+}
+
+/// Inbox JSON exposes the token in `hook_url`, not a separate `hook_token` field.
+fn hook_token_from_monitor(body: &Value) -> String {
+    if let Some(t) = body["hook_token"].as_str().filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    body["hook_url"]
+        .as_str()
+        .and_then(|u| u.rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| panic!("hook_url token: {body}"))
+        .to_string()
 }
 
 fn test_auth_config() -> AuthConfig {
@@ -2088,9 +2104,26 @@ async fn invite_existing_member(app: &axum::Router, owner_jar: &CookieJar, ws: &
     );
     assert_eq!(
         invited.body["added_existing_user"],
-        true,
-        "existing user must join immediately: {}",
+        false,
+        "invite of an existing user is pending until accept: {}",
         invited.body
+    );
+    let token = invited.body["invite"]["token"]
+        .as_str()
+        .expect("invite.token");
+    let accepted = call(
+        app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "accept teammate invite: {}",
+        accepted.body
     );
     member_jar
 }
@@ -2891,7 +2924,7 @@ async fn fleet_settings_get_defaults_fleet_llm_off() {
     assert_eq!(got.body["fleet_llm"], "off", "{}", got.body);
     assert_eq!(got.body["fleet_llm_model"], "", "{}", got.body);
     assert_eq!(got.body["effective_backend"], "off", "{}", got.body);
-    assert_eq!(got.body["max_agents"], 3, "{}", got.body);
+    assert_eq!(got.body["max_agents"], 16, "{}", got.body);
 }
 
 #[tokio::test]
@@ -6648,6 +6681,53 @@ async fn seed_inbox_connection(state: &AppState, workspace_id: Uuid, provider: &
     )
     .await
     .expect("seed connection");
+    let client_secret = state
+        .integrations
+        .credentials_key
+        .encrypt(&json!({ "webhook_secret": TEST_WEBHOOK_SECRET }))
+        .expect("encrypt oauth app");
+    fleet_db::repos::integrations::upsert_oauth_app(
+        &state.db,
+        workspace_id,
+        provider,
+        "test-client",
+        &client_secret,
+        None,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("seed oauth app webhook_secret");
+}
+
+fn hmac_sha256_hex(secret: &str, data: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn github_webhook_headers(body: &[u8]) -> Vec<(String, String)> {
+    let sig = hmac_sha256_hex(TEST_WEBHOOK_SECRET, body);
+    vec![
+        ("x-github-event".into(), "issues".into()),
+        ("x-hub-signature-256".into(), format!("sha256={sig}")),
+    ]
+}
+
+fn slack_webhook_headers(body: &[u8]) -> Vec<(String, String)> {
+    let ts = chrono::Utc::now().timestamp().to_string();
+    let mut msg = Vec::from(b"v0:");
+    msg.extend_from_slice(ts.as_bytes());
+    msg.push(b':');
+    msg.extend_from_slice(body);
+    let sig = format!("v0={}", hmac_sha256_hex(TEST_WEBHOOK_SECRET, &msg));
+    vec![
+        ("x-slack-request-timestamp".into(), ts),
+        ("x-slack-signature".into(), sig),
+    ]
+}
+
+fn header_pairs(owned: &[(String, String)]) -> Vec<(&str, &str)> {
+    owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
 }
 
 #[tokio::test]
@@ -6671,9 +6751,7 @@ async fn inbox_webhook_unknown_token_is_401() {
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
     assert!(
-        started.body["hook_token"]
-            .as_str()
-            .is_some_and(|t| !t.is_empty()),
+        !hook_token_from_monitor(&started.body).is_empty(),
         "need a live hook_token so a stranger path is not the monitor: {}",
         started.body
     );
@@ -6720,18 +6798,17 @@ async fn inbox_webhook_lists_upserted_ticket() {
     )
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
-    let token = started.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&started.body);
     assert!(!token.is_empty());
 
+    let body = github_issue_body();
+    let hdrs = github_webhook_headers(&body);
     let ok = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/github/{token}"),
-        &[("x-github-event", "issues")],
-        github_issue_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
@@ -6771,10 +6848,7 @@ async fn inbox_webhook_pinned_slack_still_ingests_slack() {
     )
     .await;
     assert_eq!(started.status, StatusCode::OK, "{}", started.body);
-    let token = started.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&started.body);
     assert!(!token.is_empty());
 
     let pin = call(
@@ -6792,12 +6866,14 @@ async fn inbox_webhook_pinned_slack_still_ingests_slack() {
     .await;
     assert_eq!(pin.status, StatusCode::OK, "{}", pin.body);
 
+    let body = slack_message_body();
+    let hdrs = slack_webhook_headers(&body);
     let slack = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/slack/{token}"),
-        &[],
-        slack_message_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(slack.status, StatusCode::OK, "{}", slack.body);
@@ -6838,18 +6914,17 @@ async fn inbox_webhook_disabled_monitor_ingests_zero() {
     )
     .await;
     assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
-    let token = stopped.body["hook_token"]
-        .as_str()
-        .expect("hook_token")
-        .to_string();
+    let token = hook_token_from_monitor(&stopped.body);
     assert!(!token.is_empty());
 
+    let body = github_issue_body();
+    let hdrs = github_webhook_headers(&body);
     let hook = call_raw(
         &app,
         "POST",
         &format!("/api/integrations/webhooks/github/{token}"),
-        &[("x-github-event", "issues")],
-        github_issue_body(),
+        &header_pairs(&hdrs),
+        body,
     )
     .await;
     assert_eq!(hook.status, StatusCode::OK, "{}", hook.body);

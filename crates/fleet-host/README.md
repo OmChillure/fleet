@@ -42,23 +42,30 @@ fleet-host update    # apply CP-served bins (same path as auto-update)
 fleet-host unpair    # delete machine.token only; config stays
 ```
 
-## Isolation vs placement
+## Agent runtime vs workspace location
 
-Isolation is `process` < `container` < `vm`. k8s is **placement**, not
-isolation. A pod is still a container (`KubePod`). Firecracker / QEMU /
-KubeVirt are `vm`.
+Two axes, never one isolation enum for this box.
 
-| Isolation | Executor | This box will… |
+| Axis | Meaning | Wire today |
 | --- | --- | --- |
-| `process` (`runtime=host`) | exec | `fleet-driver` on the host (`FLEET_HARNESS=mock\|grok`) |
-| `container` | docker | `docker run` (`--network` default `none`). Same `FLEET_*` as host. Missing docker is an error — never Host. |
-| `container` | kube_pod | In-cluster (or `KUBECONFIG`) creates a `FleetSandbox` CR. Guest is `fleet-driver` (ACP). |
-| `vm` | firecracker / qemu | Allowed only when a hypervisor is on `PATH`. `run_vm` is fail-closed (no Host fallback). |
+| **agent_runtime** | Where the agent runs: host process (TUI) vs container/VM | `run_mode` `on_pc` \| `in_container` (JSON alias `agent_runtime`) |
+| **workspace_location** | Where the repo lives: host vs container/VM | workspace `min_isolation` `process` \| `container` \| `vm` |
+
+Host `isolation` `native`/`sandboxed` is derived from agent_runtime
+(`on_pc`→`native`, `in_container`→`sandboxed`). k8s is placement (a
+pod is still a container). Kind/container is assignable.
+
+| agent_runtime | Executor | This box will… |
+| --- | --- | --- |
+| `on_pc` (`runtime=host`) | exec | `fleet-driver` on the host (`FLEET_HARNESS=mock\|grok`) |
+| `in_container` | docker | `docker run` (`--network` default `none`). Same `FLEET_*` as host. Missing docker is an error — never Host. |
+| `in_container` | kube_pod | In-cluster (or `KUBECONFIG`) creates a `FleetSandbox` CR. Guest is `fleet-driver` (ACP). |
+| `in_container` (vm guest) | firecracker / qemu | Allowed only when a hypervisor is on `PATH`. `run_vm` is fail-closed (no Host fallback). |
 
 | Key | Default | This box will… |
 | --- | --- | --- |
-| `run_host` | `true` | Accept process isolation |
-| `run_container` | `false` | Accept container isolation (docker or kube_pod) |
+| `run_host` | `true` | Accept host-process agent runtime |
+| `run_container` | `false` | Accept container/VM agent runtime (docker or kube_pod) |
 | `container_backend` | `k3d` | Hint: `docker` requires the docker CLI; `k3d` prefers kube |
 | `docker_network` | `bridge` | Docker network for `docker run`. Empty omits `--network`. `none` blocks heartbeats. |
 

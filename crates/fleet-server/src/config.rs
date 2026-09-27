@@ -2,7 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use fleet_auth::AuthConfig;
 use fleet_integrations::IntegrationsConfig;
 
@@ -259,8 +259,8 @@ mod tests {
                 ("SANDBOX_BACKEND", None),
             ],
             || {
-                let err = ServerConfig::from_env()
-                    .expect_err("HOST=localhost is not a SocketAddr host");
+                let err =
+                    ServerConfig::from_env().expect_err("HOST=localhost is not a SocketAddr host");
                 let msg = format!("{err:#}");
                 assert!(
                     msg.contains("invalid HOST/PORT"),
@@ -365,10 +365,7 @@ mod tests {
                         "http://127.0.0.1:13230".to_string(),
                     ]
                 );
-                assert_eq!(
-                    cfg.integrations.api_public_base,
-                    "http://localhost:18280"
-                );
+                assert_eq!(cfg.integrations.api_public_base, "http://localhost:18280");
                 assert_eq!(cfg.integrations.ui_public_base, "http://localhost:13230");
             },
         );

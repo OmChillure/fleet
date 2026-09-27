@@ -20,7 +20,7 @@ cargo run
 
 # Terminal 2 — UI (proxies /api → backend; cookies stay first-party)
 # dx comes from the one install script (do not cargo-install it on the host):
-#   crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+#   scripts/install-full-suite-deps.sh
 dx serve --package fleet-ui --port 3030
 # → http://localhost:3030
 ```

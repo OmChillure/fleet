@@ -35,7 +35,7 @@ ok ".env DATABASE_URL → compose :5433, ENABLE_BROWSER_E2E=1"
 
 if ! need dx; then
   echo "ERROR: dx (Dioxus CLI) is not on PATH." >&2
-  echo "       Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh" >&2
+  echo "       Run scripts/install-full-suite-deps.sh" >&2
   echo "       (no arguments; PROFILE/ENABLE_* in repo-root .env)." >&2
   echo "       Do not WARN-and-continue. Do not use Kind UI as a substitute for host dx." >&2
   exit 1
@@ -45,7 +45,7 @@ ok "dx $(dx --version 2>/dev/null || true)"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${ROOT}/.tmp/ms-playwright}"
 if ! python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(headless=True).close(); p.stop()" >/dev/null 2>&1; then
   echo "ERROR: playwright chromium is not ready." >&2
-  echo "       Run crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh" >&2
+  echo "       Run scripts/install-full-suite-deps.sh" >&2
   echo "       (no arguments; ENABLE_BROWSER_E2E=1 in repo-root .env). Do not pip/apt around it." >&2
   exit 1
 fi

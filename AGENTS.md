@@ -1,5 +1,18 @@
 # Agent notes
 
+## Merge bar (hard)
+
+**Opening a GitLab MR is the green light to merge.** If a human sees an
+MR, they will merge it. A branch may exist. The MR must not, until the
+bar below is green on the **final** tree. Starting `just test` or a
+ship-image bake and opening the MR while it runs is not done.
+
+The only command that may create an MR is `scripts/open-mr.sh` (it runs
+`scripts/assert-mr-ready.sh` first). Never `git push -o merge_request.create`,
+`glab mr create`, or `POST /merge_requests`. A PreToolUse hook denies
+those. If you are about to create or reopen an MR, follow
+`.grok/skills/open-mr/SKILL.md`. Details: **Merge requests and review**.
+
 ## External connections (do not lock operators out)
 
 Paired runners and live integrations are **external connections**. Treat them
@@ -48,7 +61,7 @@ long queue.
 
 Install is one command, no arguments:
 
-`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
+`scripts/install-full-suite-deps.sh`
 
 Read that script for OS/RAM/disk/`PROFILE`/`ENABLE_*`. Persist those in the
 repo-root `.env` (same file as DATABASE_URL / JWT / OAuth). Do not invent a
@@ -133,6 +146,11 @@ can exist locally. The MR must not. The bookworm ship-image compile is
 the deployer's proof (`PROVE_ONLY=1` in `deploy/studio/scripts/deploy.sh`),
 not a command the author runs before opening the MR. The MR is mergeable
 only after that proof exists for this SHA.
+
+The only allowed creator is `scripts/open-mr.sh`. It refuses unless
+`scripts/assert-mr-ready.sh` sees receipts from `scripts/record-mr-bar.sh`
+for **this** `scripts/tree-id.sh`. A new commit or dirty tree changes
+the id and drops the receipts. Never `git push -o merge_request.create`.
 
 Ship work through a **GitLab merge request** and **ask for a peer review on
 Slack**. That is the default.

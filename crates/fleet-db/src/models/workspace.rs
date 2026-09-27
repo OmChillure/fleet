@@ -2,13 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-/// Canonical IsolationClass wire strings stored on `workspaces.min_isolation`.
-/// Not a second enum — keep these as `&str` and parse in contracts.
+/// Canonical workspace_location wire strings stored on `workspaces.min_isolation`.
+/// Where the repo lives — not agent_runtime (`run_mode` on the host).
+/// Settings JSON still uses `min_isolation` (see fleet_routes.rs).
 pub const MIN_ISOLATION_PROCESS: &str = "process";
 pub const MIN_ISOLATION_CONTAINER: &str = "container";
 pub const MIN_ISOLATION_VM: &str = "vm";
 
-/// `process` | `container` | `vm`. Other values are rejected.
+/// `process` | `container` | `vm` (workspace_location). Other values are rejected.
 pub fn parse_min_isolation(raw: &str) -> Option<&'static str> {
     match raw.trim() {
         MIN_ISOLATION_PROCESS => Some(MIN_ISOLATION_PROCESS),
@@ -100,6 +101,8 @@ mod min_isolation_tests {
         assert_eq!(parse_min_isolation("native"), None);
         assert_eq!(parse_min_isolation("host"), None);
         assert_eq!(parse_min_isolation("k8s"), None);
+        assert_eq!(parse_min_isolation("on_pc"), None);
+        assert_eq!(parse_min_isolation("in_container"), None);
         assert_eq!(parse_min_isolation(""), None);
     }
 }

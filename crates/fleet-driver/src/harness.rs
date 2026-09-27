@@ -11,6 +11,42 @@ pub struct HarnessSpec {
     pub args: Vec<String>,
 }
 
+/// Same chat ids as `fleet-server` `PROVIDERS`, plus guest-only `mock`.
+/// Aliases match `ProviderSpec::aliases` (xai / codex / google / anthropic).
+const GUEST_HARNESS: &[(&str, &[&str])] = &[
+    ("mock", &[]),
+    ("grok", &["xai"]),
+    ("ollama", &[]),
+    ("openai", &["codex"]),
+    ("gemini", &["google"]),
+    ("claude", &["anthropic"]),
+];
+
+fn guest_harness_list_phrase() -> String {
+    GUEST_HARNESS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Canonical `FLEET_HARNESS` id. Empty → `mock`. Unregistered names (e.g. `deepseek`) fail.
+pub fn parse_harness_id(raw: &str) -> Result<String> {
+    let key = raw.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return Ok("mock".into());
+    }
+    for (id, aliases) in GUEST_HARNESS {
+        if key == *id || aliases.iter().any(|alias| *alias == key) {
+            return Ok((*id).into());
+        }
+    }
+    bail!(
+        "unknown harness {raw:?}; expected {}",
+        guest_harness_list_phrase()
+    )
+}
+
 /// Resolve harness argv.
 ///
 /// * `FLEET_HARNESS_CMD` (whitespace-split) overrides command+args entirely.
@@ -44,8 +80,9 @@ pub fn resolve(
         });
     }
 
+    let name = parse_harness_id(&name)?;
     match name.as_str() {
-        "" | "mock" => {
+        "mock" => {
             let command = mock_command(mock_bin);
             Ok(HarnessSpec {
                 name: "mock".into(),
@@ -73,7 +110,7 @@ pub fn resolve(
                 args,
             })
         }
-        "claude" | "anthropic" => {
+        "claude" => {
             let mut args = vec![
                 "-p".into(),
                 "--output-format".into(),
@@ -105,7 +142,7 @@ pub fn resolve(
             command: "ollama".into(),
             args: Vec::new(),
         }),
-        "openai" | "codex" => {
+        "openai" => {
             let mut args = vec!["exec".into(), "--skip-git-repo-check".into()];
             if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
                 args.push("-m".into());
@@ -117,7 +154,7 @@ pub fn resolve(
                 args,
             })
         }
-        "gemini" | "google" => {
+        "gemini" => {
             let mut args = vec!["-p".into()];
             if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
                 args.push("-m".into());
@@ -129,7 +166,10 @@ pub fn resolve(
                 args,
             })
         }
-        other => bail!("unknown harness {other:?}; expected mock|grok|claude|ollama|openai|gemini"),
+        other => bail!(
+            "unknown harness {other:?}; expected {}",
+            guest_harness_list_phrase()
+        ),
     }
 }
 
@@ -245,21 +285,61 @@ mod tests {
     #[test]
     fn unknown_harness_errs() {
         assert!(resolve("opencode", None, None, true, None, None, None).is_err());
+        assert!(parse_harness_id("deepseek").is_err());
+    }
+
+    #[test]
+    fn fleet_harness_maps_same_id_set() {
+        assert_eq!(parse_harness_id("").unwrap(), "mock");
+        assert_eq!(parse_harness_id("mock").unwrap(), "mock");
+        for id in ["grok", "ollama", "openai", "gemini", "claude"] {
+            assert_eq!(parse_harness_id(id).unwrap(), id);
+        }
+        assert_eq!(parse_harness_id("xai").unwrap(), "grok");
+        assert_eq!(parse_harness_id("codex").unwrap(), "openai");
+        assert_eq!(parse_harness_id("google").unwrap(), "gemini");
+        assert_eq!(parse_harness_id("anthropic").unwrap(), "claude");
+        let h = resolve("anthropic", None, None, false, None, None, None).unwrap();
+        assert_eq!(h.name, "claude");
     }
 
     #[test]
     fn claude_print_keeps_tools() {
-        let h = resolve("claude", None, Some("sonnet"), true, None, None, Some("high"))
-            .unwrap();
+        let h = resolve(
+            "claude",
+            None,
+            Some("sonnet"),
+            true,
+            None,
+            None,
+            Some("high"),
+        )
+        .unwrap();
         assert_eq!(h.name, "claude");
         assert_eq!(h.command, "claude");
         assert!(h.args.contains(&"-p".into()));
-        assert!(!h.args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
-        assert!(h.args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"));
+        assert!(
+            !h.args
+                .windows(2)
+                .any(|w| w[0] == "--tools" && w[1].is_empty())
+        );
+        assert!(
+            h.args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions")
+        );
         assert!(!h.args.iter().any(|a| a == "dontAsk"));
-        assert!(h.args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        assert!(
+            h.args
+                .windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "sonnet")
+        );
         let ask = resolve("claude", None, None, false, None, None, None).unwrap();
-        assert!(ask.args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits"));
+        assert!(
+            ask.args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits")
+        );
     }
 
     #[test]

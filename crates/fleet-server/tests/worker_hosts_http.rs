@@ -2401,7 +2401,7 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
         .as_str()
         .unwrap_or_else(|| panic!("create pair_token: {}", created.body))
         .to_string();
-    let hid = created.body["host"]["id"]
+    let _hid = created.body["host"]["id"]
         .as_str()
         .expect("host.id")
         .to_string();
@@ -2430,7 +2430,6 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
                 "platform": "linux-x86_64",
                 "advertised_host": true,
                 "advertised_container": false,
-                "machine_id": hid,
                 "workspace_id": ws
             })),
         )
@@ -9572,6 +9571,7 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     let app = app().await;
     let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(TEST_BOOTSTRAP_SECRET)).await;
     let (_email, _jar, ws) = signup_and_login(&app).await;
+    let hostname = format!("cluster-host-{}", Uuid::new_v4());
     let machine_id = Uuid::new_v4();
     let first = call_bearer(
         &app,
@@ -9579,11 +9579,10 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
         "/api/worker-hosts/bootstrap",
         TEST_BOOTSTRAP_SECRET,
         Some(json!({
-            "hostname": "cluster-host",
+            "hostname": hostname,
             "platform": "linux-x86_64",
             "advertised_host": false,
             "advertised_container": true,
-            "machine_id": machine_id,
             "workspace_id": ws
         })),
     )
@@ -9614,7 +9613,7 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
         "/api/worker-hosts/bootstrap",
         TEST_BOOTSTRAP_SECRET,
         Some(json!({
-            "hostname": "cluster-host",
+            "hostname": hostname,
             "platform": "linux-x86_64",
             "advertised_host": false,
             "advertised_container": true,
@@ -9636,7 +9635,7 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     );
     let _ = host_id;
 
-    let old = call_bearer(
+    let still = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/me/heartbeat",
@@ -9649,10 +9648,10 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     )
     .await;
     assert_eq!(
-        old.status,
+        still.status,
         StatusCode::OK,
         "original machine token still works: {}",
-        old.body
+        still.body
     );
 }
 

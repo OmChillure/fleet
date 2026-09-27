@@ -4,6 +4,7 @@ pub mod admin;
 pub mod cases;
 pub mod chats;
 pub mod control_plane_events;
+pub mod instance_settings;
 pub mod integrations;
 pub mod llm_keys;
 pub mod personas;

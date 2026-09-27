@@ -1,19 +1,116 @@
-//! OpenAI and Anthropic (Claude) chat providers — same tool loop as Grok.
+//! Chat / guest provider registry and plane-key loops (OpenAI, Gemini, Claude).
 
 use std::env;
 use std::time::Duration;
 
 use fleet_auth::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat::{ChatModelInfo, ChatProgress, ChatProviderInfo};
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace,
-    tool_definitions, ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace, tool_definitions,
 };
 use crate::state::AppState;
+
+/// Where tokens / the binary live for a registered chat provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRun {
+    /// Official CLI on the selected runner (`grok`, `claude`, `ollama`).
+    RunnerCli,
+    /// Control-plane API key; runner CLI is an extra path (`openai`, `gemini`).
+    ControlPlaneKey,
+}
+
+/// One registered chat / guest provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub run: ProviderRun,
+}
+
+impl ProviderSpec {
+    fn matches(&self, raw: &str) -> bool {
+        self.id == raw || self.aliases.iter().any(|alias| *alias == raw)
+    }
+}
+
+// New provider = add a ProviderSpec here + complete/status hooks; do not add a sixth match-arm in chat.rs.
+pub const PROVIDERS: &[ProviderSpec] = &[
+    ProviderSpec {
+        id: "grok",
+        display_name: "Grok",
+        aliases: &["xai"],
+        run: ProviderRun::RunnerCli,
+    },
+    ProviderSpec {
+        id: "ollama",
+        display_name: "Private (Ollama)",
+        aliases: &[],
+        run: ProviderRun::RunnerCli,
+    },
+    ProviderSpec {
+        id: "openai",
+        display_name: "OpenAI",
+        aliases: &["codex"],
+        run: ProviderRun::ControlPlaneKey,
+    },
+    ProviderSpec {
+        id: "gemini",
+        display_name: "Gemini",
+        aliases: &["google"],
+        run: ProviderRun::ControlPlaneKey,
+    },
+    ProviderSpec {
+        id: "claude",
+        display_name: "Claude",
+        aliases: &["anthropic"],
+        run: ProviderRun::RunnerCli,
+    },
+];
+
+/// Canonical ids in registry order. Does not include guest-only `mock`.
+pub fn all_provider_ids() -> Vec<&'static str> {
+    PROVIDERS.iter().map(|p| p.id).collect()
+}
+
+/// Lookup by canonical id or alias.
+pub fn provider_spec(raw: &str) -> Option<&'static ProviderSpec> {
+    let key = raw.trim().to_ascii_lowercase();
+    PROVIDERS.iter().find(|p| p.matches(&key))
+}
+
+fn provider_id_list_phrase() -> String {
+    let ids = all_provider_ids();
+    match ids.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// Canonical chat / `TASK_PROVIDER` id. Empty, typo, and unregistered names fail closed.
+pub fn parse_provider_id(raw: &str) -> AppResult<String> {
+    match provider_spec(raw) {
+        Some(spec) => Ok(spec.id.to_string()),
+        None => {
+            let other = raw.trim().to_ascii_lowercase();
+            Err(AppError::bad_request(format!(
+                "unknown provider `{other}` — use {}",
+                provider_id_list_phrase()
+            )))
+        }
+    }
+}
+
+/// Same as [`parse_provider_id`]; chat.rs calls this name.
+pub fn parse_provider(raw: &str) -> AppResult<String> {
+    parse_provider_id(raw)
+}
 
 const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 const GEMINI_DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -167,20 +264,6 @@ fn split_models(raw: Option<&str>, family: &str) -> Vec<ChatModelInfo> {
         .collect()
 }
 
-/// Canonical chat / `TASK_PROVIDER` id. Empty, typo, and ticket names fail closed.
-pub fn parse_provider(raw: &str) -> AppResult<String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "openai" => Ok("openai".into()),
-        "gemini" | "google" => Ok("gemini".into()),
-        "claude" | "anthropic" => Ok("claude".into()),
-        "grok" | "xai" => Ok("grok".into()),
-        "ollama" => Ok("ollama".into()),
-        other => Err(AppError::bad_request(format!(
-            "unknown provider `{other}` — use grok, ollama, openai, gemini, or claude"
-        ))),
-    }
-}
-
 pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
     if !cfg.enabled {
         return ChatProviderInfo {
@@ -201,9 +284,7 @@ pub fn openai_status(cfg: &OpenaiConfig) -> ChatProviderInfo {
             name: "OpenAI".into(),
             available: false,
             coming_soon: false,
-            error: Some(
-                "Set OPENAI_API_KEY or pick a runner with Codex / the OpenAI CLI.".into(),
-            ),
+            error: Some("Set OPENAI_API_KEY or pick a runner with Codex / the OpenAI CLI.".into()),
             models,
             default_model,
         };
@@ -226,9 +307,10 @@ fn gemini_models() -> Vec<ChatModelInfo> {
 }
 
 fn gemini_default_model(models: &[ChatModelInfo]) -> Option<String> {
-    models.first().map(|m| m.name.clone()).or_else(|| {
-        Some("gemini-2.5-flash".into())
-    })
+    models
+        .first()
+        .map(|m| m.name.clone())
+        .or_else(|| Some("gemini-2.5-flash".into()))
 }
 
 pub fn gemini_status(cfg: &GeminiConfig) -> ChatProviderInfo {
@@ -1009,31 +1091,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_provider_id_accepts_five_rejects_deepseek_until_registered() {
+        assert_eq!(
+            all_provider_ids(),
+            vec!["grok", "ollama", "openai", "gemini", "claude"]
+        );
+        for id in all_provider_ids() {
+            assert_eq!(parse_provider_id(id).unwrap(), id);
+        }
+        assert_eq!(parse_provider_id("xai").unwrap(), "grok");
+        assert_eq!(parse_provider_id("codex").unwrap(), "openai");
+        assert_eq!(parse_provider_id("google").unwrap(), "gemini");
+        assert_eq!(parse_provider_id("anthropic").unwrap(), "claude");
+        let err = match parse_provider_id("deepseek") {
+            Ok(id) => panic!("deepseek must stay unregistered, got {id}"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AppError::BadRequest(_)));
+        assert!(provider_spec("deepseek").is_none());
+    }
+
+    #[test]
     fn openai_config_available_requires_enabled_and_nonempty_key() {
-        assert!(!OpenaiConfig {
-            enabled: false,
-            api_key: Some("sk-test".into()),
-            api_base: OPENAI_DEFAULT_BASE.into(),
-        }
-        .available());
-        assert!(!OpenaiConfig {
-            enabled: true,
-            api_key: None,
-            api_base: OPENAI_DEFAULT_BASE.into(),
-        }
-        .available());
-        assert!(!OpenaiConfig {
-            enabled: true,
-            api_key: Some(String::new()),
-            api_base: OPENAI_DEFAULT_BASE.into(),
-        }
-        .available());
-        assert!(OpenaiConfig {
-            enabled: true,
-            api_key: Some("sk-test".into()),
-            api_base: OPENAI_DEFAULT_BASE.into(),
-        }
-        .available());
+        assert!(
+            !OpenaiConfig {
+                enabled: false,
+                api_key: Some("sk-test".into()),
+                api_base: OPENAI_DEFAULT_BASE.into(),
+            }
+            .available()
+        );
+        assert!(
+            !OpenaiConfig {
+                enabled: true,
+                api_key: None,
+                api_base: OPENAI_DEFAULT_BASE.into(),
+            }
+            .available()
+        );
+        assert!(
+            !OpenaiConfig {
+                enabled: true,
+                api_key: Some(String::new()),
+                api_base: OPENAI_DEFAULT_BASE.into(),
+            }
+            .available()
+        );
+        assert!(
+            OpenaiConfig {
+                enabled: true,
+                api_key: Some("sk-test".into()),
+                api_base: OPENAI_DEFAULT_BASE.into(),
+            }
+            .available()
+        );
     }
 
     #[test]
@@ -1268,8 +1379,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::thread;
             use std::time::Duration;
 

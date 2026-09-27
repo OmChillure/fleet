@@ -4,15 +4,13 @@ use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::plan_jobs::{self, NewPlanJob};
 use fleet_db::repos::workspaces as workspace_repo;
-use fleet_orchestrator::domain::{
-    PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
-};
+use fleet_orchestrator::domain::{PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus};
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -120,7 +118,7 @@ pub async fn accept_goal_plan(
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", 3)
+        .ensure_project(workspace_id, "workspace fleet", 16)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     let plan = plan_from_goal(workspace_id, &claimed.goal, worker_profile);
@@ -129,7 +127,12 @@ pub async fn accept_goal_plan(
         return Err(AppError::bad_request(e.to_string()));
     }
     let run_id = plan.run_id;
-    match state.orch.store.insert_accepted_plan(workspace_id, plan).await {
+    match state
+        .orch
+        .store
+        .insert_accepted_plan(workspace_id, plan)
+        .await
+    {
         Ok(_) => {
             let done = plan_jobs::mark_accepted(&state.db, workspace_id, job.id, run_id)
                 .await?

@@ -3,22 +3,21 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
+    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
-    identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    is_home_workspace, not_taking_reason, provider_install_command, runtime_line,
-    settings_draft_dirty,
-    shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
-    status_label, trimmed_host_name, update_now_label, update_requested, verify_install_command,
-    widgets_locked, windows_verify_install_command, worker_id_label, BEHAVIOR_LABEL,
+    identity_line, in_removed_list, is_control_plane, is_home_workspace, is_removed, jobs_line,
+    last_seen_label, not_taking_reason, provider_install_command, runtime_line,
+    settings_draft_dirty, shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line,
+    stale_package_warning, status_label, trimmed_host_name, update_now_label, update_requested,
+    verify_install_command, widgets_locked, windows_verify_install_command, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    create_host, fetch_local_model_tags, fetch_local_models, install_commands, list_workers_page,
-    patch_host, revoke_host, windows_install_command, CreateHostBody, CreateHostResponse,
-    HostPatch, HostPublic, LocalModelCatalog, LocalModelTags, PackageInventory,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTags,
+    PackageInventory, create_host, fetch_local_model_tags, fetch_local_models, install_commands,
+    list_workers_page, patch_host, revoke_host, windows_install_command,
 };
 use crate::pages::auth::api::auth_base_url;
 use crate::clipboard::copy_text;
@@ -83,7 +82,8 @@ fn request_create_host(
                 send_policy: Some(send_policy),
             },
         )
-        .await {
+        .await
+        {
             Ok(created) => {
                 let mut list = hosts();
                 if !list.iter().any(|h| h.id == created.host.id) {
@@ -1875,7 +1875,7 @@ fn SandboxBlock(
                 "Sandboxing"
             }
             p { class: "m-0 text-[11px] text-[var(--app-muted)]",
-                "What this runner may execute. Workspace Settings still set the minimum isolation (process < container < vm)."
+                "What this runner may execute. Workspace Settings still set workspace location (process < container < vm)."
             }
 
             div { class: "space-y-1.5 rounded-lg border border-[var(--app-border)] p-2",

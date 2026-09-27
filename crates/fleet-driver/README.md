@@ -75,7 +75,7 @@ Process sandbox uses your user `~/.grok` (including MCP servers in
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `FLEET_*` | (required) | Session, token, API URL, work dir (same contract as the pair payload) |
-| `FLEET_HARNESS` | `mock` | `mock` \| `grok` \| `claude` \| `ollama` (plus openai/gemini aliases) |
+| `FLEET_HARNESS` | `mock` | `mock` \| `grok` \| `ollama` \| `openai` \| `gemini` \| `claude` (same ids as chat; aliases `xai`/`codex`/`google`/`anthropic`) |
 | `FLEET_MODEL` | unset | `grok agent -m` (else Grok config default) |
 | `FLEET_REASONING_EFFORT` | unset | `grok agent --reasoning-effort` |
 | `FLEET_GROK_BIN` | `~/.grok/bin/grok` or `PATH` | Grok CLI |

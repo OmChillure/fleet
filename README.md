@@ -23,7 +23,7 @@ Rust workspace (see root `Cargo.toml`).
 ## Local development
 
 Install is one command, no flags:
-`crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
+`scripts/install-full-suite-deps.sh`
 (`PROFILE` / `ENABLE_*` in repo-root `.env`). Do not `cargo install` around a
 missing `dx` / `kind` / Playwright.
 

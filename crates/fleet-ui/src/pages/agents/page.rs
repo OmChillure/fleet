@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    PersonaDto, WorkspacePersona, archive_workspace_persona, create_workspace_persona,
-    fetch_personas, list_workspace_personas, seed_starters,
+    RosterSpecialist, WorkspacePersona, archive_workspace_persona, create_workspace_persona,
+    fetch_roster_specialists, list_workspace_personas, seed_starters,
 };
 use crate::components::toast::show_toast;
 
@@ -10,7 +10,7 @@ use crate::components::toast::show_toast;
 pub fn Agents(workspace_id: String) -> Element {
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
-    let mut personas = use_signal(Vec::<PersonaDto>::new);
+    let mut specialists = use_signal(Vec::<RosterSpecialist>::new);
     let mut workspace_personas = use_signal(Vec::<WorkspacePersona>::new);
     let mut backend = use_signal(|| None::<String>);
     let mut source = use_signal(String::new);
@@ -25,11 +25,11 @@ pub fn Agents(workspace_id: String) -> Element {
     use_effect(move || {
         let ws = ws.clone();
         spawn(async move {
-            match fetch_personas(&ws).await {
+            match fetch_roster_specialists(&ws).await {
                 Ok(p) => {
                     source.set(p.source);
                     backend.set(p.agent_backend);
-                    personas.set(p.personas);
+                    specialists.set(p.specialists);
                     error.set(None);
                 }
                 Err(e) => error.set(Some(e)),
@@ -47,46 +47,52 @@ pub fn Agents(workspace_id: String) -> Element {
                 "Agents"
             }
             p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                "Personas configure future runs. No LLM is called here. "
-                "Roster slugs go on launch_agent_plan. Workspace personas are saved here (seed starters or create your own). "
+                "No LLM is called here. Roster specialists are agency-agents roles you pick as worker_profile. "
+                "Workspace personas are saved on this workspace (seed the 8 starters or create your own). "
                 if let Some(b) = backend() {
                     "LLM backend: {b}."
                 } else {
                     "Pick Grok / Claude / Ollama on a paired runner in Chat. Settings Ollama is only a fallback."
                 }
             }
-            if !source().is_empty() {
-                p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "Roster: {source}"
-                }
-            }
 
-            if loading() {
-                p { class: "mt-8 text-sm text-[var(--app-muted)]", "Loading personas…" }
-            } else if let Some(err) = error() {
-                p { class: "mt-8 text-sm text-[var(--app-muted)]", "{err}" }
-            } else {
-                div { class: "mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3",
-                    for p in personas() {
-                        article {
-                            key: "{p.slug}",
-                            class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
-                            p { class: "m-0 text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
-                                "{p.division}"
-                            }
-                            h2 { class: "m-0 mt-1 text-sm font-semibold text-[var(--app-fg)]",
-                                "{p.emoji} {p.name}"
-                            }
-                            p { class: "m-0 mt-1 font-mono text-[11px] text-[var(--app-muted)]",
-                                "{p.slug}"
-                            }
-                            if !p.vibe.is_empty() {
-                                p { class: "m-0 mt-2 text-xs leading-5 text-[var(--app-fg)]",
-                                    "{p.vibe}"
+            section { class: "mt-8",
+                h2 { class: "m-0 text-lg font-semibold text-[var(--app-fg)]",
+                    "Roster specialists"
+                }
+                p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                    "Agency-agents catalog. Slugs go on launch_agent_plan as worker_profile."
+                    if !source().is_empty() {
+                        " Source: {source}"
+                    }
+                }
+                if loading() {
+                    p { class: "mt-4 text-sm text-[var(--app-muted)]", "Loading roster specialists…" }
+                } else if let Some(err) = error() {
+                    p { class: "mt-4 text-sm text-[var(--app-muted)]", "{err}" }
+                } else {
+                    div { class: "mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3",
+                        for p in specialists() {
+                            article {
+                                key: "{p.slug}",
+                                class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                                p { class: "m-0 text-[10px] uppercase tracking-wide text-[var(--app-muted)]",
+                                    "{p.division}"
                                 }
-                            } else if !p.description.is_empty() {
-                                p { class: "m-0 mt-2 text-xs leading-5 text-[var(--app-muted)]",
-                                    "{p.description}"
+                                h3 { class: "m-0 mt-1 text-sm font-semibold text-[var(--app-fg)]",
+                                    "{p.emoji} {p.name}"
+                                }
+                                p { class: "m-0 mt-1 font-mono text-[11px] text-[var(--app-muted)]",
+                                    "{p.slug}"
+                                }
+                                if !p.vibe.is_empty() {
+                                    p { class: "m-0 mt-2 text-xs leading-5 text-[var(--app-fg)]",
+                                        "{p.vibe}"
+                                    }
+                                } else if !p.description.is_empty() {
+                                    p { class: "m-0 mt-2 text-xs leading-5 text-[var(--app-muted)]",
+                                        "{p.description}"
+                                    }
                                 }
                             }
                         }
@@ -130,7 +136,7 @@ pub fn Agents(workspace_id: String) -> Element {
                     }
                 }
                 p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                    "Stored on this workspace. Seed adds the 8 starter roles if missing."
+                    "Stored on this workspace (role prompt, tools, budget). Seed adds the 8 starter roles if missing."
                 }
 
                 div { class: "mt-4 grid gap-3 sm:grid-cols-2",

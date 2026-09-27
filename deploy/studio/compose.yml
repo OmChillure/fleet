@@ -151,6 +151,7 @@ services:
       - web
 
   zenohd:
+    # crate zenoh 1.10; image 1.2.1 (known skew; open+pubsub is the lock)
     image: eclipse/zenoh:1.2.1@sha256:ed9c4ca01a64efb1bd52c2ad7668c6477c7a6981da1b502101db80e0d6be1f44
     restart: unless-stopped
     <<: *default-security
