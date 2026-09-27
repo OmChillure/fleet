@@ -2559,6 +2559,9 @@ class VerifyInstallTests(unittest.TestCase):
                 'control_plane_url = "http://old.example"\n', encoding="utf-8"
             )
             (cfg / "machine.token").write_text("flm_secretvalue\n", encoding="utf-8")
+            unit = home / ".config" / "systemd" / "user" / "fleet-host.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
             bin_path = home / ".local" / "bin" / "fleet-host"
             bin_path.parent.mkdir(parents=True)
             bin_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

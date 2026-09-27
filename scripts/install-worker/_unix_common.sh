@@ -579,8 +579,13 @@ fleet_verify() {
             _active=$(systemctl is-active fleet-host 2>/dev/null || true)
         fi
     fi
+    _proc_exe=
     if have pgrep && pgrep -x fleet-host >/dev/null 2>&1; then
         _running=1
+        _pid=$(pgrep -x fleet-host 2>/dev/null | head -n 1 || true)
+        if [ -n "$_pid" ] && [ -r "/proc/$_pid/exe" ]; then
+            _proc_exe=$(readlink "/proc/$_pid/exe" 2>/dev/null || true)
+        fi
     fi
     case $_active in
         active|activating) _running=1 ;;
@@ -624,6 +629,13 @@ fleet_verify() {
         fi
     fi
 
+    if [ "$_running" -eq 1 ] && [ -n "$_proc_exe" ] && [ -n "$_bin" ] && [ "$_proc_exe" != "$_bin" ]; then
+        _means="$_means A different program is running than the installed binary."
+    fi
+    if [ "$_running" -eq 1 ] && [ "$_enabled" = disabled ]; then
+        _means="$_means The service unit is disabled, so a new login will not start it."
+    fi
+
     _config=$(paired_control_plane_url || true)
     _config=$(norm_pair_url "$_config")
     _command=$(norm_pair_url "${FLEET_URL:-}")
@@ -641,6 +653,31 @@ fleet_verify() {
     info "fleet-host verify"
     if [ -n "$_bin" ]; then info "binary:          $_bin"; else info "binary:          missing"; fi
     if [ "$_token" -eq 1 ]; then info "token:           present"; else info "token:           missing"; fi
+    if [ -n "$_scope" ]; then
+        [ -n "$_enabled" ] || _enabled=unknown
+        [ -n "$_active" ] || _active=unknown
+        info "service:         ${_scope} systemd enabled=${_enabled} active=${_active}"
+    else
+        info "service:         no unit file"
+    fi
+    if [ "$_running" -eq 1 ]; then
+        if [ -n "$_proc_exe" ]; then
+            info "process:         running ${_proc_exe}"
+        else
+            info "process:         running"
+        fi
+    else
+        info "process:         not running"
+    fi
+    if [ -n "$_proc_exe" ] && [ -n "$_bin" ] && [ "$_proc_exe" != "$_bin" ]; then
+        info "process_note:    the running program is not the installed binary"
+    fi
+    _hb=$_cfg_dir/last_heartbeat.json
+    if [ -f "$_hb" ]; then
+        info "last_heartbeat:  $(tr '\n' ' ' < "$_hb")"
+    else
+        info "last_heartbeat:  (none)"
+    fi
     if [ -n "$_config" ]; then info "plane_config:    $_config"; else info "plane_config:    missing"; fi
     info "plane_config_ping: $_config_ping"
     if [ -n "$_command" ]; then
