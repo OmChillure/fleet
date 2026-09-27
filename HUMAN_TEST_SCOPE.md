@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `d5f706a1c3217811d38ae9307451e52c36c3cc98`
-- Tree-id: `f7325c97e675b1415886ed94a7768846600b647d`
+- Tree-id: `29715dff9fee3c663956ccffdbd6d4a5b4b4df8e`
 
 ## Scenes
 
@@ -31,6 +31,7 @@ direct and indirect path hits in `tests/browser/surface_map.toml`.
 | `scripts/install-worker/install-worker.sh` | `runners` |
 | `scripts/install-worker/verify.ps1` | `runners` |
 | `scripts/install-worker/verify.sh` | `runners` |
+| `scripts/install-worker/windows-arm64.ps1` | `runners` |
 | `scripts/install-worker/windows-x86_64.ps1` | `runners` |
 
 ## Film review (agent fills after recording)
