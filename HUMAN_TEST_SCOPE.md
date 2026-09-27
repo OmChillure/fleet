@@ -41,7 +41,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: f505b6a9c0560989b9b99d8f869de1de0cb06d7e (`.tmp/demos/20260927T234905Z-runners-lab.webm`). API `/health` and UI `/fleet-git-sha.txt` matched that id. Signup and login used `demo.d1556efa07@example.test`.
+- Frames + webm inspected: `.tmp/demos/20260927T234905Z-frames/` (01–15, runners.png, lab.png) and `20260927T234905Z-runners-lab.webm`
+- Bugs found:
+  - none. Offline card 5700g shows Verify installation, `sh -s -- verify`, and the Windows `FLEET_ACTION=verify` command, with no pair token. The pending card has no verify block. Copy shows "Command copied." Lab protocol frame ends OK. The pair panel shows a one-time install token, which is the add-worker command.
