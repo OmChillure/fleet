@@ -6,28 +6,32 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `bb33982fe4dcae03a93146c8c15e4d6d6205b6a8`
-- Tree-id: `fd042faba38204c272b769929ba50e3e6a932453-2560a9f5d481`
+- Tree-id: `8341e4de896bc8ff16f8f48fe06285d68e79aba9`
 
 ## Scenes
 
-- `integrations`
+- `runners`
+- `lab`
 
 ## Pause steps
 
-- Integrations
+- Runners / Self-hosted
+- Workers
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
-| `crates/fleet-db/src/repos/integrations.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/apps/github/client.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/apps/github/mod.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/apps/github/tools/mod.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/apps/github/tools/reads.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/apps/mod.rs` | `integrations` |
-| `crates/fleet-integrations/src/proxy/mod.rs` | `integrations` |
+| `crates/fleet-runners-view/src/lib.rs` | `runners` |
+| `crates/fleet-runners-view/src/types.rs` | `runners` |
+| `crates/fleet-sandbox-driver/sandbox-lab/tests/test_install_worker.py` | `lab` |
+| `crates/fleet-server/src/install_routes.rs` | `runners` |
+| `crates/fleet-server/src/worker_hosts.rs` | `runners` |
+| `crates/fleet-ui/src/pages/runners/self_hosted/api.rs` | `runners` |
+| `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |
+| `scripts/install-worker/verify.ps1` | `runners` |
+| `scripts/install-worker/verify.sh` | `runners` |
 
 ## Film review (agent fills after recording)
 
@@ -36,7 +40,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes, `2ea4351df6ce02693c54412854215f4814f09281` (`GET /health` and `/fleet-git-sha.txt` on :18080/:13030). Clip `.tmp/demos/20260927T190207Z-integrations.webm`.
-- Frames + webm inspected: yes, `20260927T190207Z-frames` 01–08 and `integrations.png`.
-- Bugs found:
-  - none. Integrations heading, git search (GitHub and GitLab Connect), GitHub Connect opens the manifest popup and the card shows Connecting, Asana search shows Asana. Demo account is `demo.1ad911b89c@example.test`. No error toast and no secret.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)
