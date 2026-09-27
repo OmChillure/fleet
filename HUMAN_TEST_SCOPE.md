@@ -36,7 +36,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes, `2ea4351df6ce02693c54412854215f4814f09281` (`GET /health` and `/fleet-git-sha.txt` on :18080/:13030). Clip `.tmp/demos/20260927T190207Z-integrations.webm`.
+- Frames + webm inspected: yes, `20260927T190207Z-frames` 01–08 and `integrations.png`.
+- Bugs found:
+  - none. Integrations heading, git search (GitHub and GitLab Connect), GitHub Connect opens the manifest popup and the card shows Connecting, Asana search shows Asana. Demo account is `demo.1ad911b89c@example.test`. No error toast and no secret.
