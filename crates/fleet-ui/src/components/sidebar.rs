@@ -26,7 +26,8 @@ pub fn Sidebar() -> Element {
     // Full-width when true; collapsed rail with only the toggle when false.
     let is_open = chrome.sidebar_open;
     let mut workspaces = use_signal(|| Vec::<WorkspacePublic>::new());
-    let mut user = use_signal(|| Option::<UserPublic>::None);
+    let session_user = use_context::<Signal<Option<UserPublic>>>();
+    let mut user = use_signal(|| session_user());
     let mut open = use_signal(|| false);
     let mut creating = use_signal(|| false);
     let mut new_name = use_signal(|| String::new());

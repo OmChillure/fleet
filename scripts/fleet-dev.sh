@@ -236,9 +236,11 @@ ensure_env() {
     return 1
   fi
 
-  if ! grep -qE '^FLEET_BOOTSTRAP_SECRET=' "$ROOT/.env"; then
-    echo "# FLEET_BOOTSTRAP_SECRET=" >>"$ROOT/.env"
-    warn "Appended FLEET_BOOTSTRAP_SECRET for local fleet-host bootstrap"
+  if ! grep -qE '^FLEET_BOOTSTRAP_SECRET=.+' "$ROOT/.env"; then
+    local secret
+    secret="$(openssl rand -hex 24)"
+    echo "FLEET_BOOTSTRAP_SECRET=$secret" >>"$ROOT/.env"
+    warn "Wrote FLEET_BOOTSTRAP_SECRET so the local fleet-host can pair"
   fi
 
   # Optional ADMIN_TOKEN for demo-orch.sh — leave commented unless present.
