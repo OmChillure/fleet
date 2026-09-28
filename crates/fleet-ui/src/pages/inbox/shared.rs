@@ -208,7 +208,7 @@ pub fn launch_item(ws: String, t: &TicketRow, mut data: PageData) {
 
 pub fn frame(inner: Element) -> Element {
     rsx! {
-        div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
+        div { class: "mx-auto flex h-full w-full max-w-7xl flex-col gap-4 overflow-auto p-4 md:p-5",
             {inner}
         }
     }

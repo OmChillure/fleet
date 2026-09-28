@@ -66,13 +66,6 @@ pub fn default_positions(n: usize) -> Vec<(f64, f64)> {
     (0..n).map(|i| (24.0 + i as f64 * 248.0, 28.0)).collect()
 }
 
-#[derive(Clone, Copy)]
-struct Drag {
-    index: usize,
-    dx: f64,
-    dy: f64,
-}
-
 fn block_title(role: Role, info: &InboxAppInfo) -> String {
     match role {
         Role::Source => format!("Watch {0}", info.name),
@@ -99,12 +92,8 @@ pub fn workflow(ws: &str, mut data: PageData) -> Element {
     let info = data.info;
     let roles = pipeline(info.has_filter);
     let n = roles.len();
-    let mut positions = use_signal(|| default_positions(n));
-    let mut drag: Signal<Option<Drag>> = use_signal(|| None);
     let narrow_on = !data.filter().trim().is_empty();
     let exp = experience(info);
-    let board_width = 48 + n * 248;
-
     rsx! {
         section { class: "rounded-2xl border {exp.accent} bg-[var(--app-bg-elevated)] p-4",
             div { class: "flex flex-wrap items-baseline justify-between gap-2",
@@ -112,76 +101,41 @@ pub fn workflow(ws: &str, mut data: PageData) -> Element {
                     "{info.name} automation"
                 }
                 p { class: "m-0 text-xs text-[var(--app-muted)]",
-                    "Drag a block to arrange this inbox. The wires are the path Fleet runs."
+                    "The wires are the path Fleet runs. A dashed wire means that step is not limiting anything."
                 }
             }
             div {
-                class: "mt-3 overflow-x-auto rounded-xl border border-dashed border-[var(--app-border)]",
-            div {
-                class: "relative h-[320px]",
-                style: "min-width: {board_width}px;",
-                onpointermove: move |evt| {
-                    let Some(d) = drag() else { return };
-                    let x = (evt.data().client_coordinates().x - d.dx).max(8.0);
-                    let y = (evt.data().client_coordinates().y - d.dy).max(8.0);
-                    let mut next = positions();
-                    if let Some(slot) = next.get_mut(d.index) {
-                        *slot = (x, y);
-                    }
-                    positions.set(next);
-                },
-                onpointerup: move |_| drag.set(None),
-                svg {
-                    class: "pointer-events-none absolute inset-0 h-full w-full",
-                    for i in 0..n.saturating_sub(1) {
-                        {
-                            let pos = positions();
-                            let (x1, y1) = pos.get(i).copied().unwrap_or((0.0, 0.0));
-                            let (x2, y2) = pos.get(i + 1).copied().unwrap_or((0.0, 0.0));
-                            let skip = roles.get(i) == Some(&Role::Narrow) && !narrow_on && info.has_filter;
-                            let dash = if skip { "6 4" } else { "0" };
-                            rsx! {
-                                line {
-                                    key: "{i}",
-                                    x1: "{x1 + 200.0}",
-                                    y1: "{y1 + 36.0}",
-                                    x2: "{x2}",
-                                    y2: "{y2 + 36.0}",
-                                    stroke: "var(--app-muted)",
-                                    "stroke-width": "1.5",
-                                    "stroke-dasharray": "{dash}",
-                                }
-                            }
-                        }
-                    }
-                }
+                class: "mt-3 flex flex-wrap items-stretch gap-x-2 gap-y-3 rounded-xl border border-dashed border-[var(--app-border)] p-3",
                 for (i, role) in roles.iter().copied().enumerate() {
                     {
-                        let pos = positions();
-                        let (x, y) = pos.get(i).copied().unwrap_or((24.0, 28.0));
                         let title = block_title(role, info);
                         let blurb = block_blurb(role, info);
+                        let skipped = role == Role::Narrow && !narrow_on;
+                        let wire = if i + 1 == n {
+                            String::new()
+                        } else if skipped {
+                            "┄".to_string()
+                        } else {
+                            "—".to_string()
+                        };
                         rsx! {
-                            article {
-                                key: "{i}",
-                                class: "absolute w-[210px] rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-3 shadow-sm",
-                                style: "left: {x}px; top: {y}px;",
-                                header {
-                                    class: "cursor-grab text-xs font-semibold text-[var(--app-fg)]",
-                                    onpointerdown: move |evt| {
-                                        let ox = evt.data().client_coordinates().x - x;
-                                        let oy = evt.data().client_coordinates().y - y;
-                                        drag.set(Some(Drag { index: i, dx: ox, dy: oy }));
-                                    },
-                                    "{title}"
+                            div { key: "{i}", class: "flex items-center gap-2",
+                                article {
+                                    class: "w-[220px] max-w-full rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-3 shadow-sm",
+                                    header {
+                                        class: "text-xs font-semibold text-[var(--app-fg)]",
+                                        "{title}"
+                                    }
+                                    p { class: "mt-1 text-[11px] leading-snug text-[var(--app-muted)]", "{blurb}" }
+                                    { block_body(ws, data, role) }
                                 }
-                                p { class: "mt-1 text-[11px] leading-snug text-[var(--app-muted)]", "{blurb}" }
-                                { block_body(ws, data, role) }
+                                if !wire.is_empty() {
+                                    span { class: "text-[var(--app-muted)]", "{wire}" }
+                                }
                             }
                         }
                     }
                 }
-            }
             }
         }
     }
