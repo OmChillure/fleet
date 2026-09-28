@@ -723,6 +723,9 @@ fleet_verify() {
         fi
     fi
 
+    if [ "$_offer" -eq 1 ] && [ -n "$_ask" ]; then
+        info "ask:             $_ask"
+    fi
     _yes=0
     case ${FLEET_VERIFY_REPAIR:-} in
         1|y|yes) _yes=1 ;;
@@ -739,6 +742,11 @@ fleet_verify() {
             ;;
     esac
     if [ "$FLEET_ACTION" = repair ]; then
+        if [ "$_token" -ne 1 ] || [ "$_verdict" = not_installed ] || [ "$_verdict" = bins_missing ]; then
+            info "repair:          refused"
+            info "repair_next:     No machine token, or the install is gone. Do not re-pair."
+            return "$_code"
+        fi
         _yes=1
         _offer=1
         if [ -z "$_target" ]; then
