@@ -325,12 +325,10 @@ async fn maybe_launch_after_runner(
     mut content: String,
     already: &[ChatAction],
 ) -> (String, Vec<ChatAction>) {
-    if already.iter().any(|a| {
-        a.ok
-            && (a.tool == "launch_agent_task"
-                || a.tool == "launch_agent_plan"
-                || a.run_id.is_some())
-    }) {
+    if already
+        .iter()
+        .any(|a| a.ok && (a.tool == "launch_agent_task" || a.tool == "launch_agent_plan"))
+    {
         return (content, vec![]);
     }
     if !wants_fleet_launch(last_user) {

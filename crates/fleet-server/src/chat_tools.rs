@@ -5,16 +5,16 @@ use std::time::Duration;
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::integrations as integ_repo;
 use fleet_integrations::proxy::{
-    ProxyCaller, ProxyResult, format_context_markdown, operations_for, supported_providers,
+    format_context_markdown, operations_for, supported_providers, ProxyCaller, ProxyResult,
 };
-use fleet_integrations::{IntegrationAvailability, catalog};
+use fleet_integrations::{catalog, IntegrationAvailability};
 use fleet_orchestrator::domain::{
-    MAX_PROJECT_AGENTS, MAX_TASKS_PER_PLAN, OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody,
-    WorkPlanStatus,
+    OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus, MAX_PROJECT_AGENTS,
+    MAX_TASKS_PER_PLAN,
 };
 use fleet_orchestrator::validate;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -1303,7 +1303,11 @@ pub fn coerce_integration_args(
             }
         }
     }
-    if changed { Some(next) } else { None }
+    if changed {
+        Some(next)
+    } else {
+        None
+    }
 }
 
 fn write_text_missing(args: &Value) -> bool {
@@ -1556,11 +1560,21 @@ async fn workspace_default_run_mode(state: &AppState, workspace_id: Uuid) -> Str
         .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string())
 }
 
+async fn instance_agent_cap(state: &AppState) -> i32 {
+    fleet_db::repos::instance_settings::get(&state.db)
+        .await
+        .map(|s| s.max_agents_cap)
+        .unwrap_or(128)
+        .clamp(1, MAX_PROJECT_AGENTS)
+}
+
 async fn ensure_project(state: &AppState, workspace_id: Uuid) -> AppResult<()> {
+    let cap = instance_agent_cap(state).await;
+    let max_agents = chat_max_agents().min(cap);
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", 3)
+        .ensure_project(workspace_id, "workspace fleet", max_agents)
         .await
         .map_err(|e| {
             tracing::error!(%workspace_id, error = %e, "chat tool ensure_project failed");
@@ -1574,7 +1588,8 @@ async fn ensure_project_capacity(
     workspace_id: Uuid,
     max_agents: i32,
 ) -> AppResult<()> {
-    let max = max_agents.clamp(1, chat_max_agents());
+    let cap = instance_agent_cap(state).await;
+    let max = max_agents.clamp(1, chat_max_agents().min(cap));
     ensure_project(state, workspace_id).await?;
     state
         .orch
@@ -2319,12 +2334,13 @@ async fn configure_fleet_tool(
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
 
+    let cap = instance_agent_cap(state).await;
     let max = arguments
         .get("max_agents")
         .and_then(|v| v.as_i64())
         .map(|n| n as i32)
         .unwrap_or(current.max_agents)
-        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
+        .clamp(1, cap);
 
     let llm = arguments
         .get("fleet_llm")
@@ -3080,24 +3096,20 @@ mod tests {
             .is_ok(),
             "OpenAI is a runner CLI; missing runner is require_taking_runner"
         );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "openai".into(),
-                model: "any".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "gemini".into(),
-                model: "any".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "openai".into(),
+            model: "any".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "gemini".into(),
+            model: "any".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
         assert!(
             require_runner_worker_llm(&ChatLlmContext {
                 provider: "ollama".into(),
@@ -3108,24 +3120,20 @@ mod tests {
             .is_ok(),
             "chat may queue ollama work until a runner appears"
         );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "ollama".into(),
-                model: "tiny".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "ollama".into(),
-                model: "tiny".into(),
-                runner_id: Some(Uuid::now_v7()),
-                effort: None,
-            })
-            .is_ok()
-        );
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "ollama".into(),
+            model: "tiny".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "ollama".into(),
+            model: "tiny".into(),
+            runner_id: Some(Uuid::now_v7()),
+            effort: None,
+        })
+        .is_ok());
     }
 
     #[test]
@@ -3135,12 +3143,10 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_id() {
-        assert!(
-            parse_launch_plan_args(&json!({
-                "tasks": [{ "id": " ", "title": "X" }]
-            }))
-            .is_err()
-        );
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": " ", "title": "X" }]
+        }))
+        .is_err());
     }
 
     #[test]
@@ -3169,23 +3175,19 @@ mod tests {
 
     #[test]
     fn parse_launch_plan_args_rejects_blank_task_title() {
-        assert!(
-            parse_launch_plan_args(&json!({
-                "tasks": [{ "id": "a", "title": "  " }]
-            }))
-            .is_err()
-        );
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": "a", "title": "  " }]
+        }))
+        .is_err());
     }
 
     #[test]
     fn parse_launch_plan_args_rejects_task_title_over_200() {
         let title = "x".repeat(201);
-        assert!(
-            parse_launch_plan_args(&json!({
-                "tasks": [{ "id": "a", "title": title }]
-            }))
-            .is_err()
-        );
+        assert!(parse_launch_plan_args(&json!({
+            "tasks": [{ "id": "a", "title": title }]
+        }))
+        .is_err());
     }
 
     #[test]
