@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `9b044a98d1bc48dd83f1a3e9b0bd2ed1153cae93`
-- Tree-id: `34e1590a72f4b505c5220796bd3166dc220c5b6d-3a1f49b1b1a5`
+- Tree-id: `216c537cdb50cf4296ea1f00b10973575b6a22d3`
 
 ## Scenes
 
@@ -50,8 +50,8 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: yes, `4f96f07621d8e691bdd13aa6fe9dcba1766714c7` on API :28081 and UI :23031.
-- Frames + webm inspected: yes, `.tmp/demos/20260928T012859Z-frames/` and `20260928T012859Z-auth-workspace-chat-fleet-settings.webm`.
+- Recorded on final merge tree: yes, `216c537cdb50cf4296ea1f00b10973575b6a22d3` on API :28081 and UI :23031.
+- Frames + webm inspected: yes, `.tmp/demos/20260928T015259Z-frames/` and `20260928T015259Z-auth-workspace-chat-fleet-settings-kind.webm`.
 - Bugs found:
   - Settings shows the cap (PC allowed, Open internet allowed), Network set to Open internet, and a repo default of acme/app.
-  - The recorder looked for the old heading "Where new fleet jobs run". The page heading is Agent runtime, set to Run on a PC.
+  - Kind shows the cluster page with no error toast.
