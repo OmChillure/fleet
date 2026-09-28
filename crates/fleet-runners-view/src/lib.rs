@@ -1149,13 +1149,13 @@ pub fn install_api_url(created: &CreateHostResponse, api_base: &str) -> String {
 /// Read-only check pasted on the offline machine. Served script, no pair token.
 pub fn verify_install_command(api_base: &str) -> String {
     let base = api_base.trim_end_matches('/');
-    format!("curl -fsSL {base}/install-worker.sh | FLEET_URL={base} FLEET_MACHINE_TOKEN='<saved flm_ token>' sh -s -- verify")
+    format!("curl -fsSL {base}/install-worker.sh | FLEET_URL={base} sh -s -- verify")
 }
 
 /// Same check for Windows PowerShell.
 pub fn windows_verify_install_command(api_base: &str) -> String {
     let base = api_base.trim_end_matches('/');
-    format!("$env:FLEET_URL='{base}'; $env:FLEET_MACHINE_TOKEN='<saved flm_ token>'; $env:FLEET_ACTION='verify'; irm '{base}/install-worker.ps1' | iex")
+    format!("$env:FLEET_URL='{base}'; $env:FLEET_ACTION='verify'; irm '{base}/install-worker.ps1' | iex")
 }
 
 /// PowerShell one-liner: download, pair, start (Windows).
@@ -2714,14 +2714,16 @@ mod tests {
         let windows = windows_verify_install_command("https://fleet.example.test/");
         assert_eq!(
             unix,
-            "curl -fsSL https://fleet.example.test/install-worker.sh | FLEET_URL=https://fleet.example.test FLEET_MACHINE_TOKEN='<saved flm_ token>' sh -s -- verify"
+            "curl -fsSL https://fleet.example.test/install-worker.sh | FLEET_URL=https://fleet.example.test sh -s -- verify"
         );
         assert_eq!(
             windows,
-            "$env:FLEET_URL='https://fleet.example.test'; $env:FLEET_MACHINE_TOKEN='<saved flm_ token>'; $env:FLEET_ACTION='verify'; irm 'https://fleet.example.test/install-worker.ps1' | iex"
+            "$env:FLEET_URL='https://fleet.example.test'; $env:FLEET_ACTION='verify'; irm 'https://fleet.example.test/install-worker.ps1' | iex"
         );
         assert!(!unix.contains("FLEET_PAIR_TOKEN"));
         assert!(!windows.contains("FLEET_PAIR_TOKEN"));
+        assert!(!unix.contains("FLEET_MACHINE_TOKEN"));
+        assert!(!windows.contains("FLEET_MACHINE_TOKEN"));
         assert!(!unix.contains("machine.token"));
     }
 
