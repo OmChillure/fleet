@@ -76,6 +76,14 @@ pub struct PlanPolicy {
     /// `on_pc` | `in_container`.
     #[serde(default = "default_plan_run_mode")]
     pub run_mode: String,
+    /// Resolved network: `inherit` | `none` | `allowlist` | `open`. Empty means unset.
+    #[serde(default)]
+    pub egress_mode: String,
+    #[serde(default)]
+    pub egress_allowlist: String,
+    /// The starter asked for something looser than the repo default, inside the workspace cap.
+    #[serde(default)]
+    pub posture_loosened: bool,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// Extra write-backs (in addition to a reply on each task `external_ref`).
@@ -102,6 +110,9 @@ impl Default for PlanPolicy {
             preferred_host_id: None,
             requested_by: None,
             run_mode: default_plan_run_mode(),
+            egress_mode: String::new(),
+            egress_allowlist: String::new(),
+            posture_loosened: false,
             reasoning_effort: None,
             outputs: Vec::new(),
         }

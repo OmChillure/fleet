@@ -35,6 +35,10 @@ pub fn router() -> Router<AppState> {
             get(get_settings).patch(patch_settings),
         )
         .route(
+            "/api/workspaces/{workspace_id}/fleet/repo-postures",
+            get(list_repo_postures).put(put_repo_posture),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/personas",
             get(get_personas),
         )
@@ -180,6 +184,12 @@ async fn settings_json(
         "default_egress_allowlist": workspace_repo::default_egress_allowlist(&state.db, workspace_id)
             .await
             .unwrap_or_default(),
+        "run_envelope": workspace_repo::run_envelope(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
+        "egress_envelope": workspace_repo::egress_envelope(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "open".into()),
         "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "owner_only".into()),
@@ -196,6 +206,65 @@ async fn settings_json(
         "effective_backend": llm.backend.as_deref().unwrap_or("off"),
         "effective_model": llm.model,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct PutRepoPostureBody {
+    repo: String,
+    run_mode: String,
+    egress_mode: String,
+    #[serde(default)]
+    egress_allowlist: String,
+}
+
+async fn list_repo_postures(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let rows = fleet_db::repos::repo_postures::list_for_workspace(&state.db, workspace_id).await?;
+    let repos = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "repo": row.repo,
+                "run_mode": row.run_mode,
+                "egress_mode": row.egress_mode,
+                "egress_allowlist": row.egress_allowlist,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "repos": repos })))
+}
+
+async fn put_repo_posture(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PutRepoPostureBody>,
+) -> AppResult<Json<Value>> {
+    let (_user, role) = require_member(&state, &jar, workspace_id).await?;
+    if role != "owner" && role != "admin" {
+        return Err(AppError::forbidden(
+            "owner or admin required to set a repo default",
+        ));
+    }
+    let row = fleet_db::repos::repo_postures::upsert(
+        &state.db,
+        workspace_id,
+        &body.repo,
+        &body.run_mode,
+        &body.egress_mode,
+        &body.egress_allowlist,
+    )
+    .await?;
+    Ok(Json(json!({
+        "repo": row.repo,
+        "run_mode": row.run_mode,
+        "egress_mode": row.egress_mode,
+        "egress_allowlist": row.egress_allowlist,
+    })))
 }
 
 async fn get_settings(
@@ -224,6 +293,8 @@ pub struct PatchSettingsBody {
     pub default_send_policy: Option<String>,
     pub default_egress: Option<String>,
     pub default_egress_allowlist: Option<String>,
+    pub run_envelope: Option<String>,
+    pub egress_envelope: Option<String>,
     pub chat_max_turns: Option<i32>,
 }
 
@@ -281,6 +352,8 @@ async fn patch_settings(
         || body.default_send_policy.is_some()
         || body.default_egress.is_some()
         || body.default_egress_allowlist.is_some()
+        || body.run_envelope.is_some()
+        || body.egress_envelope.is_some()
     {
         if role != "owner" && role != "admin" {
             return Err(AppError::forbidden(
@@ -296,6 +369,12 @@ async fn patch_settings(
     }
     if let Some(raw) = body.default_egress_allowlist.as_deref() {
         workspace_repo::set_default_egress_allowlist(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.run_envelope.as_deref() {
+        workspace_repo::set_run_envelope(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.egress_envelope.as_deref() {
+        workspace_repo::set_egress_envelope(&state.db, workspace_id, raw).await?;
     }
     if let Some(raw) = body.default_send_policy.as_deref() {
         workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;

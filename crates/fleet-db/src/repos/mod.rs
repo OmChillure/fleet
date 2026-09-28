@@ -8,6 +8,7 @@ pub mod instance_settings;
 pub mod integrations;
 pub mod llm_keys;
 pub mod personas;
+pub mod repo_postures;
 pub mod plan_jobs;
 pub mod sessions;
 pub mod tickets;
