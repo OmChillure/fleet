@@ -27,6 +27,8 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut grok_env = use_signal(|| false);
     let mut min_isolation = use_signal(|| "process".to_string());
     let mut default_run_mode = use_signal(|| "on_pc".to_string());
+    let mut default_egress = use_signal(|| "inherit".to_string());
+    let mut default_egress_allowlist = use_signal(String::new);
     let mut chat_max_turns = use_signal(|| 32i32);
     let mut chat_max_turns_min = use_signal(|| 1i32);
     let mut chat_max_turns_max = use_signal(|| 128i32);
@@ -61,6 +63,10 @@ pub fn Settings(workspace_id: String) -> Element {
                     if !s.default_run_mode.trim().is_empty() {
                         default_run_mode.set(s.default_run_mode);
                     }
+                    if !s.default_egress.trim().is_empty() {
+                        default_egress.set(s.default_egress);
+                    }
+                    default_egress_allowlist.set(s.default_egress_allowlist);
                     if s.chat_max_turns > 0 {
                         chat_max_turns.set(s.chat_max_turns);
                     }
@@ -119,6 +125,8 @@ pub fn Settings(workspace_id: String) -> Element {
         let model = fleet_model();
         let iso = min_isolation();
         let mode = default_run_mode();
+        let egress = default_egress();
+        let allowlist = default_egress_allowlist();
         let turns = chat_max_turns();
         spawn(async move {
             let s = match save_settings(
@@ -129,6 +137,8 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm_model: model,
                     min_isolation: iso,
                     default_run_mode: Some(mode),
+                    default_egress: Some(egress),
+                    default_egress_allowlist: Some(allowlist),
                     chat_max_turns: Some(turns),
                 },
             )
@@ -225,6 +235,36 @@ pub fn Settings(workspace_id: String) -> Element {
                         onchange: move |e| default_run_mode.set(e.value()),
                         option { value: "on_pc", "Run on a PC" }
                         option { value: "in_container", "Run in a container" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Network"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Separate from where the job runs. A PC job uses that machine's network. A container or VM uses this choice: no internet, an allowlist, or open. Runner default leaves the box as it is already configured."
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{default_egress}",
+                        onchange: move |e| default_egress.set(e.value()),
+                        option { value: "inherit", "Runner default" }
+                        option { value: "none", "No internet" }
+                        option { value: "allowlist", "Allowlist" }
+                        option { value: "open", "Open internet" }
+                    }
+                    if default_egress() == "allowlist" {
+                        textarea {
+                            class: field_class(),
+                            rows: "3",
+                            placeholder: "10.0.0.0/8, 172.18.0.1/32",
+                            value: "{default_egress_allowlist}",
+                            oninput: move |e| default_egress_allowlist.set(e.value()),
+                        }
+                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                            "CIDRs, separated by commas or lines. Kubernetes adds those ranges on top of the control plane. Hostnames are stored and not filtered. Docker on a runner cannot enforce an allowlist."
+                        }
                     }
                 }
 

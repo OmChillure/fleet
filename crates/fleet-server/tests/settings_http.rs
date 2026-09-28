@@ -427,6 +427,51 @@ async fn fleet_settings_get_min_isolation_defaults_container() {
 }
 
 #[tokio::test]
+async fn fleet_settings_egress_defaults_inherit_and_owner_can_open() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let got = call(&app, "GET", &settings, Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["default_egress"], "inherit", "{}", got.body);
+    assert_eq!(got.body["default_egress_allowlist"], "", "{}", got.body);
+
+    let patched = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({
+            "default_egress": "allowlist",
+            "default_egress_allowlist": "10.0.0.0/8, 172.18.0.1/32"
+        })),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK, "{}", patched.body);
+    assert_eq!(
+        patched.body["default_egress"], "allowlist",
+        "{}",
+        patched.body
+    );
+    assert_eq!(
+        patched.body["default_egress_allowlist"], "10.0.0.0/8, 172.18.0.1/32",
+        "{}",
+        patched.body
+    );
+
+    let bad = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "default_egress": "package_registries" })),
+    )
+    .await;
+    assert_eq!(bad.status, StatusCode::CONFLICT, "{}", bad.body);
+}
+
+#[tokio::test]
 async fn fleet_settings_patch_min_isolation_container_persists() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;

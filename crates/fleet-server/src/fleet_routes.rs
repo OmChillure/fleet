@@ -174,6 +174,12 @@ async fn settings_json(
         "default_run_mode": workspace_repo::default_run_mode(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "on_pc".into()),
+        "default_egress": workspace_repo::default_egress(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "inherit".into()),
+        "default_egress_allowlist": workspace_repo::default_egress_allowlist(&state.db, workspace_id)
+            .await
+            .unwrap_or_default(),
         "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "owner_only".into()),
@@ -216,6 +222,8 @@ pub struct PatchSettingsBody {
     pub min_isolation: Option<String>,
     pub default_run_mode: Option<String>,
     pub default_send_policy: Option<String>,
+    pub default_egress: Option<String>,
+    pub default_egress_allowlist: Option<String>,
     pub chat_max_turns: Option<i32>,
 }
 
@@ -269,15 +277,25 @@ async fn patch_settings(
     if let Some(raw) = body.min_isolation.as_deref() {
         workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
     }
-    if body.default_run_mode.is_some() || body.default_send_policy.is_some() {
+    if body.default_run_mode.is_some()
+        || body.default_send_policy.is_some()
+        || body.default_egress.is_some()
+        || body.default_egress_allowlist.is_some()
+    {
         if role != "owner" && role != "admin" {
             return Err(AppError::forbidden(
-                "owner or admin required to change default run mode",
+                "owner or admin required to change where jobs run or their network",
             ));
         }
     }
     if let Some(raw) = body.default_run_mode.as_deref() {
         workspace_repo::set_default_run_mode(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_egress.as_deref() {
+        workspace_repo::set_default_egress(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_egress_allowlist.as_deref() {
+        workspace_repo::set_default_egress_allowlist(&state.db, workspace_id, raw).await?;
     }
     if let Some(raw) = body.default_send_policy.as_deref() {
         workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;
