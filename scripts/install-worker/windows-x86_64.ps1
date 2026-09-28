@@ -259,9 +259,9 @@ if ($FleetAction -eq "verify" -or $FleetAction -eq "repair") {
         }
         Write-Host "repair:          same token"
         Write-Host "repair_url:      $target"
-        exit 0
+        return
     }
-    exit 0
+    return
 }
 
 Write-Host "Agent Fleet worker installer"
