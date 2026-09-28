@@ -576,6 +576,7 @@ start_host() {
     FLEET_HOST_CONFIG_DIR="$RUN_DIR/host" \
     FLEET_CONTROL_PLANE_URL="http://127.0.0.1:${port}" \
     FLEET_BOOTSTRAP_SECRET="${FLEET_BOOTSTRAP_SECRET:-}" \
+    FLEET_HOST_RUN_CONTAINER=1 \
     cargo run -p fleet-host -- run \
     >>"$LOG_HOST" 2>&1 &
   echo $! >"$PID_HOST"
