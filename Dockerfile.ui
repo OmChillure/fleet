@@ -45,9 +45,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')" \
     && stamp=/app/target/.fleet-ui-src-hash \
     && if [ "$(cat "$stamp" 2>/dev/null || true)" != "$src_hash" ]; then \
-         echo "fleet-ui sources changed; dropping cached wasm"; \
-         find /app/target -mindepth 1 -maxdepth 1 -exec rm -rf {} +; \
+         echo "fleet-ui sources changed; dropping cached fleet-ui wasm"; \
+         rm -rf \
+           /app/target/wasm32-unknown-unknown/wasm-release/deps/libfleet_ui-* \
+           /app/target/wasm32-unknown-unknown/wasm-release/deps/fleet_ui-* \
+           /app/target/wasm32-unknown-unknown/wasm-release/.fingerprint/fleet-ui-* \
+           /app/target/dx; \
        fi \
+    && mkdir -p /app/target \
     && grep -q 'Reconnect' crates/fleet-ui/src/pages/integrations/page.rs \
     && mkdir -p crates/fleet-ui/public \
     && printf '%s\n' "${FLEET_GIT_SHA}" > crates/fleet-ui/public/fleet-git-sha.txt \
@@ -65,8 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && wasm="$(grep -o 'fleet-ui_bg-[^"]*\.wasm' "/out/${js}" | head -1)" \
     && test -n "$wasm" \
     && grep -a -q 'Reconnect' "/out/assets/${wasm}" \
-    && printf '%s\n' "$src_hash" > "$stamp" \
-    || { echo "ERROR: served wasm is stale (Reconnect missing from ${wasm:-unknown})"; exit 1; }
+    && printf '%s\n' "$src_hash" > "$stamp"
 
 FROM nginx:1.27-alpine AS runtime
 
