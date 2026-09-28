@@ -31,6 +31,27 @@ pub struct UpsertConnection {
     pub at: DateTime<Utc>,
 }
 
+/// Connected and errored rows for the integrations UI. Disconnected rows stay hidden.
+/// Credentials are included; do not send this struct on a public response.
+pub async fn list_visible_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<IntegrationConnection>> {
+    let q = format!(
+        r#"
+        SELECT {COLS}
+        FROM integration_connections
+        WHERE workspace_id = $1 AND status IN ('connected', 'error')
+        ORDER BY provider ASC
+        "#
+    );
+    sqlx::query_as::<_, IntegrationConnection>(&q)
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
 /// Active (connected) rows for a workspace — includes credentials for internal use.
 pub async fn list_for_workspace(
     pool: &PgPool,

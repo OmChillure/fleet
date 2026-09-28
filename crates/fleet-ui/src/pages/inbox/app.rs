@@ -8,7 +8,10 @@ use super::catalog::{explain_error, hook_url_for, inbox_app};
 use super::shared::{PageData, apply_rows};
 use super::views;
 use crate::Route;
-use crate::pages::integrations::{find_integration, integration_is_connected, list_integrations};
+use crate::pages::integrations::{
+    find_integration, integration_is_connected, integration_needs_reconnect, list_integrations,
+    message_is_auth_failure,
+};
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     let Some(m) = resp.monitor.as_ref() else {
@@ -20,6 +23,7 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
         "jira" => m.jira_jql.clone().unwrap_or_default(),
         "notion" => m.notion_databases.join(", "),
         "gitlab" => m.gitlab_projects.join(", "),
+        "gitea" => m.gitea_repos.join(", "),
         "linear" => m.linear_teams.join(", "),
         "trello" => m.trello_boards.join(", "),
         _ => String::new(),
@@ -37,6 +41,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     let mut last_error = use_signal(|| None::<String>);
     let mut hook_url = use_signal(String::new);
     let mut connected = use_signal(|| false);
+    let mut auth_failed = use_signal(|| false);
     let mut account = use_signal(String::new);
     let busy = use_signal(|| false);
     let finish_error = use_signal(|| None::<(String, String)>);
@@ -52,6 +57,8 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                 match list_integrations(&ws).await {
                     Ok(list) => {
                         if let Some(i) = find_integration(&list, &prov) {
+                            let failed = integration_needs_reconnect(i);
+                            auth_failed.set(failed);
                             connected.set(integration_is_connected(i));
                             account.set(
                                 i.connection
@@ -61,6 +68,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                             );
                         } else {
                             connected.set(false);
+                            auth_failed.set(false);
                         }
                     }
                     Err(_) => {}
@@ -81,11 +89,15 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                     Ok(resp) => {
                         if let Some(m) = resp.monitor.as_ref() {
                             hook_url.set(hook_url_for(&m.hook_url, &prov));
-                            last_error.set(
-                                m.last_error
-                                    .as_deref()
-                                    .and_then(|e| explain_error(e, &prov)),
-                            );
+                            let explained = m
+                                .last_error
+                                .as_deref()
+                                .and_then(|e| explain_error(e, &prov));
+                            if explained.as_deref().is_some_and(message_is_auth_failure) {
+                                auth_failed.set(true);
+                                connected.set(false);
+                            }
+                            last_error.set(explained);
                         } else {
                             last_error.set(None);
                         }
@@ -105,6 +117,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                                     last_error,
                                     hook_url,
                                     connected,
+                                    auth_failed,
                                     account,
                                     busy,
                                     finish_error,
@@ -142,6 +155,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
         last_error,
         hook_url,
         connected,
+        auth_failed,
         account,
         busy,
         finish_error,

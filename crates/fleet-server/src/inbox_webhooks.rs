@@ -6,7 +6,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -252,6 +252,14 @@ async fn token_path_signature_ok(
             Some(got) => secure_eq(got.trim(), token),
             None => false,
         }),
+        "gitea" => {
+            let sig = header_str(headers, "x-gitea-signature")
+                .or_else(|| header_str(headers, "x-hub-signature-256"));
+            Ok(match sig {
+                Some(sig) => github_signature_ok(token, sig, body),
+                None => false,
+            })
+        }
         "github" | "linear" | "slack" => {
             let stored = provider_signing_secret(state, workspace_id, provider).await?;
             let Some(secret) = stored else {
@@ -399,6 +407,7 @@ pub fn parse_event(
     match provider {
         "github" => parse_github(headers, &v),
         "gitlab" => parse_gitlab(&v),
+        "gitea" => parse_gitea(headers, &v),
         "jira" => parse_jira(&v),
         "linear" => parse_linear(&v),
         "slack" => parse_slack(&v),
@@ -521,6 +530,28 @@ fn parse_github(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
         }]));
     }
     Ok(ParsedEvent::Ignore)
+}
+
+fn parse_gitea(headers: &HeaderMap, v: &Value) -> Result<ParsedEvent, String> {
+    let event = header_str(headers, "x-gitea-event")
+        .or_else(|| header_str(headers, "x-github-event"))
+        .unwrap_or("");
+    if event == "ping" {
+        return Ok(ParsedEvent::Ping);
+    }
+    let mut forwarded = headers.clone();
+    if header_str(&forwarded, "x-github-event").is_none() && !event.is_empty() {
+        if let Ok(value) = HeaderValue::from_str(event) {
+            forwarded.insert("x-github-event", value);
+        }
+    }
+    let mut parsed = parse_github(&forwarded, v)?;
+    if let ParsedEvent::Items(items) = &mut parsed {
+        for item in items.iter_mut() {
+            item.provider = "gitea".into();
+        }
+    }
+    Ok(parsed)
 }
 
 fn parse_gitlab(v: &Value) -> Result<ParsedEvent, String> {
@@ -1110,6 +1141,26 @@ mod tests {
         assert!(slack_timestamp_fresh_at(&headers, 1_000_000));
         assert!(slack_timestamp_fresh_at(&headers, 1_000_280));
         assert!(!slack_timestamp_fresh_at(&headers, 1_000_301));
+    }
+
+    #[test]
+    fn gitea_issue_event_ingests_repo_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-gitea-event", HeaderValue::from_static("issues"));
+        let body = json!({
+            "repository": { "full_name": "worms/game" },
+            "issue": { "number": 1, "title": "Add a worm", "state": "open", "body": "grid" }
+        });
+        let parsed = parse_event("gitea", &headers, &serde_json::to_vec(&body).unwrap()).unwrap();
+        match parsed {
+            ParsedEvent::Items(items) => {
+                assert_eq!(items[0].provider, "gitea");
+                assert_eq!(items[0].key, "worms/game#1");
+                assert_eq!(items[0].title, "Add a worm");
+                assert!(!items[0].closed);
+            }
+            other => panic!("expected items, got {other:?}"),
+        }
     }
 
     #[test]

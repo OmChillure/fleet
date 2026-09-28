@@ -181,6 +181,37 @@ impl ExternalBoardSync for IoBoardSync {
                     }
                 }
             }
+            "gitea" => {
+                if let Some((owner, repo, number)) = parse_github_issue(key) {
+                    log_io(
+                        inv.invoke(
+                            ws,
+                            "gitea".into(),
+                            "add_comment".into(),
+                            json!({ "owner": owner, "repo": repo, "number": number, "body": body }),
+                        )
+                        .await,
+                        "gitea.add_comment",
+                    );
+                    if let Some(state) = github_issue_state(&item.status) {
+                        log_io(
+                            inv.invoke(
+                                ws,
+                                "gitea".into(),
+                                "update_issue".into(),
+                                json!({
+                                    "owner": owner,
+                                    "repo": repo,
+                                    "number": number,
+                                    "state": state,
+                                }),
+                            )
+                            .await,
+                            "gitea.update_issue",
+                        );
+                    }
+                }
+            }
             "gitlab" => {
                 if let Some((project, iid)) = parse_gitlab_issue(key) {
                     log_io(
@@ -525,6 +556,28 @@ mod tests {
         assert_eq!(gh.2["repo"], "app");
         assert_eq!(gh.2["number"], 4);
         assert_eq!(gh.2["state"], "closed");
+    }
+
+    #[tokio::test]
+    async fn closes_gitea_issue_on_done_success() {
+        let (rec, sync) = wired_rec();
+        let ws = uuid::Uuid::new_v4();
+        sync.sync_task_status(item(ws, "gitea", "worms/game#1", "done_success"))
+            .await
+            .unwrap();
+        let calls = rec.calls.lock().unwrap();
+        let comment = calls
+            .iter()
+            .find(|(p, o, _)| p == "gitea" && o == "add_comment")
+            .expect("gitea.add_comment");
+        assert_eq!(comment.2["owner"], "worms");
+        assert_eq!(comment.2["repo"], "game");
+        assert_eq!(comment.2["number"], 1);
+        let close = calls
+            .iter()
+            .find(|(p, o, _)| p == "gitea" && o == "update_issue")
+            .expect("gitea.update_issue");
+        assert_eq!(close.2["state"], "closed");
     }
 
     #[tokio::test]

@@ -344,7 +344,7 @@ pub fn tool_definitions() -> Value {
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "description": "github | gitlab | bitbucket | jira | linear | slack | figma | notion | confluence | google_drive | teams | discord | trello | asana"
+                            "description": "github | gitlab | gitea | bitbucket | jira | linear | slack | figma | notion | confluence | google_drive | teams | discord | trello | asana"
                         },
                         "operation": {
                             "type": "string",
@@ -2782,6 +2782,9 @@ fn provider_capabilities(provider: &str) -> &'static str {
         "gitlab" => {
             "list_repos, list_issues, get_issue, list_mrs, get_mr, get_file, list_commits, commit_files, create_branch, create_mr, create_issue, add_comment"
         }
+        "gitea" => {
+            "list_repos, list_issues, get_issue, list_mrs, list_prs, get_mr, get_pr, get_file, list_commits, put_file, commit_files, create_branch, create_mr, create_pr, create_issue, update_issue, add_comment, merge_mr, merge_pr"
+        }
         "jira" => {
             "search_issues, get_issue, list_projects, create_issue, add_comment, list_transitions, transition_issue"
         }
@@ -3400,6 +3403,19 @@ I will not ask you to continue."
         );
         assert!(md.contains(" [not connected]:"), "{md}");
         assert!(!md.contains(" [connected]:"), "{md}");
+    }
+
+    #[test]
+    fn connector_catalog_gitea_line_lists_repo_and_pr_ops() {
+        let md = connector_catalog_markdown(&[]);
+        let line = md
+            .lines()
+            .find(|l| l.starts_with("- gitea ["))
+            .unwrap_or("");
+        assert!(line.contains("put_file"), "{line}\n{md}");
+        assert!(line.contains("create_pr"), "{line}\n{md}");
+        assert!(line.contains("list_issues"), "{line}\n{md}");
+        assert!(!line.contains("no proxy tools"), "{line}");
     }
 
     #[test]

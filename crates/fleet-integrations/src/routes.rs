@@ -166,7 +166,7 @@ async fn list_integrations(
     Path(workspace_id): Path<Uuid>,
 ) -> AppResult<Json<IntegrationListResponse>> {
     let _ = require_workspace_member(&state, &jar, workspace_id).await?;
-    let connections = integ_repo::list_for_workspace(&state.db, workspace_id).await?;
+    let connections = integ_repo::list_visible_for_workspace(&state.db, workspace_id).await?;
     let apps = integ_repo::list_oauth_apps(&state.db, workspace_id).await?;
     let workspace_app_providers = apps.into_iter().map(|a| a.provider).collect();
     Ok(Json(IntegrationListResponse {

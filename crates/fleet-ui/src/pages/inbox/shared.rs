@@ -11,7 +11,7 @@ use super::experience::experience;
 use crate::Route;
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
-use crate::pages::integrations::IntegrationLogo;
+use crate::pages::integrations::{IntegrationLogo, message_is_auth_failure};
 
 #[derive(Clone, Copy)]
 pub struct PageData {
@@ -22,6 +22,7 @@ pub struct PageData {
     pub last_error: Signal<Option<String>>,
     pub hook_url: Signal<String>,
     pub connected: Signal<bool>,
+    pub auth_failed: Signal<bool>,
     pub account: Signal<String>,
     pub busy: Signal<bool>,
     pub finish_error: Signal<Option<(String, String)>>,
@@ -45,6 +46,9 @@ impl PageData {
     }
     pub fn connected(self) -> bool {
         (self.connected)()
+    }
+    pub fn auth_failed(self) -> bool {
+        (self.auth_failed)()
     }
     pub fn busy(self) -> bool {
         (self.busy)()
@@ -218,6 +222,12 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
     let info = data.info;
     let exp = experience(info);
     let on = data.connected();
+    let broken = data.auth_failed()
+        || data
+            .last_error()
+            .as_deref()
+            .is_some_and(message_is_auth_failure);
+    let healthy = on && !broken;
     let status = data.status_line();
     let provider = info.id.to_string();
     let ws_refresh = ws.to_string();
@@ -236,7 +246,13 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
                     }
                     p { class: "mt-1 max-w-xl text-sm text-[var(--app-muted)]", "{info.work}" }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        if on { "Connected · " } else { "Not connected yet · " }
+                        if broken {
+                            "Sign-in failed · "
+                        } else if healthy {
+                            "Connected · "
+                        } else {
+                            "Not connected yet · "
+                        }
                         "{status}"
                     }
                 }
@@ -247,6 +263,7 @@ pub fn header(ws: &str, data: PageData, extra: Element) -> Element {
                     provider: provider.clone(),
                     name: info.name.to_string(),
                     connected: data.connected,
+                    auth_failed: data.auth_failed,
                     account: data.account,
                 }
                 button {
@@ -280,7 +297,7 @@ pub fn error_banner(data: PageData) -> Element {
 }
 
 pub fn need_connect(ws: &str, data: PageData) -> Element {
-    if data.connected() {
+    if data.connected() || data.auth_failed() {
         return rsx! {};
     }
     let info = data.info;

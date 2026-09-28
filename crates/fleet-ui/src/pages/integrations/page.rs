@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    Integration, disconnect_integration, integration_is_connected, list_integrations,
+    Integration, disconnect_integration, integration_is_connected, integration_needs_reconnect,
+    list_integrations,
     oauth_start_url, patch_integration_defaults,
 };
 use super::logos::IntegrationLogo;
@@ -271,6 +272,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                             let ws_disconnect = workspace_id.clone();
                             let ws_connect = workspace_id.clone();
                             let available = integ.availability == "available";
+                            let needs_reconnect = integration_needs_reconnect(&integ);
                             let connected = integration_is_connected(&integ);
                             let is_connecting =
                                 connecting_provider().as_deref() == Some(integ.id.as_str());
@@ -281,7 +283,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 .and_then(|c| c.account_label.clone())
                                 .unwrap_or_default();
 
-                            let subtitle = if connected && !account.is_empty() {
+                            let subtitle = if needs_reconnect {
+                                "Sign-in failed".to_string()
+                            } else if connected && !account.is_empty() {
                                 account.clone()
                             } else if is_connecting {
                                 "Connecting…".to_string()
@@ -291,7 +295,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 integ.category_label.clone()
                             };
 
-                            let status_dot = if connected {
+                            let status_dot = if needs_reconnect {
+                                "bg-amber-400"
+                            } else if connected {
                                 "bg-emerald-400"
                             } else if is_connecting {
                                 "bg-amber-400 animate-pulse"
@@ -323,7 +329,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                     class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
                                                 }
                                                 span { class: "truncate", "{subtitle}" }
-                                                if connected {
+                                                if needs_reconnect {
+                                                    span { class: "text-amber-300", "· Reconnect" }
+                                                } else if connected {
                                                     span { class: "text-emerald-400/90", "· Connected" }
                                                 }
                                             }
@@ -381,11 +389,13 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 if is_connecting {
                                                     Spinner {}
                                                     span { "Connecting" }
+                                                } else if needs_reconnect {
+                                                    span { "Reconnect" }
                                                 } else {
                                                     span { "Connect" }
                                                 }
                                             }
-                                        } else if available && connected {
+                                        } else if available && (connected || needs_reconnect) {
                                             button {
                                                 class: "shrink-0 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/15 disabled:opacity-50",
                                                 r#type: "button",

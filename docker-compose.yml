@@ -60,6 +60,11 @@ services:
       FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-}
       SIGNUP_TOKEN: ${SIGNUP_TOKEN:-}
       ZENOH_LOCATOR: tcp/zenohd:7447
+      # localhost inside this container is not the Mac. host.docker.internal
+      # reaches the published Gitea port. The same name must resolve in the browser.
+      GITEA_BASE_URL: ${GITEA_BASE_URL:-http://host.docker.internal:3033}
+      GITEA_CLIENT_ID: ${GITEA_CLIENT_ID:-}
+      GITEA_CLIENT_SECRET: ${GITEA_CLIENT_SECRET:-}
       RUST_LOG: info,sqlx=warn,tower_http=info
       # ADMIN_TOKEN: dev-admin-token-change-me
     volumes:
@@ -123,7 +128,7 @@ services:
       disable: true
 
   gitea:
-    image: gitea/gitea:1.22.6
+    image: gitea/gitea:1.27.3
     ports:
       - "3033:3000"
     environment:

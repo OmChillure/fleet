@@ -151,6 +151,19 @@ pub fn default_output_for_ref(ext: &ExternalRef, summary: &str) -> Option<PlanIo
                 args: json!({ "project": project, "iid": iid, "body": summary }),
             })
         }
+        "gitea" => {
+            let (owner, repo, number) = parse_owner_repo_num(key)?;
+            Some(PlanIo {
+                provider,
+                operation: "add_comment".into(),
+                args: json!({
+                    "owner": owner,
+                    "repo": repo,
+                    "number": number,
+                    "body": summary
+                }),
+            })
+        }
         "jira" => Some(PlanIo {
             provider,
             operation: "add_comment".into(),
@@ -304,6 +317,24 @@ mod tests {
                 "github key {key:?} should not map to a write-back",
             );
         }
+    }
+
+    #[test]
+    fn gitea_comment_maps_owner_repo_number() {
+        let io = default_output_for_ref(
+            &ExternalRef {
+                provider: "gitea".into(),
+                key: "worms/game#1".into(),
+            },
+            "pr up",
+        )
+        .unwrap();
+        assert_eq!(io.provider, "gitea");
+        assert_eq!(io.operation, "add_comment");
+        assert_eq!(io.args["owner"], "worms");
+        assert_eq!(io.args["repo"], "game");
+        assert_eq!(io.args["number"], 1);
+        assert_eq!(io.args["body"], "pr up");
     }
 
     #[test]

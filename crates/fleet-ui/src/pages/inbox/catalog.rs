@@ -133,7 +133,7 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
             "Save repos, then Refresh. Start run launches a Fleet job for that issue.",
         ],
         hook_title: "Gitea issue webhook",
-        hook_help: "In the Gitea repo: Settings → Webhooks. Paste this URL and enable Issue events.",
+        hook_help: "In the Gitea repo: Settings → Webhooks → Add webhook. Paste this URL, set the secret to the token in the URL, content type application/json, and enable Issue events.",
         empty: "No open issues yet. Connect Gitea, check repo access, then Refresh.",
         action: "Start run",
     },
@@ -517,7 +517,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
     }
     if lower.contains("missing_scope") {
         return format!(
-            "{name} refused the request — the connection is missing a permission. Disconnect and Connect again under Workspace → Integrations, and accept the extra access."
+            "{name} refused the request — the connection is missing a permission. Use Reconnect on this page and accept the extra access."
         );
     }
     if lower.contains("invalid_auth")
@@ -526,7 +526,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
         || lower.contains("account_inactive")
     {
         return format!(
-            "The {name} connection is no longer valid. Disconnect and Connect again under Workspace → Integrations."
+            "The {name} sign-in is no longer valid. Use Reconnect on this page."
         );
     }
     if lower.contains("not_connected") {

@@ -155,6 +155,87 @@ pub(crate) async fn add_comment(
     )
 }
 
+pub(crate) async fn put_file(
+    http: &reqwest::Client,
+    token: &str,
+    base: &str,
+    args: &Value,
+) -> ProxyResult {
+    let repo = match require_repo(args) {
+        Ok(v) => v,
+        Err(e) => return bad("put_file", e),
+    };
+    let path = match args.get("path").and_then(|v| v.as_str()).map(str::trim) {
+        Some(p) if !p.is_empty() && !p.starts_with('/') => p,
+        _ => return bad("put_file", "path is required (no leading /)"),
+    };
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return bad("put_file", "content is required (UTF-8 text)"),
+    };
+    if content.len() > MAX_FILE_BYTES {
+        return bad("put_file", format!("content too large (max {MAX_FILE_BYTES} bytes)"));
+    }
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("chore: update file via Agent Fleet");
+    let branch = args
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut get_url = match repo_api(base, &repo, &format!("/contents/{}", path_enc(path))) {
+        Ok(u) => u,
+        Err(e) => return bad("put_file", e),
+    };
+    if let Some(b) = branch {
+        get_url.push_str(&format!("?ref={}", urlencoding(b)));
+    }
+    let (get_status, existing) = gitea_get(http, token, &get_url).await;
+    let sha = if (200..300).contains(&get_status) {
+        existing.get("sha").and_then(|v| v.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    };
+    let mut payload = json!({
+        "message": message,
+        "content": b64_encode(content.as_bytes()),
+    });
+    if let Some(b) = branch {
+        payload["branch"] = json!(b);
+    }
+    if let Some(ref s) = sha {
+        payload["sha"] = json!(s);
+    }
+    let url = match repo_api(base, &repo, &format!("/contents/{}", path_enc(path))) {
+        Ok(u) => u,
+        Err(e) => return bad("put_file", e),
+    };
+    let method = if sha.is_some() {
+        reqwest::Method::PUT
+    } else {
+        reqwest::Method::POST
+    };
+    let (status, body) = gitea_send(http, token, method, &url, Some(&payload)).await;
+    if !(200..300).contains(&status) {
+        return upstream("put_file", status, &body);
+    }
+    ProxyResult::ok_result(
+        "gitea",
+        "put_file",
+        format!("Wrote {path} on {repo}"),
+        json!({
+            "repo": repo,
+            "path": path,
+            "sha": body.get("content").and_then(|c| c.get("sha")).or_else(|| body.get("sha")),
+        }),
+        Some(status),
+    )
+}
+
 pub(crate) async fn create_branch(
     http: &reqwest::Client,
     token: &str,

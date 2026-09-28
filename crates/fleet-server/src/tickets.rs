@@ -2070,6 +2070,14 @@ async fn fetch_ticket_details(
             let (project, iid) = item.external_key.split_once('#')?;
             ("get_issue", json!({ "project": project, "iid": iid }))
         }
+        "gitea" => {
+            let (full, number) = item.external_key.split_once('#')?;
+            let (owner, repo) = full.split_once('/')?;
+            (
+                "get_issue",
+                json!({ "owner": owner, "repo": repo, "number": number }),
+            )
+        }
         "bitbucket" => {
             let (full, id) = item.external_key.split_once('#')?;
             let (ws, repo) = full.split_once('/')?;
