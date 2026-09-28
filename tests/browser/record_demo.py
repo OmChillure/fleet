@@ -1115,8 +1115,8 @@ class Demo:
                     self.bug(f"agent count did not persist after Save+reload (got {got!r})")
                 self.snap("reloaded-agents")
 
-        if "Where new fleet jobs run" not in p.inner_text("body"):
-            self.bug("Settings missing Where new fleet jobs run")
+        if "Agent runtime" not in p.inner_text("body"):
+            self.bug("Settings missing Agent runtime")
         if "API keys for Run in a container" not in p.inner_text("body"):
             self.bug("Settings missing API keys for Run in a container")
         self.snap("run-mode-and-keys")

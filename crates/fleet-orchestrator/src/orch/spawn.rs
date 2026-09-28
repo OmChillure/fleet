@@ -295,7 +295,24 @@ pub async fn schedule_and_spawn(
                 "assigning a paired host while orchestrator URL is loopback; off-box workers cannot heartbeat"
             );
         }
-        if let Ok(mode) =
+        let plan_egress = plan_hint
+            .as_ref()
+            .map(|p| p.policy.egress_mode.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(mode) = plan_egress {
+            if mode != "inherit" {
+                req.env.insert("FLEET_EGRESS".into(), mode.clone());
+                if mode == "allowlist" {
+                    let list = plan_hint
+                        .as_ref()
+                        .map(|p| p.policy.egress_allowlist.clone())
+                        .unwrap_or_default();
+                    if !list.trim().is_empty() {
+                        req.env.insert("FLEET_EGRESS_ALLOWLIST".into(), list);
+                    }
+                }
+            }
+        } else if let Ok(mode) =
             fleet_db::repos::workspaces::default_egress(store.pool(), project_id).await
         {
             if mode != "inherit" {
