@@ -1016,7 +1016,8 @@ exit 22
                 !body.contains("API_PUBLIC_BASE"),
                 "{name} must not reference API_PUBLIC_BASE (OAuth / public API)"
             );
-            // verify.sh / verify.ps1 only read the local install. They do not pair.
+            // verify.* diagnoses the local install and can restart it.
+            // It does not pair. FLEET_URL is optional context for the ping.
             if name.starts_with("verify.") {
                 continue;
             }

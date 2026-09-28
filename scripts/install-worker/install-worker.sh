@@ -6,6 +6,8 @@
 #
 # Usage:
 #   curl -fsSL https://<cp>/install-worker.sh | FLEET_URL=https://<cp> FLEET_PAIR_TOKEN=<token> sh
+#   curl -fsSL https://<cp>/install-worker.sh | FLEET_URL=https://<cp> sh -s -- verify
+#   curl -fsSL https://<cp>/install-worker.sh | FLEET_URL=https://<cp> sh -s -- repair
 #   fetch -o - https://<cp>/install-worker.sh | FLEET_URL=https://<cp> FLEET_PAIR_TOKEN=<token> sh
 #   FLEET_URL=http://127.0.0.1:8080 FLEET_PAIR_TOKEN=<token> sh install-worker.sh
 #   FLEET_DETECT_ONLY=1 sh install-worker.sh   # print platform id and exit
@@ -264,6 +266,14 @@ export FLEET_INSTALL_ORIGIN="$ORIGIN"
 export FLEET_PLATFORM="$PLATFORM"
 # UI one-liner sets FLEET_PAIR_TOKEN on this sh; the platform child must see it.
 export FLEET_PAIR_TOKEN
+# install (default), verify, or repair. sh -s -- verify passes the argument
+# through this pipe; the platform installer and _unix_common.sh honor it.
+FLEET_ACTION=${1:-${FLEET_ACTION:-install}}
+case $FLEET_ACTION in
+    install|verify|repair) ;;
+    *) die "action must be install, verify, or repair" ;;
+esac
+export FLEET_ACTION
 
 info "platform: $PLATFORM"
 info "source:   $ORIGIN"

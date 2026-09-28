@@ -64,8 +64,8 @@ inventory, plane runner taking / not taking jobs vs local spawn.
 - Do not mark a layer done because a neighboring test exists. The row
   is the unit of coverage.
 
-**Verify installation.** The offline-card check is read-only and does not
-take a job. Layer 1 is `VerifyInstallTests` plus the command-string unit.
+**Verify installation.** The offline-card check pings the control plane and can repair with the token already on disk. It does not
+pair or take a job. Layer 1 is `VerifyInstallTests` plus the command-string unit.
 Layer 2 is `test_05b_offline_card_shows_verify_install` and the runners
 film. Layer 3 is **n/a**: the script does not pair, heartbeat, or lease,
 and a guest VM would only re-run the same disk checks the lab test already

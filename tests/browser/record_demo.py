@@ -1299,9 +1299,9 @@ class Demo:
             body = p.inner_text("body")
             if "Verify installation" not in body:
                 self.bug("offline card missing Verify installation")
-            pre = p.locator("pre").filter(has_text="verify.sh")
+            pre = p.locator("pre").filter(has_text="sh -s -- verify")
             if pre.count() == 0:
-                self.bug("offline card missing verify.sh command")
+                self.bug("offline card missing verify command")
             else:
                 command = pre.first.inner_text()
                 if "FLEET_PAIR_TOKEN" in command:

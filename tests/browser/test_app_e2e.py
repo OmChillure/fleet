@@ -1032,12 +1032,13 @@ class BrowserE2ETests(unittest.TestCase):
             card = open_host_panel(page, "5700g", timeout_ms=15_000)
             text = card.first.inner_text()
             self.assertIn("Verify installation", text)
-            self.assertIn("install/worker/verify.sh", text)
-            self.assertIn("install/worker/verify.ps1", text)
+            self.assertIn("install-worker.sh", text)
+            self.assertIn("sh -s -- verify", text)
+            self.assertIn("install-worker.ps1", text)
+            self.assertIn("pings the control plane", text)
             command = page.locator("pre").filter(has_text="verify.sh").first.inner_text()
             self.assertNotIn("FLEET_PAIR_TOKEN", command)
-            self.assertIn("service_disabled", text)
-            self.assertIn("bins_missing", text)
+            self.assertIn("FLEET_URL=", command)
         finally:
             page.unroute("**/api/workspaces/*/worker-hosts")
 
