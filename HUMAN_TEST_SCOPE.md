@@ -6,7 +6,7 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `a6d49f7ef2d993efa0fade24bfd3d41fe754fd48`
-- Tree-id: `a6d49f7ef2d993efa0fade24bfd3d41fe754fd48-c835b050889b`
+- Tree-id: `5daf105afa99bdb8fe68530fe4f6c9439275aae1`
 
 ## Scenes
 
@@ -33,7 +33,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: yes, product tree 5daf105afa99bdb8fe68530fe4f6c9439275aae1 (rebased onto origin/main; same Workforce UI)
+- Frames + webm inspected: yes, .tmp/demos/20260928T003027Z-api-dashboard.webm and frames 01-08
+- Bugs found:
+  - none. Signup returned 201, login returned 200. Workforce shows Arriving work and Pull open GitHub issues. No error toast. The demo account was demo.*@example.test.
