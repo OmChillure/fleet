@@ -2,10 +2,11 @@
 
 use dioxus::prelude::*;
 
+use crate::pages::inbox::designer::workflow;
 use crate::pages::inbox::experience::experience;
 use crate::pages::inbox::shared::{
-    PageData, action_cell, empty_or_list, error_banner, filter_box, flow, frame, header, hook_card,
-    need_connect, open_in, setup,
+    action_cell, empty_or_list, error_banner, flow, frame, header, hook_card, need_connect,
+    open_in, PageData,
 };
 
 pub fn view(ws: &str, data: PageData) -> Element {
@@ -14,14 +15,8 @@ pub fn view(ws: &str, data: PageData) -> Element {
     frame(rsx! {
         {header(ws, data, rsx! { {flow(data)} })}
         {need_connect(ws, data)}
+        {workflow(ws, data)}
         {error_banner(data)}
-        {filter_box(
-            ws,
-            data,
-            "Same language as Jira’s issue search bar. Empty uses statusCategory != Done. Click a chip to start from a common query.",
-            true,
-        )}
-        {setup(data, "How to set up Jira")}
         {hook_card(data)}
         h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Matching issues" }
         {empty_or_list(data, rsx! {

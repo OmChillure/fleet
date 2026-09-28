@@ -827,8 +827,8 @@ class Demo:
             raise RuntimeError("Inbox missing GitHub in the nav or cards")
         gh.first.click()
         pause(p, 800)
-        if "How to set up GitHub" not in p.inner_text("body"):
-            raise RuntimeError("GitHub inbox missing setup walkthrough")
+        if "GitHub automation" not in p.inner_text("body"):
+            raise RuntimeError("GitHub inbox missing automation board")
         body = p.inner_text("body")
         if "{provider}" in body:
             raise RuntimeError("GitHub webhook still has {provider} in the URL")

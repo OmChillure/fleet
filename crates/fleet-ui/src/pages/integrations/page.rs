@@ -3,11 +3,13 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    Integration, disconnect_integration, integration_is_connected, list_integrations,
-    oauth_start_url, patch_integration_defaults,
+    disconnect_integration, integration_is_connected, list_integrations, oauth_start_url,
+    patch_integration_defaults, Integration,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
+use crate::pages::inbox::is_inbox_app;
+use crate::Route;
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -26,9 +28,9 @@ struct OauthBridgeMsg {
 mod oauth_bridge {
     use super::OauthBridgeMsg;
     use std::cell::RefCell;
-    use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
 
     thread_local! {
         static PENDING: RefCell<Option<OauthBridgeMsg>> = const { RefCell::new(None) };
@@ -452,6 +454,16 @@ pub fn Integrations(workspace_id: String) -> Element {
                                     p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
                                         "{integ.description}"
                                     }
+                                    if is_inbox_app(&integ.id) {
+                                        Link {
+                                            to: Route::InboxApp {
+                                                workspace_id: workspace_id.clone(),
+                                                provider: integ.id.clone(),
+                                            },
+                                            class: "mt-2 inline-block text-xs text-[var(--app-accent)] underline",
+                                            "Open inbox"
+                                        }
+                                    }
                                     if let Some(err) = last_error.as_deref() {
                                         if !connected {
                                             p { class: "mt-2 text-xs leading-snug text-red-300/90",
@@ -478,7 +490,7 @@ pub fn Integrations(workspace_id: String) -> Element {
 
 #[component]
 fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
-    use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
+    use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
     use fleet_runners_view::{display_name, is_removed};
 
     let mut hosts = use_signal(Vec::<HostPublic>::new);
