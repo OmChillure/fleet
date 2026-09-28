@@ -53,7 +53,24 @@ async fn get_install_worker_ps1() -> Response {
 async fn get_named_script(AxumPath(name): AxumPath<String>) -> AppResult<Response> {
     reject_unsafe_name(&name)?;
     let body = script_body(&name).ok_or_else(|| AppError::not_found("install script not found"))?;
+    if name == "verify.sh" {
+        let baked = bake_verify_origin(body);
+        return Ok(script_response(&name, &baked));
+    }
     Ok(script_response(&name, body))
+}
+
+/// Piped `curl verify.sh | sh` has no sibling file. Stamp the worker public
+/// base into the one token the script understands. A git checkout stays
+/// unsubstituted so `sh verify.sh` next to `_unix_common.sh` is unchanged.
+fn bake_verify_origin(body: &str) -> String {
+    let origin = std::env::var("WORKER_PUBLIC_BASE")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .replace('\'', "");
+    body.replace("'@fleet-verify-origin@'", &format!("'{origin}'"))
 }
 
 fn lookup_worker_bin(state: &AppState, platform: &str, bin: &str) -> AppResult<PathBuf> {
@@ -506,13 +523,13 @@ fn missing_bin_hint(platform: &str, bin: &str) -> String {
     )
 }
 
-fn script_response(name: &str, body: &'static str) -> Response {
+fn script_response(name: &str, body: &str) -> Response {
     let ct = if name.ends_with(".sh") {
         HeaderValue::from_static("text/x-shellscript; charset=utf-8")
     } else {
         HeaderValue::from_static("text/plain; charset=utf-8")
     };
-    (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body).into_response()
+    (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body.to_string()).into_response()
 }
 
 /// Every script `GET /install/worker/{name}` can serve. Tests iterate this so a
