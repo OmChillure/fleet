@@ -566,7 +566,7 @@ start_host() {
   mkdir -p "$RUN_DIR/host"
   local want="http://127.0.0.1:${port}"
   if [[ -f "$RUN_DIR/host/config.toml" ]] && ! grep -q "control_plane_url = \"$want\"" "$RUN_DIR/host/config.toml"; then
-    rm -f "$RUN_DIR/host/config.toml" "$RUN_DIR/host/machine.token"
+    rm -f "$RUN_DIR/host/config.toml" "$RUN_DIR/host/machine.token" "$RUN_DIR/host/machine.id"
     log "Dropped stale fleet-host pair so it can reach $want"
   fi
   log "Starting fleet-host (bootstrap pair + lease)…"
