@@ -41,7 +41,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: 
-- Frames + webm inspected: 
-- Bugs found: 
-  - (none / list them)
+- Recorded on final merge tree: e4cfaeedf7b84cede766e9562be058fc2f0f47d2 (`.tmp/demos/20260928T001705Z-runners-lab.webm`). API `/health` and UI `/fleet-git-sha.txt` matched that id. Signup used `demo.61aab61277@example.test`.
+- Frames + webm inspected: `.tmp/demos/20260928T001705Z-frames/` (01–15, runners.png, lab.png) and `20260928T001705Z-runners-lab.webm`
+- Bugs found:
+  - none. Offline card 5700g shows Verify installation and `sh -s -- verify` with no pair token. The pending card has no verify block. Copy shows "Command copied." Lab protocol frame ends OK.
