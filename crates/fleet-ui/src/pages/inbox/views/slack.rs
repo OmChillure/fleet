@@ -2,10 +2,11 @@
 
 use dioxus::prelude::*;
 
+use crate::pages::inbox::designer::workflow;
 use crate::pages::inbox::experience::{experience, slack_parts};
 use crate::pages::inbox::shared::{
-    PageData, action_cell, empty_or_list, error_banner, filter_box, flow, frame, header, hook_card,
-    need_connect, open_in, preview, setup,
+    action_cell, empty_or_list, error_banner, flow, frame, header, hook_card, need_connect,
+    open_in, preview, PageData,
 };
 
 pub fn view(ws: &str, data: PageData) -> Element {
@@ -14,6 +15,7 @@ pub fn view(ws: &str, data: PageData) -> Element {
     frame(rsx! {
         {header(ws, data, rsx! { {flow(data)} })}
         {need_connect(ws, data)}
+        {workflow(ws, data)}
         {error_banner(data)}
         section { class: "rounded-2xl border {exp.accent} {exp.wash} p-4",
             h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
@@ -29,13 +31,6 @@ pub fn view(ws: &str, data: PageData) -> Element {
                 "Use the name you gave the Slack app. Handle is one ops task, not a coding run. Fleet replies in the channel and skips its own “Fleet run …” messages on the next poll."
             }
         }
-        {setup(data, "How to set up Slack")}
-        {filter_box(
-            ws,
-            data,
-            "Channel names (#eng) or IDs (C0123456789). Empty means every channel the bot is already in.",
-            false,
-        )}
         {hook_card(data)}
         h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Recent messages" }
         {empty_or_list(data, rsx! {

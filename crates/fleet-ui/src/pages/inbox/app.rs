@@ -3,12 +3,12 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use super::api::{InboxResponse, TicketRow, list_inbox};
+use super::api::{list_inbox, InboxResponse, TicketRow};
 use super::catalog::{explain_error, hook_url_for, inbox_app};
-use super::shared::{PageData, apply_rows};
+use super::shared::{apply_rows, PageData};
 use super::views;
-use crate::Route;
 use crate::pages::integrations::{find_integration, integration_is_connected, list_integrations};
+use crate::Route;
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
     let Some(m) = resp.monitor.as_ref() else {
@@ -28,6 +28,14 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
 
 #[component]
 pub fn InboxApp(workspace_id: String, provider: String) -> Element {
+    let key = format!("{workspace_id}:{provider}");
+    rsx! {
+        InboxAppBody { key: "{key}", workspace_id, provider }
+    }
+}
+
+#[component]
+fn InboxAppBody(workspace_id: String, provider: String) -> Element {
     let provider = provider.trim().to_ascii_lowercase();
     let info = inbox_app(&provider);
 
@@ -38,6 +46,8 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
     let mut hook_url = use_signal(String::new);
     let mut connected = use_signal(|| false);
     let mut account = use_signal(String::new);
+    let mut allowed = use_signal(Vec::<String>::new);
+    let mut auto_launch = use_signal(|| false);
     let busy = use_signal(|| false);
     let finish_error = use_signal(|| None::<(String, String)>);
     let mut seeded = use_signal(|| false);
@@ -52,15 +62,28 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                 match list_integrations(&ws).await {
                     Ok(list) => {
                         if let Some(i) = find_integration(&list, &prov) {
-                            connected.set(integration_is_connected(i));
-                            account.set(
+                            let on = integration_is_connected(i);
+                            connected.set(on);
+                            if on {
+                                account.set(
+                                    i.connection
+                                        .as_ref()
+                                        .and_then(|c| c.account_label.clone())
+                                        .unwrap_or_default(),
+                                );
+                            } else {
+                                account.set(String::new());
+                            }
+                            allowed.set(
                                 i.connection
                                     .as_ref()
-                                    .and_then(|c| c.account_label.clone())
+                                    .map(crate::pages::integrations::granted_repos)
                                     .unwrap_or_default(),
                             );
                         } else {
                             connected.set(false);
+                            account.set(String::new());
+                            allowed.set(Vec::new());
                         }
                     }
                     Err(_) => {}
@@ -91,6 +114,7 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                         }
                         if !seeded() {
                             filter.set(filter_value(&prov, &resp));
+                            auto_launch.set(resp.monitor.as_ref().is_some_and(|m| m.auto_launch));
                             seeded.set(true);
                         }
                         if let Some(info) = inbox_app(&prov) {
@@ -106,6 +130,8 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
                                     hook_url,
                                     connected,
                                     account,
+                                    allowed,
+                                    auto_launch,
                                     busy,
                                     finish_error,
                                 },
@@ -143,6 +169,8 @@ pub fn InboxApp(workspace_id: String, provider: String) -> Element {
         hook_url,
         connected,
         account,
+        allowed,
+        auto_launch,
         busy,
         finish_error,
     };
