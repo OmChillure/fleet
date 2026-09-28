@@ -23,17 +23,6 @@ CREATE_RE = re.compile(
     re.I | re.X,
 )
 
-# Agent invoked open-mr.sh (not merely mentioned it in a comment).
-OPEN_MR_RE = re.compile(
-    r"(?:^|[;&|\n]|&&|\|\|)\s*(?:(?:command|env|bash|sh)\s+)?(?:\S*/)?open-mr\.sh\b",
-    re.I,
-)
-
-GIT_PUSH_CREATE_RE = re.compile(
-    r"\bgit\s+push\b[^\n]*merge_request\.create",
-    re.I,
-)
-
 DENY_REASON = (
     "Opening an MR is the green light to merge. This command would create "
     "an MR before the merge bar is proven. Run scripts/open-mr.sh only after "
@@ -68,14 +57,15 @@ def command_from_event(ev: object) -> str:
 
 
 def decide(cmd: str) -> str:
-    """Return 'allow' or a deny reason."""
-    if not CREATE_RE.search(cmd):
-        return "allow"
-    if GIT_PUSH_CREATE_RE.search(cmd):
+    """Return 'allow' or a deny reason.
+
+    `open-mr.sh` alone does not match CREATE_RE. Naming that script in the
+    same command as `glab mr create`, `gh pr create`, or a merge-request
+    POST does not make the create legal.
+    """
+    if CREATE_RE.search(cmd):
         return DENY_REASON
-    if OPEN_MR_RE.search(cmd):
-        return "allow"
-    return DENY_REASON
+    return "allow"
 
 
 def self_test() -> int:
@@ -98,6 +88,12 @@ def self_test() -> int:
         ),
         (
             "scripts/open-mr.sh && git push gitlab HEAD -o merge_request.create",
+            "deny",
+        ),
+        ("scripts/open-mr.sh && glab mr create --title x", "deny"),
+        ("scripts/open-mr.sh && gh pr create --fill", "deny"),
+        (
+            "scripts/open-mr.sh; curl -X POST https://nova.teachx.ai/api/v4/projects/1/merge_requests",
             "deny",
         ),
     ]

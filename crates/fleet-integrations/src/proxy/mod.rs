@@ -21,7 +21,7 @@ mod types;
 
 pub use apps::{dispatch, operations_catalog_text, operations_for, supported_providers};
 pub use sanitize::{contains_secret_keys, sanitize_value};
-pub use types::{MAX_PROXY_DATA_BYTES, ProxyCaller, ProxyRequest, ProxyResult};
+pub use types::{ProxyCaller, ProxyRequest, ProxyResult, MAX_PROXY_DATA_BYTES};
 
 use std::time::Duration;
 
@@ -128,7 +128,28 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
 
     let access_token = match resolve_access_token(pool, key, &http, &conn, &operation).await {
         Ok(token) => token,
-        Err(err) => return err,
+        Err(err) => {
+            // Mint failures return before dispatch. A 401 still has to persist
+            // or the card stays Connected with no last_error. 403 stays upstream.
+            if err.error_code.as_deref() == Some("token_expired") {
+                if let Err(e) = fleet_db::repos::integrations::mark_error(
+                    pool,
+                    workspace_id,
+                    &provider,
+                    &err.summary,
+                )
+                .await
+                {
+                    tracing::error!(
+                        workspace_id = %workspace_id,
+                        provider = %provider,
+                        error = %e,
+                        "failed to persist token_expired on connection"
+                    );
+                }
+            }
+            return err;
+        }
     };
 
     tracing::info!(
@@ -480,8 +501,8 @@ mod tests {
         fn bind() -> Self {
             use std::io::{Read, Write};
             use std::net::TcpListener;
-            use std::sync::Arc;
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use std::sync::Arc;
             use std::thread;
 
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind create_pr sink");

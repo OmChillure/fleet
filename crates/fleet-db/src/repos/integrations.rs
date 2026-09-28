@@ -31,7 +31,10 @@ pub struct UpsertConnection {
     pub at: DateTime<Utc>,
 }
 
-/// Active (connected) rows for a workspace — includes credentials for internal use.
+/// Connected rows, plus a GitHub App row parked at `error` while its
+/// installation id is still stored. The integrations page uses this list,
+/// so that row can show `last_error` and Reconnect. Same predicate as
+/// [`list_inbox_providers`]. Credentials stay in the row for the proxy.
 pub async fn list_for_workspace(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -40,7 +43,15 @@ pub async fn list_for_workspace(
         r#"
         SELECT {COLS}
         FROM integration_connections
-        WHERE workspace_id = $1 AND status = 'connected'
+        WHERE workspace_id = $1
+          AND (
+            status = 'connected'
+            OR (
+              provider = 'github'
+              AND status = 'error'
+              AND COALESCE(config->>'installation_id', '') <> ''
+            )
+          )
         ORDER BY provider ASC
         "#
     );
