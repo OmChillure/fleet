@@ -8,11 +8,25 @@
 //! shared channel. Keys stay on the control plane; only text goes here.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use fleet_db::PgPool;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Kind on the `agent.event` BusMessage for run-scoped team share.
+/// Keep in sync with `fleet_bus::TEAM_SHARE_KIND`.
+const TEAM_SHARE_KIND: &str = "team_share";
+
+static SHARE_OUTBOX: OnceLock<PgPool> = OnceLock::new();
+
+/// Register the control-plane outbox pool so [`post_message`] can enqueue a
+/// share fact. No-op after the first call. Safe when Zenoh is offline.
+pub fn set_share_outbox(pool: PgPool) {
+    let _ = SHARE_OUTBOX.set(pool);
+}
 
 pub const MAX_BODY_CHARS: usize = 4000;
 pub const MAX_MESSAGES: usize = 500;
@@ -178,7 +192,59 @@ pub async fn post_message(
     .await?;
 
     rewrite_team_chat_md(talk).await;
+    enqueue_team_share(talk, &msg).await;
     Ok(msg)
+}
+
+/// `agent.event` / `team_share` fact for the run-share key
+/// `fleet/{workspace}/run/{run}/share/chat/{id}`.
+///
+/// `session_id` here is run-scoped bus correlation. Live HTTP status is
+/// `WorkerSessionStatus`; catalogue `SessionState` is bus payload only.
+fn team_share_bus_message(talk: &TeamTalk, msg: &TeamMessage) -> agent_fleet_contracts::BusMessage {
+    use agent_fleet_contracts::{
+        AgentEvent, BusMessage, MessageBody, Producer, Redaction, SessionId, TurnId, WorkflowId,
+    };
+    let mut bus = BusMessage::new(
+        Producer::Orchestrator,
+        MessageBody::AgentEvent(AgentEvent {
+            session_id: SessionId::from_uuid(talk.run_id),
+            turn_id: TurnId::from_uuid(msg.id),
+            seq: u64::from(msg.seq),
+            kind: TEAM_SHARE_KIND.into(),
+            acp_method: None,
+            payload: serde_json::to_value(msg).ok(),
+            redaction: Redaction::None,
+        }),
+    );
+    bus.envelope.tenant_id = Some(talk.project_id.to_string());
+    bus.envelope.workflow_id = Some(WorkflowId::from_uuid(talk.run_id));
+    bus
+}
+
+async fn enqueue_team_share(talk: &TeamTalk, msg: &TeamMessage) {
+    let Some(pool) = SHARE_OUTBOX.get() else {
+        return;
+    };
+    let bus = team_share_bus_message(talk, msg);
+    let message_id = bus.envelope.message_id.as_uuid();
+    let Ok(body) = serde_json::to_value(&bus) else {
+        return;
+    };
+    if let Err(e) = fleet_db::repos::control_plane_events::insert_outbound(
+        pool,
+        message_id,
+        bus.type_name(),
+        body,
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %e,
+            run_id = %talk.run_id,
+            "team share outbox insert failed"
+        );
+    }
 }
 
 pub async fn list_messages(talk: &TeamTalk) -> Vec<TeamMessage> {
@@ -620,6 +686,48 @@ mod tests {
         assert!(
             !s.contains("you (`*`)"),
             "broadcast must not take the directed dest arm: {s}"
+        );
+    }
+
+    #[test]
+    fn team_share_bus_message_is_run_scoped() {
+        use agent_fleet_contracts::MessageBody;
+        let talk = TeamTalk::from_spawn(
+            Path::new("/tmp"),
+            Uuid::nil(),
+            Uuid::from_u128(1),
+            "t1",
+            "backend",
+        );
+        let msg = TeamMessage {
+            id: Uuid::from_u128(2),
+            seq: 3,
+            ts: Utc::now(),
+            from: "t1".into(),
+            from_profile: "backend".into(),
+            to: "*".into(),
+            kind: "say".into(),
+            in_reply_to: None,
+            body: "hello".into(),
+        };
+        let bus = team_share_bus_message(&talk, &msg);
+        assert_eq!(bus.type_name(), "agent.event");
+        match &bus.body {
+            MessageBody::AgentEvent(ev) => {
+                assert_eq!(ev.kind, TEAM_SHARE_KIND);
+                assert_eq!(ev.seq, 3);
+                assert_eq!(ev.turn_id.as_uuid(), msg.id);
+                assert_eq!(ev.session_id.as_uuid(), talk.run_id);
+            }
+            other => panic!("expected agent.event, got {other:?}"),
+        }
+        assert_eq!(
+            bus.envelope.tenant_id.as_deref(),
+            Some(talk.project_id.to_string().as_str())
+        );
+        assert_eq!(
+            bus.envelope.workflow_id.map(|id| id.as_uuid()),
+            Some(talk.run_id)
         );
     }
 

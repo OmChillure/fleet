@@ -30,9 +30,10 @@ pub async fn invoke(
     token: &str,
     operation: &str,
     args: &Value,
+    config: &Value,
 ) -> ProxyResult {
     match operation {
-        "list_repos" => reads::list_repos(http, token, args).await,
+        "list_repos" => reads::list_repos(http, token, args, config).await,
         "list_issues" => reads::list_issues(http, token, args).await,
         "get_issue" => reads::get_issue(http, token, args).await,
         "list_prs" => reads::list_prs(http, token, args).await,

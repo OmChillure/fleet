@@ -425,12 +425,27 @@ fn fleet(ws: &str, suffix: &str) -> String {
 }
 
 /// Pair + machine heartbeat so the host is online with `advertised_host=true`.
+/// Process-only advertise cannot take the workspace default `container` pin.
 async fn create_pair_and_heartbeat(
     app: &axum::Router,
     jar: &CookieJar,
     ws: &str,
     name: &str,
 ) -> (Uuid, String) {
+    let iso = call(
+        app,
+        "PATCH",
+        &fleet(ws, "/settings"),
+        Some(jar),
+        Some(json!({ "min_isolation": "process" })),
+    )
+    .await;
+    assert_eq!(
+        iso.status,
+        StatusCode::OK,
+        "min_isolation=process for process-only host: {}",
+        iso.body
+    );
     let created = call(
         app,
         "POST",
@@ -814,6 +829,16 @@ async fn tick_assigns_remote_host_instead_of_local_stub() {
     let (app, _state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "tick-host").await;
+    // New workspaces default to container. This host is process-only.
+    let pin = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        Some(&jar),
+        Some(json!({ "min_isolation": "process" })),
+    )
+    .await;
+    assert_eq!(pin.status, StatusCode::OK, "pin process: {}", pin.body);
 
     let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);
@@ -874,6 +899,15 @@ async fn tick_remote_assign_does_not_stamp_last_heartbeat_at() {
     let (app, _state) = app_with_state().await;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let (host_id, _machine) = create_pair_and_heartbeat(&app, &jar, &ws, "hb-null-host").await;
+    let pin = call(
+        &app,
+        "PATCH",
+        &fleet(&ws, "/settings"),
+        Some(&jar),
+        Some(json!({ "min_isolation": "process" })),
+    )
+    .await;
+    assert_eq!(pin.status, StatusCode::OK, "pin process: {}", pin.body);
 
     let fleet_proj = call(&app, "GET", &fleet(&ws, ""), Some(&jar), None).await;
     assert_eq!(fleet_proj.status, StatusCode::OK, "{}", fleet_proj.body);

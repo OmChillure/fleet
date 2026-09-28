@@ -144,7 +144,7 @@ GROK_JSON="${STATE_DIR}/logs/grok-${STAMP}.json"
 GROK_ERR="${STATE_DIR}/logs/grok-${STAMP}.err"
 export GROK_LOG_FILE="${STATE_DIR}/logs/grok-${STAMP}.log"
 
-RULES="Do not git checkout, reset, or clean ${REPO}. Do not rotate pair tokens or force a re-pair. Deploy only via ${ROOT}/scripts/deploy.sh. Production SHA must be a GitLab commit. Write grok-status (deployed|blocked|failed) and grok-report before stopping."
+RULES="Do not create another worktree or another directory under /code. Reuse ${REPO} and ~/.local/state/vps-fleet/build. Do not git checkout, reset, or clean ${REPO}. Do not rotate pair tokens or force a re-pair. Deploy only via ${ROOT}/scripts/deploy.sh. Production SHA must be a GitLab commit. Write grok-status (deployed|blocked|failed) and grok-report before stopping."
 
 cmd=(
   "${GROK}"

@@ -4,6 +4,10 @@
 #
 #   ./scripts/deploy.sh           # deploy origin/main if SHA changed
 #   FORCE=1 ./scripts/deploy.sh   # rebuild and ship even if SHA matches
+#   PROVE_ONLY=1 DEPLOY_SHA=<sha> ./scripts/deploy.sh
+#       Build the bookworm images and the three ship runner platforms
+#       for that commit. Do not contact the VPS. An MR is mergeable
+#       only after this exits 0 for that SHA.
 
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -29,9 +33,6 @@ VPS_SSH_OPTS="-o ControlMaster=auto -o ControlPath=${CTL} -o ControlPersist=60"
 cleanup() {
   ssh -i "${VPS_DEPLOY_KEY}" -o ControlPath="${CTL}" -O exit "${VPS_DEPLOY_USER}@${VPS_HOST}" >/dev/null 2>&1 || true
   rm -f "${CTL}"
-  if [[ -n "${WORKDIR:-}" && -d "${WORKDIR}" ]]; then
-    rm -rf "${WORKDIR}"
-  fi
 }
 trap cleanup EXIT
 
@@ -80,7 +81,18 @@ done
 EOF
 }
 
-if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
+if [[ -n "${DEPLOY_SHA:-}" && "${PROVE_ONLY:-0}" != 1 ]]; then
+  log "DEPLOY_SHA is only valid with PROVE_ONLY=1"
+  exit 1
+fi
+if [[ -n "${DEPLOY_SHA:-}" ]]; then
+  if ! git -C "${REPO}" cat-file -e "${DEPLOY_SHA}^{commit}" 2>/dev/null; then
+    log "fetching ${DEPLOY_SHA}"
+    git -C "${REPO}" fetch --quiet "${GIT_REMOTE}" "${DEPLOY_SHA}"
+  fi
+  SHA="$(git -C "${REPO}" rev-parse "${DEPLOY_SHA}^{commit}")"
+  log "proving ${SHA}"
+elif [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
   SHA="$(bash "${REPO}/scripts/tree-id.sh")"
   log "deploying local worktree ${SHA}"
 else
@@ -93,12 +105,21 @@ fail_notify() {
   notify_desktop critical "Agent Fleet deploy failed" "${SHORT}: $*"
 }
 
-LAST_LOCAL="$(cat "${STATE_DIR}/deployed-sha" 2>/dev/null || true)"
-LAST_REMOTE="$(vps_deploy_ssh "cat '${VPS_STACK_DIR}/DEPLOYED_SHA' 2>/dev/null || true")"
+if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
+  if [[ "${SHA}" == *-* ]]; then
+    log "refuse to prove a dirty tree-id ${SHA}"
+    exit 1
+  fi
+  log "prove-only ${SHORT}; not contacting the VPS"
+  LAST_REMOTE=""
+else
+  LAST_LOCAL="$(cat "${STATE_DIR}/deployed-sha" 2>/dev/null || true)"
+  LAST_REMOTE="$(vps_deploy_ssh "cat '${VPS_STACK_DIR}/DEPLOYED_SHA' 2>/dev/null || true")"
 
-if [[ "${FORCE}" != 1 && "${SHA}" == "${LAST_LOCAL}" && "${SHA}" == "${LAST_REMOTE}" ]]; then
-  log "already deployed ${SHORT}; nothing to do"
-  exit 0
+  if [[ "${FORCE}" != 1 && "${SHA}" == "${LAST_LOCAL}" && "${SHA}" == "${LAST_REMOTE}" ]]; then
+    log "already deployed ${SHORT}; nothing to do"
+    exit 0
+  fi
 fi
 
 # A leftover worktree id (sha-sha) is not origin/main. Keep a patch by
@@ -109,24 +130,29 @@ fi
 
 log "deploying ${SHORT}"
 
-if [[ "${SKIP_BUILD}" != 1 ]]; then
-  WORKDIR="$(mktemp -d "${ROOT}/.build.XXXXXX")"
-  log "materializing ${SHORT} into ${WORKDIR}"
-  if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
-    rsync -a --delete \
-      --exclude target --exclude .git --exclude data --exclude tmp --exclude .tmp \
-      --exclude node_modules --exclude '*.pyc' --exclude __pycache__ \
-      "${REPO}/" "${WORKDIR}/"
-  else
-    git -C "${REPO}" archive "${SHA}" | tar -x -C "${WORKDIR}"
-    # origin/main Dockerfile omitted this until the tree includes it; include_str! needs it.
-    if [[ -f "${WORKDIR}/runner-packages.toml" ]] \
-      && ! grep -q 'COPY runner-packages.toml' "${WORKDIR}/Dockerfile"; then
-      sed -i '/COPY crates \.\/crates/a COPY runner-packages.toml ./' "${WORKDIR}/Dockerfile"
-      log "patched Dockerfile to COPY runner-packages.toml"
-    fi
-  fi
+# One directory, reused. cargo target/ stays between deploys. Do not
+# mktemp another tree under /code.
+WORKDIR="${STATE_DIR}/build"
+mkdir -p "${WORKDIR}"
+log "updating reused build dir ${WORKDIR} to ${SHORT}"
+STAGE="$(mktemp -d /tmp/fleet-archive.XXXXXX)"
+if [[ "${DEPLOY_SOURCE}" == "worktree" ]]; then
+  rsync -a --delete \
+    --exclude target --exclude .git --exclude data --exclude tmp --exclude .tmp \
+    --exclude node_modules --exclude '*.pyc' --exclude __pycache__ \
+    "${REPO}/" "${STAGE}/"
+else
+  git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE}"
+fi
+if [[ -f "${STAGE}/runner-packages.toml" ]] \
+  && ! grep -q 'COPY runner-packages.toml' "${STAGE}/Dockerfile"; then
+  sed -i '/COPY crates \.\/crates/a COPY runner-packages.toml ./' "${STAGE}/Dockerfile"
+  log "patched Dockerfile to COPY runner-packages.toml"
+fi
+rsync -a --delete --exclude target --exclude .git "${STAGE}/" "${WORKDIR}/"
+rm -rf "${STAGE}"
 
+if [[ "${SKIP_BUILD}" != 1 ]]; then
   log "building ${API_IMAGE}:${SHORT} and ${UI_IMAGE}:${SHORT}"
   fail=0
   docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
@@ -157,19 +183,66 @@ fi
 
 # Host/driver packages for install + auto-update. Rebuild a platform only
 # when those crates changed. After a failed UI build we never get here.
-STAGE_SRC="${WORKDIR:-${REPO}}"
-if [[ -z "${WORKDIR:-}" ]]; then
-  STAGE_SRC="$(mktemp -d "${ROOT}/.build.XXXXXX")"
-  git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE_SRC}"
-fi
+STAGE_SRC="${WORKDIR}"
 if ! STAGE_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
   fail_notify "worker package stage failed"
   exit 1
 fi
-if [[ -z "${WORKDIR:-}" ]]; then
-  rm -rf "${STAGE_SRC}"
+
+# Author should bump the per-OS rev before merge. If that was missed,
+# register already bumped it. Commit that lock onto main and ship the
+# new commit so the image git_sha matches the rev bump.
+if [[ "${PROVE_ONLY:-0}" != 1 ]]; then
+  recorded="$(mktemp)"
+  git -C "${REPO}" show "${SHA}:runner-packages.toml" > "${recorded}" 2>/dev/null || true
+  if [[ ! -s "${recorded}" ]] || ! cmp -s "${recorded}" "${WORKDIR}/runner-packages.toml"; then
+    log "runner lock changed; committing rev bump onto origin/main"
+    git -C "${REPO}" fetch --quiet origin main
+    rev_wt="$(mktemp -d /tmp/fleet-revcommit.XXXXXX)"
+    git -C "${REPO}" worktree add --detach "${rev_wt}" origin/main
+    cp "${WORKDIR}/runner-packages.toml" "${rev_wt}/runner-packages.toml"
+    git -C "${rev_wt}" add runner-packages.toml
+    git -C "${rev_wt}" commit -m "$(cat <<'EOF'
+chore: bump runner revs the author missed
+
+The deployer rebuilt a ship platform whose bytes changed and the
+per-OS rev was not bumped. It owns that bump and records the hashes
+of the bins it built. Pre-merge still asks the author to bump the rev.
+EOF
+)"
+    new_sha="$(git -C "${rev_wt}" rev-parse HEAD)"
+    git -C "${REPO}" push origin "${new_sha}:refs/heads/main"
+    git -C "${REPO}" worktree remove --force "${rev_wt}"
+    SHA="${new_sha}"
+    SHORT="${SHA:0:12}"
+    log "main is ${SHORT}; rebuilding images so git_sha matches"
+    STAGE="$(mktemp -d /tmp/fleet-archive.XXXXXX)"
+    git -C "${REPO}" archive "${SHA}" | tar -x -C "${STAGE}"
+    rsync -a --delete --exclude target --exclude .git "${STAGE}/" "${WORKDIR}/"
+    rm -rf "${STAGE}"
+    fail=0
+    docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
+      -f "${WORKDIR}/Dockerfile" -t "${API_IMAGE}:${SHA}" "${WORKDIR}" &
+    api_pid=$!
+    docker build --build-arg "FLEET_GIT_SHA=${SHA}" \
+      -f "${WORKDIR}/Dockerfile.ui" -t "${UI_IMAGE}:${SHA}" "${WORKDIR}" &
+    ui_pid=$!
+    wait "${api_pid}" || fail=1
+    wait "${ui_pid}" || fail=1
+    if [[ "${fail}" -ne 0 ]]; then
+      fail_notify "rebuild after rev bump failed"
+      exit 1
+    fi
+  fi
+  rm -f "${recorded}"
 fi
 
+if [[ "${PROVE_ONLY:-0}" == 1 ]]; then
+  mkdir -p "${STATE_DIR}/ship-proof"
+  printf 'ok %s\n' "${SHA}" > "${STATE_DIR}/ship-proof/${SHA}"
+  log "ship proof ok ${SHORT} (images and runner packages built; not shipped)"
+  exit 0
+fi
 log "shipping images to ${VPS_HOST}"
 docker save "${API_IMAGE}:${SHA}" "${UI_IMAGE}:${SHA}" \
   | zstd -T0 \
@@ -181,13 +254,13 @@ if ! compose_up "${SHA}"; then
 fi
 
 if wait_healthy "${SHA}"; then
-  vps_deploy_ssh "printf '%s\n' '${SHA}' > '${VPS_STACK_DIR}/DEPLOYED_SHA' && printf '%s\n' '${PREV}' > '${VPS_STACK_DIR}/PREVIOUS_SHA'"
-  printf '%s\n' "${SHA}" > "${STATE_DIR}/deployed-sha"
   prune_old_images "${SHA}" "${PREV}"
   if ! SHIP_ONLY=1 bash "${ROOT}/scripts/stage-ship-packages.sh" "${SHA}" "${STAGE_SRC}"; then
     fail_notify "plane is healthy but worker-dist rsync failed"
     exit 1
   fi
+  vps_deploy_ssh "printf '%s\n' '${SHA}' > '${VPS_STACK_DIR}/DEPLOYED_SHA' && printf '%s\n' '${PREV}' > '${VPS_STACK_DIR}/PREVIOUS_SHA'"
+  printf '%s\n' "${SHA}" > "${STATE_DIR}/deployed-sha"
   log "deployed ${SHORT} → ${PUBLIC_BASE}"
   notify_desktop normal "Agent Fleet deployed" \
     "${SHORT} is live at ${PUBLIC_BASE}"

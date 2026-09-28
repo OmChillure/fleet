@@ -140,9 +140,9 @@ async fn seed_workspace(store: &Store, project_id: Uuid) {
     let slug = format!("api{}", project_id.as_simple());
     sqlx::query(
         r#"
-        INSERT INTO workspaces (id, slug, name, created_at, updated_at)
-        VALUES ($1, $2, $3, now(), now())
-        ON CONFLICT (id) DO NOTHING
+        INSERT INTO workspaces (id, slug, name, min_isolation, created_at, updated_at)
+        VALUES ($1, $2, $3, 'process', now(), now())
+        ON CONFLICT (id) DO UPDATE SET min_isolation = 'process'
         "#,
     )
     .bind(project_id)
@@ -281,7 +281,7 @@ async fn fixture_and_tick_happy_path() {
                 "priority": 50
             }
         ],
-        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false }
+        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false, "run_mode": "on_pc" }
     });
 
     let (st, body) = json_req(
@@ -431,7 +431,7 @@ async fn fixture_run_unknown_project_404() {
             "worker_profile": "coding",
             "priority": 100
         }],
-        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false }
+        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false, "run_mode": "on_pc" }
     });
     let (st, v) = json_req(
         app,
@@ -585,7 +585,7 @@ async fn v1_admin_mutating_routes_401_without_bearer() {
                     "status": "accepted",
                     "source": "fixture",
                     "tasks": [],
-                    "policy": { "on_task_fail": "fail_run" }
+                    "policy": { "on_task_fail": "fail_run", "run_mode": "on_pc" }
                 }
             })),
         ),
@@ -655,7 +655,7 @@ async fn seed_project_with_worker_session(
             "worker_profile": "coding",
             "priority": 100
         }],
-        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false }
+        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false, "run_mode": "on_pc" }
     });
     let (st, body) = json_req(
         app,
@@ -914,7 +914,7 @@ async fn worker_io_team_chat_roundtrip_and_rejects_bad_token() {
             "worker_profile": "coding",
             "priority": 100
         }],
-        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false }
+        "policy": { "on_task_fail": "fail_run", "auto_sync_external": false, "run_mode": "on_pc" }
     });
     let (st, body) = json_req(
         app.clone(),

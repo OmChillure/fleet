@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use super::api::{
     AdminUser, AdminWorkspace, Overview, PatchUserBody, fetch_instance, fetch_overview,
-    fetch_runners, fetch_sessions, fetch_users, fetch_work, fetch_workspaces, patch_user,
+    fetch_runners, fetch_sessions, fetch_users, fetch_work, fetch_workspaces, patch_instance_cap,
+    patch_user,
 };
 use crate::components::toast::show_toast;
 
@@ -178,7 +179,12 @@ pub fn Admin() -> Element {
                     WorkspacesSection { workspaces: workspaces() }
                     RunnersSection { runners: runners() }
                     WorkSection { work: work(), sessions: sessions() }
-                    InstanceSection { instance: instance() }
+                    InstanceSection {
+                        instance: instance(),
+                        on_changed: move |_| {
+                            load_gen.set(load_gen() + 1);
+                        },
+                    }
                 }
             }
         }
@@ -535,11 +541,21 @@ fn CountBlock(title: String, value: Value) -> Element {
 }
 
 #[component]
-fn InstanceSection(instance: Value) -> Element {
+fn InstanceSection(instance: Value, on_changed: EventHandler<()>) -> Element {
+    let mut cap_draft = use_signal(|| {
+        instance
+            .get("max_agents_cap")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(128)
+            .to_string()
+    });
     let health = instance.get("health").cloned().unwrap_or(Value::Null);
     let urls = instance.get("urls").cloned().unwrap_or(Value::Null);
     let providers = instance.get("providers").cloned().unwrap_or(Value::Null);
-    let oauth = instance.get("oauth_configured").cloned().unwrap_or(Value::Null);
+    let oauth = instance
+        .get("oauth_configured")
+        .cloned()
+        .unwrap_or(Value::Null);
     let packages = instance
         .get("packages")
         .and_then(|v| v.as_array())
@@ -565,6 +581,38 @@ fn InstanceSection(instance: Value) -> Element {
             }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
                 "API {json_str(&urls, \"api_public_base\")} · UI {json_str(&urls, \"ui_public_base\")} · workers {json_str(&urls, \"worker_public_base\")}"
+            }
+            p { class: "mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--app-fg)]",
+                span { "Concurrent-agent cap" }
+                input {
+                    class: "w-20 rounded border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1",
+                    r#type: "number",
+                    min: "1",
+                    max: "1024",
+                    value: "{cap_draft()}",
+                    oninput: move |e| cap_draft.set(e.value()),
+                }
+                button {
+                    class: "rounded border border-[var(--app-border)] px-2 py-1",
+                    onclick: move |_| {
+                        let raw = cap_draft();
+                        let on_changed = on_changed;
+                        spawn(async move {
+                            let Ok(n) = raw.trim().parse::<i32>() else {
+                                show_toast().error("cap must be a number");
+                                return;
+                            };
+                            match patch_instance_cap(n).await {
+                                Ok(_) => {
+                                    show_toast().success("Instance cap saved");
+                                    on_changed.call(());
+                                }
+                                Err(e) => show_toast().error(e),
+                            }
+                        });
+                    },
+                    "Save"
+                }
             }
             p { class: "mt-1 text-xs text-[var(--app-muted)]",
                 if signup { "Signup token required" } else { "Open signup" }

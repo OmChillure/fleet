@@ -10,6 +10,21 @@ container** (KubePod / in-cluster, or Docker). Same pair, lease, and
 `work_claims` path — do not invent a second spawn. See
 [`../runners/run-on-pc-vs-container.md`](../runners/run-on-pc-vs-container.md).
 
+### Isolation (two axes)
+
+**agent_runtime** — where the agent runs (host process / TUI vs
+container or VM). Wire: `run_mode` `on_pc` | `in_container`. JSON alias
+`agent_runtime`.
+
+**workspace_location** — where the repo lives. Wire: workspace
+`min_isolation` `process` | `container` | `vm`. Settings JSON still
+uses `min_isolation` (`fleet_routes.rs`).
+
+Host `isolation` `native`/`sandboxed` is a derived label of
+agent_runtime (`on_pc`→`native`, `in_container`→`sandboxed`). PATCH
+`isolation` with `process`/`container`/`vm` is 400. Kind/container is
+assignable.
+
 Do not replace `fleet-driver`, `fleet-operator`,
 `FleetSandbox`, `work_claims`, or session `FLEET_*` tokens. This layer
 is a durable **machine** in front of them. The API is not a runner.
@@ -37,13 +52,14 @@ Contract for implementers. Exclusive file owners are listed at the bottom.
   install endpoints still serve scripts; binary GET returns 404 with a
   build hint. Dev can set `FLEET_WORKER_BUILD_FROM_SOURCE=1` on the
   **machine** (not the CP) so the platform script runs `cargo build`.
-- Identity: served binaries, if any, should match `scripts/tree-id.sh`
-  (same fail-closed rule as API/UI images). Stage writes `manifest.json`
-  next to the bins (`scripts/stage-worker-dist.sh`); worker “current /
-  outdated” compares against `[verify]` in `runner-packages.toml` (staging
-  writes `[versions]`). Host and driver each have `[release.BIN]` with
-  their own line version (0.0.3) plus a per-OS rev (windows 0.0.3.1).
-  A line bump to 0.0.4 resets every OS rev. Not `/health.git_sha`.
+- Identity: the deployer stamps the commit it built into `manifest.json`
+  (`FLEET_GIT_SHA`). Worker “current / outdated” compares against
+  `[verify]` in `runner-packages.toml`. The author bumps `[versions]`,
+  `[verify]`, and the per-OS `-rev`. The deployer fills `[release]`
+  hashes from the bins it published. Display is `0.0.3` when rev=0 and
+  `0.0.3.1` when rev=1. A line bump resets every OS rev. Not
+  `/health.git_sha`. The ship platforms are linux-x86_64, linux-aarch64,
+  and windows-x86_64.
 
 ### Worker machine
 
@@ -480,6 +496,12 @@ fleet-host update
 fleet-host status
 fleet-host unpair
 ```
+
+`fleet-host status` only works when the binary is still on `PATH`, and it
+does not say whether the service is disabled. The official check for an
+offline card is the read-only script on
+[Runners → Self-hosted](../runners/verify-installation.md). It does not
+re-pair.
 
 `pair` writes `~/.config/fleet-host/config.toml` (create dirs `0700`)
 and `~/.config/fleet-host/machine.token` (`0600`).

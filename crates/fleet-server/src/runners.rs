@@ -147,7 +147,13 @@ async fn http_attach_byo_cloud(
         .and_then(|h| h.get("id"))
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
-    let raw = serde_json::to_vec(&body.credentials.unwrap_or(json!({}))).unwrap_or_default();
+    let plaintext = body.credentials.unwrap_or(json!({}));
+    let envelope = state
+        .integrations
+        .credentials_key
+        .encrypt(&plaintext)
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    let raw = serde_json::to_vec(&envelope).map_err(|e| AppError::internal(e.to_string()))?;
     sqlx::query(
         r#"
         INSERT INTO cloud_credentials (id, workspace_id, provider, ciphertext, host_id)

@@ -13,14 +13,18 @@ Deploy **agent-fleet** `origin/main` to the VPS. Then stop.
 
 - Product checkout: repo root (parent of `deploy/studio`)
 - Ship tool: `deploy/studio/scripts/deploy.sh` (only way images reach the VPS)
+- Ship proof, before merge: `PROVE_ONLY=1 DEPLOY_SHA=<commit> ./scripts/deploy.sh` (no VPS contact)
+- Runner revs: the author bumps them before merge. If a ship platform's bytes changed and the rev was not bumped, this script bumps it, commits that onto `main`, and deploys that commit. It does not force-push.
 - Live: https://agentfleet.studio
 - Identity: `GET /health` `git_sha` **and** `GET /fleet-git-sha.txt` must equal the shipped commit
 - State: `~/.local/state/vps-fleet/` (`deployed-sha`, `grok-status`, `grok-session`, `grok-report`)
 
 ## Hard rules
 
-- Do **not** `git checkout`, `reset`, `clean`, or otherwise mutate the operator
-  worktree. Fetch is fine. Edits go in a **new git worktree**.
+- This checkout is the only product folder. Do **not** create another
+  worktree or another directory under `/code`. `deploy.sh` reuses
+  `~/.local/state/vps-fleet/build` and keeps its `target/`.
+- Do **not** `git checkout`, `reset`, or `clean` this checkout. Fetch is fine.
 - Do **not** deploy a dirty / local-only tree. Production SHA must be a
   GitLab commit. `DEPLOY_SOURCE=worktree` is not for this timer.
 - Do **not** force-push `main`. Fixes go on a branch + GitLab MR.

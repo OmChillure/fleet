@@ -1,4 +1,7 @@
 //! Workspace personas — agent role configs (no LLM calls).
+//!
+//! Not roster specialists (`GET /api/workspaces/{id}/fleet/personas`).
+//! This router is `/api/workspaces/{id}/personas` CRUD + 8 seed starters.
 
 use axum::Json;
 use axum::Router;
@@ -67,7 +70,7 @@ pub struct SeedResponse {
     pub skipped: usize,
 }
 
-/// Static starter catalog (product vision).
+/// Eight workspace-persona starters (product vision). Not roster specialists.
 struct Starter {
     slug: &'static str,
     name: &'static str,
@@ -173,7 +176,7 @@ fn starters() -> &'static [Starter] {
     ]
 }
 
-/// Roster label: trim, then reject empty / over 80 (create and PATCH).
+/// Workspace persona name: trim, then reject empty / over 80 (create and PATCH).
 fn validated_persona_name(raw: &str) -> AppResult<String> {
     let name = raw.trim().to_string();
     if name.is_empty() {

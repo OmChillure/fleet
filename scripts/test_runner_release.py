@@ -121,6 +121,83 @@ class RunnerReleaseTests(unittest.TestCase):
         self.assertEqual(rel.revs["linux-aarch64"], 0)
         self.assertEqual(rel.children["linux-x86_64"], new_h)
 
+    def test_keep_author_revs_writes_hash_and_rejects_a_missing_bump(self) -> None:
+        dest = Path(tempfile.mkdtemp(prefix="rr-"))
+        self.addCleanup(lambda: shutil.rmtree(dest, ignore_errors=True))
+        old_h = _sha(b"old-host")
+        new_h = _sha(b"new-host")
+        drv = _sha(b"drv")
+        children = {p: old_h for p in rr.SHIP_PLATFORMS}
+
+        def toml(host_rev: int) -> str:
+            return (
+                "[versions]\nfleet-host = \"0.0.3\"\nfleet-driver = \"0.0.3\"\n"
+                "[release.fleet-host]\n"
+                f'version = "0.0.3"\nparent = "{rr.parent_digest(children)}"\n'
+                f'linux-x86_64 = "{old_h}"\nlinux-x86_64-rev = {host_rev}\n'
+                f'linux-aarch64 = "{old_h}"\nlinux-aarch64-rev = 0\n'
+                f'windows-x86_64 = "{old_h}"\nwindows-x86_64-rev = 0\n'
+                "[release.fleet-driver]\n"
+                f'version = "0.0.3"\nparent = "{rr.parent_digest({p: drv for p in children})}"\n'
+                f'linux-x86_64 = "{drv}"\nlinux-x86_64-rev = 0\n'
+                f'linux-aarch64 = "{drv}"\nlinux-aarch64-rev = 0\n'
+                f'windows-x86_64 = "{drv}"\nwindows-x86_64-rev = 0\n'
+            )
+
+        baseline = dest / "baseline.toml"
+        baseline.write_text(toml(0))
+        toml_path = dest / "runner-packages.toml"
+        toml_path.write_text(toml(0))
+        for plat, host_sha in (
+            ("linux-x86_64", new_h),
+            ("linux-aarch64", old_h),
+            ("windows-x86_64", old_h),
+        ):
+            d = dest / "dist" / plat
+            d.mkdir(parents=True)
+            (d / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "bins": {
+                            "fleet-host": {"sha256": host_sha},
+                            "fleet-driver": {"sha256": drv},
+                        }
+                    }
+                )
+            )
+        self.assertEqual(
+            rr.cmd_register(
+                toml_path, dest / "dist", keep_author_revs=True, baseline=baseline
+            ),
+            1,
+        )
+        toml_path.write_text(toml(1))
+        self.assertEqual(
+            rr.cmd_register(
+                toml_path, dest / "dist", keep_author_revs=True, baseline=baseline
+            ),
+            0,
+        )
+        rel = rr.parse_bin_release(toml_path.read_text(), "fleet-host")
+        self.assertEqual(rel.revs["linux-x86_64"], 1)
+        self.assertEqual(rel.revs["linux-aarch64"], 0)
+        self.assertEqual(rel.children["linux-x86_64"], new_h)
+        self.assertEqual(rel.parent, rr.parent_digest(rel.children))
+        toml_path.write_text(toml(0))
+        self.assertEqual(
+            rr.cmd_register(
+                toml_path,
+                dest / "dist",
+                keep_author_revs=True,
+                deployer_revs=True,
+                baseline=baseline,
+            ),
+            0,
+        )
+        rel = rr.parse_bin_release(toml_path.read_text(), "fleet-host")
+        self.assertEqual(rel.revs["linux-x86_64"], 1)
+        self.assertEqual(rel.children["linux-x86_64"], new_h)
+
 
 if __name__ == "__main__":
     unittest.main()

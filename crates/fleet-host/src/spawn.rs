@@ -7,14 +7,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use agent_fleet_contracts::ExecutorKind;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::client::{JobRuntime, SpawnPayload};
-use crate::config::{merge_child_env, ContainerBackend, LocalConfig};
+use crate::config::{ContainerBackend, LocalConfig, merge_child_env};
 use crate::platform::{command_exists, hypervisor_on_path, in_cluster, kubeconfig_present};
 
 const WORKER_TOKEN_KEY: &str = "FLEET_WORKER_TOKEN";
@@ -283,7 +283,9 @@ fn sigterm_pid(pid: u32) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let status = std::process::Command::new("taskkill")
+        let mut kill = std::process::Command::new("taskkill");
+        crate::platform::hide_console(&mut kill);
+        let status = kill
             .args(["/PID", &pid.to_string()])
             .status()
             .context("taskkill")?;
@@ -439,6 +441,9 @@ pub async fn run_claim_with(
         },
         JobRuntime::Vm => run_vm(cfg, payload, &session_dir).await,
     };
+    if result.is_ok() {
+        let _ = publish_guest_proof(payload, &session_dir).await;
+    }
     wipe_session_dir(&session_dir);
     result
 }
@@ -453,6 +458,7 @@ async fn run_host(cfg: &LocalConfig, payload: &SpawnPayload, cwd: &Path) -> Resu
         .with_context(|| format!("stderr.log in {}", cwd.display()))?;
 
     let mut cmd = Command::new(&bin);
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -494,12 +500,36 @@ pub fn docker_container_name(session_id: Uuid) -> String {
     format!("fleet-wh-{session_id}")
 }
 
+/// Docker network for a job. `inherit` keeps the runner setting (and still
+/// remaps `none` to `bridge` so a guest can heartbeat). A job-level `none`
+/// or `open` wins. Docker cannot filter an allowlist.
+pub fn docker_network(cfg: &LocalConfig, egress_mode: &str) -> Result<String> {
+    let mode = egress_mode.trim();
+    if mode.is_empty() || mode.eq_ignore_ascii_case("inherit") {
+        let net = cfg.docker_network.trim();
+        let net = if net.is_empty() || net.eq_ignore_ascii_case("none") {
+            "bridge"
+        } else {
+            net
+        };
+        return Ok(net.to_string());
+    }
+    match mode.to_ascii_lowercase().as_str() {
+        "open" => Ok("bridge".into()),
+        "none" => Ok("none".into()),
+        "allowlist" => bail!(
+            "Docker on this runner cannot enforce an egress allowlist. Pick Open internet or No internet, or use a Kubernetes runner."
+        ),
+        other => bail!("unknown egress mode {other}"),
+    }
+}
+
 pub fn docker_run_args(
     cfg: &LocalConfig,
     payload: &SpawnPayload,
     session_dir: &Path,
     container_name: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let env = child_env_for_isolated_guest(payload, &cfg.extra_env, Path::new("/work"));
     let bin = container_child_bin(cfg, &env);
     let mut args: Vec<String> = vec![
@@ -521,14 +551,9 @@ pub fn docker_run_args(
         args.push("--user".into());
         args.push(format!("{uid}:{gid}"));
     }
-    let net = cfg.docker_network.trim();
-    let net = if net.is_empty() || net.eq_ignore_ascii_case("none") {
-        "bridge"
-    } else {
-        net
-    };
+    let net = docker_network(cfg, &payload.egress_mode)?;
     args.push("--network".into());
-    args.push(net.to_string());
+    args.push(net);
     if payload.privileged && cfg.allow_privileged {
         args.push("--privileged".into());
     }
@@ -538,13 +563,13 @@ pub fn docker_run_args(
     }
     args.push(cfg.docker_image.clone());
     args.push(bin);
-    args
+    Ok(args)
 }
 
 async fn run_docker(cfg: &LocalConfig, payload: &SpawnPayload, session_dir: &Path) -> Result<()> {
     docker_preflight_with(command_exists("docker"))?;
     let name = docker_container_name(payload.session_id);
-    let args = docker_run_args(cfg, payload, session_dir, &name);
+    let args = docker_run_args(cfg, payload, session_dir, &name)?;
 
     let stdout = std::fs::File::create(session_dir.join("stdout.log"))
         .with_context(|| format!("stdout.log in {}", session_dir.display()))?;
@@ -557,6 +582,7 @@ async fn run_docker(cfg: &LocalConfig, payload: &SpawnPayload, session_dir: &Pat
         .await;
 
     let mut cmd = Command::new("docker");
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -575,7 +601,9 @@ async fn docker_rm_f(name: &str) -> Result<()> {
     if !command_exists("docker") {
         bail!("docker not on PATH; cannot rm {name}");
     }
-    let out = Command::new("docker")
+    let mut rm = Command::new("docker");
+    crate::platform::hide_console_tokio(&mut rm);
+    let out = rm
         .args(["rm", "-f", name])
         .output()
         .await
@@ -754,6 +782,7 @@ async fn run_vm_with(
         .with_context(|| format!("stderr.log in {}", session_dir.display()))?;
     info!(bin = qemu, cwd = %session_dir.display(), "spawn vm worker");
     let mut cmd = Command::new(qemu);
+    crate::platform::hide_console_tokio(&mut cmd);
     cmd.args(&args[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -886,6 +915,8 @@ mod tests {
             orchestrator_url: String::new(),
             runtime: JobRuntime::Host,
             run_mode: None,
+            egress_mode: String::new(),
+            egress_allowlist: String::new(),
             isolation: None,
             task_title: String::new(),
             task_spec: String::new(),
@@ -999,7 +1030,8 @@ mod tests {
         let mut p = sample_payload();
         p.session_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         p.worker_token = "tok".into();
-        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "fleet-wh-test");
+        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "fleet-wh-test")
+            .expect("docker args");
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--network" && w[1] == "bridge"),
@@ -1028,7 +1060,8 @@ mod tests {
         for blank in ["", "  "] {
             let mut cfg = LocalConfig::defaults();
             cfg.docker_network = blank.into();
-            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+                .expect("docker args");
             let i = args
                 .iter()
                 .position(|a| a == "--network")
@@ -1045,7 +1078,8 @@ mod tests {
     fn docker_run_args_custom_network_follows_network_flag() {
         let mut cfg = LocalConfig::defaults();
         cfg.docker_network = "labnet".into();
-        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+            .expect("docker args");
         let i = args
             .iter()
             .position(|a| a == "--network")
@@ -1058,7 +1092,8 @@ mod tests {
     fn docker_run_args_command_is_basename_of_absolute_driver_bin() {
         let mut cfg = LocalConfig::defaults();
         cfg.fleet_driver_bin = "/opt/fleet/fleet-driver".into();
-        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+            .expect("docker args");
         assert_eq!(
             args.last().map(String::as_str),
             Some("fleet-driver"),
@@ -1085,7 +1120,8 @@ mod tests {
         payload
             .env
             .insert("FLEET_WORK_CMD".into(), "echo host-only".into());
-        let args = docker_run_args(&cfg, &payload, Path::new("/tmp/sess"), "n");
+        let args =
+            docker_run_args(&cfg, &payload, Path::new("/tmp/sess"), "n").expect("docker args");
         assert!(
             !args
                 .iter()
@@ -1134,7 +1170,8 @@ mod tests {
         let mut cfg = LocalConfig::defaults();
         cfg.extra_env
             .insert("FLEET_API_BASE".into(), "http://127.0.0.1:8080".into());
-        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+            .expect("docker args");
         assert!(
             !args.iter().any(|a| a.contains("127.0.0.1")),
             "loopback extra_env must not ride into docker: {args:?}"
@@ -1161,9 +1198,11 @@ mod tests {
             std::fs::read_to_string(dir.path().join("work/app.rs")).unwrap(),
             "fn main() {}\n"
         );
-        assert!(std::fs::read_to_string(dir.path().join("PERSONA.md"))
-            .unwrap()
-            .contains("coder"));
+        assert!(
+            std::fs::read_to_string(dir.path().join("PERSONA.md"))
+                .unwrap()
+                .contains("coder")
+        );
         assert!(dir.path().join("fleet-tool.sh").is_file());
     }
 
@@ -1240,10 +1279,34 @@ mod tests {
     }
 
     #[test]
+    fn job_egress_open_and_none_override_runner_network() {
+        let mut cfg = LocalConfig::defaults();
+        cfg.docker_network = "host".into();
+        let mut open = sample_payload();
+        open.egress_mode = "open".into();
+        let args = docker_run_args(&cfg, &open, Path::new("/tmp/sess"), "n").expect("open");
+        let i = args.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("bridge"));
+
+        let mut closed = sample_payload();
+        closed.egress_mode = "none".into();
+        let args = docker_run_args(&cfg, &closed, Path::new("/tmp/sess"), "n").expect("none");
+        let i = args.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("none"));
+
+        let mut listed = sample_payload();
+        listed.egress_mode = "allowlist".into();
+        let err = docker_run_args(&cfg, &listed, Path::new("/tmp/sess"), "n")
+            .expect_err("docker cannot filter an allowlist");
+        assert!(err.to_string().contains("allowlist"), "{err}");
+    }
+
+    #[test]
     fn docker_network_none_is_remapped_to_bridge() {
         let mut cfg = LocalConfig::defaults();
         cfg.docker_network = "none".into();
-        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+            .expect("docker args");
         let i = args
             .iter()
             .position(|a| a == "--network")
@@ -1260,7 +1323,8 @@ mod tests {
         for none in ["NONE", " None "] {
             let mut cfg = LocalConfig::defaults();
             cfg.docker_network = none.into();
-            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n");
+            let args = docker_run_args(&cfg, &sample_payload(), Path::new("/tmp/sess"), "n")
+                .expect("docker args");
             let i = args
                 .iter()
                 .position(|a| a == "--network")
@@ -1344,7 +1408,7 @@ mod tests {
         assert!(!cfg.allow_privileged);
         let mut p = sample_payload();
         p.privileged = true;
-        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n").expect("docker args");
         assert!(
             !args.iter().any(|a| a == "--privileged"),
             "allow_privileged=false must omit --privileged: {args:?}"
@@ -1357,7 +1421,7 @@ mod tests {
         cfg.allow_privileged = true;
         let mut p = sample_payload();
         p.privileged = true;
-        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n").expect("docker args");
         assert!(
             args.iter().any(|a| a == "--privileged"),
             "privileged=true and allow_privileged=true must pass --privileged: {args:?}"
@@ -1370,7 +1434,7 @@ mod tests {
         cfg.allow_privileged = true;
         let mut p = sample_payload();
         p.privileged = false;
-        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n");
+        let args = docker_run_args(&cfg, &p, Path::new("/tmp/sess"), "n").expect("docker args");
         assert!(
             !args.iter().any(|a| a == "--privileged"),
             "payload.privileged=false must not emit --privileged even when allow_privileged: {args:?}"

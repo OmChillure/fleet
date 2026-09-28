@@ -24,7 +24,7 @@ use uuid::Uuid;
 const TEST_PASSWORD: &str = "correct-horse";
 const TEST_ADMIN_TOKEN: &str = "test-admin";
 const TEST_JWT_SECRET: &str = "dev-change-me-to-a-long-random-secret-at-least-32-chars";
-const TEST_BOOTSTRAP_SECRET: &str = "test-bootstrap-secret";
+const TEST_BOOTSTRAP_SECRET: &str = "test-bootstrap-secret-24ch";
 
 fn require_database_url() -> String {
     std::env::var("DATABASE_URL")
@@ -777,10 +777,7 @@ async fn cluster_host_not_injected_into_other_workspace_list() {
     let (_email_a, _jar_a, ws_a) = signup_and_login(&app).await;
     let hostname = format!("cluster-list-{}", Uuid::new_v4());
 
-    let boot_secret = std::env::var("FLEET_BOOTSTRAP_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| TEST_BOOTSTRAP_SECRET.to_string());
+    let boot_secret = TEST_BOOTSTRAP_SECRET.to_string();
     let boot = {
         let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(&boot_secret)).await;
         call_bearer(
@@ -2406,7 +2403,7 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
         .as_str()
         .unwrap_or_else(|| panic!("create pair_token: {}", created.body))
         .to_string();
-    let hid = created.body["host"]["id"]
+    let _hid = created.body["host"]["id"]
         .as_str()
         .expect("host.id")
         .to_string();
@@ -2422,10 +2419,7 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
     assert_eq!(paired.status, StatusCode::OK, "pair: {}", paired.body);
     assert_http_omits_pair_plaintext(&paired, &[&pair_token], "POST /pair");
 
-    let boot_secret = std::env::var("FLEET_BOOTSTRAP_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| TEST_BOOTSTRAP_SECRET.to_string());
+    let boot_secret = TEST_BOOTSTRAP_SECRET.to_string();
     let boot = {
         let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(&boot_secret)).await;
         call_bearer(
@@ -2438,14 +2432,23 @@ async fn pair_and_bootstrap_http_omit_consumed_flp_() {
                 "platform": "linux-x86_64",
                 "advertised_host": true,
                 "advertised_container": false,
-                "machine_id": hid,
+                "machine_id": _hid,
                 "workspace_id": ws
             })),
         )
         .await
     };
-    assert_eq!(boot.status, StatusCode::OK, "bootstrap: {}", boot.body);
-    assert_http_omits_pair_plaintext(&boot, &[&pair_token], "POST /bootstrap");
+    assert_eq!(
+        boot.status,
+        StatusCode::FORBIDDEN,
+        "bootstrap must not rotate a paired host: {}",
+        boot.body
+    );
+    let raw = boot.body.to_string();
+    assert!(
+        !raw.contains(&pair_token),
+        "refused bootstrap must not echo the pair token: {raw}"
+    );
 }
 
 /// After pair, POST /me/heartbeat and /me/lease wrap host_json plus extras
@@ -2573,17 +2576,13 @@ async fn machine_token_plaintext_omitted_from_get_and_heartbeat_after_rotate() {
     );
     let hid = host_id.to_string();
 
-    let boot_secret = std::env::var("FLEET_BOOTSTRAP_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| TEST_BOOTSTRAP_SECRET.to_string());
     let boot = {
-        let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(&boot_secret)).await;
+        let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(TEST_BOOTSTRAP_SECRET)).await;
         call_bearer(
             &app,
             "POST",
             "/api/worker-hosts/bootstrap",
-            &boot_secret,
+            TEST_BOOTSTRAP_SECRET,
             Some(json!({
                 "hostname": name,
                 "platform": "linux-x86_64",
@@ -2597,26 +2596,14 @@ async fn machine_token_plaintext_omitted_from_get_and_heartbeat_after_rotate() {
     };
     assert_eq!(
         boot.status,
-        StatusCode::OK,
-        "bootstrap rotate: {}",
+        StatusCode::FORBIDDEN,
+        "bootstrap must not rotate a paired host: {}",
         boot.body
     );
-    let new_flm = boot.body["machine_token"]
-        .as_str()
-        .unwrap_or_else(|| {
-            panic!(
-                "POST /bootstrap rotate must return machine_token once: {}",
-                boot.body
-            )
-        })
-        .to_string();
     assert!(
-        new_flm.starts_with("flm_") && new_flm.len() > 8,
-        "bootstrap rotate machine_token must be flm_…: {new_flm}"
-    );
-    assert_ne!(
-        new_flm, old_flm,
-        "bootstrap rotate must mint a new machine token"
+        boot.body["machine_token"].is_null(),
+        "refused bootstrap must not mint a token: {}",
+        boot.body
     );
 
     let got = call(
@@ -2627,18 +2614,18 @@ async fn machine_token_plaintext_omitted_from_get_and_heartbeat_after_rotate() {
         None,
     )
     .await;
-    assert_eq!(got.status, StatusCode::OK, "get after rotate: {}", got.body);
+    assert_eq!(got.status, StatusCode::OK, "get after refused rotate: {}", got.body);
     assert_later_http_omits_machine_plaintext(
         &got,
-        &[&old_flm, &new_flm],
-        "GET /worker-hosts/{id} after bootstrap rotate",
+        &[&old_flm],
+        "GET /worker-hosts/{id} after refused bootstrap",
     );
 
     let hb = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/me/heartbeat",
-        &new_flm,
+        &old_flm,
         Some(json!({
             "advertised_host": true,
             "advertised_container": false,
@@ -2650,13 +2637,13 @@ async fn machine_token_plaintext_omitted_from_get_and_heartbeat_after_rotate() {
     assert_eq!(
         hb.status,
         StatusCode::OK,
-        "heartbeat with rotated token: {}",
+        "original machine token still works: {}",
         hb.body
     );
     assert_later_http_omits_machine_plaintext(
         &hb,
-        &[&old_flm, &new_flm],
-        "POST /me/heartbeat after bootstrap rotate",
+        &[&old_flm],
+        "POST /me/heartbeat after refused bootstrap",
     );
 }
 
@@ -6321,11 +6308,6 @@ async fn assert_tick_does_not_assign(
             host_id,
             "{what}: a later tick must not assign a new session to that host: {chosen:?}"
         );
-        assert_eq!(
-            chosen.runtime,
-            fleet_orchestrator::store::HostRuntime::Host,
-            "{what}: v1 tick must never emit container/k3d: {chosen:?}"
-        );
     }
     let listed = fleet_db::repos::worker_hosts::list_assignable(
         &state.db,
@@ -7954,6 +7936,21 @@ async fn install_bin_allowlist_rejects_control_plane_and_unknown_names() {
         host.raw
     );
     assert_eq!(host.raw.as_bytes(), host_payload);
+    let busted = call(
+        &app,
+        "GET",
+        "/install/worker/bin/linux-x86_64/fleet-host?h=c53195bf6e692ccf9064566c96301cdb63cb8d84b6b6ef22d348819dc6c1212b",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        busted.status,
+        StatusCode::OK,
+        "query-string cache bust must still serve the bin: {}",
+        busted.raw
+    );
+    assert_eq!(busted.raw.as_bytes(), host_payload);
 
     // Dist unset so lookup can reach workspace target/{release,debug}/{bin}.
     let (app_fallback, _) = app_with_state_dist(None).await;
@@ -9199,7 +9196,15 @@ async fn new_pair_token_does_not_invalidate_other_hosts_unused_token() {
 /// catalog:unit-request-update — Auto-update off + Update now (`request_update`).
 #[tokio::test]
 async fn request_update_marks_host() {
-    let app = app().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plat = dir.path().join("linux-x86_64");
+    std::fs::create_dir_all(&plat).unwrap();
+    std::fs::write(
+        plat.join("manifest.json"),
+        r#"{"git_sha":"staged","platform":"linux-x86_64","bins":{"fleet-host":{"sha256":"abc","version":"9.9.9"},"fleet-driver":{"sha256":"def","version":"9.9.9"}}}"#,
+    )
+    .unwrap();
+    let app = app_with_state_dist(Some(dir.path().to_path_buf())).await.0;
     let (_email, jar, ws) = signup_and_login(&app).await;
     let (host_id, machine) = create_pair_and_heartbeat(&app, &jar, &ws, "box", true, false).await;
     let host_path = format!("{}/{host_id}", hosts_path(&ws));
@@ -9379,8 +9384,8 @@ async fn request_update_true_while_auto_on_stamps() {
     .await;
     assert_eq!(patched.status, StatusCode::OK, "request: {}", patched.body);
     assert_eq!(
-        patched.body["auto_update"], true,
-        "auto stays on: {}",
+        patched.body["auto_update"], false,
+        "request_update must not turn auto_update on: {}",
         patched.body
     );
     let requested = patched.body["update_requested_at"]
@@ -9577,18 +9582,17 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     let app = app().await;
     let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(TEST_BOOTSTRAP_SECRET)).await;
     let (_email, _jar, ws) = signup_and_login(&app).await;
-    let machine_id = Uuid::new_v4();
+    let hostname = format!("cluster-host-{}", Uuid::new_v4());
     let first = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/bootstrap",
         TEST_BOOTSTRAP_SECRET,
         Some(json!({
-            "hostname": "cluster-host",
+            "hostname": hostname,
             "platform": "linux-x86_64",
             "advertised_host": false,
             "advertised_container": true,
-            "machine_id": machine_id,
             "workspace_id": ws
         })),
     )
@@ -9619,21 +9623,29 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
         "/api/worker-hosts/bootstrap",
         TEST_BOOTSTRAP_SECRET,
         Some(json!({
-            "hostname": "cluster-host",
+            "hostname": hostname,
             "platform": "linux-x86_64",
             "advertised_host": false,
             "advertised_container": true,
-            "machine_id": machine_id,
+            "machine_id": host_id,
             "workspace_id": ws
         })),
     )
     .await;
-    assert_eq!(again.status, StatusCode::OK, "rotate: {}", again.body);
-    let token2 = again.body["machine_token"].as_str().unwrap();
-    assert_ne!(token1, token2);
-    assert_eq!(again.body["host_id"].as_str(), Some(host_id));
+    assert_eq!(
+        again.status,
+        StatusCode::FORBIDDEN,
+        "bootstrap must not rotate an existing machine: {}",
+        again.body
+    );
+    assert!(
+        again.body["machine_token"].is_null(),
+        "refused bootstrap must not mint a token: {}",
+        again.body
+    );
+    let _ = host_id;
 
-    let old = call_bearer(
+    let still = call_bearer(
         &app,
         "POST",
         "/api/worker-hosts/me/heartbeat",
@@ -9646,25 +9658,11 @@ async fn bootstrap_pairs_and_rotates_same_machine() {
     )
     .await;
     assert_eq!(
-        old.status,
-        StatusCode::UNAUTHORIZED,
-        "old token: {}",
-        old.body
+        still.status,
+        StatusCode::OK,
+        "original machine token still works: {}",
+        still.body
     );
-
-    let fresh = call_bearer(
-        &app,
-        "POST",
-        "/api/worker-hosts/me/heartbeat",
-        token2,
-        Some(json!({
-            "advertised_host": false,
-            "advertised_container": true,
-            "current_jobs": 0
-        })),
-    )
-    .await;
-    assert_eq!(fresh.status, StatusCode::OK, "new token: {}", fresh.body);
 }
 
 fn assert_cluster_host_mutate_rejected(out: &HttpOut, what: &str) {
@@ -9708,10 +9706,7 @@ async fn cluster_host_foreign_workspace_cannot_pause_or_revoke() {
     let (_email_a, jar_a, ws_a) = signup_and_login(&app).await;
     let hostname = format!("cluster-foreign-{}", Uuid::new_v4());
 
-    let boot_secret = std::env::var("FLEET_BOOTSTRAP_SECRET")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| TEST_BOOTSTRAP_SECRET.to_string());
+    let boot_secret = TEST_BOOTSTRAP_SECRET.to_string();
     let boot = {
         let _boot_env = BootstrapSecretEnvGuard::lock_and_set(Some(&boot_secret)).await;
         call_bearer(

@@ -4,7 +4,7 @@
 #   ./scripts/human-test.sh record [scenes…]
 #
 # Does NOT install packages. Missing cargo/docker/dx → run
-#   crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+#   scripts/install-full-suite-deps.sh
 # (no flags; PROFILE/ENABLE_* in repo-root .env).
 #
 # Usage:
@@ -25,7 +25,7 @@ cd "$ROOT"
 DEV="${ROOT}/scripts/fleet-dev.sh"
 REC="${ROOT}/tests/browser/record_demo.py"
 DOC="docs/human-testing.md"
-INSTALL="crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh"
+INSTALL="scripts/install-full-suite-deps.sh"
 UI_URL="${FLEET_UI_URL:-http://localhost:3030}"
 API_URL="${FLEET_API_URL:-http://127.0.0.1:8080}"
 
@@ -223,7 +223,8 @@ cmd_guide() {
     "Each card shows a short machine id. Removed clones of a live hostname/platform stay hidden. Re-pair reclaims the same row." \
     "Remove worker asks “Remove this worker?” — Cancel keeps the card; Confirm removes it (a pending leftover stays hidden)." \
     "Click the pencil in the right panel to rename; Enter saves, Escape cancels." \
-    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." || return 0
+    "Pending card last seen never; after pair+heartbeat last seen just now (or Ns ago)." \
+    "An offline card (no heartbeat for 90s) opens Verify installation. Paste the command on that computer. It prints the verdict, pings the control plane, and can repair with the token already on disk. It does not mint a token. A pending or online card does not show that block." || return 0
 
   pause_step "Workers" \
     "Alias: /{ws}/workers redirects to /{ws}/runners/self-hosted (same Self-hosted page)." \

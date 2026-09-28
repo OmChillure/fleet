@@ -237,8 +237,9 @@ async fn match_github_app_signature(
     Ok(None)
 }
 
-/// Path token is the capability. Providers with a signing scheme must present
-/// a valid signature. Missing header / missing secret / decrypt failure deny.
+/// Path token is the capability. When an app webhook secret is stored, that
+/// provider must present a valid signature. No stored secret leaves the token
+/// as the only check. A bad signature or a decrypt failure denies.
 async fn token_path_signature_ok(
     state: &AppState,
     provider: &str,
@@ -262,8 +263,9 @@ async fn token_path_signature_ok(
         }
         "github" | "linear" | "slack" => {
             let stored = provider_signing_secret(state, workspace_id, provider).await?;
+            // Path token is the capability. A stored app secret still has to sign.
             let Some(secret) = stored else {
-                return Ok(false);
+                return Ok(true);
             };
             Ok(match provider {
                 "github" => match header_str(headers, "x-hub-signature-256") {

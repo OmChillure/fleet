@@ -13,12 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::cases as case_repo;
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_db::{Case, CaseEvent};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use fleet_integrations::proxy::ProxyCaller;
@@ -409,15 +409,16 @@ pub fn case_json(case: &Case, events: Option<&[CaseEvent]>) -> Value {
         "updated_at": case.updated_at,
     });
     if let Some(ev) = events {
-        v["events"] = json!(ev
-            .iter()
-            .map(|e| json!({
-                "id": e.id,
-                "kind": e.kind,
-                "payload": e.payload,
-                "created_at": e.created_at,
-            }))
-            .collect::<Vec<_>>());
+        v["events"] = json!(
+            ev.iter()
+                .map(|e| json!({
+                    "id": e.id,
+                    "kind": e.kind,
+                    "payload": e.payload,
+                    "created_at": e.created_at,
+                }))
+                .collect::<Vec<_>>()
+        );
     }
     v
 }
@@ -1502,13 +1503,19 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
 
     let mut plan = build_multi_task_plan(case.workspace_id, None, tasks);
     plan.source = "case".into();
+    let run_mode = workspace_repo::default_run_mode(&state.db, case.workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
+    plan.policy.run_mode = run_mode.clone();
     let llm = crate::chat_tools::composer_or_fallback_for(
         state,
         case.workspace_id,
         case.created_by,
     )
     .await;
-    crate::chat_tools::require_taking_runner(&llm).map_err(|e| e.to_string())?;
+    if run_mode != fleet_db::WORKER_HOST_RUN_IN_CONTAINER {
+        crate::chat_tools::require_taking_runner(&llm).map_err(|e| e.to_string())?;
+    }
     crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
     plan.policy.requested_by = case.created_by;
     validate::validate_plan(&plan).map_err(|e| e.to_string())?;
@@ -1516,7 +1523,7 @@ async fn launch_case_plan(state: &AppState, case: &Case, launch: &Value) -> Resu
     state
         .orch
         .store
-        .ensure_project(case.workspace_id, "workspace fleet", 3)
+        .ensure_project(case.workspace_id, "workspace fleet", 16)
         .await
         .map_err(|e| e.to_string())?;
     let (run, _) = state
@@ -1577,11 +1584,7 @@ mod tests {
             (Deciding, Cancelled, true),
         ];
         for &(from, to, allowed) in cells {
-            assert_eq!(
-                can_transition(from, to),
-                allowed,
-                "{from:?} → {to:?}"
-            );
+            assert_eq!(can_transition(from, to), allowed, "{from:?} → {to:?}");
         }
     }
 
@@ -1672,10 +1675,12 @@ mod tests {
         let arr = ctx["observations"].as_array().expect("arr");
         assert_eq!(arr.len(), MAX_OBSERVATIONS);
         assert!(arr[0]["note"].as_str().unwrap().contains("note 20"));
-        assert!(arr.last().unwrap()["note"]
-            .as_str()
-            .unwrap()
-            .contains("note 59"));
+        assert!(
+            arr.last().unwrap()["note"]
+                .as_str()
+                .unwrap()
+                .contains("note 59")
+        );
     }
 
     #[test]

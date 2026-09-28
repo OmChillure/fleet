@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 pub fn uses_official_cli(harness: &str) -> bool {
     matches!(
         harness.trim().to_ascii_lowercase().as_str(),
-        "grok" | "xai" | "claude" | "anthropic" | "ollama"
+        "grok" | "xai" | "claude" | "anthropic"
     )
 }
 
@@ -133,12 +133,23 @@ pub fn run(
 
 fn nonempty_model(model: &str) -> Option<String> {
     let t = model.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 fn with_worker_rules(work_dir: &Path, prompt: &str) -> String {
     let mut out = String::new();
-    if let Ok(persona) = fs::read_to_string(work_dir.join("PERSONA.md"))
+    let persona = fs::read_to_string(work_dir.join("PERSONA.md"))
+        .ok()
+        .or_else(|| {
+            work_dir
+                .parent()
+                .and_then(|p| fs::read_to_string(p.join("PERSONA.md")).ok())
+        });
+    if let Some(persona) = persona
         && !persona.trim().is_empty()
     {
         out.push_str(persona.trim());
@@ -246,23 +257,38 @@ fn run_timeout(
         child.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = child.spawn().map_err(|e| anyhow::anyhow!("{bin}: {e}"))?;
-    if let Some(text) = stdin_text
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        let _ = stdin.write_all(text.as_bytes());
-    }
+    // Readers start before stdin is written. A child that fills the stdout
+    // pipe while still reading stdin must not block the timeout loop.
+    let stdout_h = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut out, &mut buf);
+            buf
+        })
+    });
+    let stderr_h = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = std::io::Read::read_to_string(&mut err, &mut buf);
+            buf
+        })
+    });
+    let stdin_h = stdin_text.and_then(|text| {
+        let mut stdin = child.stdin.take()?;
+        let text = text.to_string();
+        Some(std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        }))
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = std::io::Read::read_to_string(&mut out, &mut stdout);
+                if let Some(h) = stdin_h {
+                    let _ = h.join();
                 }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
-                }
+                let stdout = stdout_h.and_then(|h| h.join().ok()).unwrap_or_default();
+                let stderr = stderr_h.and_then(|h| h.join().ok()).unwrap_or_default();
                 if !status.success() {
                     let err = stderr.trim();
                     if err.is_empty() {
@@ -275,12 +301,22 @@ fn run_timeout(
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(h) = stdin_h {
+                    let _ = h.join();
+                }
+                let _ = stdout_h.map(|h| h.join());
+                let _ = stderr_h.map(|h| h.join());
                 bail!("{bin} timed out after {}s", timeout.as_secs());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(40)),
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(h) = stdin_h {
+                    let _ = h.join();
+                }
+                let _ = stdout_h.map(|h| h.join());
+                let _ = stderr_h.map(|h| h.join());
                 bail!("{bin}: {e}");
             }
         }
@@ -296,7 +332,10 @@ pub fn persist_outcome(work_dir: &Path, outcome: &OfficialOutcome) -> Result<()>
     let body = json_result(outcome);
     fs::write(dir.join("result.json"), serde_json::to_vec_pretty(&body)?)?;
     let result = work_dir.join("result.md");
-    if !result.exists() || fs::read_to_string(&result).map(|s| s.trim().is_empty()).unwrap_or(true)
+    if !result.exists()
+        || fs::read_to_string(&result)
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
     {
         let mut md = String::from("# Result\n\n");
         md.push_str(outcome.text.trim());
@@ -327,7 +366,7 @@ mod tests {
     fn official_providers() {
         assert!(uses_official_cli("grok"));
         assert!(uses_official_cli("Claude"));
-        assert!(uses_official_cli("ollama"));
+        assert!(!uses_official_cli("ollama"));
         assert!(!uses_official_cli("mock"));
         assert!(!uses_official_cli("grok-acp"));
     }
@@ -336,7 +375,9 @@ mod tests {
     fn grok_worker_argv_is_agent_not_chat_print() {
         let args = grok_argv(Path::new("/tmp/p.txt"), "grok-4.6", Some("high"), 20);
         assert!(args.contains(&"--prompt-file".into()));
-        assert!(args.windows(2).any(|w| w[0] == "--max-turns" && w[1] == "20"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--max-turns" && w[1] == "20"));
         assert!(args.windows(2).any(|w| w[0] == "-m" && w[1] == "grok-4.6"));
         assert!(!args.iter().any(|a| a == "agent"));
         assert!(!args.iter().any(|a| a == "stdio"));
@@ -365,7 +406,11 @@ mod tests {
     fn claude_worker_keeps_tools() {
         let args = claude_argv("sonnet", Some("high"));
         assert!(args.contains(&"-p".into()));
-        assert!(!args.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
+        assert!(!args
+            .windows(2)
+            .any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "sonnet"));
     }
 }

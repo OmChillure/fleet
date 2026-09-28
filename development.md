@@ -18,7 +18,7 @@ Prefer **`http://localhost:3030`** in the browser (not `127.0.0.1`) so cookie au
 - For **k3d**: `brew install k3d` (see [`infra/README.md`](infra/README.md))
 - Host toolchain (`cargo`, `dx`, kind, …): one command, no flags —
 
-  `crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh`
+  `scripts/install-full-suite-deps.sh`
 
   Persist `PROFILE` / `ENABLE_*` in repo-root `.env`. Do not `cargo install`
   dioxus-cli on the host (OpenSSL 4 cannot build it; the install script

@@ -9,7 +9,7 @@ from pathlib import Path
 
 LAB = Path(__file__).resolve().parents[1]
 REPO = LAB.parents[2]
-SCRIPT = LAB / "scripts" / "install-full-suite-deps.sh"
+SCRIPT = REPO / "scripts" / "install-full-suite-deps.sh"
 
 
 class InstallDxFailClosedTests(unittest.TestCase):

@@ -1,11 +1,11 @@
 //! Capacity schedule + spawn protocol.
 
-use crate::domain::{count_capacity_in_use, free_slots, WorkerSessionStatus};
+use crate::domain::{WorkerSessionStatus, count_capacity_in_use, free_slots};
 use crate::sandbox::remote::{self, RemoteHostHandle};
-use crate::sandbox::{fleet_worker_env, SpawnRequest};
+use crate::sandbox::{SpawnRequest, fleet_worker_env};
 use crate::store::{
-    enqueue_remote_spawn, hold_ready_for_host_update, select_assignable_runner_preferring_for_job,
-    workspace_has_updating_host, BoardSnapshot, JobNeed, RunMode, Store,
+    BoardSnapshot, JobNeed, RunMode, Store, enqueue_remote_spawn, hold_ready_for_host_update,
+    select_assignable_runner_preferring_for_job, workspace_has_updating_host,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -295,6 +295,42 @@ pub async fn schedule_and_spawn(
                 "assigning a paired host while orchestrator URL is loopback; off-box workers cannot heartbeat"
             );
         }
+        let plan_egress = plan_hint
+            .as_ref()
+            .map(|p| p.policy.egress_mode.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(mode) = plan_egress {
+            if mode != "inherit" {
+                req.env.insert("FLEET_EGRESS".into(), mode.clone());
+                if mode == "allowlist" {
+                    let list = plan_hint
+                        .as_ref()
+                        .map(|p| p.policy.egress_allowlist.clone())
+                        .unwrap_or_default();
+                    if !list.trim().is_empty() {
+                        req.env.insert("FLEET_EGRESS_ALLOWLIST".into(), list);
+                    }
+                }
+            }
+        } else if let Ok(mode) =
+            fleet_db::repos::workspaces::default_egress(store.pool(), project_id).await
+        {
+            if mode != "inherit" {
+                req.env.insert("FLEET_EGRESS".into(), mode.clone());
+                if mode == "allowlist" {
+                    if let Ok(list) = fleet_db::repos::workspaces::default_egress_allowlist(
+                        store.pool(),
+                        project_id,
+                    )
+                    .await
+                    {
+                        if !list.trim().is_empty() {
+                            req.env.insert("FLEET_EGRESS_ALLOWLIST".into(), list);
+                        }
+                    }
+                }
+            }
+        }
         let handle = RemoteHostHandle::new(chosen.id()).as_str();
         match enqueue_remote_spawn(store, &chosen, &req, orchestrator_url).await {
             Ok(()) => {
@@ -397,7 +433,7 @@ pub async fn apply_retry_after_failure(
     cancel_requested: bool,
     exit_reason: crate::domain::ExitReason,
 ) -> Result<(), TickError> {
-    use crate::domain::{should_retry, BoardTaskStatus, RetryAction};
+    use crate::domain::{BoardTaskStatus, RetryAction, should_retry};
 
     if store.live_claim_is_other_attempt(task_id, attempt).await? {
         return Ok(());

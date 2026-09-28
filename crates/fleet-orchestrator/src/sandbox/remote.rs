@@ -50,6 +50,12 @@ pub struct SpawnPayload {
     /// Use case: `on_pc` | `in_container`.
     #[serde(default)]
     pub run_mode: String,
+    /// `inherit` | `none` | `allowlist` | `open`. Empty means inherit.
+    #[serde(default)]
+    pub egress_mode: String,
+    /// Extra destinations when `egress_mode` is `allowlist`.
+    #[serde(default)]
+    pub egress_allowlist: String,
     /// Isolation class: process | container | vm. Not "k8s".
     #[serde(default)]
     pub isolation: String,
@@ -120,6 +126,11 @@ pub fn spawn_payload(
     strip_denied_secret_env(&mut env);
     env.insert("FLEET_WORKER_TOKEN".into(), req.worker_token.clone());
     env.insert("FLEET_ORCHESTRATOR_URL".into(), orchestrator_url.into());
+    let egress_mode = env.get("FLEET_EGRESS").cloned().unwrap_or_default();
+    let egress_allowlist = env
+        .get("FLEET_EGRESS_ALLOWLIST")
+        .cloned()
+        .unwrap_or_default();
     let isolation = isolation_for_runtime(runtime);
     if isolation == "container" || isolation == "vm" {
         agent_fleet_contracts::strip_isolated_guest_env(&mut env);
@@ -139,6 +150,8 @@ pub fn spawn_payload(
             "container" | "docker" | "k8s" | "kubernetes" => "in_container".into(),
             _ => "on_pc".into(),
         },
+        egress_mode,
+        egress_allowlist,
         isolation: isolation.into(),
         task_title: req.task_title.clone().unwrap_or_default(),
         task_spec: req.task_spec.clone().unwrap_or_default(),

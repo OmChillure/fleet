@@ -9,13 +9,13 @@ use chrono::{TimeDelta, Utc};
 use fleet_auth::{AppError, AppResult};
 use fleet_db::repos::work_claims;
 use fleet_db::{NewWorkClaim, WorkerHost};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::chat::ChatProgress;
 use crate::chat_tools::{
-    execute_tool_with_retry, rewrite_if_asked_to_continue, system_prompt_for_workspace, ChatAction,
-    ChatLlmContext, MAX_TOOL_ROUNDS,
+    ChatAction, ChatLlmContext, MAX_TOOL_ROUNDS, execute_tool_with_retry,
+    rewrite_if_asked_to_continue, system_prompt_for_workspace,
 };
 use crate::state::AppState;
 
@@ -279,11 +279,7 @@ pub(crate) fn parse_runner_tool_calls(text: &str) -> Option<Vec<(String, Value)>
             );
             out.push((name.to_string(), args));
         }
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        if out.is_empty() { None } else { Some(out) }
     } else {
         let name = v
             .get("name")

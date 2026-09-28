@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use fleet_auth::{require_user, AppError, AppResult, AuthState};
+use fleet_auth::{AppError, AppResult, AuthState, require_user};
 use fleet_db::repos::workspaces as workspace_repo;
 use fleet_orchestrator::domain::{
     OnTaskFailPolicy, PlanPolicy, PlanTask, WorkPlanBody, WorkPlanStatus,
@@ -15,7 +15,7 @@ use fleet_orchestrator::domain::{
 use fleet_orchestrator::orch::TickError;
 use fleet_orchestrator::store::StoreError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -33,6 +33,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/workspaces/{workspace_id}/fleet/settings",
             get(get_settings).patch(patch_settings),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/fleet/repo-postures",
+            get(list_repo_postures).put(put_repo_posture),
         )
         .route(
             "/api/workspaces/{workspace_id}/fleet/personas",
@@ -92,7 +96,7 @@ async fn ensure_project(state: &AppState, workspace_id: Uuid, name_hint: &str) -
     state
         .orch
         .store
-        .ensure_project(workspace_id, name_hint, 3)
+        .ensure_project(workspace_id, name_hint, 16)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -162,11 +166,30 @@ async fn settings_json(
     // Do not serialize OpenaiConfig / ClaudeConfig / GrokConfig — api_key stays off the wire.
     json!({
         "max_agents": cfg.max_agents,
-        "max_agents_cap": fleet_orchestrator::domain::MAX_PROJECT_AGENTS,
+        "max_agents_cap": fleet_db::repos::instance_settings::get(&state.db)
+            .await
+            .map(|s| s.max_agents_cap)
+            .unwrap_or(128),
         "min_isolation": min_isolation,
+        "workspace_location": min_isolation,
+        "agent_runtime": workspace_repo::default_run_mode(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
         "default_run_mode": workspace_repo::default_run_mode(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "on_pc".into()),
+        "default_egress": workspace_repo::default_egress(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "inherit".into()),
+        "default_egress_allowlist": workspace_repo::default_egress_allowlist(&state.db, workspace_id)
+            .await
+            .unwrap_or_default(),
+        "run_envelope": workspace_repo::run_envelope(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "on_pc".into()),
+        "egress_envelope": workspace_repo::egress_envelope(&state.db, workspace_id)
+            .await
+            .unwrap_or_else(|_| "open".into()),
         "default_send_policy": workspace_repo::default_send_policy(&state.db, workspace_id)
             .await
             .unwrap_or_else(|_| "owner_only".into()),
@@ -183,6 +206,65 @@ async fn settings_json(
         "effective_backend": llm.backend.as_deref().unwrap_or("off"),
         "effective_model": llm.model,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct PutRepoPostureBody {
+    repo: String,
+    run_mode: String,
+    egress_mode: String,
+    #[serde(default)]
+    egress_allowlist: String,
+}
+
+async fn list_repo_postures(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let _ = require_member(&state, &jar, workspace_id).await?;
+    let rows = fleet_db::repos::repo_postures::list_for_workspace(&state.db, workspace_id).await?;
+    let repos = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "repo": row.repo,
+                "run_mode": row.run_mode,
+                "egress_mode": row.egress_mode,
+                "egress_allowlist": row.egress_allowlist,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "repos": repos })))
+}
+
+async fn put_repo_posture(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PutRepoPostureBody>,
+) -> AppResult<Json<Value>> {
+    let (_user, role) = require_member(&state, &jar, workspace_id).await?;
+    if role != "owner" && role != "admin" {
+        return Err(AppError::forbidden(
+            "owner or admin required to set a repo default",
+        ));
+    }
+    let row = fleet_db::repos::repo_postures::upsert(
+        &state.db,
+        workspace_id,
+        &body.repo,
+        &body.run_mode,
+        &body.egress_mode,
+        &body.egress_allowlist,
+    )
+    .await?;
+    Ok(Json(json!({
+        "repo": row.repo,
+        "run_mode": row.run_mode,
+        "egress_mode": row.egress_mode,
+        "egress_allowlist": row.egress_allowlist,
+    })))
 }
 
 async fn get_settings(
@@ -209,6 +291,10 @@ pub struct PatchSettingsBody {
     pub min_isolation: Option<String>,
     pub default_run_mode: Option<String>,
     pub default_send_policy: Option<String>,
+    pub default_egress: Option<String>,
+    pub default_egress_allowlist: Option<String>,
+    pub run_envelope: Option<String>,
+    pub egress_envelope: Option<String>,
     pub chat_max_turns: Option<i32>,
 }
 
@@ -228,10 +314,14 @@ async fn patch_settings(
         .map_err(|e| map_orch_err("get_project_config", e))?;
 
     let max = body.max_agents.unwrap_or(current.max_agents);
-    if max < 1 || max > fleet_orchestrator::domain::MAX_PROJECT_AGENTS {
+    let cap = fleet_db::repos::instance_settings::get(&state.db)
+        .await
+        .map(|s| s.max_agents_cap)
+        .unwrap_or(128)
+        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
+    if max < 1 || max > cap {
         return Err(AppError::bad_request(format!(
-            "max_agents must be 1–{}",
-            fleet_orchestrator::domain::MAX_PROJECT_AGENTS
+            "max_agents must be 1–{cap} (instance cap)"
         )));
     }
     let llm = body
@@ -258,15 +348,33 @@ async fn patch_settings(
     if let Some(raw) = body.min_isolation.as_deref() {
         workspace_repo::set_min_isolation(&state.db, workspace_id, raw).await?;
     }
-    if body.default_run_mode.is_some() || body.default_send_policy.is_some() {
+    if body.default_run_mode.is_some()
+        || body.default_send_policy.is_some()
+        || body.default_egress.is_some()
+        || body.default_egress_allowlist.is_some()
+        || body.run_envelope.is_some()
+        || body.egress_envelope.is_some()
+    {
         if role != "owner" && role != "admin" {
             return Err(AppError::forbidden(
-                "owner or admin required to change default run mode",
+                "owner or admin required to change where jobs run or their network",
             ));
         }
     }
     if let Some(raw) = body.default_run_mode.as_deref() {
         workspace_repo::set_default_run_mode(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_egress.as_deref() {
+        workspace_repo::set_default_egress(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.default_egress_allowlist.as_deref() {
+        workspace_repo::set_default_egress_allowlist(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.run_envelope.as_deref() {
+        workspace_repo::set_run_envelope(&state.db, workspace_id, raw).await?;
+    }
+    if let Some(raw) = body.egress_envelope.as_deref() {
+        workspace_repo::set_egress_envelope(&state.db, workspace_id, raw).await?;
     }
     if let Some(raw) = body.default_send_policy.as_deref() {
         workspace_repo::set_default_send_policy(&state.db, workspace_id, raw).await?;

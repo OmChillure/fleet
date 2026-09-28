@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use super::api::{LoginBody, list_workspaces, login as api_login, take_just_registered};
+use super::api::{
+    LoginBody, UserPublic, list_workspaces, login as api_login, take_just_registered,
+};
 use super::layout::AuthSplit;
 use crate::Route;
 use crate::components::toast::show_toast;
@@ -12,6 +14,7 @@ pub fn Login() -> Element {
     let mut password = use_signal(|| String::new());
     let mut loading = use_signal(|| false);
     let navigator = use_navigator();
+    let mut session_user = use_context::<Signal<Option<UserPublic>>>();
 
     // Toast after successful signup → login redirect.
     use_effect(move || {
@@ -64,6 +67,7 @@ pub fn Login() -> Element {
                         }
                     }
                     loading.set(false);
+                    session_user.set(Some(res.user.clone()));
                     if let Some(id) = ws_id {
                         let hello = if res.message.trim().is_empty() {
                             format!("Signed in as {}.", res.user.email)

@@ -4,16 +4,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fleet_auth::{AppError, AppResult};
+use fleet_db::TicketInboxItem;
 use fleet_db::repos::integrations as integ_repo;
 use fleet_db::repos::tickets::{self as ticket_repo, UpsertInbox, UpsertMonitor};
-use fleet_db::TicketInboxItem;
+use fleet_db::repos::workspaces as workspace_repo;
 use fleet_integrations::proxy::{ProxyCaller, ProxyResult};
 use fleet_orchestrator::domain::{ExternalRef, PlanTask};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::inbox_sources::{self, InboxKind, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT};
+use crate::inbox_sources::{self, DEFAULT_LAUNCH_LIMIT, DEFAULT_POLL_LIMIT, InboxKind};
 use crate::state::AppState;
 
 pub const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
@@ -345,6 +346,7 @@ fn monitor_json(
         "auto_launch": monitor.auto_launch,
         "launch_limit": monitor.launch_limit,
         "poll_limit": monitor.poll_limit,
+        "hook_token": monitor.hook_token,
         "hook_url": hook_url_template(api_base, &monitor.hook_token),
         "last_poll_at": monitor.last_poll_at,
         "last_error": monitor.last_error,
@@ -917,12 +919,12 @@ pub async fn poll_due_workspaces(state: &AppState) {
 }
 
 async fn connected_task_providers(state: &AppState, workspace_id: Uuid) -> AppResult<Vec<String>> {
-    let rows = integ_repo::list_for_workspace(&state.db, workspace_id)
+    let rows = integ_repo::list_inbox_providers(&state.db, workspace_id)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(rows
         .into_iter()
-        .map(|c| c.provider.to_ascii_lowercase())
+        .map(|p| p.to_ascii_lowercase())
         .filter(|p| inbox_sources::is_inbox_provider(p))
         .collect())
 }
@@ -2095,11 +2097,7 @@ async fn fetch_ticket_details(
         _ => return None,
     };
     let result = proxy_op(state, workspace_id, &caller, &item.provider, op, args).await;
-    if result.ok {
-        Some(result.data)
-    } else {
-        None
-    }
+    if result.ok { Some(result.data) } else { None }
 }
 
 fn ticket_spec_md(item: &TicketInboxItem, live: Option<&Value>) -> String {
@@ -2167,7 +2165,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use fleet_auth::{require_user, AuthState};
-use fleet_db::repos::workspaces as workspace_repo;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -2254,7 +2251,12 @@ pub async fn finish_and_launch(
 ) -> AppResult<Value> {
     use crate::chat_tools::build_multi_task_plan;
     let llm = crate::chat_tools::composer_or_fallback_for(state, workspace_id, Some(user_id)).await;
-    crate::chat_tools::require_taking_runner(&llm)?;
+    let run_mode = workspace_repo::default_run_mode(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string());
+    if run_mode != fleet_db::WORKER_HOST_RUN_IN_CONTAINER {
+        crate::chat_tools::require_taking_runner(&llm)?;
+    }
     let prep = prepare_finish(state, workspace_id, user_id, args).await?;
     let claimed = ticket_repo::claim_launch(
         &state.db,
@@ -2270,7 +2272,7 @@ pub async fn finish_and_launch(
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", 3)
+        .ensure_project(workspace_id, "workspace fleet", 16)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     let ticket_kind = matches!(
@@ -2287,6 +2289,7 @@ pub async fn finish_and_launch(
     let mut plan = build_multi_task_plan(workspace_id, None, prep.tasks);
     plan.source = "inbox".into();
     plan.policy.auto_sync_external = ticket_kind;
+    plan.policy.run_mode = run_mode;
     crate::chat_tools::stamp_plan_llm(&mut plan, &llm);
     plan.policy.requested_by = Some(user_id);
     let (run, _) = match state

@@ -17,6 +17,7 @@ use fleet_runners_view::routes::{
     SEGMENT_CLOUD, SEGMENT_PARTNERS, runner_child_path, runners_index_target, self_hosted_path,
     workers_redirect,
 };
+use pages::auth::api::UserPublic;
 use pages::admin::Admin;
 use pages::agents::Agents;
 use pages::auth::{Login, Signup};
@@ -151,6 +152,8 @@ fn App() -> Element {
     // Lives above AppShell so accordion state survives layout remounts.
     let nav = use_signal(NavChrome::default);
     use_context_provider(|| nav);
+    let session_user = use_signal(|| Option::<UserPublic>::None);
+    use_context_provider(|| session_user);
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
         document::Link { rel: "icon", href: asset!("/assets/app-icon.png") }

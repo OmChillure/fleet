@@ -3,23 +3,23 @@
 use dioxus::prelude::*;
 use fleet_runners_view::routes::NAV_LABEL_SELF_HOSTED;
 use fleet_runners_view::{
-    accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
+    BEHAVIOR_LABEL, accept_jobs_label, accept_jobs_title, accepting_jobs, agent_status_phrase,
     catalog_provider_display_name, clamp_max_jobs, disk_free_line, display_name,
     draft_holding_new_jobs, extra_status_pills, format_bytes, format_ts, hint_is_loopback,
-    identity_line, in_removed_list, is_control_plane, is_removed, jobs_line, last_seen_label,
-    is_home_workspace, not_taking_reason, provider_install_command, runtime_line,
-    settings_draft_dirty,
-    shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line, stale_package_warning,
-    status_label, trimmed_host_name, update_now_label, update_requested, widgets_locked,
-    worker_id_label, BEHAVIOR_LABEL,
+    identity_line, in_removed_list, is_control_plane, is_home_workspace, is_removed, jobs_line,
+    last_seen_label, not_taking_reason, provider_install_command, runtime_line,
+    settings_draft_dirty, shows_software_line, software_bin_rows, sort_hosts_for_list, specs_line,
+    stale_package_warning, status_label, trimmed_host_name, update_now_label, update_requested,
+    verify_install_command, widgets_locked, windows_verify_install_command, worker_id_label,
 };
 use gloo_timers::future::TimeoutFuture;
 
 use super::api::{
-    create_host, fetch_local_model_tags, fetch_local_models, install_commands, list_workers_page,
-    patch_host, revoke_host, windows_install_command, CreateHostBody, CreateHostResponse,
-    HostPatch, HostPublic, LocalModelCatalog, LocalModelTags, PackageInventory,
+    CreateHostBody, CreateHostResponse, HostPatch, HostPublic, LocalModelCatalog, LocalModelTags,
+    PackageInventory, create_host, fetch_local_model_tags, fetch_local_models, install_commands,
+    list_workers_page, patch_host, revoke_host, windows_install_command,
 };
+use crate::pages::auth::api::auth_base_url;
 use crate::clipboard::copy_text;
 use crate::components::side_panel::SidePanel;
 use crate::components::toast::show_toast;
@@ -82,7 +82,8 @@ fn request_create_host(
                 send_policy: Some(send_policy),
             },
         )
-        .await {
+        .await
+        {
             Ok(created) => {
                 let mut list = hosts();
                 if !list.iter().any(|h| h.id == created.host.id) {
@@ -304,6 +305,14 @@ pub fn SelfHosted(workspace_id: String) -> Element {
                 },
                 HostDetailPanel {
                     workspace_id: workspace_id.clone(),
+                    verify_base: {
+                        let base = packages().worker_public_base;
+                        if base.trim().is_empty() {
+                            auth_base_url()
+                        } else {
+                            base
+                        }
+                    },
                     host,
                     on_updated: move |updated: HostPublic| {
                         let mut list = hosts();
@@ -539,6 +548,72 @@ fn PencilIcon() -> Element {
     }
 }
 
+/// Offline means no heartbeat. This block is how you tell a deleted install
+/// from a service that is only disabled or stopped. Paste it on that computer.
+#[component]
+fn VerifyInstallBlock(verify_base: String) -> Element {
+    let unix = verify_install_command(&verify_base);
+    let windows = windows_verify_install_command(&verify_base);
+    let unix_copy = unix.clone();
+    let windows_copy = windows.clone();
+    rsx! {
+        section {
+            class: "mt-3 rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-3",
+            h2 { class: "m-0 text-xs font-semibold text-[var(--app-fg)]",
+                "Verify installation"
+            }
+            p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                "Offline means this card has had no heartbeat for 90 seconds. Paste the command on that computer. It prints the verdict, pings the control plane, and can repair with the token already on disk. It does not mint a new token."
+            }
+            label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                "Linux, macOS, FreeBSD"
+            }
+            div { class: "mt-1 flex flex-wrap items-start gap-2",
+                pre {
+                    class: "m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--app-fg)]",
+                    "{unix}"
+                }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    onclick: move |_| {
+                        if copy_text(&unix_copy) {
+                            show_toast().success("Command copied.");
+                        } else {
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
+                        }
+                    },
+                    "Copy"
+                }
+            }
+            label { class: "mt-3 block text-[10px] font-medium uppercase tracking-wide text-[var(--app-muted)]",
+                "Windows"
+            }
+            div { class: "mt-1 flex flex-wrap items-start gap-2",
+                pre {
+                    class: "m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap rounded-lg border border-[var(--app-border)] bg-[var(--app-bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--app-fg)]",
+                    "{windows}"
+                }
+                button {
+                    class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-bg-hover)]",
+                    r#type: "button",
+                    onclick: move |_| {
+                        if copy_text(&windows_copy) {
+                            show_toast().success("Command copied.");
+                        } else {
+                            show_toast().warn("Copy failed. Select the command and copy it yourself.");
+                        }
+                    },
+                    "Copy"
+                }
+            }
+            p { class: "mt-3 mb-0 text-xs text-[var(--app-muted)]",
+                "The verdict, what it means, the plane ping, and the repair question are printed by the command. If that computer has no token file, the server cannot fill the old one in. Set FLEET_MACHINE_TOKEN to the flm_ value you saved when the worker was added, then answer y. That writes the same token. It does not pair."
+            }
+        }
+    }
+}
+
 #[component]
 fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) -> Element {
     let extra_pills = extra_status_pills(&host);
@@ -597,6 +672,7 @@ fn HostListRow(selected: bool, host: HostPublic, on_open: EventHandler<String>) 
 #[component]
 fn HostDetailPanel(
     workspace_id: String,
+    verify_base: String,
     host: HostPublic,
     on_updated: EventHandler<HostPublic>,
     on_revoked: EventHandler<String>,
@@ -805,6 +881,10 @@ fn HostDetailPanel(
             }
             if show_error {
                 p { class: "mt-2 text-xs text-red-400", "{last_error}" }
+            }
+
+            if host.status == "offline" && !plane {
+                VerifyInstallBlock { verify_base: verify_base.clone() }
             }
 
             if !revoked && !home {
@@ -1792,7 +1872,7 @@ fn SandboxBlock(
                 "Sandboxing"
             }
             p { class: "m-0 text-[11px] text-[var(--app-muted)]",
-                "What this runner may execute. Workspace Settings still set the minimum isolation (process < container < vm)."
+                "What this runner may execute. Workspace Settings still set workspace location (process < container < vm)."
             }
 
             div { class: "space-y-1.5 rounded-lg border border-[var(--app-border)] p-2",

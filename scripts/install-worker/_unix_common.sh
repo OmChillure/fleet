@@ -101,8 +101,18 @@ warn_loopback_origin() {
     die "refusing to pair: $_origin is loopback and this host is not the control plane"
 }
 
-[ -n "$ORIGIN" ] || die "FLEET_URL is not set"
-[ -n "$PLATFORM" ] || die "FLEET_PLATFORM is not set"
+# install requires a URL, a platform, and a pair token (unless already paired).
+# verify and repair are the same script with another argument. They must run
+# without a pair token so they cannot mint one.
+FLEET_ACTION=${FLEET_ACTION:-install}
+case $FLEET_ACTION in
+    install|verify|repair) ;;
+    *) die "FLEET_ACTION must be install, verify, or repair" ;;
+esac
+if [ "$FLEET_ACTION" = install ]; then
+    [ -n "$ORIGIN" ] || die "FLEET_URL is not set"
+    [ -n "$PLATFORM" ] || die "FLEET_PLATFORM is not set"
+fi
 
 # Pair token is required for first install. Missing/empty/whitespace must
 # fail closed before mkdir or fetch so we never write bins that never pair.
@@ -115,7 +125,7 @@ if [ -f "$token_file" ]; then
     _existing=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$token_file")
     [ -n "$_existing" ] && already_paired=1
 fi
-if [ -z "$_pair_token" ] && [ "$already_paired" -eq 0 ]; then
+if [ "$FLEET_ACTION" = install ] && [ -z "$_pair_token" ] && [ "$already_paired" -eq 0 ]; then
     die "FLEET_PAIR_TOKEN is not set"
 fi
 if [ -n "$_pair_token" ]; then
@@ -153,7 +163,9 @@ confirm_unpair_and_pair() {
     esac
 }
 
-warn_loopback_origin "$ORIGIN"
+if [ "$FLEET_ACTION" = install ]; then
+    warn_loopback_origin "$ORIGIN"
+fi
 
 if [ -z "$PREFIX" ]; then
     if [ "$(id -u)" -eq 0 ]; then
@@ -253,10 +265,14 @@ install_bins_from_cp() {
             fi
             info "local $bin is stale; downloading again"
         fi
-        bytes=$(content_length "$base/$bin" || true)
+        bin_url="$base/$bin"
+        if [ -n "$want" ]; then
+            bin_url="$base/$bin?h=$want"
+        fi
+        bytes=$(content_length "$bin_url" || true)
         note=$(size_note "$bytes")
         info "downloading $bin$note"
-        if fetch_to "$base/$bin" "$dest.tmp"; then
+        if fetch_to "$bin_url" "$dest.tmp"; then
             if [ -n "$want" ]; then
                 info "verifying $bin"
                 got=$(norm_sha "$(file_sha256 "$dest.tmp")")
@@ -467,6 +483,383 @@ EOF
     chmod 755 /usr/local/etc/rc.d/fleet-host
     info "rc.d script: /usr/local/etc/rc.d/fleet-host  (sysrc fleet_host_enable=YES)"
 }
+
+# Point config.toml at a control plane without touching machine.token.
+write_control_plane_url() {
+    _url=$1
+    _cfg_dir=${FLEET_HOST_CONFIG_DIR:-$HOME/.config/fleet-host}
+    _cfg=$_cfg_dir/config.toml
+    _tok=$_cfg_dir/machine.token
+    mkdir -p "$_cfg_dir"
+    _copy=$(mktemp)
+    cp "$_tok" "$_copy"
+    _tmp=$(mktemp)
+    if [ -f "$_cfg" ]; then
+        awk -v url="$_url" '
+            BEGIN { done = 0 }
+            /^[[:space:]]*control_plane_url[[:space:]]*=/ {
+                print "control_plane_url = \"" url "\""
+                done = 1
+                next
+            }
+            { print }
+            END { if (!done) print "control_plane_url = \"" url "\"" }
+        ' "$_cfg" > "$_tmp"
+    else
+        printf 'control_plane_url = "%s"\n' "$_url" > "$_tmp"
+    fi
+    mv "$_tmp" "$_cfg"
+    if ! cmp -s "$_tok" "$_copy"; then
+        rm -f "$_copy"
+        die "machine.token changed while writing the URL; not pairing"
+    fi
+    rm -f "$_copy"
+}
+
+# Ping /health. Prints one status word to stdout. Never prints a token.
+ping_health() {
+    _url=$1
+    case $_url in
+        http://*|https://*) ;;
+        *) printf '%s\n' "not configured"; return ;;
+    esac
+    if ! have curl && ! have wget && ! have fetch; then
+        printf '%s\n' "curl missing"
+        return
+    fi
+    _body=$(probe_health "$_url/health" 2>/dev/null) || _body=
+    if [ -z "$_body" ]; then
+        printf '%s\n' "unreachable"
+        return
+    fi
+    _status=$(printf '%s' "$_body" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    _sha=$(printf '%s' "$_body" | sed -n 's/.*"git_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    [ -n "$_status" ] || _status=ok
+    [ -n "$_sha" ] || _sha=unknown
+    printf '%s\n' "reachable status=${_status} git_sha=${_sha}"
+}
+
+# verify prints the diagnosis. repair (or a yes answer) switches the URL
+# when it differs and restarts via start_host_service. Same machine token.
+fleet_verify() {
+    if [ -z "${PLATFORM:-}" ]; then
+        case $(uname -s 2>/dev/null || echo unknown) in
+            Linux) PLATFORM=linux-x86_64 ;;
+            Darwin) PLATFORM=darwin-arm64 ;;
+            FreeBSD) PLATFORM=freebsd-amd64 ;;
+        esac
+    fi
+    _cfg_dir=${FLEET_HOST_CONFIG_DIR:-$HOME/.config/fleet-host}
+    _bin=""
+    if [ -x "${HOME}/.local/bin/fleet-host" ]; then
+        _bin=${HOME}/.local/bin/fleet-host
+    elif [ -x /usr/local/bin/fleet-host ]; then
+        _bin=/usr/local/bin/fleet-host
+    elif have fleet-host; then
+        _bin=$(command -v fleet-host)
+    fi
+    _token=0
+    if [ "$already_paired" -eq 1 ]; then
+        _token=1
+    fi
+    _user_unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/fleet-host.service
+    _sys_unit=/etc/systemd/system/fleet-host.service
+    _scope=
+    if [ -f "$_user_unit" ]; then _scope=user; fi
+    if [ -f "$_sys_unit" ] && { [ "$(id -u)" -eq 0 ] || [ -z "$_scope" ]; }; then
+        _scope=system
+    fi
+    _enabled= _active= _running=0
+    if [ -n "$_scope" ] && have systemctl; then
+        if [ "$_scope" = user ]; then
+            _enabled=$(systemctl --user is-enabled fleet-host 2>/dev/null || true)
+            _active=$(systemctl --user is-active fleet-host 2>/dev/null || true)
+        else
+            _enabled=$(systemctl is-enabled fleet-host 2>/dev/null || true)
+            _active=$(systemctl is-active fleet-host 2>/dev/null || true)
+        fi
+    fi
+    _proc_exe=
+    if have pgrep && pgrep -x fleet-host >/dev/null 2>&1; then
+        _running=1
+        _pid=$(pgrep -x fleet-host 2>/dev/null | head -n 1 || true)
+        if [ -n "$_pid" ] && [ -r "/proc/$_pid/exe" ]; then
+            _proc_exe=$(readlink "/proc/$_pid/exe" 2>/dev/null || true)
+        fi
+    fi
+    case $_active in
+        active|activating) _running=1 ;;
+    esac
+    _verdict=not_installed
+    _code=4
+    _next="On Runners → Self-hosted, use Add worker and paste the install command."
+    if [ -z "$_bin" ] && [ ! -f "$_cfg_dir/config.toml" ] && [ -z "$_scope" ]; then
+        _verdict=not_installed
+        _means="the install is gone. Add worker and paste the install command. If the output says token present, that reinstall keeps the same machine. Do not re-pair."
+    elif [ -z "$_bin" ]; then
+        _verdict=bins_missing
+        _means="the install is gone. Add worker and paste the install command. If the output says token present, that reinstall keeps the same machine. Do not re-pair."
+        if [ "$_token" -eq 1 ]; then
+            _next="The program is gone and the machine token is still here. Re-run install. It keeps this machine. Do not re-pair."
+        fi
+    elif [ "$_running" -eq 1 ]; then
+        _verdict=service_running
+        _code=0
+        _means="this computer is up. A card that stays offline cannot reach the control plane. Read the plane lines."
+        _next="The process is up. The plane lines say whether to restart or switch."
+    elif [ "$_enabled" = disabled ] || [ "$_enabled" = masked ]; then
+        _verdict=service_disabled
+        _code=2
+        _means="the install is there and the service will not start at login. Run the next line."
+        if [ "$_scope" = user ]; then
+            _next="systemctl --user enable --now fleet-host"
+        else
+            _next="systemctl enable --now fleet-host"
+        fi
+    else
+        _verdict=service_stopped
+        _code=3
+        _means="the install is there and the service is enabled, but the process is down. Run the next line."
+        if [ "$_scope" = user ]; then
+            _next="systemctl --user start fleet-host"
+        elif [ "$_scope" = system ]; then
+            _next="systemctl start fleet-host"
+        else
+            _next="\"$_bin\" run"
+        fi
+    fi
+
+    if [ "$_running" -eq 1 ] && [ -n "$_proc_exe" ] && [ -n "$_bin" ] && [ "$_proc_exe" != "$_bin" ]; then
+        _means="$_means A different program is running than the installed binary."
+    fi
+    if [ "$_running" -eq 1 ] && [ "$_enabled" = disabled ]; then
+        _means="$_means The service unit is disabled, so a new login will not start it."
+    fi
+
+    _config=$(paired_control_plane_url || true)
+    _config=$(norm_pair_url "$_config")
+    _command=$(norm_pair_url "${FLEET_URL:-}")
+    _config_ping=$(ping_health "$_config")
+    _command_ping=$(ping_health "$_command")
+    _config_up=0
+    _command_up=0
+    case $_config_ping in reachable*) _config_up=1 ;; esac
+    case $_command_ping in reachable*) _command_up=1 ;; esac
+    _different=0
+    if [ -n "$_command" ] && [ -n "$_config" ] && [ "$_command" != "$_config" ]; then
+        _different=1
+    fi
+
+    info "fleet-host verify"
+    if [ -n "$_bin" ]; then info "binary:          $_bin"; else info "binary:          missing"; fi
+    if [ "$_token" -eq 1 ]; then info "token:           present"; else info "token:           missing"; fi
+    if [ -n "$_scope" ]; then
+        [ -n "$_enabled" ] || _enabled=unknown
+        [ -n "$_active" ] || _active=unknown
+        info "service:         ${_scope} systemd enabled=${_enabled} active=${_active}"
+    else
+        info "service:         no unit file"
+    fi
+    if [ "$_running" -eq 1 ]; then
+        if [ -n "$_proc_exe" ]; then
+            info "process:         running ${_proc_exe}"
+        else
+            info "process:         running"
+        fi
+    else
+        info "process:         not running"
+    fi
+    if [ -n "$_proc_exe" ] && [ -n "$_bin" ] && [ "$_proc_exe" != "$_bin" ]; then
+        info "process_note:    the running program is not the installed binary"
+    fi
+    _hb=$_cfg_dir/last_heartbeat.json
+    if [ -f "$_hb" ]; then
+        info "last_heartbeat:  $(tr '\n' ' ' < "$_hb")"
+    else
+        info "last_heartbeat:  (none)"
+    fi
+    if [ -n "$_config" ]; then info "plane_config:    $_config"; else info "plane_config:    missing"; fi
+    info "plane_config_ping: $_config_ping"
+    if [ -n "$_command" ]; then
+        info "plane_command:   $_command"
+        info "plane_command_ping: $_command_ping"
+    else
+        info "plane_command:   (pass verify on the install script so FLEET_URL is set)"
+    fi
+    if [ "$_different" -eq 1 ]; then
+        info "plane:           different"
+    elif [ -n "$_config" ]; then
+        info "plane:           same"
+    else
+        info "plane:           missing"
+    fi
+    info "verdict:         $_verdict"
+    info "means:           $_means"
+    info "next:            $_next"
+
+    _offer=0
+    _ask=
+    _target=
+    if [ "$_token" -eq 1 ] && [ "$_verdict" != not_installed ] && [ "$_verdict" != bins_missing ]; then
+        _offer=1
+        if [ "$_different" -eq 1 ] && [ "$_command_up" -eq 1 ] && [ "$_config_up" -eq 0 ]; then
+            _ask="Switch control plane from $_config to $_command and restart with the same token? [y/N] "
+            _target=$_command
+        elif [ "$_different" -eq 1 ] && [ "$_command_up" -eq 1 ] && [ "$_config_up" -eq 1 ]; then
+            _ask="$_config answers and $_command answers. Switch to $_command and restart with the same token? [y/N] "
+            _target=$_command
+        elif [ "$_different" -eq 1 ] && [ "$_command_up" -eq 0 ] && [ "$_config_up" -eq 1 ]; then
+            _ask="$_config answers. $_command did not. Switch anyway and restart with the same token? [y/N] "
+            _target=$_command
+        elif [ "$_different" -eq 1 ]; then
+            _ask="Neither control plane answered. Switch from $_config to $_command anyway? [y/N] "
+            _target=$_command
+        elif [ "$_config_up" -eq 1 ]; then
+            _ask="Restart fleet-host with the same token? The control plane answered, so this does not switch planes. [y/N] "
+            _target=$_config
+        else
+            _ask="The control plane did not answer. Restart fleet-host anyway with the same token? This does not switch planes. [y/N] "
+            _target=$_config
+        fi
+    fi
+
+    if [ "$_offer" -eq 1 ] && [ -n "$_ask" ]; then
+        info "ask:             $_ask"
+    fi
+    _yes=0
+    case ${FLEET_VERIFY_REPAIR:-} in
+        1|y|yes) _yes=1 ;;
+        0|n|no) _yes=0 ;;
+        *)
+            if [ "$_offer" -eq 1 ] && [ -t 1 ] && [ -r /dev/tty ]; then
+                printf '%s' "$_ask" >/dev/tty
+                _ans=
+                read -r _ans </dev/tty || _ans=
+                case $_ans in
+                    y|Y|yes|YES) _yes=1 ;;
+                esac
+            fi
+            ;;
+    esac
+    if [ "$FLEET_ACTION" = repair ]; then
+        if [ "$_token" -ne 1 ] || [ "$_verdict" = not_installed ] || [ "$_verdict" = bins_missing ]; then
+            info "repair:          refused"
+            info "repair_next:     No machine token, or the install is gone. Do not re-pair."
+            return "$_code"
+        fi
+        _yes=1
+        _offer=1
+        if [ -z "$_target" ]; then
+            _target=${_command:-$_config}
+        fi
+    fi
+    if [ "$_yes" -eq 1 ] && [ "$_offer" -eq 1 ] && [ -n "$_target" ]; then
+        case $_target in
+            http://*|https://*) ;;
+            *)
+                info "repair:          refused"
+                info "repair_next:     No control plane URL to write."
+                return "$_code"
+                ;;
+        esac
+        write_control_plane_url "$_target"
+        if [ -z "${PREFIX:-}" ]; then
+            if [ "$(id -u)" -eq 0 ]; then PREFIX=/usr/local; else PREFIX=${HOME}/.local; fi
+            BIN_DIR=${PREFIX}/bin
+        fi
+        if start_host_service; then
+            info "repair:          same token"
+            info "repair_url:      $_target"
+            return 0
+        fi
+        info "repair:          url written"
+        info "repair_url:      $_target"
+        info "repair_next:     The token is unchanged. Start fleet-host run yourself."
+        return 3
+    fi
+    if [ "$_offer" -eq 1 ] && [ "$_yes" -eq 0 ]; then
+        info "repair:          offered"
+        info "repair_next:     Re-run and answer y, or pass repair. The machine token stays. It does not re-pair."
+    fi
+    if [ "$_token" -eq 0 ]; then
+        _supplied=$(printf '%s' "${FLEET_MACHINE_TOKEN:-}" | tr -d '[:space:]')
+        info "means:           no machine token on this computer, and no saved control plane."
+        info "means:           The card already has a token. The server only kept a hash, so this command must include the saved flm_ value as FLEET_MACHINE_TOKEN."
+        info "means:           Writing it does not pair and does not mint a token. A pair token would be a different machine."
+        case $_supplied in
+            flm_*)
+                _ask="Write the token from this command and set the control plane to ${_command:-<set FLEET_URL>}? This does not pair. [y/N] "
+                info "ask:             $_ask"
+                _yes=0
+                case ${FLEET_VERIFY_REPAIR:-} in
+                    1|y|yes) _yes=1 ;;
+                    0|n|no) _yes=0 ;;
+                    *)
+                        if [ "$FLEET_ACTION" = repair ]; then
+                            _yes=1
+                        elif [ -t 1 ] && [ -r /dev/tty ]; then
+                            printf '%s' "$_ask" >/dev/tty
+                            _ans=
+                            read -r _ans </dev/tty || _ans=
+                            case $_ans in
+                                y|Y|yes|YES) _yes=1 ;;
+                            esac
+                        fi
+                        ;;
+                esac
+                if [ "$_yes" -ne 1 ]; then
+                    info "repair:          offered"
+                    info "repair_next:     Answer y to write that token, or pass repair. It does not re-pair."
+                    return "$_code"
+                fi
+                case $_command in
+                    http://*|https://*) ;;
+                    *)
+                        info "repair:          refused"
+                        info "repair_next:     Set FLEET_URL to the control plane before writing the token."
+                        return "$_code"
+                        ;;
+                esac
+                mkdir -p "$(dirname "$token_file")"
+                printf '%s' "$_supplied" > "$token_file"
+                unset FLEET_MACHINE_TOKEN
+                write_control_plane_url "$_command"
+                already_paired=1
+                info "repair:          wrote token from the command"
+                info "repair_url:      $_command"
+                if [ ! -x "${_bin:-}" ]; then
+                    FLEET_CONTINUE_INSTALL=1
+                    info "repair_next:     The program is not installed. Continuing with install. It will not pair."
+                    return 0
+                fi
+                start_host_service || true
+                return 0
+                ;;
+            "")
+                info "repair:          refused"
+                info "repair_next:     Re-run with FLEET_MACHINE_TOKEN set to the saved flm_ token. Do not use a pair token."
+                ;;
+            *)
+                info "repair:          refused"
+                info "repair_next:     FLEET_MACHINE_TOKEN must be the saved flm_ token, not a pair token."
+                ;;
+        esac
+    fi
+    return "$_code"
+}
+
+case ${FLEET_ACTION:-install} in
+    verify|repair)
+        fleet_verify
+        _verify_rc=$?
+        if [ "${FLEET_CONTINUE_INSTALL:-}" = 1 ]; then
+            already_paired=1
+            unset FLEET_PAIR_TOKEN
+        else
+            exit "$_verify_rc"
+        fi
+        ;;
+esac
 
 # --- main ---
 info "Agent Fleet worker installer"

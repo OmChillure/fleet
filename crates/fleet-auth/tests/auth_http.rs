@@ -24,6 +24,27 @@ fn user_id(login: &HttpOut) -> String {
         .to_string()
 }
 
+/// Inviting an existing user only opens an invite. Join before treating them as a member.
+async fn accept_workspace_invite(app: &axum::Router, invitee_jar: &CookieJar, invited: &HttpOut) {
+    let token = invited.body["invite"]["token"]
+        .as_str()
+        .expect("invite.token");
+    let accepted = call(
+        app,
+        "POST",
+        "/api/invites/accept",
+        Some(invitee_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "accept invite: {}",
+        accepted.body
+    );
+}
+
 fn listed_workspace_ids(listed: &HttpOut) -> Vec<&str> {
     listed.body["workspaces"]
         .as_array()
@@ -894,7 +915,7 @@ async fn invite_adds_existing_user_ignoring_email_case() {
     )
     .await;
     assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
-    assert_eq!(invited.body["added_existing_user"], false);
+    assert_eq!(invited.body["added_existing_user"], true);
     assert!(invited.body["invite"]["token"].as_str().is_some());
 }
 
@@ -1568,7 +1589,7 @@ async fn member_cannot_list_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
     let token = added.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,
@@ -1627,7 +1648,7 @@ async fn member_cannot_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
     let token = added.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,
@@ -1702,7 +1723,7 @@ async fn admin_can_list_and_revoke_invites() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
-    assert_eq!(added.body["added_existing_user"], false);
+    assert_eq!(added.body["added_existing_user"], true);
 
     let promoted = call(
         &app,
@@ -1947,7 +1968,7 @@ async fn invite_existing_member_is_already_a_member() {
     )
     .await;
     assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
-    assert_eq!(first.body["added_existing_user"], false);
+    assert_eq!(first.body["added_existing_user"], true);
     let token = first.body["invite"]["token"].as_str().unwrap();
     let accepted = call(
         &app,
@@ -2131,6 +2152,7 @@ async fn admin_invite_admin_does_not_create_open_invite() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2196,6 +2218,7 @@ async fn admin_invite_member_records_role_member() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2246,6 +2269,7 @@ async fn admin_invite_existing_user_as_admin_is_403_and_not_added() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2314,6 +2338,7 @@ async fn admin_cannot_delete_owner() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2381,6 +2406,7 @@ async fn admin_cannot_patch_owner_role() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2442,6 +2468,7 @@ async fn admin_cannot_patch_self_role() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2503,6 +2530,7 @@ async fn admin_cannot_patch_member_role() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2514,7 +2542,7 @@ async fn admin_cannot_patch_member_role() {
     .await;
     assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
 
-    let (other_email, _other_jar, other_login) = signup_and_login(&app).await;
+    let (other_email, other_jar, other_login) = signup_and_login(&app).await;
     let other_id = user_id(&other_login);
     let other_added = call(
         &app,
@@ -2530,6 +2558,7 @@ async fn admin_cannot_patch_member_role() {
         "{}",
         other_added.body
     );
+    accept_workspace_invite(&app, &other_jar, &other_added).await;
 
     let patched = call(
         &app,
@@ -2587,6 +2616,7 @@ async fn admin_cannot_promote_self_to_owner() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2642,6 +2672,7 @@ async fn admin_can_delete_non_owner_member() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &admin_jar, &added).await;
 
     let promoted = call(
         &app,
@@ -2653,7 +2684,7 @@ async fn admin_can_delete_non_owner_member() {
     .await;
     assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
 
-    let (other_email, _other_jar, other_login) = signup_and_login(&app).await;
+    let (other_email, other_jar, other_login) = signup_and_login(&app).await;
     let other_id = user_id(&other_login);
     let other_added = call(
         &app,
@@ -2669,6 +2700,7 @@ async fn admin_can_delete_non_owner_member() {
         "{}",
         other_added.body
     );
+    accept_workspace_invite(&app, &other_jar, &other_added).await;
 
     let deleted = call(
         &app,
@@ -2717,8 +2749,9 @@ async fn member_cannot_patch_peer_role() {
     )
     .await;
     assert_eq!(added.status, StatusCode::CREATED, "{}", added.body);
+    accept_workspace_invite(&app, &member_jar, &added).await;
 
-    let (peer_email, _peer_jar, peer_login) = signup_and_login(&app).await;
+    let (peer_email, peer_jar, peer_login) = signup_and_login(&app).await;
     let peer_id = user_id(&peer_login);
     let peer_added = call(
         &app,
@@ -2734,6 +2767,7 @@ async fn member_cannot_patch_peer_role() {
         "{}",
         peer_added.body
     );
+    accept_workspace_invite(&app, &peer_jar, &peer_added).await;
 
     let patched = call(
         &app,

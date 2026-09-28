@@ -32,9 +32,25 @@ A desktop notification on this PC fires on a successful ship and on failure
 Worker packages (`GET /install/worker/bin/{platform}/{bin}`) are staged in
 the same `deploy.sh` pass: **linux-x86_64** (bookworm), **linux-aarch64**,
 **windows-x86_64**. A platform is rebuilt only when `fleet-host` /
-`fleet-driver` (or the stage scripts / `Cargo.lock`) changed since that
-platform’s last bake. musl, armv7, and windows-arm64 are not built.
-**darwin-*** is not built here — this box cannot cross-compile macOS.
+`fleet-driver` sources changed since the staged manifest. Unchanged
+sources keep the bins already staged (compiles are not bit-identical).
+musl, armv7, and windows-arm64 are not built. **darwin-*** is not built
+here — this box cannot cross-compile macOS.
+
+The author bumps `[versions]`, `[verify]`, and the per-OS rev. This
+script writes the sha256 from the bins it built (`register
+--keep-author-revs`) and stores
+`~/.local/state/vps-fleet/runner-packages.followup.toml`. Open a
+follow-up MR with that file. Do not merge it from the deploy session.
+
+An MR is mergeable only after a ship proof for that commit:
+
+```bash
+PROVE_ONLY=1 DEPLOY_SHA=<commit> ./scripts/deploy.sh
+```
+
+That builds both images and the three platforms and writes
+`~/.local/state/vps-fleet/ship-proof/<commit>`. It does not contact the VPS.
 
 ## Day to day
 
@@ -79,7 +95,7 @@ The domain currently resolves to Cloudflare, not the VPS — point it here:
 2. A `www` → `82.39.213.33` (proxied)
 3. SSL/TLS → **Full** (not Flexible, not Full strict)
 
-Leave the records orange-clouded. Visitors use Cloudflare’s cert; origin uses a self-signed cert on :443. HTTP :80 redirects to HTTPS (requires SSL mode **Full**).
+Leave the records orange-clouded. Visitors use Cloudflare’s cert; origin uses a self-signed cert on :443. HTTP :80 redirects to HTTPS (requires SSL mode **Full**). The `:443` site redirects `www.agentfleet.studio` to the apex. `fleet-stack up` restarts the caddy container afterwards, because the Caddyfile is a bind mount and compose will not recreate caddy when only that file changes.
 
 ## Hardening
 

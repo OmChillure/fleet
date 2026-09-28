@@ -33,18 +33,25 @@ https://agentfleet.studio. Both of these must equal that commit:
    ```
 
    It archives `origin/main`, builds `agent-fleet-api:<sha>` +
-   `agent-fleet-ui:<sha>`, zstd-pipes them to the VPS, compose-ups, waits
+   `agent-fleet-ui:<sha>`, stages linux-x86_64, linux-aarch64, and
+   windows-x86_64, zstd-pipes images to the VPS, compose-ups, waits
    for health, rolls back on a bad SHA. First compile of a new SHA can
-   take tens of minutes. Stay with it.
+   take tens of minutes. Stay with it. Do not stage musl, armv7,
+   windows-arm64, or darwin.
 5. On success: write `grok-status=deployed` and a short `grok-report`
-   (SHA, public health). Stop.
+   (SHA, public health). If
+   `~/.local/state/vps-fleet/runner-release-followup` names this SHA,
+   the registered hashes differ from git. Put
+   `runner-packages.followup.toml` on a new branch and open an MR.
+   Do not merge it. Stop.
 6. On **docker build / compile** failure:
    - Diagnose from the journal / docker output. Do not retry the same
      broken archive in a loop.
-   - Fix in a **new worktree** of the product repo based on `origin/main`.
-     Never edit the operator checkout in place.
-   - Push a branch and open a GitLab MR (`glab` if present). Do not
-     merge it yourself. Do not force-push `main`.
+   - Fix on a branch in **this same checkout**. Do not create another
+     worktree or another directory under `/code`.
+   - Push a branch. Open the MR with `scripts/open-mr.sh` or
+     `~/.grok/skills/open-mr/scripts/open-mr.sh` only after that fix's
+     author bar is green. Do not merge it. Do not force-push `main`.
    - Leave production on the last good SHA (`deploy.sh` already did not
      ship a failed build).
    - Write `grok-status=blocked` and `grok-report` with the compile

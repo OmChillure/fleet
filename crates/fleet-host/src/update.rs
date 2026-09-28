@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::Mutex as AsyncMutex;
@@ -26,13 +26,40 @@ const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
 
 /// Coordinated across the run loop and a background apply task.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UpdateState {
     pub stop_claiming: AtomicBool,
     pub updating: AtomicBool,
     pub exit_process: AtomicBool,
     attempted: Mutex<HashSet<String>>,
     applying: Mutex<bool>,
+    last_error: Mutex<Option<String>>,
+    last_failed_key: Mutex<Option<String>>,
+    last_fail_at: Mutex<Option<Instant>>,
+    begun_key: Mutex<Option<String>>,
+    fail_cooldown: Duration,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            stop_claiming: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
+            exit_process: AtomicBool::new(false),
+            attempted: Mutex::new(HashSet::new()),
+            applying: Mutex::new(false),
+            last_error: Mutex::new(None),
+            last_failed_key: Mutex::new(None),
+            last_fail_at: Mutex::new(None),
+            begun_key: Mutex::new(None),
+            // Tests retry immediately so catalog cases stay single-threaded.
+            fail_cooldown: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(120)
+            },
+        }
+    }
 }
 
 impl UpdateState {
@@ -49,18 +76,84 @@ impl UpdateState {
         if *applying {
             return false;
         }
+        if self.in_fail_cooldown(attempt_key) {
+            return false;
+        }
         let mut seen = self.attempted.lock().unwrap_or_else(|e| e.into_inner());
         if !seen.insert(attempt_key.to_string()) {
             return false;
         }
         *applying = true;
+        if let Ok(mut g) = self.begun_key.lock() {
+            *g = Some(attempt_key.to_string());
+        }
         true
+    }
+
+    fn in_fail_cooldown(&self, key: &str) -> bool {
+        if self.fail_cooldown.is_zero() {
+            return false;
+        }
+        let failed = self
+            .last_failed_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if failed.as_deref() != Some(key) {
+            return false;
+        }
+        let at = self.last_fail_at.lock().unwrap_or_else(|e| e.into_inner());
+        at.is_some_and(|t| t.elapsed() < self.fail_cooldown)
     }
 
     pub fn finish(&self) {
         if let Ok(mut g) = self.applying.lock() {
             *g = false;
         }
+    }
+
+    pub fn finish_ok(&self) {
+        self.finish();
+        if let Ok(mut g) = self.last_error.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.last_failed_key.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.last_fail_at.lock() {
+            *g = None;
+        }
+    }
+
+    /// Forget the attempt key so a later heartbeat can retry, and keep the
+    /// error for the next `/heartbeat` (`last_error` is assigned, not COALESCE).
+    pub fn note_fail(&self, err: &str) {
+        self.finish();
+        let key = self
+            .begun_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(ref attempt_key) = key {
+            if let Ok(mut seen) = self.attempted.lock() {
+                seen.remove(attempt_key);
+            }
+            if let Ok(mut g) = self.last_failed_key.lock() {
+                *g = Some(attempt_key.clone());
+            }
+        }
+        if let Ok(mut g) = self.last_fail_at.lock() {
+            *g = Some(Instant::now());
+        }
+        if let Ok(mut g) = self.last_error.lock() {
+            *g = Some(err.to_string());
+        }
+    }
+
+    pub fn apply_error(&self) -> Option<String> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn is_updating(&self) -> bool {
@@ -390,7 +483,10 @@ async fn download_changed(
             continue;
         }
         let file_name = dest_file_name(logical, local.windows);
-        let sidecar = match client.fetch_install_sha256(platform, &file_name).await {
+        let sidecar = match client
+            .fetch_install_sha256_hashed(platform, &file_name, Some(&want.sha256))
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 let msg = e.to_string();
@@ -406,7 +502,9 @@ async fn download_changed(
                 want.sha256
             );
         }
-        let bytes = client.fetch_install_bytes(platform, &file_name).await?;
+        let bytes = client
+            .fetch_install_bytes_hashed(platform, &file_name, Some(&want.sha256))
+            .await?;
         let got = sha256_hex(&bytes);
         if !sha_eq(&got, &want.sha256) {
             bail!("checksum mismatch for {file_name}");
@@ -1296,6 +1394,29 @@ mod tests {
         );
     }
 
+    /// catalog:unit-request-update — a failed apply must not consume the key
+    /// forever; heartbeat last_error must keep the message until success.
+    #[test]
+    fn note_fail_forgets_key_and_surfaces_apply_error() {
+        let state = UpdateState::new();
+        assert!(state.try_begin("sha-a"));
+        state.note_fail("checksum mismatch for fleet-host.exe");
+        assert_eq!(
+            state.apply_error().as_deref(),
+            Some("checksum mismatch for fleet-host.exe")
+        );
+        assert!(
+            state.try_begin("sha-a"),
+            "failed attempt key must be retryable after note_fail"
+        );
+        state.finish_ok();
+        assert!(state.apply_error().is_none(), "success clears last_error");
+        assert!(
+            !state.try_begin("sha-a"),
+            "successful attempt key stays consumed"
+        );
+    }
+
     #[test]
     fn attempt_key_prefers_trimmed_git_sha_else_sorted_bin_hashes() {
         let trimmed = DesiredSoftware {
@@ -1367,7 +1488,8 @@ mod tests {
                     cb(&method, &path);
                 }
                 log2.lock().unwrap().push((method, path.clone()));
-                let body = files.get(&path).cloned();
+                let lookup = path.split_once('?').map(|(p, _)| p).unwrap_or(&path);
+                let body = files.get(lookup).cloned();
                 let (status, payload) = match body {
                     Some(b) => ("200 OK", b),
                     None => ("404 Not Found", Vec::new()),

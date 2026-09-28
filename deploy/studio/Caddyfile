@@ -35,6 +35,8 @@
 		reverse_proxy api:8080
 	}
 	# Worker install + bin fetch (not under /api).
+	# *.exe is a cacheable static object. Hosts fetch ?h={sha256} so each
+	# generation is a new cache key (bare path may lag at the edge).
 	handle /install* {
 		reverse_proxy api:8080
 	}

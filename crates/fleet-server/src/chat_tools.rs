@@ -242,7 +242,7 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "list_agent_personas",
-                "description": "List specialist agent personas to use as worker_profile on launch_agent_task / launch_agent_plan. Any roster slug works (engineering, marketing, finance, healthcare, …). Default if omitted: generalist. Optional shortcuts: coding, frontend, reviewer, testing.",
+                "description": "List roster specialists to use as worker_profile on launch_agent_task / launch_agent_plan. Returns specialists as the main list; workspace personas (if any) are a separate workspace_personas array, not mixed in. Any roster slug works (engineering, marketing, finance, healthcare, …). Default if omitted: generalist. Optional shortcuts: coding, frontend, reviewer, testing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -807,8 +807,7 @@ pub fn require_runner_worker_llm(llm: &ChatLlmContext) -> AppResult<()> {
         return Ok(());
     }
     Err(AppError::bad_request(
-        "fleet workers run Grok, Claude, Gemini, OpenAI, or Ollama on a paired runner"
-            .to_string(),
+        "fleet workers run Grok, Claude, Gemini, OpenAI, or Ollama on a paired runner".to_string(),
     ))
 }
 
@@ -841,10 +840,8 @@ pub fn wants_fleet_launch(text: &str) -> bool {
         || t.contains("start an")
         || t.contains("start a ")
         || t.contains("create an");
-    let target = t.contains("agent")
-        || t.contains("fleet")
-        || t.contains("sandbox")
-        || t.contains("worker");
+    let target =
+        t.contains("agent") || t.contains("fleet") || t.contains("sandbox") || t.contains("worker");
     launchy && target
 }
 
@@ -1299,8 +1296,8 @@ pub fn coerce_integration_args(
         let ch = next.get("channel").and_then(|v| v.as_str()).unwrap_or("");
         let needs_id = ch.is_empty() || !(ch.starts_with('C') && ch.len() >= 8);
         if needs_id {
-            if let Some(id) = harvest_slack_channel_named(prior, ch)
-                .or_else(|| harvest_slack_channel(prior))
+            if let Some(id) =
+                harvest_slack_channel_named(prior, ch).or_else(|| harvest_slack_channel(prior))
             {
                 next.as_object_mut()?.insert("channel".into(), json!(id));
                 changed = true;
@@ -1526,6 +1523,68 @@ pub(crate) fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
     }
 }
 
+async fn stamp_workspace_run_mode(state: &AppState, workspace_id: Uuid, plan: &mut WorkPlanBody) {
+    let ws = &state.db;
+    let run_envelope = fleet_db::repos::workspaces::run_envelope(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "on_pc".into());
+    let egress_envelope = fleet_db::repos::workspaces::egress_envelope(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "open".into());
+    let fallback_run = fleet_db::repos::workspaces::default_run_mode(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "on_pc".into());
+    let fallback_egress = fleet_db::repos::workspaces::default_egress(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "inherit".into());
+    let repo = repo_key_from_plan(plan);
+    let stored = match repo.as_deref() {
+        Some(name) => fleet_db::repos::repo_postures::get(ws, workspace_id, name)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let resolved = fleet_db::resolve_posture(
+        &run_envelope,
+        &egress_envelope,
+        &fallback_run,
+        &fallback_egress,
+        stored.as_ref().map(|p| p.run_mode.as_str()),
+        stored.as_ref().map(|p| p.egress_mode.as_str()),
+        None,
+        None,
+    );
+    if let Ok(resolved) = resolved {
+        plan.policy.run_mode = resolved.run_mode;
+        plan.policy.egress_mode = resolved.egress_mode;
+        plan.policy.egress_allowlist = stored
+            .map(|p| p.egress_allowlist)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_default();
+        if plan.policy.egress_allowlist.is_empty() && plan.policy.egress_mode == "allowlist" {
+            if let Ok(list) =
+                fleet_db::repos::workspaces::default_egress_allowlist(ws, workspace_id).await
+            {
+                plan.policy.egress_allowlist = list;
+            }
+        }
+        plan.policy.posture_loosened = resolved.loosened;
+    }
+}
+
+fn repo_key_from_plan(plan: &WorkPlanBody) -> Option<String> {
+    for task in &plan.tasks {
+        let raw = task.external_ref.as_ref().map(|r| r.key.as_str())?;
+        let raw = raw.trim();
+        let name = raw.split(['#', ' ']).next().unwrap_or(raw).trim();
+        if name.contains('/') && !name.contains("://") {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 pub fn build_multi_task_plan(
     workspace_id: Uuid,
     max_agents_override: Option<i32>,
@@ -1550,11 +1609,27 @@ pub fn build_multi_task_plan(
     }
 }
 
+async fn workspace_default_run_mode(state: &AppState, workspace_id: Uuid) -> String {
+    fleet_db::repos::workspaces::default_run_mode(&state.db, workspace_id)
+        .await
+        .unwrap_or_else(|_| fleet_db::WORKER_HOST_RUN_ON_PC.to_string())
+}
+
+async fn instance_agent_cap(state: &AppState) -> i32 {
+    fleet_db::repos::instance_settings::get(&state.db)
+        .await
+        .map(|s| s.max_agents_cap)
+        .unwrap_or(128)
+        .clamp(1, MAX_PROJECT_AGENTS)
+}
+
 async fn ensure_project(state: &AppState, workspace_id: Uuid) -> AppResult<()> {
+    let cap = instance_agent_cap(state).await;
+    let max_agents = chat_max_agents().min(cap);
     state
         .orch
         .store
-        .ensure_project(workspace_id, "workspace fleet", 3)
+        .ensure_project(workspace_id, "workspace fleet", max_agents)
         .await
         .map_err(|e| {
             tracing::error!(%workspace_id, error = %e, "chat tool ensure_project failed");
@@ -1568,7 +1643,8 @@ async fn ensure_project_capacity(
     workspace_id: Uuid,
     max_agents: i32,
 ) -> AppResult<()> {
-    let max = max_agents.clamp(1, chat_max_agents());
+    let cap = instance_agent_cap(state).await;
+    let max = max_agents.clamp(1, chat_max_agents().min(cap));
     ensure_project(state, workspace_id).await?;
     state
         .orch
@@ -1775,32 +1851,64 @@ async fn list_agent_personas_tool(
     let data_dir = std::env::var("DATA_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
-    let mut personas = fleet_orchestrator::personas::list_personas(&data_dir).await;
+    let mut specialists = fleet_orchestrator::personas::list_roster_specialists(&data_dir).await;
     if let Some(d) = division {
-        personas.retain(|p| p.division.eq_ignore_ascii_case(d));
+        specialists.retain(|p| p.division.eq_ignore_ascii_case(d));
     }
     let custom =
         fleet_db::repos::personas::list_for_workspace(&state.db, workspace_id, Some("active"))
             .await
             .unwrap_or_default();
-    let custom_json: Vec<Value> = custom
+    let workspace_json: Vec<Value> = custom
         .iter()
         .map(|p| {
             json!({
                 "slug": p.slug,
                 "name": p.name,
                 "description": p.description,
-                "division": "workspace",
+                "role_prompt": p.role_prompt,
+                "worker_profile": p.worker_profile,
+                "model_preference": p.model_preference,
                 "source": "workspace",
             })
         })
         .collect();
-    let n = personas.len() + custom_json.len();
-    let content = json!({
+    let specialists_json: Vec<Value> = specialists
+        .iter()
+        .take(80)
+        .map(|p| serde_json::to_value(p).unwrap_or_else(|_| json!({})))
+        .collect();
+    let content = list_agent_personas_payload(&specialists_json, &workspace_json);
+    let n = specialists_json.len();
+    let ws_n = workspace_json.len();
+    let summary = if ws_n == 0 {
+        format!("{n} specialist(s)")
+    } else {
+        format!("{n} specialist(s), {ws_n} workspace persona(s)")
+    };
+    Ok((
+        content.clone(),
+        ChatAction {
+            tool: "list_agent_personas".into(),
+            ok: true,
+            summary,
+            run_id: None,
+            sandbox_ids: None,
+            detail: Some(content),
+        },
+    ))
+}
+
+/// Specialists are the main list. Workspace personas stay in their own array.
+fn list_agent_personas_payload(specialists: &[Value], workspace_personas: &[Value]) -> Value {
+    json!({
         "source": "https://github.com/msitarzewski/agency-agents",
-        "count": n,
+        "count": specialists.len(),
         "default": "generalist",
-        "workspace_personas": custom_json,
+        "specialists": specialists,
+        // Same as specialists — never mixed with workspace personas.
+        "personas": specialists,
+        "workspace_personas": workspace_personas,
         "aliases": {
             "generalist": "generalist",
             "coding": "engineering-backend-architect (optional shortcut)",
@@ -1808,20 +1916,8 @@ async fn list_agent_personas_tool(
             "reviewer": "any *reviewer* slug (optional shortcut)",
             "testing": "testing/* first match (optional shortcut)",
         },
-        "personas": personas.iter().take(80).collect::<Vec<_>>(),
-        "hint": "Set worker_profile to a workspace persona slug (Agents page) or any roster slug.",
-    });
-    Ok((
-        content.clone(),
-        ChatAction {
-            tool: "list_agent_personas".into(),
-            ok: true,
-            summary: format!("{n} persona(s)"),
-            run_id: None,
-            sandbox_ids: None,
-            detail: Some(content),
-        },
-    ))
+        "hint": "Main list is roster specialists (worker_profile slugs). Workspace personas are only in workspace_personas — they are a different JSON shape.",
+    })
 }
 
 fn orch_data_dir(state: &AppState) -> std::path::PathBuf {
@@ -1835,7 +1931,8 @@ async fn resolve_chat_run(
 ) -> AppResult<Uuid> {
     ensure_project(state, workspace_id).await?;
     if let Some(raw) = run_id.map(str::trim).filter(|s| !s.is_empty()) {
-        let id = Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
+        let id =
+            Uuid::parse_str(raw).map_err(|_| AppError::bad_request("run_id must be a UUID"))?;
         return state
             .orch
             .store
@@ -2292,12 +2389,13 @@ async fn configure_fleet_tool(
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
 
+    let cap = instance_agent_cap(state).await;
     let max = arguments
         .get("max_agents")
         .and_then(|v| v.as_i64())
         .map(|n| n as i32)
         .unwrap_or(current.max_agents)
-        .clamp(1, fleet_orchestrator::domain::MAX_PROJECT_AGENTS);
+        .clamp(1, cap);
 
     let llm = arguments
         .get("fleet_llm")
@@ -2479,7 +2577,9 @@ async fn launch_agent_task(
     require_runner_worker_llm(llm)?;
     let mut plan = build_chat_plan(workspace_id, &args.title, &spec, profile);
     stamp_plan_llm(&mut plan, llm);
+    stamp_workspace_run_mode(state, workspace_id, &mut plan).await;
     plan.policy.requested_by = Some(user_id);
+    plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     accept_and_drive_plan(
         state,
         workspace_id,
@@ -2578,7 +2678,9 @@ async fn launch_agent_plan(
             .collect();
     }
     stamp_plan_llm(&mut plan, llm);
+    stamp_workspace_run_mode(state, workspace_id, &mut plan).await;
     plan.policy.requested_by = Some(user_id);
+    plan.policy.run_mode = workspace_default_run_mode(state, workspace_id).await;
     if let Err(e) = validate::validate_plan(&plan) {
         return Err(AppError::bad_request(e.to_string()));
     }
@@ -2948,6 +3050,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_agent_personas_payload_keeps_specialists_and_workspace_apart() {
+        let specialists = vec![json!({
+            "slug": "generalist",
+            "name": "Specialist",
+            "division": "specialized",
+        })];
+        let workspace = vec![json!({
+            "slug": "software-engineer",
+            "name": "Software engineer",
+            "role_prompt": "Be careful.",
+            "worker_profile": "coding",
+            "source": "workspace",
+        })];
+        let v = list_agent_personas_payload(&specialists, &workspace);
+        assert_eq!(v["count"], 1, "{v}");
+        assert_eq!(v["default"], "generalist");
+        assert_eq!(v["specialists"][0]["slug"], "generalist");
+        assert_eq!(v["personas"][0]["slug"], "generalist");
+        assert_eq!(v["workspace_personas"][0]["slug"], "software-engineer");
+        assert_eq!(v["workspace_personas"][0]["role_prompt"], "Be careful.");
+        let specialist_slugs: Vec<&str> = v["specialists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["slug"].as_str())
+            .collect();
+        assert!(
+            !specialist_slugs.contains(&"software-engineer"),
+            "workspace persona must not appear in specialists: {v}"
+        );
+        let persona_slugs: Vec<&str> = v["personas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["slug"].as_str())
+            .collect();
+        assert!(
+            !persona_slugs.contains(&"software-engineer"),
+            "workspace persona must not appear in personas: {v}"
+        );
+    }
+
+    #[test]
+    fn list_agent_personas_payload_count_is_specialists_only() {
+        let specialists = vec![json!({"slug": "a"}), json!({"slug": "b"})];
+        let workspace = vec![
+            json!({"slug": "ws-1"}),
+            json!({"slug": "ws-2"}),
+            json!({"slug": "ws-3"}),
+        ];
+        let v = list_agent_personas_payload(&specialists, &workspace);
+        assert_eq!(v["count"], 2, "count must not mix workspace personas: {v}");
+        assert_eq!(v["specialists"].as_array().unwrap().len(), 2);
+        assert_eq!(v["workspace_personas"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn stamp_plan_llm_writes_provider_and_model() {
         let mut plan = build_chat_plan(Uuid::nil(), "T", "S", "coding");
         let runner = Uuid::now_v7();
@@ -2995,24 +3154,20 @@ mod tests {
             .is_ok(),
             "OpenAI is a runner CLI; missing runner is require_taking_runner"
         );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "openai".into(),
-                model: "any".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "gemini".into(),
-                model: "any".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "openai".into(),
+            model: "any".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "gemini".into(),
+            model: "any".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
         assert!(
             require_runner_worker_llm(&ChatLlmContext {
                 provider: "ollama".into(),
@@ -3023,24 +3178,20 @@ mod tests {
             .is_ok(),
             "chat may queue ollama work until a runner appears"
         );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "ollama".into(),
-                model: "tiny".into(),
-                runner_id: None,
-                effort: None,
-            })
-            .is_err()
-        );
-        assert!(
-            require_taking_runner(&ChatLlmContext {
-                provider: "ollama".into(),
-                model: "tiny".into(),
-                runner_id: Some(Uuid::now_v7()),
-                effort: None,
-            })
-            .is_ok()
-        );
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "ollama".into(),
+            model: "tiny".into(),
+            runner_id: None,
+            effort: None,
+        })
+        .is_err());
+        assert!(require_taking_runner(&ChatLlmContext {
+            provider: "ollama".into(),
+            model: "tiny".into(),
+            runner_id: Some(Uuid::now_v7()),
+            effort: None,
+        })
+        .is_ok());
     }
 
     #[test]
@@ -3295,13 +3446,9 @@ mod tests {
     fn coerce_post_message_and_get_thread_resolve_hash_eng() {
         let prior = listed_channels_general_then_eng();
         for operation in ["post_message", "get_thread"] {
-            let fixed = coerce_integration_args(
-                "slack",
-                operation,
-                &json!({ "channel": "#eng" }),
-                &prior,
-            )
-            .unwrap_or_else(|| panic!("{operation} should rewrite #eng"));
+            let fixed =
+                coerce_integration_args("slack", operation, &json!({ "channel": "#eng" }), &prior)
+                    .unwrap_or_else(|| panic!("{operation} should rewrite #eng"));
             assert_eq!(fixed["channel"], "CENG", "{operation}");
         }
     }

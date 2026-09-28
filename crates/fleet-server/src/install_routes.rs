@@ -28,6 +28,8 @@ const DARWIN_X86_64: &str = include_str!("../../../scripts/install-worker/darwin
 const FREEBSD_AMD64: &str = include_str!("../../../scripts/install-worker/freebsd-amd64.sh");
 const WINDOWS_X86_64: &str = include_str!("../../../scripts/install-worker/windows-x86_64.ps1");
 const WINDOWS_ARM64: &str = include_str!("../../../scripts/install-worker/windows-arm64.ps1");
+const VERIFY_SH: &str = include_str!("../../../scripts/install-worker/verify.sh");
+const VERIFY_PS1: &str = include_str!("../../../scripts/install-worker/verify.ps1");
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -51,7 +53,33 @@ async fn get_install_worker_ps1() -> Response {
 async fn get_named_script(AxumPath(name): AxumPath<String>) -> AppResult<Response> {
     reject_unsafe_name(&name)?;
     let body = script_body(&name).ok_or_else(|| AppError::not_found("install script not found"))?;
+    if name == "verify.sh" {
+        let baked = bake_verify_origin(body, &verify_origin_from_env());
+        return Ok(script_response(&name, &baked));
+    }
     Ok(script_response(&name, body))
+}
+
+/// Piped `curl verify.sh | sh` has no sibling file. Stamp the pair origin
+/// into the one token the script understands. `WORKER_PUBLIC_BASE` wins.
+/// The API container often has only `API_PUBLIC_BASE` (compose does not
+/// pass the worker base through). A git checkout stays unsubstituted so
+/// `sh verify.sh` next to `_unix_common.sh` is unchanged.
+fn verify_origin_from_env() -> String {
+    for key in ["WORKER_PUBLIC_BASE", "API_PUBLIC_BASE"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().trim_end_matches('/').to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    String::new()
+}
+
+fn bake_verify_origin(body: &str, origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/').replace('\'', "");
+    body.replace("'@fleet-verify-origin@'", &format!("'{origin}'"))
 }
 
 fn lookup_worker_bin(state: &AppState, platform: &str, bin: &str) -> AppResult<PathBuf> {
@@ -77,8 +105,11 @@ async fn get_worker_bin(
     State(state): State<AppState>,
     AxumPath((platform, bin)): AxumPath<(String, String)>,
 ) -> AppResult<Response> {
-    let path = lookup_worker_bin(&state, &platform, &bin)?;
     let ct = worker_bin_content_type(&bin);
+    if let Some(hash) = synthesized_sha256_sidecar(&state, &platform, &bin) {
+        return Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], hash).into_response());
+    }
+    let path = lookup_worker_bin(&state, &platform, &bin)?;
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((StatusCode::OK, [(header::CONTENT_TYPE, ct)], bytes).into_response()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -365,18 +396,27 @@ fn synthesize_manifest_from_bins(
     } else {
         "fleet-driver"
     };
+    // An explicit dist dir is the only package. Do not treat cargo target
+    // bins as staged when that directory has no manifest and no binaries.
+    let exe_dir = current_exe_dir();
+    let target_dir = workspace_target_dir();
+    let (exe, target) = if state.worker_dist_dir.is_some() {
+        (None, None)
+    } else {
+        (exe_dir.as_deref(), target_dir.as_deref())
+    };
     let host_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         host_name,
         &native_platform_id(),
     )?;
     let driver_path = resolve_worker_bin(
         state.worker_dist_dir.as_deref(),
-        current_exe_dir().as_deref(),
-        workspace_target_dir().as_deref(),
+        exe,
+        target,
         platform,
         driver_name,
         &native_platform_id(),
@@ -399,15 +439,65 @@ fn synthesize_manifest_from_bins(
     })
 }
 
+fn synthesized_sha256_sidecar(state: &AppState, platform: &str, bin: &str) -> Option<String> {
+    let stem = bin.strip_suffix(".sha256")?;
+    if lookup_worker_bin(state, platform, bin).is_ok() {
+        return None;
+    }
+    let path = lookup_worker_bin(state, platform, stem).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    use sha2::{Digest, Sha256};
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
 fn bin_file_meta(path: &Path) -> Option<fleet_db::WorkerBinMeta> {
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
+    struct Entry {
+        path: PathBuf,
+        len: u64,
+        modified: Option<SystemTime>,
+        meta: fleet_db::WorkerBinMeta,
+    }
+    // Admin runner lists call this once per host. Debug fleet-host is hundreds
+    // of MB, so a same-file hit must not re-read and hash.
+    static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+    let fs_meta = std::fs::metadata(path).ok()?;
+    let len = fs_meta.len();
+    let modified = fs_meta.modified().ok();
+    if let Ok(guard) = CACHE.lock() {
+        if let Some(hit) = guard
+            .iter()
+            .find(|e| e.path == path && e.len == len && e.modified == modified)
+        {
+            return Some(hit.meta.clone());
+        }
+    }
     let bytes = std::fs::read(path).ok()?;
     let sha = hex::encode(Sha256::digest(&bytes));
-    Some(fleet_db::WorkerBinMeta {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let version = if name.starts_with("fleet-driver") {
+        crate::package_versions::fleet_driver_package_version()
+    } else {
+        crate::package_versions::fleet_host_package_version()
+    };
+    let meta = fleet_db::WorkerBinMeta {
         sha256: sha,
         size: bytes.len() as u64,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    })
+        version: Some(version.to_string()),
+    };
+    if let Ok(mut guard) = CACHE.lock() {
+        guard.push(Entry {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            meta: meta.clone(),
+        });
+    }
+    Some(meta)
 }
 
 /// Every staged `manifest.json` under `FLEET_WORKER_DIST_DIR` (one per platform).
@@ -442,13 +532,13 @@ fn missing_bin_hint(platform: &str, bin: &str) -> String {
     )
 }
 
-fn script_response(name: &str, body: &'static str) -> Response {
+fn script_response(name: &str, body: &str) -> Response {
     let ct = if name.ends_with(".sh") {
         HeaderValue::from_static("text/x-shellscript; charset=utf-8")
     } else {
         HeaderValue::from_static("text/plain; charset=utf-8")
     };
-    (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body).into_response()
+    (StatusCode::OK, [(header::CONTENT_TYPE, ct)], body.to_string()).into_response()
 }
 
 /// Every script `GET /install/worker/{name}` can serve. Tests iterate this so a
@@ -469,6 +559,8 @@ fn served_scripts() -> &'static [(&'static str, &'static str)] {
         ("freebsd-amd64.sh", FREEBSD_AMD64),
         ("windows-x86_64.ps1", WINDOWS_X86_64),
         ("windows-arm64.ps1", WINDOWS_ARM64),
+        ("verify.sh", VERIFY_SH),
+        ("verify.ps1", VERIFY_PS1),
     ]
 }
 
@@ -524,6 +616,20 @@ mod tests {
         }
         fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn bake_verify_origin_stamps_the_pair_url() {
+        let body = "origin='@fleet-verify-origin@'\ncase @fleet-verify-origin@ in\n";
+        let got = bake_verify_origin(body, "https://agentfleet.studio/");
+        assert_eq!(
+            got,
+            "origin='https://agentfleet.studio'\ncase @fleet-verify-origin@ in\n"
+        );
+        assert_eq!(
+            bake_verify_origin(body, ""),
+            "origin=''\ncase @fleet-verify-origin@ in\n"
+        );
     }
 
     #[test]
@@ -612,7 +718,9 @@ mod tests {
     fn served_unix_platform_scripts_export_matching_fleet_platform() {
         let mut stems = Vec::new();
         for (name, body) in served_scripts() {
-            if !name.ends_with(".sh") || matches!(*name, "install-worker.sh" | "_unix_common.sh") {
+            if !name.ends_with(".sh")
+                || matches!(*name, "install-worker.sh" | "_unix_common.sh" | "verify.sh")
+            {
                 continue;
             }
             let stem = name
@@ -948,6 +1056,11 @@ exit 22
                 !body.contains("API_PUBLIC_BASE"),
                 "{name} must not reference API_PUBLIC_BASE (OAuth / public API)"
             );
+            // verify.* diagnoses the local install and can restart it.
+            // It does not pair. FLEET_URL is optional context for the ping.
+            if name.starts_with("verify.") {
+                continue;
+            }
             assert!(
                 body.contains("FLEET_URL"),
                 "{name} must take the pair URL via FLEET_URL (WORKER_PUBLIC_BASE)"

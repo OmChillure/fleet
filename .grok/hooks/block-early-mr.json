@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|run_terminal_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../../scripts/block-early-mr-hook.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

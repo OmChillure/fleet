@@ -206,6 +206,101 @@ async fn credentials_for_returns_none_for_error_status() {
             .is_none(),
         "find_connected must not see an error row"
     );
+    assert!(
+        integrations::find_proxy_connection(&pool, ws_a, "github")
+            .await
+            .expect("proxy lookup")
+            .is_none(),
+        "an error row with no installation id must stay disconnected"
+    );
+}
+
+#[tokio::test]
+async fn error_row_with_installation_id_is_usable_until_cleared() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("inst")).await;
+    sqlx::query(
+        "UPDATE integration_connections SET config = '{\"installation_id\": 161434524}'::jsonb WHERE workspace_id = $1 AND provider = 'github'",
+    )
+    .bind(ws_a)
+    .execute(&pool)
+    .await
+    .expect("set installation_id");
+    integrations::mark_error(
+        &pool,
+        ws_a,
+        "github",
+        "GitHub API 403: Resource not accessible by integration",
+    )
+    .await
+    .expect("mark_error");
+
+    let row = integrations::find_proxy_connection(&pool, ws_a, "github")
+        .await
+        .expect("proxy lookup")
+        .expect("installation error row stays callable");
+    assert_eq!(row.status, "error");
+    assert!(integrations::find_connected(&pool, ws_a, "github")
+        .await
+        .expect("find_connected")
+        .is_none());
+
+    assert!(integrations::clear_error(&pool, ws_a, "github")
+        .await
+        .expect("clear_error"));
+    let connected = integrations::find_connected(&pool, ws_a, "github")
+        .await
+        .expect("find_connected after clear")
+        .expect("cleared row is connected");
+    assert!(connected.last_error.is_none());
+}
+
+#[tokio::test]
+async fn list_for_workspace_includes_github_error_with_installation_id() {
+    let pool = connect_and_migrate().await;
+    let (user_a, ws_a) = seed_user_with_workspace(&pool).await;
+    upsert_github(&pool, ws_a, user_a, leftover_ciphertext("list")).await;
+    sqlx::query(
+        "UPDATE integration_connections SET config = '{\"installation_id\": 42}'::jsonb WHERE workspace_id = $1 AND provider = 'github'",
+    )
+    .bind(ws_a)
+    .execute(&pool)
+    .await
+    .expect("set installation_id");
+    integrations::mark_error(&pool, ws_a, "github", "GitHub API 401: bad credentials")
+        .await
+        .expect("mark github");
+
+    integrations::upsert(
+        &pool,
+        &UpsertConnection {
+            id: Uuid::now_v7(),
+            workspace_id: ws_a,
+            provider: "slack".into(),
+            account_label: Some("slack".into()),
+            config: json!({}),
+            credentials: leftover_ciphertext("slk"),
+            connected_by: Some(user_a),
+            at: Utc::now(),
+        },
+    )
+    .await
+    .expect("upsert slack");
+    integrations::mark_error(&pool, ws_a, "slack", "invalid_auth")
+        .await
+        .expect("mark slack");
+
+    let listed = integrations::list_for_workspace(&pool, ws_a)
+        .await
+        .expect("list");
+    let providers: Vec<&str> = listed.iter().map(|r| r.provider.as_str()).collect();
+    assert_eq!(providers, vec!["github"]);
+    assert_eq!(listed[0].status, "error");
+    assert_eq!(
+        listed[0].last_error.as_deref(),
+        Some("GitHub API 401: bad credentials")
+    );
 }
 
 /// Global nonce PK: first insert wins for every workspace and provider.

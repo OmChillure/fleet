@@ -13,9 +13,12 @@
 # rev=1. A Windows-only fix bumps windows-x86_64-rev only. Bumping the line
 # version to 0.0.4 resets every OS rev to 0.
 #
-# If a staged binary's sha256 is not registered, check/deploy fail. For one
-# OS: bump that <os>-rev, restage that OS, register. For all OS: bump
-# [versions] and [release.BIN].version, restage, register.
+# The author bumps [versions], [verify], and the per-OS -rev when a runner
+# change should become the package hosts are asked to run. The author does
+# not fill hashes and does not restage. The deployer builds the three ship
+# platforms and registers hashes with register --keep-author-revs. A hash
+# change whose rev did not increase fails that register. A line bump resets
+# every OS rev to 0.
 #
 #   fleet-host   — pair / heartbeat / lease / official CLI chat
 #   fleet-driver — process worker (ACP)
@@ -30,20 +33,20 @@ fleet-driver = "0.0.3"
 
 [release.fleet-host]
 version = "0.0.3"
-parent = "657fbfa9ea0ae08eb77258ead88d140d9b3e6b1a7115c1700ea6180878fe9ca5"
+parent = "03fd0ffa576dca2ff15694730fec5912a898824e0b9b323fce25401870a945ac"
 linux-x86_64 = "7ba1218e45dd52d0b8a6660939f210cb9638b3e07fe2fe5213c8fcfdc4583968"
 linux-x86_64-rev = 2
 linux-aarch64 = "1208bd7c09fea2f37e9c85310ba31d9e77c4f8612ab0526453205307139f1a1e"
 linux-aarch64-rev = 2
-windows-x86_64 = "c53195bf6e692ccf9064566c96301cdb63cb8d84b6b6ef22d348819dc6c1212b"
-windows-x86_64-rev = 2
+windows-x86_64 = "ce62eef8add301b7900123b27360576e1b774b339bf4de47f93060b5a616810b"
+windows-x86_64-rev = 4
 
 [release.fleet-driver]
 version = "0.0.3"
-parent = "679b81c18116422db4fcbe14b91075da11089d40c125e7756cffafb40b826ce4"
+parent = "aca733426f018a56b396d3a0aa199137e84e1f6255a6982ac3e2d8db60a127b4"
 linux-x86_64 = "e9303d51cffd0f0af3b6ccb9995ea1e672b4f2ae2b8a51efa5f8c11428565520"
 linux-x86_64-rev = 0
 linux-aarch64 = "40d994d11f4ad94b07eb7e592a80bca8b1da3f5bef0b0c5f2aac4e4206e950af"
 linux-aarch64-rev = 0
-windows-x86_64 = "d657153401dae5bd960911dc6e2c45dc86f31fe23aef0a4f23f01d0babea49b1"
-windows-x86_64-rev = 2
+windows-x86_64 = "f8b53119a364bb8c14a0681cf60ac7649f1ccb7ff03f512b5a95989b5f8b0d26"
+windows-x86_64-rev = 3

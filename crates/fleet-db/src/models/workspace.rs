@@ -2,13 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-/// Canonical IsolationClass wire strings stored on `workspaces.min_isolation`.
-/// Not a second enum — keep these as `&str` and parse in contracts.
+/// Canonical workspace_location wire strings stored on `workspaces.min_isolation`.
+/// Where the repo lives — not agent_runtime (`run_mode` on the host).
+/// Settings JSON still uses `min_isolation` (see fleet_routes.rs).
 pub const MIN_ISOLATION_PROCESS: &str = "process";
 pub const MIN_ISOLATION_CONTAINER: &str = "container";
 pub const MIN_ISOLATION_VM: &str = "vm";
 
-/// `process` | `container` | `vm`. Other values are rejected.
+/// `process` | `container` | `vm` (workspace_location). Other values are rejected.
 pub fn parse_min_isolation(raw: &str) -> Option<&'static str> {
     match raw.trim() {
         MIN_ISOLATION_PROCESS => Some(MIN_ISOLATION_PROCESS),
@@ -16,6 +17,32 @@ pub fn parse_min_isolation(raw: &str) -> Option<&'static str> {
         MIN_ISOLATION_VM => Some(MIN_ISOLATION_VM),
         _ => None,
     }
+}
+
+/// Workspace network posture. Independent of where the job runs.
+pub const EGRESS_INHERIT: &str = "inherit";
+pub const EGRESS_NONE: &str = "none";
+pub const EGRESS_ALLOWLIST: &str = "allowlist";
+pub const EGRESS_OPEN: &str = "open";
+
+/// `inherit` | `none` | `allowlist` | `open`.
+pub fn parse_egress_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        EGRESS_INHERIT => Some(EGRESS_INHERIT),
+        EGRESS_NONE => Some(EGRESS_NONE),
+        EGRESS_ALLOWLIST => Some(EGRESS_ALLOWLIST),
+        EGRESS_OPEN => Some(EGRESS_OPEN),
+        _ => None,
+    }
+}
+
+/// Allowlist entries split on commas, semicolons, and whitespace.
+pub fn split_egress_allowlist(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -100,7 +127,27 @@ mod min_isolation_tests {
         assert_eq!(parse_min_isolation("native"), None);
         assert_eq!(parse_min_isolation("host"), None);
         assert_eq!(parse_min_isolation("k8s"), None);
+        assert_eq!(parse_min_isolation("on_pc"), None);
+        assert_eq!(parse_min_isolation("in_container"), None);
         assert_eq!(parse_min_isolation(""), None);
+    }
+
+    #[test]
+    fn parse_egress_is_four_postures() {
+        assert_eq!(parse_egress_mode(" inherit "), Some(EGRESS_INHERIT));
+        assert_eq!(parse_egress_mode("none"), Some(EGRESS_NONE));
+        assert_eq!(parse_egress_mode("allowlist"), Some(EGRESS_ALLOWLIST));
+        assert_eq!(parse_egress_mode("open"), Some(EGRESS_OPEN));
+        assert_eq!(parse_egress_mode("package_registries"), None);
+        assert_eq!(parse_egress_mode("dns_only"), None);
+        assert_eq!(
+            split_egress_allowlist("10.0.0.0/8, github.com\n172.18.0.1/32"),
+            vec![
+                "10.0.0.0/8".to_string(),
+                "github.com".to_string(),
+                "172.18.0.1/32".to_string(),
+            ]
+        );
     }
 }
 

@@ -2,10 +2,11 @@
 
 use dioxus::prelude::*;
 
+use crate::pages::inbox::designer::workflow;
 use crate::pages::inbox::experience::{experience, repo_issue_parts};
 use crate::pages::inbox::shared::{
-    PageData, action_cell, empty_or_list, error_banner, filter_box, flow, frame, header, hook_card,
-    need_connect, open_in, preview, setup,
+    action_cell, empty_or_list, error_banner, flow, frame, header, hook_card, need_connect,
+    open_in, preview, PageData,
 };
 
 pub fn view(ws: &str, data: PageData) -> Element {
@@ -14,14 +15,8 @@ pub fn view(ws: &str, data: PageData) -> Element {
     frame(rsx! {
         {header(ws, data, rsx! { {flow(data)} })}
         {need_connect(ws, data)}
+        {workflow(ws, data)}
         {error_banner(data)}
-        {setup(data, "How to set up GitLab")}
-        {filter_box(
-            ws,
-            data,
-            "Projects as group/name (the path_with_namespace GitLab shows). Empty means every project the token can list.",
-            false,
-        )}
         {hook_card(data)}
         h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Opened issues" }
         {empty_or_list(data, rsx! {

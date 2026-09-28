@@ -1,18 +1,23 @@
 //! Live Zenoh subscribe + outbox drain. Opt-in via `ZENOH_LOCATOR`.
 //! Never inject a locator into sandbox pods.
+//! Tick does not wait on this task: unset locator or open failure is degrade, not deadlock.
 
 use std::time::Duration;
 
 use fleet_bus::{
+    KEY_EXPR_ALL_RUN_SHARE, KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS,
     decode_sample, key_for_message, put_bus_message, try_open_from_env,
-    KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS,
 };
-use fleet_db::repos::control_plane_events;
 use fleet_db::PgPool;
+use fleet_db::repos::control_plane_events;
 use tracing::{info, warn};
 
 /// Start subscriber + outbox publisher when `ZENOH_LOCATOR` is set.
+///
+/// Assignment/tick never joins this task. Team chat still enqueues to the
+/// outbox when the locator is unset so the HTTP path cannot deadlock on Zenoh.
 pub fn start_bus_tasks(pool: PgPool) {
+    fleet_orchestrator::sandbox::team_chat::set_share_outbox(pool.clone());
     tokio::spawn(async move {
         let session = match try_open_from_env().await {
             Ok(Some(s)) => s,
@@ -26,7 +31,11 @@ pub fn start_bus_tasks(pool: PgPool) {
             }
         };
         info!("control-plane bus connected");
-        for key in [KEY_EXPR_ALL_SANDBOX_EVENTS, KEY_EXPR_ALL_SESSION_EVENTS] {
+        for key in [
+            KEY_EXPR_ALL_SANDBOX_EVENTS,
+            KEY_EXPR_ALL_SESSION_EVENTS,
+            KEY_EXPR_ALL_RUN_SHARE,
+        ] {
             let sub_session = session.clone();
             let sub_pool = pool.clone();
             tokio::spawn(async move {

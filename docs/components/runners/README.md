@@ -10,6 +10,9 @@ that split is the use case. See
 
 Self-hosted pairing, install, heartbeat, and lease stay in
 [`docs/components/worker-host/README.md`](../worker-host/README.md).
+An offline card cannot tell a deleted install from a disabled service.
+The check you paste on that computer is
+[`verify-installation.md`](verify-installation.md).
 This folder is the umbrella: kinds, isolation, nav, and routes.
 
 Testing (required three layers + how to run):

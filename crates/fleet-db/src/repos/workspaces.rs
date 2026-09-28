@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::error::{DbError, DbResult};
 use crate::models::{
-    parse_min_isolation, parse_worker_host_run_mode, parse_worker_host_send_policy, Workspace,
-    WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole,
+    Workspace, WorkspaceInvite, WorkspaceMemberPublic, WorkspaceWithRole, parse_egress_mode,
+    parse_min_isolation, parse_worker_host_run_mode, parse_worker_host_send_policy,
 };
 use crate::pool::map_query_err;
 
@@ -326,6 +326,162 @@ pub async fn set_default_run_mode(
     stored.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
+pub const EGRESS_ALLOWLIST_MAX: usize = 2000;
+
+pub async fn default_egress(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT default_egress
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn default_egress_allowlist(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT default_egress_allowlist
+        FROM workspaces
+        WHERE id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_default_egress(pool: &PgPool, workspace_id: Uuid, mode: &str) -> DbResult<String> {
+    let mode = parse_egress_mode(mode).ok_or_else(|| {
+        DbError::Conflict("default_egress must be inherit, none, allowlist, or open".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET default_egress = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING default_egress
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_default_egress_allowlist(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    raw: &str,
+) -> DbResult<String> {
+    let list = raw.trim();
+    if list.len() > EGRESS_ALLOWLIST_MAX {
+        return Err(DbError::Conflict(format!(
+            "default_egress_allowlist must be at most {EGRESS_ALLOWLIST_MAX} characters"
+        )));
+    }
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET default_egress_allowlist = $2,
+            updated_at = now(),
+            version = version + 1
+        WHERE id = $1
+        RETURNING default_egress_allowlist
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(list)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn run_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT run_envelope FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn egress_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT egress_envelope FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_run_envelope(pool: &PgPool, workspace_id: Uuid, mode: &str) -> DbResult<String> {
+    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
+        DbError::Conflict("run_envelope must be on_pc or in_container".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET run_envelope = $2, updated_at = now(), version = version + 1
+        WHERE id = $1
+        RETURNING run_envelope
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_egress_envelope(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    mode: &str,
+) -> DbResult<String> {
+    let mode = match mode.trim() {
+        "open" => "open",
+        "allowlist" => "allowlist",
+        "none" => "none",
+        _ => {
+            return Err(DbError::Conflict(
+                "egress_envelope must be open, allowlist, or none".into(),
+            ))
+        }
+    };
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET egress_envelope = $2, updated_at = now(), version = version + 1
+        WHERE id = $1
+        RETURNING egress_envelope
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
 pub const CHAT_MAX_TURNS_DEFAULT: i32 = 32;
 pub const CHAT_MAX_TURNS_MIN: i32 = 1;
 pub const CHAT_MAX_TURNS_MAX: i32 = 128;
@@ -594,6 +750,23 @@ pub async fn list_open_invites(
     sqlx::query_as::<_, WorkspaceInvite>(&q)
         .bind(workspace_id)
         .fetch_all(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn find_invite_by_token(
+    pool: &PgPool,
+    token: &str,
+) -> DbResult<Option<WorkspaceInvite>> {
+    let q = format!(
+        r#"
+        SELECT {INVITE_COLS} FROM workspace_invites
+        WHERE token = $1
+        "#
+    );
+    sqlx::query_as::<_, WorkspaceInvite>(&q)
+        .bind(token)
+        .fetch_optional(pool)
         .await
         .map_err(map_query_err)
 }

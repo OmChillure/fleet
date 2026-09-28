@@ -31,9 +31,11 @@ pub struct UpsertConnection {
     pub at: DateTime<Utc>,
 }
 
-/// Connected and errored rows for the integrations UI. Disconnected rows stay hidden.
-/// Credentials are included; do not send this struct on a public response.
-pub async fn list_visible_for_workspace(
+/// Connected rows and rows parked at `error` (rejected token or a GitHub App
+/// install that still has an installation id). The integrations page uses
+/// this list so those rows can show `last_error` and Reconnect. Credentials
+/// stay in the row for the proxy; `find_connected` still ignores `error`.
+pub async fn list_for_workspace(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> DbResult<Vec<IntegrationConnection>> {
@@ -52,24 +54,23 @@ pub async fn list_visible_for_workspace(
         .map_err(map_query_err)
 }
 
-/// Active (connected) rows for a workspace — includes credentials for internal use.
-pub async fn list_for_workspace(
-    pool: &PgPool,
-    workspace_id: Uuid,
-) -> DbResult<Vec<IntegrationConnection>> {
-    let q = format!(
+/// Connected inbox rows, plus a GitHub App row parked at `error` while the
+/// installation id is still stored. The poller uses this so a permissions
+/// error is retried instead of looking disconnected forever.
+pub async fn list_inbox_providers(pool: &PgPool, workspace_id: Uuid) -> DbResult<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
         r#"
-        SELECT {COLS}
+        SELECT provider
         FROM integration_connections
-        WHERE workspace_id = $1 AND status = 'connected'
+        WHERE workspace_id = $1 AND status IN ('connected', 'error')
         ORDER BY provider ASC
-        "#
-    );
-    sqlx::query_as::<_, IntegrationConnection>(&q)
-        .bind(workspace_id)
-        .fetch_all(pool)
-        .await
-        .map_err(map_query_err)
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 /// All rows including disconnected (for admin/debug). Prefer list_for_workspace.
@@ -102,6 +103,36 @@ pub async fn find_connected(
         SELECT {COLS}
         FROM integration_connections
         WHERE workspace_id = $1 AND provider = $2 AND status = 'connected'
+        "#
+    );
+    sqlx::query_as::<_, IntegrationConnection>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+/// Connected row, or a GitHub App row parked at `error` while the installation
+/// id is still stored. A permissions 403 used to flip that status; the app
+/// install is still the credential.
+pub async fn find_proxy_connection(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+) -> DbResult<Option<IntegrationConnection>> {
+    let q = format!(
+        r#"
+        SELECT {COLS}
+        FROM integration_connections
+        WHERE workspace_id = $1 AND provider = $2
+          AND (
+            status = 'connected'
+            OR (
+              status = 'error'
+              AND COALESCE(config->>'installation_id', '') <> ''
+            )
+          )
         "#
     );
     sqlx::query_as::<_, IntegrationConnection>(&q)
@@ -250,6 +281,78 @@ pub async fn mark_error(
         )));
     }
     Ok(())
+}
+
+/// A successful installation call undoes a permissions error. Credentials stay.
+pub async fn clear_error(pool: &PgPool, workspace_id: Uuid, provider: &str) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE integration_connections
+        SET status = 'connected',
+            last_error = NULL,
+            updated_at = now(),
+            version = version + 1
+        WHERE workspace_id = $1 AND provider = $2 AND status = 'error'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Repos the GitHub App installation can see. Non-secret; shown on the card.
+pub async fn set_granted_repos(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    repos: &Value,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE integration_connections
+        SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{granted_repos}', $3, true),
+            updated_at = now(),
+            version = version + 1
+        WHERE workspace_id = $1 AND provider = $2
+          AND status IN ('connected', 'error')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .bind(repos)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Replace the encrypted credential blob after a token refresh.
+pub async fn update_credentials(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    credentials: &Value,
+) -> DbResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE integration_connections
+        SET credentials = $3,
+            updated_at = now(),
+            version = version + 1
+        WHERE workspace_id = $1 AND provider = $2
+          AND status IN ('connected', 'error')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(provider)
+    .bind(credentials)
+    .execute(pool)
+    .await
+    .map_err(map_query_err)?;
+    Ok(res.rows_affected() > 0)
 }
 
 pub async fn list_oauth_apps(

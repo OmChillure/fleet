@@ -106,7 +106,7 @@ pub(crate) fn upstream_err(op: &str, status: u16, body: &Value) -> ProxyResult {
         .and_then(|v| v.as_str())
         .or_else(|| body.get("error").and_then(|v| v.as_str()))
         .unwrap_or("upstream error");
-    let code = if status == 401 || status == 403 {
+    let code = if status == 401 {
         "token_expired"
     } else {
         "upstream"

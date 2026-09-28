@@ -1386,7 +1386,7 @@ async fn accept_partners_disclaimer_does_not_change_worker_hosts_or_assignable()
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn workspace_min_isolation_defaults_process_and_stores_wire_strings() {
+async fn workspace_min_isolation_defaults_container_and_stores_wire_strings() {
     let pool = connect_and_migrate().await;
     let (_user_id, workspace_id) = seed_user_with_workspace(&pool).await;
 
@@ -1396,8 +1396,8 @@ async fn workspace_min_isolation_defaults_process_and_stores_wire_strings() {
         .await
         .expect("raw min_isolation");
     assert_eq!(
-        raw, "process",
-        "new workspace must default to process (INSERT omits the column)"
+        raw, "container",
+        "new workspace must default to container (INSERT omits the column)"
     );
 }
 

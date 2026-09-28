@@ -323,7 +323,14 @@ async fn maybe_launch_after_runner(
     model: &str,
     runner_id: Uuid,
     mut content: String,
+    already: &[ChatAction],
 ) -> (String, Vec<ChatAction>) {
+    if already
+        .iter()
+        .any(|a| a.ok && (a.tool == "launch_agent_task" || a.tool == "launch_agent_plan"))
+    {
+        return (content, vec![]);
+    }
     if !wants_fleet_launch(last_user) {
         return (content, vec![]);
     }
@@ -1107,6 +1114,7 @@ fn agent_status_phrase(id: &str, installed: bool, logged_in: bool) -> &'static s
 fn providers_from_runner_agents(
     agents: &[WorkerAgentRuntime],
     openai_ready: bool,
+    gemini_ready: bool,
 ) -> Vec<ChatProviderInfo> {
     STATUS_CATALOG
         .iter()
@@ -1128,8 +1136,10 @@ fn providers_from_runner_agents(
                 })
                 .unwrap_or_default();
             let phrase = agent_status_phrase(id, installed, logged_in);
-            let available = if *id == "openai" || *id == "gemini" {
+            let available = if *id == "openai" {
                 openai_ready || (installed && logged_in)
+            } else if *id == "gemini" {
+                gemini_ready || (installed && logged_in)
             } else if *id == "ollama" {
                 installed && !models.is_empty()
             } else {
@@ -1222,7 +1232,7 @@ mod inventory_tests {
             models: vec![],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "claude")
             .expect("claude");
@@ -1242,7 +1252,7 @@ mod inventory_tests {
             models: vec![],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "grok")
             .expect("grok");
@@ -1262,7 +1272,7 @@ mod inventory_tests {
             models: vec!["sonnet".into()],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "claude")
             .expect("claude");
@@ -1271,8 +1281,22 @@ mod inventory_tests {
     }
 
     #[test]
+    fn gemini_not_available_from_openai_plane_key_alone() {
+        let p = providers_from_runner_agents(&[], true, false)
+            .into_iter()
+            .find(|p| p.id == "gemini")
+            .expect("gemini");
+        assert!(!p.available);
+        let openai = providers_from_runner_agents(&[], true, false)
+            .into_iter()
+            .find(|p| p.id == "openai")
+            .expect("openai");
+        assert!(openai.available);
+    }
+
+    #[test]
     fn unreported_catalog_agent_is_not_installed() {
-        let p = providers_from_runner_agents(&[], false)
+        let p = providers_from_runner_agents(&[], false, false)
             .into_iter()
             .find(|p| p.id == "claude")
             .expect("claude");
@@ -1290,7 +1314,7 @@ mod inventory_tests {
             models: vec!["llama3.2".into()],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
@@ -1308,7 +1332,7 @@ mod inventory_tests {
             models: vec![],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
@@ -1326,7 +1350,7 @@ mod inventory_tests {
             models: vec!["llama3.2".into()],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
@@ -1343,7 +1367,7 @@ mod inventory_tests {
             models: vec![],
             model_details: vec![],
         }];
-        let p = providers_from_runner_agents(&agents, false)
+        let p = providers_from_runner_agents(&agents, false, false)
             .into_iter()
             .find(|p| p.id == "ollama")
             .expect("ollama");
@@ -1419,7 +1443,8 @@ async fn chat_status(
     let public = host.as_public(Utc::now());
     let mut providers = providers_from_runner_agents(
         &public.agents,
-        state.openai.available() || state.gemini.available(),
+        state.openai.available(),
+        state.gemini.available(),
     );
     if let Some(p) = providers.iter_mut().find(|p| p.id == "openai") {
         if state.openai.available() {
@@ -1545,7 +1570,9 @@ async fn chat_complete(
     require_plane_chat_enabled(&state, &provider)?;
     require_openai_configured(&state, &provider, body.runner_id)?;
 
-    if crate::runner_chat::runner_cli_provider(&provider) {
+    if crate::runner_chat::runner_cli_provider(&provider)
+        && (body.runner_id.is_some() || !matches!(provider.as_str(), "openai" | "gemini"))
+    {
         let runner_id = body.runner_id.ok_or_else(|| {
             AppError::bad_request(
                 "select a runner — Grok / Claude / Ollama chat runs on that box's official CLI"
@@ -1598,6 +1625,7 @@ async fn chat_complete(
             &used_model,
             runner_id,
             content,
+            &actions,
         )
         .await;
         actions.extend(launched);
@@ -1931,7 +1959,9 @@ async fn run_chat_turn(
     require_plane_chat_enabled(state, &provider)?;
     require_openai_configured(state, &provider, body.runner_id)?;
 
-    if crate::runner_chat::runner_cli_provider(&provider) {
+    if crate::runner_chat::runner_cli_provider(&provider)
+        && (body.runner_id.is_some() || !matches!(provider.as_str(), "openai" | "gemini"))
+    {
         let runner_id = body.runner_id.ok_or_else(|| {
             AppError::bad_request(
                 "select a runner — Grok / Claude / Ollama chat runs on that box's official CLI"
@@ -1984,6 +2014,7 @@ async fn run_chat_turn(
             &used_model,
             runner_id,
             content,
+            &actions,
         )
         .await;
         actions.extend(launched);

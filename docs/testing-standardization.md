@@ -59,9 +59,11 @@ If a test is not relevant, decide whether the test or the code should change.
 - Live/e2e/every-test is valid only after the install script or
   `--prepare-kind` (+ host `dx`) baked `scripts/tree-id.sh` into the
   running stack. A green run on yesterday's images is not verification.
-- The last pass before an MR is the **bookworm ship image**, not host
-  `just test`. `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) is
-  what VPS and Kind compile. Host-only green is a drift, not a gate.
+- The author's last pass before an MR is `just test` and
+  `just test-integration`. The deployer proves
+  `Dockerfile` / `Dockerfile.ui` (`rust:1.88-bookworm`) with
+  `PROVE_ONLY=1` before that SHA is mergeable. Host-only green is not
+  that proof. `--prepare-kind` bakes the lab when a live run needs it.
 - Do not create a recurring test-writer loop. Do not spawn one agent
   per catalog row on a timer. Harvest from `just test` /
   `scripts/harvest-runner-catalog.sh` / Playwright. A missing child id

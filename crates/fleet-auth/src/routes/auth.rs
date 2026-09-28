@@ -225,6 +225,14 @@ pub async fn signup(
 
     tx.commit().await.map_err(fleet_db::DbError::from)?;
 
+    let _ = workspace_repo::accept_pending_invites_for_user(
+        &state.db,
+        user_id,
+        &email_normalized,
+        now,
+    )
+    .await;
+
     let user = grant_env_instance_admin(&state, user).await?;
 
     let _ = headers;
@@ -286,6 +294,13 @@ pub async fn login(
     }
 
     let user = grant_env_instance_admin(&state, user).await?;
+    let _ = workspace_repo::accept_pending_invites_for_user(
+        &state.db,
+        user.id,
+        &user.email_normalized,
+        Utc::now(),
+    )
+    .await;
 
     let (access, refresh, sid) =
         create_session_and_tokens(&state, &user, &headers, connect).await?;

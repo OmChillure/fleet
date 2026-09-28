@@ -1,11 +1,12 @@
-//! Browser client for agent personas.
+//! Browser client for workspace personas and roster specialists.
 
 use serde::Deserialize;
 
 use crate::pages::auth::api::{auth_base_url, refresh_session, with_credentials};
 
+/// Agency-agents roster specialist (`GET …/fleet/personas`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct PersonaDto {
+pub struct RosterSpecialist {
     pub slug: String,
     pub name: String,
     #[serde(default)]
@@ -19,19 +20,20 @@ pub struct PersonaDto {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct PersonasResponse {
+struct RosterSpecialistsResponse {
     #[serde(default)]
     source: String,
     #[serde(default)]
     agent_backend: Option<String>,
+    /// Wire key on `/fleet/personas` — roster specialists only.
     #[serde(default)]
-    personas: Vec<PersonaDto>,
+    personas: Vec<RosterSpecialist>,
 }
 
-pub struct PersonasPayload {
+pub struct RosterSpecialistsPayload {
     pub source: String,
     pub agent_backend: Option<String>,
-    pub personas: Vec<PersonaDto>,
+    pub specialists: Vec<RosterSpecialist>,
 }
 
 fn client() -> reqwest::Client {
@@ -63,21 +65,24 @@ async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
         .map_err(|e| e.to_string())
 }
 
-pub async fn fetch_personas(workspace_id: &str) -> Result<PersonasPayload, String> {
+pub async fn fetch_roster_specialists(
+    workspace_id: &str,
+) -> Result<RosterSpecialistsPayload, String> {
     let res = authorized_get(&format!("/api/workspaces/{workspace_id}/fleet/personas")).await?;
     let status = res.status();
     let text = res.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("personas failed ({status})"));
+        return Err(format!("roster specialists failed ({status})"));
     }
-    let body: PersonasResponse = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(PersonasPayload {
+    let body: RosterSpecialistsResponse = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(RosterSpecialistsPayload {
         source: body.source,
         agent_backend: body.agent_backend,
-        personas: body.personas,
+        specialists: body.personas,
     })
 }
 
+/// Workspace persona (`GET …/personas`). Not a roster specialist.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct WorkspacePersona {
     pub id: String,

@@ -736,18 +736,18 @@ mod tests {
     }
 
     #[test]
-    fn follow_connected_webhook_accepts_unlisted_inbox_provider() {
+    fn follow_connected_webhook_still_requires_listed_provider() {
         assert!(
-            webhook_provider_allowed(true, &["slack".into()], "github"),
-            "follow_connected must ingest github even when the pin list is slack-only"
+            !webhook_provider_allowed(true, &["slack".into()], "github"),
+            "follow_connected must not ingest github when the pin list is slack-only"
         );
     }
 
     #[test]
-    fn pinned_webhook_empty_allowlist_rejects_inbox_provider() {
+    fn empty_allowlist_accepts_inbox_provider() {
         assert!(
-            !webhook_provider_allowed(false, &[], "jira"),
-            "empty pin without follow_connected must reject jira"
+            webhook_provider_allowed(false, &[], "jira"),
+            "empty pin is workspace-scoped; inbox path providers are accepted"
         );
     }
 
@@ -887,7 +887,8 @@ mod tests {
             slack_poll_outcome(1, 5, &["Cbad: Slack API: not_in_channel".into()]).unwrap(),
             5
         );
-        let err = slack_poll_outcome(0, 0, &["Cbad: Slack API: not_in_channel".into()]).unwrap_err();
+        let err =
+            slack_poll_outcome(0, 0, &["Cbad: Slack API: not_in_channel".into()]).unwrap_err();
         assert!(err.contains("not_in_channel"), "{err}");
         assert_eq!(slack_poll_outcome(1, 0, &[]).unwrap(), 0);
     }

@@ -27,6 +27,8 @@ struct HostListResponse {
     plane_git_sha: Option<String>,
     #[serde(default)]
     package_versions: Option<PackageVersions>,
+    #[serde(default)]
+    worker_public_base: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +167,7 @@ pub async fn list_workers_page(
             packages: body.packages,
             plane_git_sha: body.plane_git_sha,
             package_versions: versions,
+            worker_public_base: body.worker_public_base,
         },
     ))
 }

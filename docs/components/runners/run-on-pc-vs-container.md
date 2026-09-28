@@ -12,10 +12,19 @@ This is the user-facing use-case split for **how a guest runs**. It is not a
 sixth runner kind. The five kinds in
 [`README.md`](README.md) stay placement / ownership
 (self-hosted native, self-hosted sandbox, public cloud, Fleet Cloud,
-Partners). Isolation `process < container < vm` and host
-`native | sandboxed` stay as the existing technical fields in
-[`crates/agent-fleet-contracts/src/isolation.rs`](../../../crates/agent-fleet-contracts/src/isolation.rs)
-and `worker_hosts.isolation`.
+Partners). Two axes, never one enum:
+
+1. **agent_runtime** — where the agent runs (host process / TUI vs
+   container or VM). Wire today: host `run_mode` `on_pc` | `in_container`.
+   JSON alias `agent_runtime`.
+2. **workspace_location** — where the repo lives (host vs container/VM).
+   Wire today: workspace `min_isolation` `process` | `container` | `vm`.
+   Settings JSON still uses `min_isolation` (`fleet_routes.rs`).
+
+Host `isolation` `native` | `sandboxed` is a **derived label** of
+agent_runtime (`on_pc` → `native`, `in_container` → `sandboxed`). PATCH
+`isolation` with `process`/`container`/`vm` is 400. Kind/container is
+assignable.
 
 Do **not** rename `fleet-host`, `fleet-driver`, `worker_hosts`, or the
 API paths `/api/workspaces/{id}/worker-hosts` and `/api/worker-hosts/…`.
@@ -39,9 +48,9 @@ speaks `JobRuntime` (`Host` \| `Container` \| `Vm`) in
 The product does not yet say which of those is a **use case**. That
 ambiguity is why the Kind bootstrap host (`labels` contains `cluster`,
 `created_by IS NULL`) is in every workspace’s **assignable set**
-(`list_assignable` is `workspace_id = $1 OR cluster`), why Settings
-`min_isolation` can look like a mode switch, and why docs still say
-container is “not v1” while in-cluster `fleet-host` advertises
+(`list_assignable` is `workspace_id = $1 OR cluster`), and why Settings
+`min_isolation` (workspace_location) can look like a mode switch.
+Kind/container is assignable; in-cluster `fleet-host` advertises
 `KubePod`.
 
 This design locks two first-class use cases. A given **machine** is only
@@ -72,8 +81,8 @@ example `XAI_API_KEY`), encrypted like OAuth, never a copied
 | Layer | What exists | File |
 | --- | --- | --- |
 | Five kinds | Self-hosted native is the only assignable kind. Cloud / Partners / public-cloud are placeholders. | [`docs/components/runners/README.md`](README.md), `RunnerKind` in `host_pool.rs` |
-| Host isolation | `worker_hosts.isolation` is `native` (assignable) or `sandboxed` (not assignable). | [`015_runner_isolation.sql`](../../../crates/fleet-db/migrations/015_runner_isolation.sql) |
-| Workspace floor | `workspaces.min_isolation` is `process \| container \| vm`, default `process`. | [`020_workspace_min_isolation.sql`](../../../crates/fleet-db/migrations/020_workspace_min_isolation.sql) |
+| Host isolation | Derived label of agent_runtime: `on_pc`→`native`, `in_container`→`sandboxed`. Kind/container is assignable. | [`015_runner_isolation.sql`](../../../crates/fleet-db/migrations/015_runner_isolation.sql) |
+| Workspace location | `workspaces.min_isolation` is `process \| container \| vm`, default `process`. | [`020_workspace_min_isolation.sql`](../../../crates/fleet-db/migrations/020_workspace_min_isolation.sql) |
 | Plane ∩ advertised | `allow_host` / `allow_container` × `advertised_host` / `advertised_container`. | `WorkerHost::effective_host` / `effective_container` |
 | Tick | `schedule_and_spawn` → `select_assignable_runner_preferring` → `enqueue_remote_spawn` → `work_claims`. No host → leave `ready`. | [`orch/spawn.rs`](../../../crates/fleet-orchestrator/src/orch/spawn.rs) |
 | V1 picker | Production tick is `select_assignable_runner_preferring` (`orch/spawn.rs`). It does **not** filter to `HostRuntime::Host`. It calls `effective_runtime_for` → `pick_isolation` (weakest offer ≥ need), so a process-need can enqueue `runtime=container`. `select_assignable_runner` (unused by tick) keeps Host only. | `host_pool.rs` |

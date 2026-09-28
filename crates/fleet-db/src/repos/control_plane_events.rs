@@ -62,6 +62,18 @@ pub async fn insert_event(
         .map_err(map_query_err)
 }
 
+/// Outbox write for a later Zenoh `put` (`fleet-server` `drain_loop`).
+///
+/// Same row as [`insert_event`]. Tick / assignment does not wait on publish.
+pub async fn insert_outbound(
+    pool: &PgPool,
+    message_id: Uuid,
+    event_type: &str,
+    body: serde_json::Value,
+) -> DbResult<ControlPlaneEvent> {
+    insert_event(pool, message_id, event_type, body).await
+}
+
 /// Oldest unpublished rows, up to `limit` (clamped 1..=1000).
 pub async fn list_unpublished(pool: &PgPool, limit: i64) -> DbResult<Vec<ControlPlaneEvent>> {
     let limit = limit.clamp(1, 1000);

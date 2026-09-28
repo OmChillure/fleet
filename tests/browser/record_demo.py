@@ -827,8 +827,8 @@ class Demo:
             raise RuntimeError("Inbox missing GitHub in the nav or cards")
         gh.first.click()
         pause(p, 800)
-        if "How to set up GitHub" not in p.inner_text("body"):
-            raise RuntimeError("GitHub inbox missing setup walkthrough")
+        if "GitHub automation" not in p.inner_text("body"):
+            raise RuntimeError("GitHub inbox missing automation board")
         body = p.inner_text("body")
         if "{provider}" in body:
             raise RuntimeError("GitHub webhook still has {provider} in the URL")
@@ -1115,11 +1115,36 @@ class Demo:
                     self.bug(f"agent count did not persist after Save+reload (got {got!r})")
                 self.snap("reloaded-agents")
 
-        if "Where new fleet jobs run" not in p.inner_text("body"):
-            self.bug("Settings missing Where new fleet jobs run")
+        if "Agent runtime" not in p.inner_text("body"):
+            self.bug("Settings missing Agent runtime")
         if "API keys for Run in a container" not in p.inner_text("body"):
             self.bug("Settings missing API keys for Run in a container")
         self.snap("run-mode-and-keys")
+
+        if "Network" not in p.inner_text("body"):
+            self.bug("Settings missing Network")
+        else:
+            net = p.locator("select").filter(has=p.locator("option[value='inherit']"))
+            if net.count() == 0:
+                self.bug("Settings missing network posture select")
+            else:
+                net.first.scroll_into_view_if_needed()
+                net.first.select_option("open")
+                save = p.get_by_role("button", name="Save", exact=True)
+                with self.expect_http("PATCH", "/fleet/settings", status="200"):
+                    save.first.click()
+                try:
+                    p.get_by_text("Settings saved.", exact=True).wait_for(timeout=10_000)
+                except Exception:
+                    self.bug("Network save produced no 'Settings saved.' toast")
+                self.dismiss_toasts()
+                p.reload(wait_until="networkidle")
+                pause(p, 800)
+                net = p.locator("select").filter(has=p.locator("option[value='inherit']"))
+                got = net.first.input_value() if net.count() else ""
+                if got != "open":
+                    self.bug(f"network posture did not persist (got {got!r})")
+                self.snap("network-open")
 
         heading = p.get_by_role("heading", name="Members", exact=True)
         if heading.count() == 0:
@@ -1214,6 +1239,84 @@ class Demo:
         pause(p, 800)
         self.snap("sandboxes")
 
+    def _film_verify_offline(self) -> None:
+        """Show the offline-card check. The list rewrite is display-only."""
+        p = self.page
+        ws = ""
+        parts = [x for x in urlparse(p.url).path.split("/") if x]
+        if parts:
+            ws = parts[0]
+
+        def handle(route) -> None:
+            req = route.request
+            if req.method != "GET":
+                route.continue_()
+                return
+            resp = route.fetch()
+            try:
+                data = resp.json()
+            except Exception:
+                route.fulfill(
+                    status=resp.status,
+                    headers={"content-type": resp.headers.get("content-type", "application/json")},
+                    body=resp.text(),
+                )
+                return
+            hosts = list(data.get("hosts") or [])
+            workspace_id = ws
+            if hosts and hosts[0].get("workspace_id"):
+                workspace_id = str(hosts[0]["workspace_id"])
+            hosts.insert(
+                0,
+                {
+                    "id": "00000000-0000-4000-8000-000000000570",
+                    "workspace_id": workspace_id,
+                    "name": "5700g",
+                    "status": "offline",
+                    "kind": "host",
+                },
+            )
+            data["hosts"] = hosts
+            if not str(data.get("worker_public_base") or "").strip():
+                data["worker_public_base"] = API
+            route.fulfill(
+                status=resp.status,
+                headers={"content-type": "application/json"},
+                body=json.dumps(data),
+            )
+
+        p.route("**/api/workspaces/*/worker-hosts", handle)
+        try:
+            p.reload(wait_until="networkidle")
+            pause(p, 800)
+            card = p.locator("button").filter(has_text="5700g")
+            if card.count() == 0:
+                self.bug("offline verify card was not listed")
+                return
+            card.first.click()
+            pause(p, 800)
+            self.snap("verify-offline")
+            body = p.inner_text("body")
+            if "Verify installation" not in body:
+                self.bug("offline card missing Verify installation")
+            pre = p.locator("pre").filter(has_text="sh -s -- verify")
+            if pre.count() == 0:
+                self.bug("offline card missing verify command")
+            else:
+                command = pre.first.inner_text()
+                if "FLEET_PAIR_TOKEN" in command:
+                    self.bug("verify command must not include a pair token")
+                copy = pre.first.locator("xpath=..").get_by_role("button", name="Copy")
+                if copy.count() and copy.first.is_visible():
+                    copy.first.click()
+                    pause(p, 500)
+                    self.dismiss_toasts()
+            self.snap("verify-command")
+        finally:
+            p.unroute("**/api/workspaces/*/worker-hosts")
+            p.reload(wait_until="networkidle")
+            pause(p, 600)
+
     def _film_self_hosted(self, rel: str) -> None:
         base = self.ensure_session()
         p = self.page
@@ -1245,10 +1348,8 @@ class Demo:
         add = p.get_by_role("button", name="Add worker")
         if add.count() == 0:
             self.bug("self-hosted missing Add worker")
-        body_before = p.inner_text("body")
-        if "Only me" not in body_before and "Who can send work" not in body_before:
-            self.bug("self-hosted missing who-can-send radios (Only me / shared PC)")
-        else:
+        elif add.first.is_visible():
+            # "Who can send work" is on a worker card, not the empty page.
             with self.expect_http("POST", "/worker-hosts", status=("200", "201")):
                 add.first.click()
             pause(p, 1500)
@@ -1276,6 +1377,8 @@ class Demo:
                 done.first.click()
                 pause(p, 600)
                 self.snap("pair-dismissed")
+        if rel == "/runners/self-hosted":
+            self._film_verify_offline()
         pending_card = p.locator("button").filter(has_text="Waiting to pair")
         if pending_card.count() == 0:
             pending_card = p.locator("button").filter(
@@ -1286,6 +1389,9 @@ class Demo:
             card.first.click()
             pause(p, 800)
             self.snap("card-open")
+            card_body = p.inner_text("body")
+            if "Only me" not in card_body and "Who can send work" not in card_body:
+                self.bug("worker card missing who-can-send control (Only me / shared PC)")
         popular = p.get_by_text("Popular models")
         if popular.count() and popular.first.is_visible():
             filt = p.get_by_placeholder("Filter the current top 50")

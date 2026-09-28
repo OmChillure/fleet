@@ -18,7 +18,7 @@ COPY scripts/install-worker ./scripts/install-worker
 # not re-download crates.io or rebuild kube/sqlx/zenoh.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+    --mount=type=cache,id=fleet-api-target,target=/app/target \
     cargo fetch --locked \
     && cargo build --release --locked \
         -p fleet-server -p fleet-host -p fleet-driver --bins
@@ -32,8 +32,8 @@ ENV FLEET_GIT_SHA=${FLEET_GIT_SHA}
 # Cache mount is not in the image — copy bins out in this RUN.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo build --release --locked -p fleet-server -p fleet-host \
+    --mount=type=cache,id=fleet-api-target,target=/app/target \
+    cargo build --release --locked -p fleet-server -p fleet-host -p fleet-driver --bins \
     && mkdir -p /out \
     && cp target/release/fleet-server \
           target/release/fleet-host \

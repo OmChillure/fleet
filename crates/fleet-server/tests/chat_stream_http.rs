@@ -1082,8 +1082,25 @@ async fn invite_existing_member(
     assert_eq!(
         invited.body["added_existing_user"],
         true,
-        "existing user must join immediately: {}",
+        "invite of an existing user adds them immediately: {}",
         invited.body
+    );
+    let token = invited.body["invite"]["token"]
+        .as_str()
+        .expect("invite.token");
+    let accepted = call(
+        app,
+        "POST",
+        "/api/invites/accept",
+        Some(&member_jar),
+        Some(json!({ "token": token })),
+    )
+    .await;
+    assert_eq!(
+        accepted.status,
+        StatusCode::OK,
+        "accept teammate invite: {}",
+        accepted.body
     );
     member_jar
 }
@@ -2947,11 +2964,13 @@ async fn enqueued_chat_turn_prompt_is_labeled_transcript() {
                 .get("prompt")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            assert_eq!(
-                prompt,
-                expected,
-                "chat_turn.payload.prompt must be the labeled transcript: {}",
-                claim.payload
+            assert!(
+                prompt.contains(&expected),
+                "chat_turn.payload.prompt must include the labeled transcript: {prompt}"
+            );
+            assert!(
+                prompt.contains("System:\n"),
+                "runner chat must prepend the system prompt ahead of the transcript: {prompt}"
             );
             assert_eq!(
                 claim.payload["max_turns"].as_i64(),

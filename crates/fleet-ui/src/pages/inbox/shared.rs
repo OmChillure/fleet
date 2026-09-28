@@ -3,15 +3,15 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    InboxResponse, MonitorPatch, TicketRow, finish_ticket, list_inbox, poll_inbox, update_monitor,
+    finish_ticket, list_inbox, poll_inbox, update_monitor, InboxResponse, MonitorPatch, TicketRow,
 };
-use super::catalog::{InboxAppInfo, explain_error};
+use super::catalog::{explain_error, InboxAppInfo};
 use super::connect::ConnectApp;
 use super::experience::experience;
-use crate::Route;
 use crate::clipboard::copy_text;
 use crate::components::toast::show_toast;
 use crate::pages::integrations::{IntegrationLogo, message_is_auth_failure};
+use crate::Route;
 
 #[derive(Clone, Copy)]
 pub struct PageData {
@@ -24,6 +24,8 @@ pub struct PageData {
     pub connected: Signal<bool>,
     pub auth_failed: Signal<bool>,
     pub account: Signal<String>,
+    pub allowed: Signal<Vec<String>>,
+    pub auto_launch: Signal<bool>,
     pub busy: Signal<bool>,
     pub finish_error: Signal<Option<(String, String)>>,
 }
@@ -49,6 +51,12 @@ impl PageData {
     }
     pub fn auth_failed(self) -> bool {
         (self.auth_failed)()
+    }
+    pub fn allowed(self) -> Vec<String> {
+        (self.allowed)()
+    }
+    pub fn auto_launch(self) -> bool {
+        (self.auto_launch)()
     }
     pub fn busy(self) -> bool {
         (self.busy)()
@@ -212,7 +220,7 @@ pub fn launch_item(ws: String, t: &TicketRow, mut data: PageData) {
 
 pub fn frame(inner: Element) -> Element {
     rsx! {
-        div { class: "mx-auto flex h-full w-full max-w-4xl flex-col gap-4 overflow-auto p-4 md:p-5",
+        div { class: "mx-auto flex h-full w-full max-w-7xl flex-col gap-4 overflow-auto p-4 md:p-5",
             {inner}
         }
     }

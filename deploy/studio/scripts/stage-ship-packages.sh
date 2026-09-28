@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Stage the worker packages we actually ship (not every OS in --all).
-# Rebuild a platform only when host/driver sources changed *and* the
-# staged hashes do not already match [release]. Compiles are not
-# bit-identical: rebuilding a locked package fails check. If hashes
-# match the lock, keep the bins even when this SHA is new (inbox-only
-# deploys). Never skip just because the manifest already says this SHA
-# — that hid a lock mismatch after a bad rebuild (ab04bca).
+# Rebuild a platform only when host/driver sources changed since the
+# staged manifest. Compiles are not bit-identical, so an unchanged
+# source tree keeps the bins already staged even when git [release]
+# hashes lag (the deployer registers those hashes; the author only
+# bumps versions and per-OS revs). If hashes match [release], keep the
+# bins. Never rebuild just because the manifest SHA is old.
 #
 #   linux-x86_64   (bookworm glibc — Debian/Ubuntu guests)
 #   linux-aarch64  (ARM servers)
@@ -74,6 +74,9 @@ worker_sources_changed() {
   return 1
 }
 
+REBUILT=0
+KEPT_STALE=0
+
 stage_one() {
   local plat="$1"
   local flag="$2"
@@ -85,16 +88,14 @@ stage_one() {
       log "worker ${plat}: staged hashes match [release], skip"
       return 0
     fi
-    if [[ "${have}" == "${SHA}" ]]; then
-      log "worker ${plat}: already labeled ${SHA:0:12} but hashes do not match [release] — not rebuilding (not bit-identical). Restore the last registered dist or register these bins."
-      return 1
-    fi
     if ! worker_sources_changed "${have}" "${SHA}"; then
-      log "worker ${plat}: host/driver unchanged since ${have:0:12} but hashes do not match [release] — not rebuilding. Restore registered bins or register."
-      return 1
+      log "worker ${plat}: host/driver unchanged since ${have:0:12}; keeping staged bins"
+      KEPT_STALE=1
+      return 0
     fi
   fi
   log "worker ${plat}: building ${flag} for ${SHA:0:12}"
+  REBUILT=1
   (
     cd "${WORKDIR}"
     FLEET_WORKER_DIST_DIR="${DIST}" FLEET_GIT_SHA="${SHA}" \
@@ -112,7 +113,26 @@ ship_dist() {
   log "worker-dist shipped"
 }
 
+apply_followup_lock() {
+  local followup="${STATE_DIR}/runner-packages.followup.toml"
+  if [[ ! -f "${followup}" ]]; then
+    log "staged bins do not match git [release] and ${followup} is missing"
+    return 1
+  fi
+  cp "${followup}" "${WORKDIR}/runner-packages.toml"
+  log "checking staged bins against the registered follow-up lock"
+}
+
+lock_matches_git() {
+  python3 "${WORKDIR}/scripts/runner-release.py" platform-ok "${DIST}" linux-x86_64 \
+    && python3 "${WORKDIR}/scripts/runner-release.py" platform-ok "${DIST}" linux-aarch64 \
+    && python3 "${WORKDIR}/scripts/runner-release.py" platform-ok "${DIST}" windows-x86_64
+}
+
 if [[ "${SHIP_ONLY:-0}" == 1 ]]; then
+  if ! lock_matches_git; then
+    apply_followup_lock
+  fi
   python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
   ship_dist
   exit 0
@@ -124,6 +144,44 @@ stage_one linux-aarch64 --aarch64
 stage_one windows-x86_64 --windows
 
 log "worker darwin-arm64 / darwin-x86_64: not built here (no macOS cross from Linux)"
+
+# Register with the deploy checkout's script. The archive copy does not
+# know about --deployer-revs until that commit is what we are building.
+cp "${REPO}/scripts/runner-release.py" "${WORKDIR}/scripts/runner-release.py"
+
+if [[ "${REBUILT}" == 1 ]]; then
+  baseline="$(mktemp)"
+  followup="${STATE_DIR}/runner-packages.followup.toml"
+  if [[ -f "${followup}" ]]; then
+    cp "${followup}" "${baseline}"
+  elif git -C "${REPO}" cat-file -e "${SHA}^:runner-packages.toml" 2>/dev/null; then
+    git -C "${REPO}" show "${SHA}^:runner-packages.toml" > "${baseline}"
+  else
+    cp "${WORKDIR}/runner-packages.toml" "${baseline}"
+  fi
+  python3 "${WORKDIR}/scripts/runner-release.py" register --deployer-revs \
+    --baseline "${baseline}" "${DIST}"
+  rm -f "${baseline}"
+  cp "${WORKDIR}/runner-packages.toml" "${STATE_DIR}/runner-packages.followup.toml"
+  printf '%s\n' "${SHA}" > "${STATE_DIR}/runner-release-followup"
+  log "registered runner hashes (${STATE_DIR}/runner-packages.followup.toml)"
+elif [[ "${KEPT_STALE}" == 1 ]]; then
+  baseline="$(mktemp)"
+  followup="${STATE_DIR}/runner-packages.followup.toml"
+  if [[ -f "${followup}" ]]; then
+    cp "${followup}" "${baseline}"
+  elif git -C "${REPO}" cat-file -e "${SHA}^:runner-packages.toml" 2>/dev/null; then
+    git -C "${REPO}" show "${SHA}^:runner-packages.toml" > "${baseline}"
+  else
+    cp "${WORKDIR}/runner-packages.toml" "${baseline}"
+  fi
+  python3 "${WORKDIR}/scripts/runner-release.py" register --deployer-revs \
+    --baseline "${baseline}" "${DIST}"
+  rm -f "${baseline}"
+  cp "${WORKDIR}/runner-packages.toml" "${STATE_DIR}/runner-packages.followup.toml"
+  printf '%s\n' "${SHA}" > "${STATE_DIR}/runner-release-followup"
+  log "registered kept bins; bumped any rev the author missed"
+fi
 
 python3 "${WORKDIR}/scripts/runner-release.py" check --require-all "${DIST}"
 

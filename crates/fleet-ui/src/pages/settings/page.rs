@@ -1,4 +1,4 @@
-//! Workspace Settings: concurrent agents, members, isolation floor, LLM keys.
+//! Workspace Settings: concurrent agents, members, workspace location, LLM keys.
 //! Workspace `llm-keys` win when present; env (`XAI_API_KEY` / `grok login`) is fallback.
 
 use dioxus::prelude::*;
@@ -17,6 +17,7 @@ fn field_class() -> &'static str {
 
 #[component]
 pub fn Settings(workspace_id: String) -> Element {
+    let repo_ws = workspace_id.clone();
     let mut loading = use_signal(|| true);
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -27,6 +28,13 @@ pub fn Settings(workspace_id: String) -> Element {
     let mut grok_env = use_signal(|| false);
     let mut min_isolation = use_signal(|| "process".to_string());
     let mut default_run_mode = use_signal(|| "on_pc".to_string());
+    let mut default_egress = use_signal(|| "inherit".to_string());
+    let mut default_egress_allowlist = use_signal(String::new);
+    let mut run_envelope = use_signal(|| "on_pc".to_string());
+    let mut egress_envelope = use_signal(|| "open".to_string());
+    let mut repo_name = use_signal(String::new);
+    let mut repo_run = use_signal(|| "in_container".to_string());
+    let mut repo_egress = use_signal(|| "none".to_string());
     let mut chat_max_turns = use_signal(|| 32i32);
     let mut chat_max_turns_min = use_signal(|| 1i32);
     let mut chat_max_turns_max = use_signal(|| 128i32);
@@ -60,6 +68,16 @@ pub fn Settings(workspace_id: String) -> Element {
                     }
                     if !s.default_run_mode.trim().is_empty() {
                         default_run_mode.set(s.default_run_mode);
+                    }
+                    if !s.default_egress.trim().is_empty() {
+                        default_egress.set(s.default_egress);
+                    }
+                    default_egress_allowlist.set(s.default_egress_allowlist);
+                    if !s.run_envelope.trim().is_empty() {
+                        run_envelope.set(s.run_envelope);
+                    }
+                    if !s.egress_envelope.trim().is_empty() {
+                        egress_envelope.set(s.egress_envelope);
                     }
                     if s.chat_max_turns > 0 {
                         chat_max_turns.set(s.chat_max_turns);
@@ -119,6 +137,10 @@ pub fn Settings(workspace_id: String) -> Element {
         let model = fleet_model();
         let iso = min_isolation();
         let mode = default_run_mode();
+        let egress = default_egress();
+        let allowlist = default_egress_allowlist();
+        let run_cap = run_envelope();
+        let egress_cap = egress_envelope();
         let turns = chat_max_turns();
         spawn(async move {
             let s = match save_settings(
@@ -129,6 +151,10 @@ pub fn Settings(workspace_id: String) -> Element {
                     fleet_llm_model: model,
                     min_isolation: iso,
                     default_run_mode: Some(mode),
+                    default_egress: Some(egress),
+                    default_egress_allowlist: Some(allowlist),
+                    run_envelope: Some(run_cap),
+                    egress_envelope: Some(egress_cap),
                     chat_max_turns: Some(turns),
                 },
             )
@@ -197,10 +223,10 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-6 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Isolation"
+                        "Workspace location"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Weakest isolation a host must offer (process < container < vm). This cannot flip Run on a PC into Run in a container."
+                        "Where the repo lives (process < container < vm). This is workspace_location, not agent_runtime — it cannot flip Run on a PC into Run in a container."
                     }
                     select {
                         class: field_class(),
@@ -214,10 +240,10 @@ pub fn Settings(workspace_id: String) -> Element {
 
                 section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
                     h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
-                        "Where new fleet jobs run"
+                        "Agent runtime"
                     }
                     p { class: "mt-1 text-xs text-[var(--app-muted)]",
-                        "Default for Start run and inbox. Chat stays Run on a PC. Kind / container jobs need Run in a container."
+                        "Where the agent runs — host process (TUI) or container/VM. Default for Start run and inbox. Chat stays Run on a PC. Kind / container jobs need Run in a container."
                     }
                     select {
                         class: field_class(),
@@ -225,6 +251,111 @@ pub fn Settings(workspace_id: String) -> Element {
                         onchange: move |e| default_run_mode.set(e.value()),
                         option { value: "on_pc", "Run on a PC" }
                         option { value: "in_container", "Run in a container" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Network"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Separate from where the job runs. A PC job uses that machine's network. A container or VM uses this choice: no internet, an allowlist, or open. Runner default leaves the box as it is already configured."
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{default_egress}",
+                        onchange: move |e| default_egress.set(e.value()),
+                        option { value: "inherit", "Runner default" }
+                        option { value: "none", "No internet" }
+                        option { value: "allowlist", "Allowlist" }
+                        option { value: "open", "Open internet" }
+                    }
+                    if default_egress() == "allowlist" {
+                        textarea {
+                            class: field_class(),
+                            rows: "3",
+                            placeholder: "10.0.0.0/8, 172.18.0.1/32",
+                            value: "{default_egress_allowlist}",
+                            oninput: move |e| default_egress_allowlist.set(e.value()),
+                        }
+                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                            "CIDRs, separated by commas or lines. Kubernetes adds those ranges on top of the control plane. Hostnames are stored and not filtered. Docker on a runner cannot enforce an allowlist."
+                        }
+                    }
+                    p { class: "mt-3 text-xs text-[var(--app-muted)]",
+                        "Cap. A repo default and a person starting a run can be tighter than this. They cannot be looser."
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{run_envelope}",
+                        onchange: move |e| run_envelope.set(e.value()),
+                        option { value: "on_pc", "PC allowed" }
+                        option { value: "in_container", "Container only" }
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{egress_envelope}",
+                        onchange: move |e| egress_envelope.set(e.value()),
+                        option { value: "open", "Open internet allowed" }
+                        option { value: "allowlist", "Allowlist at most" }
+                        option { value: "none", "No internet" }
+                    }
+                }
+
+                section { class: "mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]",
+                        "Repo default"
+                    }
+                    p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                        "Normal place and network for one codebase, such as acme/app. A job that names that repo starts here. The cap above still applies."
+                    }
+                    input {
+                        class: field_class(),
+                        placeholder: "acme/app",
+                        value: "{repo_name}",
+                        oninput: move |e| repo_name.set(e.value()),
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{repo_run}",
+                        onchange: move |e| repo_run.set(e.value()),
+                        option { value: "on_pc", "Run on a PC" }
+                        option { value: "in_container", "Run in a container" }
+                    }
+                    select {
+                        class: field_class(),
+                        value: "{repo_egress}",
+                        onchange: move |e| repo_egress.set(e.value()),
+                        option { value: "inherit", "Runner default" }
+                        option { value: "none", "No internet" }
+                        option { value: "allowlist", "Allowlist" }
+                        option { value: "open", "Open internet" }
+                    }
+                    button {
+                        class: "mt-2 rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-sm",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let ws = repo_ws.clone();
+                            let repo = repo_name();
+                            let run_mode = repo_run();
+                            let egress_mode = repo_egress();
+                            if ws.is_empty() || repo.trim().is_empty() {
+                                return;
+                            }
+                            spawn(async move {
+                                let path = format!("/api/workspaces/{ws}/fleet/repo-postures");
+                                let body = serde_json::json!({
+                                    "repo": repo,
+                                    "run_mode": run_mode,
+                                    "egress_mode": egress_mode,
+                                });
+                                match crate::pages::settings::api::put_repo_posture(&path, &body).await {
+                                    Ok(()) => show_toast().success("Repo default saved."),
+                                    Err(e) => show_toast().error(e),
+                                }
+                            });
+                        },
+                        "Save repo default"
                     }
                 }
 

@@ -3,4 +3,5 @@
 mod client;
 pub mod tools;
 
-pub use tools::{invoke, OPERATIONS};
+pub(crate) use client::mint_installation_token;
+pub use tools::{OPERATIONS, invoke};

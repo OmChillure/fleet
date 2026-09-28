@@ -32,6 +32,14 @@ pub fn router() -> Router<AppState> {
             post(post_cancel_goal),
         )
         .route(
+            "/api/workspaces/{workspace_id}/workforce/intake",
+            post(post_intake),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/workforce/approvals/{approval_id}/decide",
+            post(post_decide_approval),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/fleet/sessions/{session_id}/replace",
             post(post_replace_session),
         )
@@ -53,7 +61,8 @@ async fn require_member(
     Ok((user, role))
 }
 
-/// Run an integration op immediately. No human hold.
+/// Run an integration op. Merge, outbound messages, and deploys are held
+/// until an owner or admin decides. Everything else runs immediately.
 pub async fn gated_invoke(
     state: &AppState,
     workspace_id: Uuid,
@@ -83,18 +92,123 @@ pub async fn gated_invoke_pool(
     operation: &str,
     args: Value,
 ) -> ProxyResult {
+    let provider = provider.trim().to_ascii_lowercase();
+    let operation = operation.trim().to_ascii_lowercase();
+    if let Some(kind) = crate::workforce_os::gate_kind(&provider, &operation) {
+        return hold_for_approval(db, workspace_id, caller, kind, &provider, &operation, args).await;
+    }
     proxy::invoke(
         db,
         key,
         ProxyRequest {
             workspace_id,
-            provider: provider.to_string(),
-            operation: operation.to_string(),
+            provider,
+            operation,
             args,
             caller,
         },
     )
     .await
+}
+
+async fn hold_for_approval(
+    db: &PgPool,
+    workspace_id: Uuid,
+    caller: ProxyCaller,
+    kind: &str,
+    provider: &str,
+    operation: &str,
+    args: Value,
+) -> ProxyResult {
+    let args = crate::workforce_os::redact_args(&args);
+    let existing = wf::find_pending_approval(db, workspace_id, provider, operation, &args)
+        .await
+        .ok()
+        .flatten();
+    if let Some(row) = existing {
+        return held_result(provider, operation, kind, row.id);
+    }
+    let task_id = wf::block_latest_live_task(
+        db,
+        workspace_id,
+        "needs_approval",
+        &format!("{kind} is waiting for a person ({provider} {operation})"),
+    )
+    .await
+    .ok()
+    .flatten();
+    let goal = wf::latest_open_goal(db, workspace_id).await.ok().flatten();
+    let goal_id = goal.as_ref().map(|g| g.id);
+    let summary = format!("{kind} via {provider} {operation} is waiting for a person");
+    let approval = match wf::insert_approval(
+        db,
+        &wf::NewApproval {
+            id: Uuid::now_v7(),
+            workspace_id,
+            goal_id,
+            task_id,
+            kind: kind.to_string(),
+            provider: provider.to_string(),
+            operation: operation.to_string(),
+            args: args.clone(),
+            summary: summary.clone(),
+        },
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            return ProxyResult::err(provider, operation, "policy_gate", e.to_string(), None);
+        }
+    };
+    if let Some(gid) = goal_id {
+        let _ = wf::set_goal_status(db, workspace_id, gid, "waiting_approval", None).await;
+    }
+    record_event(
+        db,
+        "workforce.policy_held",
+        json!({
+            "workspace_id": workspace_id,
+            "approval_id": approval.id,
+            "goal_id": goal_id,
+            "task_id": task_id,
+            "kind": kind,
+            "provider": provider,
+            "operation": operation,
+            "caller": caller.kind(),
+        }),
+    )
+    .await;
+    held_result(provider, operation, kind, approval.id)
+}
+
+fn held_result(provider: &str, operation: &str, kind: &str, approval_id: Uuid) -> ProxyResult {
+    ProxyResult {
+        ok: false,
+        summary: format!("Held for human approval ({kind}). Nothing was sent."),
+        data: json!({
+            "approval_id": approval_id,
+            "kind": kind,
+            "status": "pending",
+        }),
+        provider_status: None,
+        error_code: Some("awaiting_approval".into()),
+        provider: provider.to_string(),
+        operation: operation.to_string(),
+    }
+}
+
+async fn record_event(db: &PgPool, event_type: &str, body: Value) {
+    if let Err(e) = fleet_db::repos::control_plane_events::insert_outbound(
+        db,
+        Uuid::now_v7(),
+        event_type,
+        body,
+    )
+    .await
+    {
+        tracing::warn!(%event_type, error = %e, "workforce event was not recorded");
+    }
 }
 
 /// Attach a launched run to the matching goal, or start a new goal from the label.
@@ -128,6 +242,7 @@ pub async fn attach_run_to_goal(
             run_id: Some(run_id),
             case_id,
             created_by: user_id,
+            source_ref: None,
         },
     )
     .await
@@ -174,6 +289,7 @@ pub async fn attach_case_to_goal(
             run_id: None,
             case_id: Some(case_id),
             created_by: user_id,
+            source_ref: None,
         },
     )
     .await
@@ -192,6 +308,7 @@ fn goal_json(g: &WorkforceGoal) -> Value {
         "status": g.status,
         "run_id": g.run_id,
         "case_id": g.case_id,
+        "source_ref": g.source_ref,
         "last_error": g.last_error,
         "created_at": g.created_at,
         "updated_at": g.updated_at,
@@ -210,6 +327,9 @@ async fn get_workforce(
     let all_goals = wf::list_goals(&state.db, workspace_id, None, 40)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
+    let pending = wf::list_pending_approvals(&state.db, workspace_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
     Ok(Json(json!({
         "open_goals": goals
             .iter()
@@ -217,7 +337,22 @@ async fn get_workforce(
             .map(goal_json)
             .collect::<Vec<_>>(),
         "goals": all_goals.iter().map(goal_json).collect::<Vec<_>>(),
+        "pending_approvals": pending.iter().map(approval_json).collect::<Vec<_>>(),
     })))
+}
+
+fn approval_json(a: &fleet_db::PolicyApproval) -> Value {
+    json!({
+        "id": a.id,
+        "goal_id": a.goal_id,
+        "task_id": a.task_id,
+        "kind": a.kind,
+        "provider": a.provider,
+        "operation": a.operation,
+        "summary": a.summary,
+        "status": a.status,
+        "created_at": a.created_at,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,6 +406,7 @@ async fn post_goal(
             run_id: None,
             case_id: Some(case.id),
             created_by: Some(user.id),
+            source_ref: None,
         },
     )
     .await
@@ -336,5 +472,264 @@ async fn post_replace_session(
         "task_id": report.task_id,
         "replaced": report.replaced,
         "already_dead": report.already_dead,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideBody {
+    decision: String,
+}
+
+async fn post_decide_approval(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((workspace_id, approval_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<DecideBody>,
+) -> AppResult<Json<Value>> {
+    let (user, role) = require_member(&state, &jar, workspace_id).await?;
+    if role != "owner" && role != "admin" {
+        return Err(AppError::forbidden(
+            "only an owner or admin can decide a policy gate",
+        ));
+    }
+    let decision = body.decision.trim().to_ascii_lowercase();
+    let status = match decision.as_str() {
+        "approve" => "approved",
+        "deny" => "denied",
+        _ => return Err(AppError::bad_request("decision must be approve or deny")),
+    };
+    let row = wf::decide_approval(&state.db, workspace_id, approval_id, status, user.id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::not_found("approval is not pending"))?;
+    if status == "denied" {
+        release_gate(&state, workspace_id, &row, "A person denied this gate.").await;
+        record_event(
+            &state.db,
+            "workforce.policy_denied",
+            json!({
+                "workspace_id": workspace_id,
+                "approval_id": row.id,
+                "kind": row.kind,
+                "decided_by": user.id,
+            }),
+        )
+        .await;
+        return Ok(Json(json!({ "approval": approval_json(&row) })));
+    }
+    let result = proxy::invoke(
+        &state.db,
+        &state.integrations.credentials_key,
+        ProxyRequest {
+            workspace_id,
+            provider: row.provider.clone(),
+            operation: row.operation.clone(),
+            args: row.args.clone(),
+            caller: ProxyCaller::Chat { user_id: user.id },
+        },
+    )
+    .await;
+    let finish = if result.ok { "executed" } else { "failed" };
+    let stored = json!({
+        "ok": result.ok,
+        "summary": result.summary,
+        "error_code": result.error_code,
+    });
+    let finished = wf::finish_approval(&state.db, workspace_id, row.id, finish, &stored)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .unwrap_or(row.clone());
+    release_gate(
+        &state,
+        workspace_id,
+        &finished,
+        "A person approved this gate.",
+    )
+    .await;
+    record_event(
+        &state.db,
+        "workforce.policy_decided",
+        json!({
+            "workspace_id": workspace_id,
+            "approval_id": finished.id,
+            "kind": finished.kind,
+            "status": finish,
+            "ok": result.ok,
+            "decided_by": user.id,
+        }),
+    )
+    .await;
+    Ok(Json(json!({
+        "approval": approval_json(&finished),
+        "result": stored,
+    })))
+}
+
+async fn release_gate(state: &AppState, workspace_id: Uuid, row: &fleet_db::PolicyApproval, note: &str) {
+    if let Some(task_id) = row.task_id {
+        let _ = wf::resume_blocked_task(&state.db, workspace_id, task_id, note).await;
+    }
+    if let Some(goal_id) = row.goal_id {
+        let _ = wf::set_goal_status(&state.db, workspace_id, goal_id, "acting", None).await;
+    }
+}
+
+async fn post_intake(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(workspace_id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let (user, _) = require_member(&state, &jar, workspace_id).await?;
+    let repos = gated_invoke(
+        &state,
+        workspace_id,
+        ProxyCaller::Chat { user_id: user.id },
+        "github",
+        "list_repos",
+        json!({ "per_page": 5 }),
+    )
+    .await;
+    if !repos.ok {
+        record_event(
+            &state.db,
+            "workforce.intake_refused",
+            json!({
+                "workspace_id": workspace_id,
+                "reason": repos.summary,
+            }),
+        )
+        .await;
+        return Ok(Json(json!({
+            "accepted": [],
+            "refused": [{ "source_ref": "github", "reason": repos.summary }],
+            "already_open": [],
+        })));
+    }
+    let repo_items = repos
+        .data
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    let mut already_open = Vec::new();
+    for repo in repo_items.iter().take(5) {
+        if accepted.len() >= 20 {
+            break;
+        }
+        let full = repo.get("full_name").and_then(|v| v.as_str()).unwrap_or("");
+        let Some((owner, name)) = full.split_once('/') else {
+            continue;
+        };
+        let issues = gated_invoke(
+            &state,
+            workspace_id,
+            ProxyCaller::Chat { user_id: user.id },
+            "github",
+            "list_issues",
+            json!({ "owner": owner, "repo": name, "state": "open", "per_page": 8 }),
+        )
+        .await;
+        if !issues.ok {
+            refused.push(json!({
+                "source_ref": format!("github:{full}"),
+                "reason": issues.summary,
+            }));
+            continue;
+        }
+        let issue_items = issues
+            .data
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for issue in issue_items.iter().take(8) {
+            if accepted.len() >= 20 {
+                break;
+            }
+            let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+            let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let url = issue.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+            match crate::workforce_os::analyze_github_issue(full, number, title, body, url) {
+                crate::workforce_os::IntakeVerdict::Refuse { source_ref, reason } => {
+                    refused.push(json!({ "source_ref": source_ref, "reason": reason }));
+                }
+                crate::workforce_os::IntakeVerdict::Accept {
+                    source_ref,
+                    title,
+                    goal_md,
+                } => {
+                    if wf::goal_by_source_ref(&state.db, workspace_id, &source_ref)
+                        .await
+                        .map_err(|e| AppError::internal(e.to_string()))?
+                        .is_some()
+                    {
+                        already_open.push(source_ref);
+                        continue;
+                    }
+                    let case = crate::cases::create_case(
+                        &state,
+                        workspace_id,
+                        Some(user.id),
+                        crate::cases::CreateCaseBody {
+                            title: title.clone(),
+                            kind: Some("workforce".into()),
+                            policy_md: Some(goal_md.clone()),
+                            stage: Some("start".into()),
+                            context: Some(json!({
+                                "source": "workforce_intake",
+                                "source_ref": source_ref,
+                            })),
+                            wake_in_s: Some(15),
+                        },
+                    )
+                    .await?;
+                    let inserted = wf::insert_goal(
+                        &state.db,
+                        &NewGoal {
+                            id: Uuid::now_v7(),
+                            workspace_id,
+                            title: title.clone(),
+                            goal_md,
+                            run_id: None,
+                            case_id: Some(case.id),
+                            created_by: Some(user.id),
+                            source_ref: Some(source_ref.clone()),
+                        },
+                    )
+                    .await;
+                    let goal = match inserted {
+                        Ok(goal) => goal,
+                        Err(e) if e.is_unique_violation() => {
+                            already_open.push(source_ref);
+                            continue;
+                        }
+                        Err(e) => return Err(AppError::internal(e.to_string())),
+                    };
+                    let goal = wf::set_goal_status(&state.db, workspace_id, goal.id, "acting", None)
+                        .await
+                        .map_err(|e| AppError::internal(e.to_string()))?
+                        .unwrap_or(goal);
+                    record_event(
+                        &state.db,
+                        "workforce.intake_accepted",
+                        json!({
+                            "workspace_id": workspace_id,
+                            "goal_id": goal.id,
+                            "source_ref": source_ref,
+                        }),
+                    )
+                    .await;
+                    accepted.push(goal_json(&goal));
+                }
+            }
+        }
+    }
+    Ok(Json(json!({
+        "accepted": accepted,
+        "refused": refused,
+        "already_open": already_open,
     })))
 }

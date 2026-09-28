@@ -99,8 +99,8 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         steps: &[
             "Connect GitHub on this page if the green Connected badge is not there yet.",
             "On GitHub.com open Settings → Applications → Agent Fleet (or your app name) and allow the repositories you want Fleet to see.",
-            "If you only want some of those repos here, type them below as owner/name (for example acme/api). Leave the box empty to use every repo the app can already see.",
-            "Click Save repos, then Refresh. Open issues appear below. Start run turns one issue into a Fleet job.",
+            "On the board, check only the repositories you want. All checked means every repo the app can already see.",
+            "Turn on automatic launch if new issues should start a run without you pressing the button.",
         ],
         hook_title: "Push issues here without waiting for Refresh",
         hook_help: "In each GitHub repo: Settings → Webhooks → Add webhook. Paste this URL, content type application/json, events “Issues”.",

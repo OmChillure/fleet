@@ -247,12 +247,24 @@ impl HostClient {
     /// GET `{control_plane_url}/install/worker/bin/{platform}/{bin}` (or `.sha256`).
     /// Bins are only fetched from the paired origin. Missing sidecar is a hard fail.
     pub async fn fetch_install_bytes(&self, platform: &str, name: &str) -> Result<Vec<u8>> {
+        self.fetch_install_bytes_hashed(platform, name, None).await
+    }
+
+    /// Same as [`Self::fetch_install_bytes`], with `?h={sha256}` so a CDN
+    /// that keys on the query string cannot serve a previous generation.
+    pub async fn fetch_install_bytes_hashed(
+        &self,
+        platform: &str,
+        name: &str,
+        content_sha256: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let platform = safe_install_segment(platform)?;
         let name = safe_install_segment(name)?;
         let path = format!("/install/worker/bin/{platform}/{name}");
+        let url = install_url_with_hash(&self.url(&path), content_sha256);
         let resp = self
             .http
-            .get(self.url(&path))
+            .get(&url)
             .timeout(Duration::from_secs(600))
             .send()
             .await
@@ -270,10 +282,33 @@ impl HostClient {
     }
 
     pub async fn fetch_install_sha256(&self, platform: &str, name: &str) -> Result<String> {
+        self.fetch_install_sha256_hashed(platform, name, None).await
+    }
+
+    pub async fn fetch_install_sha256_hashed(
+        &self,
+        platform: &str,
+        name: &str,
+        content_sha256: Option<&str>,
+    ) -> Result<String> {
         let sidecar = format!("{name}.sha256");
-        let bytes = self.fetch_install_bytes(platform, &sidecar).await?;
+        let bytes = self
+            .fetch_install_bytes_hashed(platform, &sidecar, content_sha256)
+            .await?;
         parse_sha256_sidecar(&bytes)
             .ok_or_else(|| anyhow::anyhow!("invalid sha256 sidecar for {name}"))
+    }
+}
+
+/// Append `?h={sha256}` when the digest is a 64-hex file hash. Edges that
+/// already cached the bare path keep serving it; a new query is a new object.
+pub(crate) fn install_url_with_hash(base: &str, content_sha256: Option<&str>) -> String {
+    match content_sha256
+        .map(str::trim)
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        Some(h) => format!("{base}?h={}", h.to_ascii_lowercase()),
+        None => base.to_string(),
     }
 }
 
@@ -598,6 +633,11 @@ pub struct SpawnPayload {
     pub runtime: JobRuntime,
     #[serde(default)]
     pub run_mode: Option<String>,
+    /// `inherit` | `none` | `allowlist` | `open`. Empty means the runner default.
+    #[serde(default)]
+    pub egress_mode: String,
+    #[serde(default)]
+    pub egress_allowlist: String,
     /// Isolation class (`process` | `container` | `vm`). When set, maps onto `runtime`.
     /// Placement words (`k8s`) are rejected — a pod is still container isolation.
     #[serde(default)]
@@ -975,7 +1015,8 @@ mod tests {
                 let method = it.next().unwrap_or("").to_string();
                 let path = it.next().unwrap_or("").to_string();
                 log2.lock().unwrap().push((method, path.clone()));
-                let (code, payload) = match files.get(&path) {
+                let lookup = path.split_once('?').map(|(p, _)| p).unwrap_or(&path);
+                let (code, payload) = match files.get(lookup) {
                     Some((code, b)) => (*code, b.clone()),
                     None => (404, Vec::new()),
                 };
@@ -1002,6 +1043,20 @@ mod tests {
     }
 
     fn paths_hit(mock: &MockInstall) -> Vec<String> {
+        mock.log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| {
+                p.split_once('?')
+                    .map(|(path, _)| path)
+                    .unwrap_or(p)
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn raw_paths_hit(mock: &MockInstall) -> Vec<String> {
         mock.log
             .lock()
             .unwrap()
@@ -1347,6 +1402,46 @@ mod tests {
             paths,
             vec![format!("{}.sha256", install_path(&platform, &name))],
             "must request the sidecar, not fall back to hashing the bin: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn install_url_with_hash_appends_only_64_hex() {
+        let base = "https://cp.example/install/worker/bin/windows-x86_64/fleet-host.exe";
+        let sha = "c53195bf6e692ccf9064566c96301cdb63cb8d84b6b6ef22d348819dc6c1212b";
+        assert_eq!(
+            install_url_with_hash(base, Some(sha)),
+            format!("{base}?h={sha}")
+        );
+        assert_eq!(
+            install_url_with_hash(base, Some(&sha.to_ascii_uppercase())),
+            format!("{base}?h={sha}")
+        );
+        assert_eq!(install_url_with_hash(base, Some("not-a-hash")), base);
+        assert_eq!(install_url_with_hash(base, None), base);
+    }
+
+    /// Cache-bust query must be on the wire so a CDN HIT on the bare path
+    /// cannot satisfy a new desired sha256.
+    #[tokio::test]
+    async fn fetch_install_bytes_hashed_sends_h_query() {
+        let platform = detect_platform();
+        let name = bin_name("fleet-host", &platform);
+        let sha = "c53195bf6e692ccf9064566c96301cdb63cb8d84b6b6ef22d348819dc6c1212b";
+        let mock = spawn_install_mock(HashMap::from([(
+            install_path(&platform, &name),
+            b"hashed-fetch".to_vec(),
+        )]));
+        let client = HostClient::for_pair(&mock.base, &LocalConfig::default()).unwrap();
+        let got = client
+            .fetch_install_bytes_hashed(&platform, &name, Some(sha))
+            .await
+            .expect("hashed fetch");
+        assert_eq!(got, b"hashed-fetch");
+        let raw = raw_paths_hit(&mock);
+        assert!(
+            raw.iter().any(|p| p.ends_with(&format!("?h={sha}"))),
+            "GET must include ?h={{sha256}}, got {raw:?}"
         );
     }
 

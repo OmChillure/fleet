@@ -127,6 +127,23 @@ for line in text.splitlines():
 PY
 }
 
+# Bake the same display-version the manifest will stamp, so host/driver
+# FLEET_*_PKG_VERSION matches bins.*.version (0.0.3.N vs 0.0.3).
+export_pkg_versions() {
+  local platform="$1"
+  local host_ver driver_ver
+  host_ver="$(python3 "$ROOT/scripts/runner-release.py" display-version fleet-host "$platform")"
+  driver_ver="$(python3 "$ROOT/scripts/runner-release.py" display-version fleet-driver "$platform")"
+  if [[ -z "$host_ver" ]]; then
+    host_ver="$(pkg_version_from_toml fleet-host)"
+  fi
+  if [[ -z "$driver_ver" ]]; then
+    driver_ver="$(pkg_version_from_toml fleet-driver)"
+  fi
+  export FLEET_HOST_PKG_VERSION="$host_ver"
+  export FLEET_DRIVER_PKG_VERSION="$driver_ver"
+}
+
 # Bake recorded in fleet-host (option_env FLEET_GIT_SHA), immediately before
 # the git_sha symbol. Do not invent a tree-id for an unbaked PE.
 baked_sha_from_host() {
@@ -342,6 +359,7 @@ stage_native() {
   fi
 
   echo "building fleet-host fleet-driver (debug) for $platform"
+  export_pkg_versions "$platform"
   cargo build -p fleet-host -p fleet-driver
 
   local target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -366,6 +384,7 @@ stage_musl_host() {
   fi
 
   echo "building fleet-host fleet-driver (debug) for linux-x86_64-musl"
+  export_pkg_versions linux-x86_64-musl
   if ! cargo build -p fleet-host -p fleet-driver \
       --target x86_64-unknown-linux-musl; then
     echo "stage-worker-dist: host musl cargo build failed; will try docker" >&2
@@ -446,6 +465,7 @@ stage_windows_host() {
   local target_dir="${FLEET_WINDOWS_GNU_TARGET_DIR:-$ROOT/target/docker-windows-gnu}"
   mkdir -p "$target_dir"
   echo "building fleet-host fleet-driver (release) for windows-x86_64"
+  export_pkg_versions windows-x86_64
   if ! CARGO_TARGET_DIR="$target_dir" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
       CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
@@ -554,6 +574,7 @@ stage_windows_arm64_host() {
   local target_dir="${FLEET_WINDOWS_ARM64_TARGET_DIR:-$ROOT/target/docker-windows-arm64-gnu}"
   mkdir -p "$target_dir"
   echo "building fleet-host fleet-driver (debug) for windows-arm64"
+  export_pkg_versions windows-arm64
   if ! CARGO_TARGET_DIR="$target_dir" \
       CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=aarch64-w64-mingw32-clang \
       CC_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-clang \
@@ -611,5 +632,6 @@ case "$MODE" in
     ;;
 esac
 
-# Deploy / register-runner-release.sh run the fail-closed check after all
-# shipped OS packages exist. A single-platform stage cannot update the parent.
+# The deployer runs runner-release.py check after the three ship platforms
+# exist. A single-platform stage cannot update the parent. --all is a
+# local lab build; deploy/studio does not pass --all.

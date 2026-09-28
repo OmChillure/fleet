@@ -12,7 +12,7 @@ This is **not** `PROCESS_WORKER_BIN`. The orch process worker is
 ## Install / tests
 
 ```bash
-crates/fleet-sandbox-driver/sandbox-lab/scripts/install-full-suite-deps.sh
+scripts/install-full-suite-deps.sh
 crates/fleet-sandbox-driver/sandbox-lab/scripts/run-full-suite.sh
 cargo test -p fleet-sandbox-driver
 ```

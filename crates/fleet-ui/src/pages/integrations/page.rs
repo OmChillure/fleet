@@ -3,12 +3,13 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    Integration, disconnect_integration, integration_is_connected, integration_needs_reconnect,
-    list_integrations,
-    oauth_start_url, patch_integration_defaults,
+    disconnect_integration, integration_is_connected, integration_needs_reconnect,
+    list_integrations, oauth_start_url, patch_integration_defaults, Integration,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
+use crate::pages::inbox::is_inbox_app;
+use crate::Route;
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -27,9 +28,9 @@ struct OauthBridgeMsg {
 mod oauth_bridge {
     use super::OauthBridgeMsg;
     use std::cell::RefCell;
-    use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
 
     thread_local! {
         static PENDING: RefCell<Option<OauthBridgeMsg>> = const { RefCell::new(None) };
@@ -282,11 +283,26 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 .as_ref()
                                 .and_then(|c| c.account_label.clone())
                                 .unwrap_or_default();
+                            let repos = integ
+                                .connection
+                                .as_ref()
+                                .map(crate::pages::integrations::api::granted_repos)
+                                .unwrap_or_default();
+                            let last_error = integ
+                                .connection
+                                .as_ref()
+                                .and_then(|c| c.last_error.clone())
+                                .filter(|s| !s.trim().is_empty());
+                            let reconnect = !connected && last_error.is_some();
 
-                            let subtitle = if needs_reconnect {
+                            let subtitle = if needs_reconnect || reconnect {
                                 "Sign-in failed".to_string()
                             } else if connected && !account.is_empty() {
-                                account.clone()
+                                if repos.is_empty() {
+                                    account.clone()
+                                } else {
+                                    format!("{account} · {}", repos.join(", "))
+                                }
                             } else if is_connecting {
                                 "Connecting…".to_string()
                             } else if !available {
@@ -324,12 +340,12 @@ pub fn Integrations(workspace_id: String) -> Element {
                                             h2 { class: "m-0 truncate text-[15px] font-semibold tracking-tight text-[var(--app-fg)]",
                                                 "{integ.name}"
                                             }
-                                            div { class: "mt-0.5 flex items-center gap-1.5 text-xs text-[var(--app-muted)]",
+                                            div { class: "mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[var(--app-muted)]",
                                                 span {
                                                     class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
                                                 }
-                                                span { class: "truncate", "{subtitle}" }
-                                                if needs_reconnect {
+                                                span { class: "min-w-0 break-all", title: "{subtitle}", "{subtitle}" }
+                                                if needs_reconnect || reconnect {
                                                     span { class: "text-amber-300", "· Reconnect" }
                                                 } else if connected {
                                                     span { class: "text-emerald-400/90", "· Connected" }
@@ -344,6 +360,8 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 disabled: is_connecting,
                                                 title: if is_connecting {
                                                     "Waiting for authorization in the other tab…"
+                                                } else if needs_reconnect || reconnect {
+                                                    "Check the existing app install and reconnect"
                                                 } else {
                                                     "Sign in with the provider and grant permissions"
                                                 },
@@ -389,7 +407,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 if is_connecting {
                                                     Spinner {}
                                                     span { "Connecting" }
-                                                } else if needs_reconnect {
+                                                } else if needs_reconnect || reconnect {
                                                     span { "Reconnect" }
                                                 } else {
                                                     span { "Connect" }
@@ -441,6 +459,23 @@ pub fn Integrations(workspace_id: String) -> Element {
                                     p { class: "mt-3 line-clamp-2 flex-1 text-[13px] leading-snug text-[var(--app-muted)]",
                                         "{integ.description}"
                                     }
+                                    if is_inbox_app(&integ.id) {
+                                        Link {
+                                            to: Route::InboxApp {
+                                                workspace_id: workspace_id.clone(),
+                                                provider: integ.id.clone(),
+                                            },
+                                            class: "mt-2 inline-block text-xs text-[var(--app-accent)] underline",
+                                            "Open inbox"
+                                        }
+                                    }
+                                    if let Some(err) = last_error.as_deref() {
+                                        if !connected {
+                                            p { class: "mt-2 text-xs leading-snug text-red-300/90",
+                                                "{err}"
+                                            }
+                                        }
+                                    }
                                     if connected {
                                         IntegrationDefaults {
                                             workspace_id: workspace_id.clone(),
@@ -460,7 +495,7 @@ pub fn Integrations(workspace_id: String) -> Element {
 
 #[component]
 fn IntegrationDefaults(workspace_id: String, integ: Integration) -> Element {
-    use crate::pages::runners::self_hosted::api::{HostPublic, list_workers_page};
+    use crate::pages::runners::self_hosted::api::{list_workers_page, HostPublic};
     use fleet_runners_view::{display_name, is_removed};
 
     let mut hosts = use_signal(Vec::<HostPublic>::new);
