@@ -269,6 +269,7 @@ async fn http_instance(State(state): State<AppState>, jar: CookieJar) -> AppResu
     let oauth = json!({
         "github": state.integrations.github.is_some(),
         "gitlab": state.integrations.gitlab.is_some(),
+        "gitea": state.integrations.gitea.is_some(),
         "slack": state.integrations.slack.is_some(),
         "linear": state.integrations.linear.is_some(),
         "jira": state.integrations.jira.is_some(),

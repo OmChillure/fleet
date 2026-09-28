@@ -51,11 +51,20 @@ services:
       COOKIE_SECURE: "false"
       COOKIE_SAMESITE: Lax
       API_PUBLIC_BASE: http://localhost:8080
+      # Assignment treats a loopback URL as "only this machine." A Mac runner
+      # paired to the Compose API is a different hostname, so set this to the
+      # LAN address (ORCHESTRATOR_PUBLIC_URL=http://192.168.x.x:8080).
+      ORCHESTRATOR_PUBLIC_URL: ${ORCHESTRATOR_PUBLIC_URL:-http://localhost:8080}
       UI_PUBLIC_BASE: http://localhost:3030
       DATA_DIR: /data
       FLEET_BOOTSTRAP_SECRET: ${FLEET_BOOTSTRAP_SECRET:-}
       SIGNUP_TOKEN: ${SIGNUP_TOKEN:-}
       ZENOH_LOCATOR: tcp/zenohd:7447
+      # localhost inside this container is not the Mac. host.docker.internal
+      # reaches the published Gitea port. The same name must resolve in the browser.
+      GITEA_BASE_URL: ${GITEA_BASE_URL:-http://host.docker.internal:3033}
+      GITEA_CLIENT_ID: ${GITEA_CLIENT_ID:-}
+      GITEA_CLIENT_SECRET: ${GITEA_CLIENT_SECRET:-}
       RUST_LOG: info,sqlx=warn,tower_http=info
       # ADMIN_TOKEN: dev-admin-token-change-me
     volumes:
@@ -119,7 +128,28 @@ services:
     healthcheck:
       disable: true
 
+  gitea:
+    image: gitea/gitea:1.27.3
+    ports:
+      - "3033:3000"
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__DOMAIN: localhost
+      GITEA__server__ROOT_URL: http://localhost:3033/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__SSH_PORT: "2222"
+      GITEA__server__START_SSH_SERVER: "false"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY: fleet-gitea-dev-secret-key-32b
+      GITEA__oauth2__JWT_SECRET: fleet-gitea-dev-jwt-secret-32bytes
+    volumes:
+      - gitea_data:/data
+
 volumes:
   fleet_pg:
   fleet_data:
   fleet_host:
+  gitea_data:

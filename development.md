@@ -26,6 +26,14 @@ Prefer **`http://localhost:3030`** in the browser (not `127.0.0.1`) so cookie au
 
 ---
 
+## Local Gitea (integration tests)
+
+```bash
+scripts/gitea-up.sh
+```
+
+That starts Gitea at `http://localhost:3033`, creates users `fleet` and `dev`, org `worms` with repos `game` and `docs`, and one open issue. The access token and OAuth client land in `.tmp/gitea.env`. Point Fleet at it with `GITEA_BASE_URL`, `GITEA_CLIENT_ID`, and `GITEA_CLIENT_SECRET` from that file, then Connect **Gitea** on the integrations page.
+
 ## One command: full stack in Docker
 
 ```bash

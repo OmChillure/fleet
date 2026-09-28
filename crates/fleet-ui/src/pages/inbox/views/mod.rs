@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 mod asana;
 mod bitbucket;
 mod confluence;
+mod gitea;
 mod github;
 mod gitlab;
 mod jira;
@@ -21,6 +22,7 @@ pub fn render(ws: &str, info: &'static InboxAppInfo, data: PageData) -> Element 
     match info.id {
         "github" => github::view(ws, data),
         "gitlab" => gitlab::view(ws, data),
+        "gitea" => gitea::view(ws, data),
         "bitbucket" => bitbucket::view(ws, data),
         "jira" => jira::view(ws, data),
         "linear" => linear::view(ws, data),

@@ -133,6 +133,8 @@ fn test_state(pool: fleet_db::PgPool) -> IntegrationsState {
                 .expect("test key"),
             github: None,
             gitlab: None,
+            gitea: None,
+            gitea_base_url: "http://localhost:3033".into(),
             slack: None,
             linear: None,
             jira: None,

@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    disconnect_integration, integration_is_connected, list_integrations, oauth_start_url,
-    patch_integration_defaults, Integration,
+    disconnect_integration, integration_is_connected, integration_needs_reconnect,
+    list_integrations, oauth_start_url, patch_integration_defaults, Integration,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
@@ -273,6 +273,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                             let ws_disconnect = workspace_id.clone();
                             let ws_connect = workspace_id.clone();
                             let available = integ.availability == "available";
+                            let needs_reconnect = integration_needs_reconnect(&integ);
                             let connected = integration_is_connected(&integ);
                             let is_connecting =
                                 connecting_provider().as_deref() == Some(integ.id.as_str());
@@ -294,7 +295,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 .filter(|s| !s.trim().is_empty());
                             let reconnect = !connected && last_error.is_some();
 
-                            let subtitle = if connected && !account.is_empty() {
+                            let subtitle = if needs_reconnect || reconnect {
+                                "Sign-in failed".to_string()
+                            } else if connected && !account.is_empty() {
                                 if repos.is_empty() {
                                     account.clone()
                                 } else {
@@ -308,7 +311,9 @@ pub fn Integrations(workspace_id: String) -> Element {
                                 integ.category_label.clone()
                             };
 
-                            let status_dot = if connected {
+                            let status_dot = if needs_reconnect {
+                                "bg-amber-400"
+                            } else if connected {
                                 "bg-emerald-400"
                             } else if is_connecting {
                                 "bg-amber-400 animate-pulse"
@@ -340,10 +345,10 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                     class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
                                                 }
                                                 span { class: "min-w-0 break-all", title: "{subtitle}", "{subtitle}" }
-                                                if connected {
+                                                if needs_reconnect || reconnect {
+                                                    span { class: "text-amber-300", "· Reconnect" }
+                                                } else if connected {
                                                     span { class: "text-emerald-400/90", "· Connected" }
-                                                } else if reconnect {
-                                                    span { class: "text-red-300/90", "· Error" }
                                                 }
                                             }
                                         }
@@ -355,7 +360,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 disabled: is_connecting,
                                                 title: if is_connecting {
                                                     "Waiting for authorization in the other tab…"
-                                                } else if reconnect {
+                                                } else if needs_reconnect || reconnect {
                                                     "Check the existing app install and reconnect"
                                                 } else {
                                                     "Sign in with the provider and grant permissions"
@@ -402,13 +407,13 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                 if is_connecting {
                                                     Spinner {}
                                                     span { "Connecting" }
-                                                } else if reconnect {
+                                                } else if needs_reconnect || reconnect {
                                                     span { "Reconnect" }
                                                 } else {
                                                     span { "Connect" }
                                                 }
                                             }
-                                        } else if available && connected {
+                                        } else if available && (connected || needs_reconnect) {
                                             button {
                                                 class: "shrink-0 rounded-lg border border-red-500/30 px-2.5 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/15 disabled:opacity-50",
                                                 r#type: "button",

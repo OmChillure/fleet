@@ -7,7 +7,10 @@ use super::api::{list_inbox, InboxResponse, TicketRow};
 use super::catalog::{explain_error, hook_url_for, inbox_app};
 use super::shared::{apply_rows, PageData};
 use super::views;
-use crate::pages::integrations::{find_integration, integration_is_connected, list_integrations};
+use crate::pages::integrations::{
+    find_integration, integration_is_connected, integration_needs_reconnect, list_integrations,
+    message_is_auth_failure,
+};
 use crate::Route;
 
 fn filter_value(provider: &str, resp: &InboxResponse) -> String {
@@ -20,6 +23,7 @@ fn filter_value(provider: &str, resp: &InboxResponse) -> String {
         "jira" => m.jira_jql.clone().unwrap_or_default(),
         "notion" => m.notion_databases.join(", "),
         "gitlab" => m.gitlab_projects.join(", "),
+        "gitea" => m.gitea_repos.join(", "),
         "linear" => m.linear_teams.join(", "),
         "trello" => m.trello_boards.join(", "),
         _ => String::new(),
@@ -45,6 +49,7 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
     let mut last_error = use_signal(|| None::<String>);
     let mut hook_url = use_signal(String::new);
     let mut connected = use_signal(|| false);
+    let mut auth_failed = use_signal(|| false);
     let mut account = use_signal(String::new);
     let mut allowed = use_signal(Vec::<String>::new);
     let mut auto_launch = use_signal(|| false);
@@ -62,6 +67,8 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                 match list_integrations(&ws).await {
                     Ok(list) => {
                         if let Some(i) = find_integration(&list, &prov) {
+                            let failed = integration_needs_reconnect(i);
+                            auth_failed.set(failed);
                             let on = integration_is_connected(i);
                             connected.set(on);
                             if on {
@@ -71,8 +78,15 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                                         .and_then(|c| c.account_label.clone())
                                         .unwrap_or_default(),
                                 );
-                            } else {
+                            } else if !failed {
                                 account.set(String::new());
+                            } else {
+                                account.set(
+                                    i.connection
+                                        .as_ref()
+                                        .and_then(|c| c.account_label.clone())
+                                        .unwrap_or_default(),
+                                );
                             }
                             allowed.set(
                                 i.connection
@@ -82,6 +96,7 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                             );
                         } else {
                             connected.set(false);
+                            auth_failed.set(false);
                             account.set(String::new());
                             allowed.set(Vec::new());
                         }
@@ -104,11 +119,15 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                     Ok(resp) => {
                         if let Some(m) = resp.monitor.as_ref() {
                             hook_url.set(hook_url_for(&m.hook_url, &prov));
-                            last_error.set(
-                                m.last_error
-                                    .as_deref()
-                                    .and_then(|e| explain_error(e, &prov)),
-                            );
+                            let explained = m
+                                .last_error
+                                .as_deref()
+                                .and_then(|e| explain_error(e, &prov));
+                            if explained.as_deref().is_some_and(message_is_auth_failure) {
+                                auth_failed.set(true);
+                                connected.set(false);
+                            }
+                            last_error.set(explained);
                         } else {
                             last_error.set(None);
                         }
@@ -129,6 +148,7 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
                                     last_error,
                                     hook_url,
                                     connected,
+                                    auth_failed,
                                     account,
                                     allowed,
                                     auto_launch,
@@ -168,6 +188,7 @@ fn InboxAppBody(workspace_id: String, provider: String) -> Element {
         last_error,
         hook_url,
         connected,
+        auth_failed,
         account,
         allowed,
         auto_launch,

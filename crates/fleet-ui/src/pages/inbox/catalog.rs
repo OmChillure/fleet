@@ -108,6 +108,36 @@ pub const INBOX_APPS: &[InboxAppInfo] = &[
         action: "Start run",
     },
     InboxAppInfo {
+        id: "gitea",
+        name: "Gitea",
+        kind: InboxKind::Ticket,
+        group: InboxGroup::Code,
+        blurb: "Open issues from a Gitea instance show up here.",
+        work: "Gitea issues live next to the repository. Your team already tracks bugs and pull requests there.",
+        fleet_does: "Start run launches coding + review. Agents use the Gitea connection to read the issue and open a pull request.",
+        outcome: "A pull request on that repository, with a note back on the issue.",
+        flow: &[
+            "Issue is open on a repo the token can read",
+            "Start run → coding + review agents",
+            "Pull request opened on the repo",
+        ],
+        filter_label: "Only these repositories (optional)",
+        filter_placeholder: "org/repo, other/app",
+        has_filter: true,
+        filter_save: "Save repos",
+        examples: &["worms/game", "worms/docs"],
+        steps: &[
+            "Connect Gitea on this page. The instance URL is the one configured for this Fleet (GITEA_BASE_URL).",
+            "The token must be allowed to read issues on the repositories you care about.",
+            "Optional: list repos below as owner/name. Empty means every repo the token can list.",
+            "Save repos, then Refresh. Start run launches a Fleet job for that issue.",
+        ],
+        hook_title: "Gitea issue webhook",
+        hook_help: "In the Gitea repo: Settings → Webhooks → Add webhook. Paste this URL, set the secret to the token in the URL, content type application/json, and enable Issue events.",
+        empty: "No open issues yet. Connect Gitea, check repo access, then Refresh.",
+        action: "Start run",
+    },
+    InboxAppInfo {
         id: "gitlab",
         name: "GitLab",
         kind: InboxKind::Ticket,
@@ -487,7 +517,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
     }
     if lower.contains("missing_scope") {
         return format!(
-            "{name} refused the request — the connection is missing a permission. Disconnect and Connect again under Workspace → Integrations, and accept the extra access."
+            "{name} refused the request — the connection is missing a permission. Use Reconnect on this page and accept the extra access."
         );
     }
     if lower.contains("invalid_auth")
@@ -496,7 +526,7 @@ fn humanize_error(provider: &str, raw: &str) -> String {
         || lower.contains("account_inactive")
     {
         return format!(
-            "The {name} connection is no longer valid. Disconnect and Connect again under Workspace → Integrations."
+            "The {name} sign-in is no longer valid. Use Reconnect on this page."
         );
     }
     if lower.contains("not_connected") {

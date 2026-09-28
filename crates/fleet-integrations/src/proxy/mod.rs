@@ -35,6 +35,24 @@ use crate::crypto::CredentialsKey;
 /// Tool `args` must never retarget this. Callers can put another workspace's
 /// `connection_id` / `workspace_id` / `id` in args; lookup stays on
 /// [`ProxyRequest::workspace_id`].
+/// A stored login was rejected. Missing-scope and not-found stay as normal errors.
+fn auth_failure(result: &ProxyResult) -> bool {
+    if result.ok {
+        return false;
+    }
+    if result.error_code.as_deref() == Some("token_expired") || result.provider_status == Some(401)
+    {
+        return true;
+    }
+    let summary = result.summary.to_ascii_lowercase();
+    summary.contains("invalid token")
+        || summary.contains("invalid username")
+        || summary.contains("bad credentials")
+        || summary.contains("token_revoked")
+        || summary.contains("invalid_auth")
+        || summary.contains("token expired")
+}
+
 fn connection_scope(req: &ProxyRequest) -> (uuid::Uuid, String) {
     (req.workspace_id, req.provider.trim().to_lowercase())
 }
@@ -211,7 +229,7 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
                 );
             }
         }
-    } else if result.error_code.as_deref() == Some("token_expired") {
+    } else if auth_failure(&result) {
         if let Err(e) = fleet_db::repos::integrations::mark_error(
             pool,
             workspace_id,
@@ -220,11 +238,11 @@ pub async fn invoke(pool: &PgPool, key: &CredentialsKey, req: ProxyRequest) -> P
         )
         .await
         {
-            tracing::error!(
+            tracing::warn!(
                 workspace_id = %workspace_id,
                 provider = %provider,
                 error = %e,
-                "failed to persist token_expired on connection"
+                "could not mark integration connection as errored"
             );
         }
     }
@@ -561,6 +579,19 @@ mod tests {
                     "update_issue",
                 ],
             ),
+            (
+                "gitea",
+                &[
+                    "list_repos",
+                    "put_file",
+                    "list_prs",
+                    "create_pr",
+                    "merge_pr",
+                    "merge_mr",
+                    "update_issue",
+                    "add_comment",
+                ],
+            ),
             ("jira", &["get_issue", "create_issue"]),
             (
                 "linear",
@@ -582,6 +613,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn auth_failure_is_401_or_rejected_token_not_a_missing_resource() {
+        let denied = ProxyResult::err(
+            "gitea",
+            "add_comment",
+            "upstream",
+            "invalid username, password or token (401)",
+            Some(401),
+        );
+        assert!(auth_failure(&denied));
+        let expired = ProxyResult::err(
+            "github",
+            "get_issue",
+            "token_expired",
+            "GitHub API 403: Resource not accessible by integration",
+            Some(403),
+        );
+        assert!(auth_failure(&expired));
+        let missing = ProxyResult::err(
+            "gitea",
+            "get_issue",
+            "upstream",
+            "not found (404)",
+            Some(404),
+        );
+        assert!(!auth_failure(&missing));
+        let ok = ProxyResult::ok_result("gitea", "list_repos", "ok", json!({}), Some(200));
+        assert!(!auth_failure(&ok));
     }
 
     /// Docs §7.3 / README allowlist for every non-github provider.

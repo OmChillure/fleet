@@ -7,7 +7,9 @@ use super::api::{InboxResponse, list_inbox, poll_inbox, start_monitor, stop_moni
 use super::catalog::{INBOX_APPS, InboxGroup};
 use crate::Route;
 use crate::components::toast::show_toast;
-use crate::pages::integrations::{IntegrationLogo, integration_is_connected, list_integrations};
+use crate::pages::integrations::{
+    IntegrationLogo, integration_is_connected, integration_needs_reconnect, list_integrations,
+};
 
 fn ticket_count(resp: &InboxResponse, provider: &str) -> usize {
     resp.tickets
@@ -21,6 +23,7 @@ pub fn Inbox(workspace_id: String) -> Element {
     let mut status_line = use_signal(|| "Loading inbox…".to_string());
     let mut counts = use_signal(std::collections::BTreeMap::<String, usize>::new);
     let mut connected = use_signal(std::collections::BTreeSet::<String>::new);
+    let mut auth_failed = use_signal(std::collections::BTreeSet::<String>::new);
     let mut monitor_on = use_signal(|| false);
     let mut busy = use_signal(|| false);
 
@@ -31,6 +34,7 @@ pub fn Inbox(workspace_id: String) -> Element {
             loop {
                 let mut next_counts = std::collections::BTreeMap::new();
                 let mut next_conn = std::collections::BTreeSet::new();
+                let mut next_failed = std::collections::BTreeSet::new();
                 match list_inbox(&ws).await {
                     Ok(resp) => {
                         monitor_on.set(resp.monitor.as_ref().is_some_and(|m| m.enabled));
@@ -49,13 +53,16 @@ pub fn Inbox(workspace_id: String) -> Element {
                 }
                 if let Ok(list) = list_integrations(&ws).await {
                     for i in list {
-                        if integration_is_connected(&i) {
+                        if integration_needs_reconnect(&i) {
+                            next_failed.insert(i.id.to_ascii_lowercase());
+                        } else if integration_is_connected(&i) {
                             next_conn.insert(i.id.to_ascii_lowercase());
                         }
                     }
                 }
                 counts.set(next_counts);
                 connected.set(next_conn);
+                auth_failed.set(next_failed);
                 TimeoutFuture::new(8000).await;
             }
         }
@@ -156,7 +163,8 @@ pub fn Inbox(workspace_id: String) -> Element {
                             ul { class: "m-0 grid list-none gap-3 p-0 sm:grid-cols-2",
                                 for app in apps {
                                     {
-                                        let on = connected().contains(app.id);
+                                        let failed = auth_failed().contains(app.id);
+                                        let on = connected().contains(app.id) && !failed;
                                         let n = *counts().get(app.id).unwrap_or(&0);
                                         rsx! {
                                             li { key: "{app.id}",
@@ -172,7 +180,13 @@ pub fn Inbox(workspace_id: String) -> Element {
                                                             "{app.name}"
                                                         }
                                                         p { class: "m-0 mt-0.5 text-xs text-[var(--app-muted)]",
-                                                            if on { "Connected" } else { "Not connected" }
+                                                            if failed {
+                                                                "Sign-in failed"
+                                                            } else if on {
+                                                                "Connected"
+                                                            } else {
+                                                                "Not connected"
+                                                            }
                                                             if n > 0 { " · {n} open" }
                                                         }
                                                         p { class: "m-0 mt-1 text-xs text-[var(--app-muted)]",

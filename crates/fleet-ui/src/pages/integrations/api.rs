@@ -107,6 +107,7 @@ pub struct Integration {
 }
 
 /// Catalog `connected` can lag the nested connection row. Either is enough.
+/// An `error` row is not connected — the token was rejected.
 /// Repo full names stored on a GitHub App connection. Empty when unknown.
 pub fn granted_repos(conn: &ConnectionPublic) -> Vec<String> {
     conn.config
@@ -122,12 +123,35 @@ pub fn granted_repos(conn: &ConnectionPublic) -> Vec<String> {
 }
 
 pub fn integration_is_connected(i: &Integration) -> bool {
+    if integration_needs_reconnect(i) {
+        return false;
+    }
     if i.connected {
         return true;
     }
     i.connection
         .as_ref()
         .is_some_and(|c| c.connected || c.status.eq_ignore_ascii_case("connected"))
+}
+
+/// A previous Connect exists, but the provider rejected the saved token.
+pub fn integration_needs_reconnect(i: &Integration) -> bool {
+    i.connection
+        .as_ref()
+        .is_some_and(|c| c.status.eq_ignore_ascii_case("error"))
+}
+
+/// Inbox and proxy errors that mean the saved login should be replaced.
+pub fn message_is_auth_failure(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("401")
+        || lower.contains("invalid token")
+        || lower.contains("invalid username")
+        || lower.contains("bad credentials")
+        || lower.contains("token_revoked")
+        || lower.contains("invalid_auth")
+        || lower.contains("token expired")
+        || lower.contains("no longer valid")
 }
 
 pub fn find_integration<'a>(list: &'a [Integration], provider: &str) -> Option<&'a Integration> {
@@ -294,7 +318,48 @@ mod tests {
             }),
         };
         assert!(integration_is_connected(&i));
+        assert!(!integration_needs_reconnect(&i));
         assert!(find_integration(std::slice::from_ref(&i), "Slack").is_some());
+    }
+
+    #[test]
+    fn error_status_needs_reconnect_and_is_not_connected() {
+        let mut i = Integration {
+            id: "gitea".into(),
+            name: "Gitea".into(),
+            description: String::new(),
+            category: "code".into(),
+            category_label: "Source control".into(),
+            availability: "available".into(),
+            icon: "gitea".into(),
+            docs_url: None,
+            auth_method: "oauth".into(),
+            oauth_configured: true,
+            oauth_start_path: None,
+            oauth_callback_url: None,
+            oauth_app_create_url: None,
+            connected: true,
+            connection: Some(ConnectionPublic {
+                id: "1".into(),
+                workspace_id: "w".into(),
+                provider: "gitea".into(),
+                status: "error".into(),
+                account_label: Some("fleet".into()),
+                connected: false,
+                last_error: Some("invalid username, password or token (401)".into()),
+                config: serde_json::json!({}),
+                defaults: ConnectionDefaults::default(),
+            }),
+        };
+        assert!(integration_needs_reconnect(&i));
+        assert!(!integration_is_connected(&i));
+        assert!(message_is_auth_failure(
+            i.connection.as_ref().unwrap().last_error.as_deref().unwrap()
+        ));
+        i.connection.as_mut().unwrap().status = "connected".into();
+        i.connection.as_mut().unwrap().connected = true;
+        assert!(!integration_needs_reconnect(&i));
+        assert!(integration_is_connected(&i));
     }
 
     #[test]

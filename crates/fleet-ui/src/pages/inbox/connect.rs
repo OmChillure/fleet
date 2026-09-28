@@ -31,11 +31,13 @@ pub fn ConnectApp(
     provider: String,
     name: String,
     mut connected: Signal<bool>,
+    mut auth_failed: Signal<bool>,
     mut account: Signal<String>,
 ) -> Element {
     let mut connecting = use_signal(|| false);
+    let broken = auth_failed();
 
-    if connected() {
+    if connected() && !broken {
         let label = account();
         return rsx! {
             span { class: "inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300",
@@ -54,7 +56,11 @@ pub fn ConnectApp(
             class: "inline-flex min-w-[6.5rem] items-center justify-center gap-1.5 rounded-lg bg-[var(--app-fg)] px-3 py-1.5 text-xs font-semibold text-[var(--app-bg)] disabled:cursor-wait disabled:opacity-80",
             r#type: "button",
             disabled: connecting(),
-            title: "Sign in with {name} and grant access",
+            title: if broken {
+                format!("Sign in with {name} again. The saved token was rejected.")
+            } else {
+                format!("Sign in with {name} and grant access")
+            },
             onclick: move |_| {
                 if connecting() {
                     return;
@@ -87,6 +93,7 @@ pub fn ConnectApp(
                                 .filter(|i| integration_is_connected(i))
                             {
                                 connected.set(true);
+                                auth_failed.set(false);
                                 let label = i
                                     .connection
                                     .as_ref()
@@ -109,6 +116,8 @@ pub fn ConnectApp(
             if connecting() {
                 span { class: "h-3 w-3 animate-spin rounded-full border-2 border-[var(--app-bg)] border-t-transparent" }
                 "Connecting"
+            } else if broken {
+                "Reconnect {name}"
             } else {
                 "Connect {name}"
             }

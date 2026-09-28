@@ -5,6 +5,7 @@ pub mod bitbucket;
 pub mod confluence;
 pub mod discord;
 pub mod figma;
+pub mod gitea;
 pub mod github;
 pub mod gitlab;
 pub mod google_drive;
@@ -23,6 +24,7 @@ pub fn supported_providers() -> &'static [&'static str] {
     &[
         "github",
         "gitlab",
+        "gitea",
         "jira",
         "linear",
         "slack",
@@ -51,6 +53,7 @@ pub fn operations_for(provider: &str) -> &'static [&'static str] {
     match provider {
         "github" => github::OPERATIONS,
         "gitlab" => gitlab::OPERATIONS,
+        "gitea" => gitea::OPERATIONS,
         "jira" => jira::OPERATIONS,
         "linear" => linear::OPERATIONS,
         "slack" => slack::OPERATIONS,
@@ -78,6 +81,7 @@ pub async fn dispatch(
     match provider {
         "github" => github::invoke(http, access_token, operation, args, config).await,
         "gitlab" => gitlab::invoke(http, access_token, operation, args).await,
+        "gitea" => gitea::invoke(http, access_token, config, operation, args).await,
         "jira" => {
             let cloud_id = config
                 .get("cloud_id")
@@ -133,6 +137,7 @@ mod tests {
             &[
                 "github",
                 "gitlab",
+                "gitea",
                 "jira",
                 "linear",
                 "slack",

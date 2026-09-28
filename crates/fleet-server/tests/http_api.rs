@@ -76,6 +76,8 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         credentials_key: CredentialsKey::from_secret(jwt_secret).expect("credentials key"),
         github: None,
         gitlab: None,
+        gitea: None,
+        gitea_base_url: "http://localhost:3033".into(),
         slack: None,
         linear: None,
         jira: None,

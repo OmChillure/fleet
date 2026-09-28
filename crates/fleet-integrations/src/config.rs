@@ -70,6 +70,9 @@ pub struct IntegrationsConfig {
 
     pub github: Option<OAuthClientConfig>,
     pub gitlab: Option<OAuthClientConfig>,
+    pub gitea: Option<OAuthClientConfig>,
+    /// Root of the Gitea instance (`http://localhost:3033`), no trailing slash.
+    pub gitea_base_url: String,
     pub slack: Option<OAuthClientConfig>,
     pub linear: Option<OAuthClientConfig>,
     pub jira: Option<OAuthClientConfig>,
@@ -123,6 +126,12 @@ impl IntegrationsConfig {
             credentials_key,
             github: optional_oauth("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")?,
             gitlab: optional_oauth("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")?,
+            gitea: optional_oauth("GITEA_CLIENT_ID", "GITEA_CLIENT_SECRET")?,
+            gitea_base_url: env::var("GITEA_BASE_URL")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://localhost:3033".into()),
             slack: optional_oauth("SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET")?,
             linear: optional_oauth("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")?,
             jira: optional_oauth("JIRA_CLIENT_ID", "JIRA_CLIENT_SECRET")?,
@@ -142,6 +151,7 @@ impl IntegrationsConfig {
         match provider {
             "github" => self.github.as_ref(),
             "gitlab" => self.gitlab.as_ref(),
+            "gitea" => self.gitea.as_ref(),
             "slack" => self.slack.as_ref(),
             "linear" => self.linear.as_ref(),
             "jira" => self.jira.as_ref(),
