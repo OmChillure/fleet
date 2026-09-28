@@ -10,7 +10,7 @@ use crate::pool::map_query_err;
 
 const GOAL_COLS: &str = r#"
     id, workspace_id, title, goal_md, status, run_id, case_id,
-    created_by, last_error, created_at, updated_at
+    created_by, source_ref, last_error, created_at, updated_at
 "#;
 
 const APPROVAL_COLS: &str = r#"
@@ -27,6 +27,7 @@ pub struct NewGoal {
     pub run_id: Option<Uuid>,
     pub case_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    pub source_ref: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,9 +47,9 @@ pub async fn insert_goal(pool: &PgPool, spec: &NewGoal) -> DbResult<WorkforceGoa
     let q = format!(
         r#"
         INSERT INTO workforce_goals (
-            id, workspace_id, title, goal_md, status, run_id, case_id, created_by
+            id, workspace_id, title, goal_md, status, run_id, case_id, created_by, source_ref
         )
-        VALUES ($1, $2, $3, $4, 'open', $5, $6, $7)
+        VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8)
         RETURNING {GOAL_COLS}
         "#
     );
@@ -60,6 +61,7 @@ pub async fn insert_goal(pool: &PgPool, spec: &NewGoal) -> DbResult<WorkforceGoa
         .bind(spec.run_id)
         .bind(spec.case_id)
         .bind(spec.created_by)
+        .bind(&spec.source_ref)
         .fetch_one(pool)
         .await
         .map_err(map_query_err)
@@ -337,6 +339,56 @@ pub async fn pick_goal_for_new_run(
         return Ok(None);
     }
     latest_open_goal_without_run(pool, workspace_id).await
+}
+
+pub async fn goal_by_source_ref(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    source_ref: &str,
+) -> DbResult<Option<WorkforceGoal>> {
+    let q = format!(
+        r#"
+        SELECT {GOAL_COLS}
+        FROM workforce_goals
+        WHERE workspace_id = $1 AND source_ref = $2
+        "#
+    );
+    sqlx::query_as::<_, WorkforceGoal>(&q)
+        .bind(workspace_id)
+        .bind(source_ref)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
+}
+
+pub async fn find_pending_approval(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    provider: &str,
+    operation: &str,
+    args: &Value,
+) -> DbResult<Option<PolicyApproval>> {
+    let q = format!(
+        r#"
+        SELECT {APPROVAL_COLS}
+        FROM policy_approvals
+        WHERE workspace_id = $1
+          AND provider = $2
+          AND operation = $3
+          AND args = $4
+          AND status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, PolicyApproval>(&q)
+        .bind(workspace_id)
+        .bind(provider)
+        .bind(operation)
+        .bind(args)
+        .fetch_optional(pool)
+        .await
+        .map_err(map_query_err)
 }
 
 pub async fn insert_approval(pool: &PgPool, spec: &NewApproval) -> DbResult<PolicyApproval> {

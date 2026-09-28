@@ -697,7 +697,7 @@ These look like product features in vision docs or UI chrome but are **not** imp
 - Email, password reset, OAuth-login-as-user (OAuth is integrations only).
 - GitLab/Bitbucket/Confluence/Asana/Trello connect.
 - OpenAI chat provider (coming-soon placeholder).
-- Approvals before merge (landing copy; no approval object).
+- Approvals before merge are a real gate: `merge_pr`, Slack/Teams/Notion writes, and `deploy` return `awaiting_approval` until an owner or admin decides on the Workforce page. GitHub issue intake is `POST …/workforce/intake` (vague issues are refused; the same issue is not opened twice).
 - Zenoh/NATS event bus in the running server (contracts crate + docs only).
 - Operator CR creation from a **host** tick unless that host is a paired `fleet-host` with KubePod.
 - VM sandboxes.

@@ -56,6 +56,8 @@ pub struct WorkforceSnapshot {
     pub open_goals: Vec<Value>,
     #[serde(default)]
     pub goals: Vec<Value>,
+    #[serde(default)]
+    pub pending_approvals: Vec<Value>,
 }
 
 pub async fn fetch_workforce(workspace_id: &str) -> Result<WorkforceSnapshot, DashError> {
@@ -111,6 +113,50 @@ pub async fn create_goal(
         }));
     }
     serde_json::from_str(&text).map_err(|e| DashError::Network(format!("invalid JSON: {e}")))
+}
+
+async fn post_workforce(workspace_id: &str, path: &str, body: Value) -> Result<Value, DashError> {
+    let url = format!(
+        "{}/api/workspaces/{workspace_id}/workforce/{path}",
+        auth_base_url().trim_end_matches('/')
+    );
+    let res = with_credentials(client().post(url).json(&body))
+        .send()
+        .await
+        .map_err(|e| DashError::Network(format!("could not reach API: {e}")))?;
+    let status = res.status();
+    let text = res
+        .text()
+        .await
+        .map_err(|e| DashError::Network(e.to_string()))?;
+    if !status.is_success() {
+        return Err(DashError::Message(if text.is_empty() {
+            format!("request failed ({status})")
+        } else {
+            text
+        }));
+    }
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|e| DashError::Network(format!("invalid JSON: {e}")))
+}
+
+pub async fn pull_github_issues(workspace_id: &str) -> Result<Value, DashError> {
+    post_workforce(workspace_id, "intake", serde_json::json!({})).await
+}
+
+pub async fn decide_approval(
+    workspace_id: &str,
+    approval_id: &str,
+    decision: &str,
+) -> Result<Value, DashError> {
+    post_workforce(
+        workspace_id,
+        &format!("approvals/{approval_id}/decide"),
+        serde_json::json!({ "decision": decision }),
+    )
+    .await
 }
 
 pub async fn fetch_overview(workspace_id: &str) -> Result<Overview, DashError> {

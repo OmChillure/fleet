@@ -2,7 +2,10 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::Value;
 
-use super::api::{Overview, WorkforceSnapshot, create_goal, fetch_overview, fetch_workforce};
+use super::api::{
+    Overview, WorkforceSnapshot, create_goal, decide_approval, fetch_overview, fetch_workforce,
+    pull_github_issues,
+};
 use crate::Route;
 
 fn short(id: &str) -> String {
@@ -147,6 +150,30 @@ fn parse_chat(v: &[Value]) -> Vec<ChatRow> {
         .collect()
 }
 
+fn decide_from_dash(
+    workspace_id: String,
+    approval_id: String,
+    decision: &'static str,
+    mut busy: Signal<bool>,
+    mut status_line: Signal<String>,
+    mut workforce: Signal<WorkforceSnapshot>,
+) {
+    if busy() {
+        return;
+    }
+    busy.set(true);
+    spawn(async move {
+        match decide_approval(&workspace_id, &approval_id, decision).await {
+            Ok(_) => status_line.set(format!("Decision recorded: {decision}.")),
+            Err(e) => status_line.set(e.message()),
+        }
+        if let Ok(w) = fetch_workforce(&workspace_id).await {
+            workforce.set(w);
+        }
+        busy.set(false);
+    });
+}
+
 fn status_class(status: &str) -> &'static str {
     match status {
         "done_success" | "completed" => "text-emerald-400",
@@ -204,7 +231,93 @@ pub fn Dashboard(workspace_id: String) -> Element {
                     "Workforce"
                 }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Set a goal. Agents do the work — merge, Slack, Notion, GitHub — and the board is still here tomorrow."
+                    "Work arrives from GitHub. The crew commits and opens the pull request. A person merges, sends the message, or deploys."
+                }
+            }
+
+            section { class: "rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                div { class: "flex flex-wrap items-center justify-between gap-2",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Arriving work" }
+                    button {
+                        class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm font-medium text-[var(--app-fg)] disabled:opacity-50",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: {
+                            let workspace_id = workspace_id.clone();
+                            move |_| {
+                                if busy() { return; }
+                                busy.set(true);
+                                let ws = workspace_id.clone();
+                                spawn(async move {
+                                    match pull_github_issues(&ws).await {
+                                        Ok(v) => {
+                                            let n = v.get("accepted").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                                            let refused = v.get("refused").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                                            status_line.set(format!("Intake accepted {n} issue(s). Refused {refused}."));
+                                        }
+                                        Err(e) => status_line.set(e.message()),
+                                    }
+                                    if let Ok(w) = fetch_workforce(&ws).await {
+                                        workforce.set(w);
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Pull open GitHub issues"
+                    }
+                }
+                p { class: "mt-2 text-sm text-[var(--app-muted)]",
+                    "Vague issues stay out. A specific issue becomes a goal and keeps its source, so the next pull does not open it twice."
+                }
+            }
+
+            if !wf.pending_approvals.is_empty() {
+                section { class: "rounded-2xl border border-amber-500/40 bg-[var(--app-bg-elevated)] p-4",
+                    h2 { class: "m-0 text-sm font-semibold text-[var(--app-fg)]", "Waiting for a person" }
+                    ul { class: "mt-3 m-0 list-none space-y-3 p-0",
+                        for a in wf.pending_approvals.clone() {
+                            {
+                                let aid = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let summary = a.get("summary").and_then(|v| v.as_str()).unwrap_or("approval").to_string();
+                                let kind = a.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                rsx! {
+                                    li {
+                                        key: "{aid}",
+                                        class: "flex flex-wrap items-center justify-between gap-2",
+                                        div {
+                                            p { class: "m-0 text-sm text-[var(--app-fg)]", "{summary}" }
+                                            p { class: "m-0 text-xs text-[var(--app-muted)]", "{kind}" }
+                                        }
+                                        div { class: "flex gap-2",
+                                            button {
+                                                class: "rounded-md bg-[var(--app-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
+                                                r#type: "button",
+                                                disabled: busy() || aid.is_empty(),
+                                                onclick: {
+                                                    let workspace_id = workspace_id.clone();
+                                                    let aid = aid.clone();
+                                                    move |_| decide_from_dash(workspace_id.clone(), aid.clone(), "approve", busy, status_line, workforce)
+                                                },
+                                                "Approve"
+                                            }
+                                            button {
+                                                class: "rounded-md border border-[var(--app-border)] px-3 py-1.5 text-sm text-[var(--app-fg)] disabled:opacity-50",
+                                                r#type: "button",
+                                                disabled: busy() || aid.is_empty(),
+                                                onclick: {
+                                                    let workspace_id = workspace_id.clone();
+                                                    let aid = aid.clone();
+                                                    move |_| decide_from_dash(workspace_id.clone(), aid.clone(), "deny", busy, status_line, workforce)
+                                                },
+                                                "Deny"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

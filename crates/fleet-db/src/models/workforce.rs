@@ -14,6 +14,7 @@ pub struct WorkforceGoal {
     pub run_id: Option<Uuid>,
     pub case_id: Option<Uuid>,
     pub created_by: Option<Uuid>,
+    pub source_ref: Option<String>,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

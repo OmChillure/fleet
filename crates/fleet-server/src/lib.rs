@@ -28,6 +28,7 @@ pub mod tickets;
 pub mod work_io;
 pub mod worker_hosts;
 pub mod workforce;
+pub mod workforce_os;
 
 #[cfg(test)]
 mod merge_gate;

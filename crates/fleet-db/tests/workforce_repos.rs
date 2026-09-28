@@ -78,6 +78,7 @@ async fn insert_acting_goal(
             run_id,
             case_id,
             created_by: Some(user_id),
+            source_ref: None,
         },
     )
     .await
