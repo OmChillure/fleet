@@ -210,7 +210,7 @@ if ($FleetAction -eq "verify" -or $FleetAction -eq "repair") {
     }
     $configPing = Ping-PlaneUrl $configUrl
     $commandPing = Ping-PlaneUrl $commandUrl
-    $different = $commandUrl -and ($commandUrl -ne $configUrl)
+    $different = $commandUrl -and $configUrl -and ($commandUrl -ne $configUrl)
     Write-Host "fleet-host verify"
     if ($alreadyPaired) { Write-Host "token:           present" } else { Write-Host "token:           missing" }
     if ($configUrl) { Write-Host "plane_config:    $configUrl" } else { Write-Host "plane_config:    missing" }
@@ -231,7 +231,51 @@ if ($FleetAction -eq "verify" -or $FleetAction -eq "repair") {
         Write-Host "repair:          offered"
         Write-Host "repair_next:     Re-run and answer y, or set FLEET_ACTION=repair. The machine token stays. It does not re-pair."
     }
-    if ($do -and $alreadyPaired) {
+    if (-not $alreadyPaired) {
+        $supplied = "$env:FLEET_MACHINE_TOKEN".Trim()
+        Write-Host "means:           no machine token on this computer, and no saved control plane."
+        Write-Host "means:           The card already has a token. The server only kept a hash, so this command must include the saved flm_ value as FLEET_MACHINE_TOKEN."
+        Write-Host "means:           Writing it does not pair and does not mint a token. A pair token would be a different machine."
+        if ($supplied -notmatch '^flm_') {
+            if ($supplied) { Write-Host "repair_next:     FLEET_MACHINE_TOKEN must be the saved flm_ token, not a pair token." }
+            else { Write-Host "repair_next:     Re-run with FLEET_MACHINE_TOKEN set to the saved flm_ token. Do not use a pair token." }
+            Write-Host "repair:          refused"
+            return
+        }
+        $write = $false
+        if ($FleetAction -eq "repair" -or $env:FLEET_VERIFY_REPAIR -eq "1") { $write = $true }
+        elseif ($env:FLEET_VERIFY_REPAIR -eq "0") { $write = $false }
+        elseif (-not [Console]::IsInputRedirected) {
+            $ans = Read-Host "Write the token from this command and set the control plane to $commandUrl? This does not pair. [y/N]"
+            if ($ans -match '^(y|yes)$') { $write = $true }
+        } else {
+            Write-Host "ask:             Write the token from this command and set the control plane to $commandUrl? This does not pair. [y/N]"
+            Write-Host "repair:          offered"
+            Write-Host "repair_next:     Answer y, or set FLEET_ACTION=repair. It does not re-pair."
+            return
+        }
+        if (-not $write) {
+            Write-Host "repair:          offered"
+            return
+        }
+        if ($commandUrl -notmatch '^https?://') {
+            Write-Host "repair:          refused"
+            Write-Host "repair_next:     Set FLEET_URL to the control plane before writing the token."
+            return
+        }
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        [System.IO.File]::WriteAllText($tokenFile, $supplied)
+        Remove-Item Env:FLEET_MACHINE_TOKEN -ErrorAction SilentlyContinue
+        $toml = Join-Path $cfgDir "config.toml"
+        [System.IO.File]::WriteAllLines($toml, @("control_plane_url = `"$commandUrl`""))
+        $check = [System.IO.File]::ReadAllText($tokenFile)
+        if ($check -ne $supplied) { throw "machine.token changed while writing the URL; not pairing" }
+        $alreadyPaired = $true
+        Write-Host "repair:          wrote token from the command"
+        Write-Host "repair_url:      $commandUrl"
+        $script:FleetContinueInstall = $true
+    }
+    if ($do -and $alreadyPaired -and -not $script:FleetContinueInstall) {
         $target = if ($commandUrl) { $commandUrl } else { $configUrl }
         $before = [System.IO.File]::ReadAllBytes($tokenFile)
         $toml = Join-Path $cfgDir "config.toml"
@@ -261,7 +305,13 @@ if ($FleetAction -eq "verify" -or $FleetAction -eq "repair") {
         Write-Host "repair_url:      $target"
         return
     }
-    return
+    if (-not $script:FleetContinueInstall) { return }
+}
+
+if ($script:FleetContinueInstall) {
+    $alreadyPaired = $true
+    $pairToken = ""
+    $env:FLEET_PAIR_TOKEN = $null
 }
 
 Write-Host "Agent Fleet worker installer"

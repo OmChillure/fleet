@@ -608,7 +608,7 @@ fn VerifyInstallBlock(verify_base: String) -> Element {
                 }
             }
             p { class: "mt-3 mb-0 text-xs text-[var(--app-muted)]",
-                "The verdict, what it means, the plane ping, and the repair question are printed by the command."
+                "The verdict, what it means, the plane ping, and the repair question are printed by the command. If that computer has no token file, the server cannot fill the old one in. Set FLEET_MACHINE_TOKEN to the flm_ value you saved when the worker was added, then answer y. That writes the same token. It does not pair."
             }
         }
     }

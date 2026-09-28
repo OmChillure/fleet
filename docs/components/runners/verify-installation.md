@@ -30,6 +30,8 @@ $env:FLEET_URL="$ORIGIN"; $env:FLEET_ACTION="verify"; irm "$ORIGIN/install-worke
 
 `repair` is the same script with `sh -s -- repair` (or `FLEET_ACTION=repair`). It keeps the machine token. `install` is the default and is the only action that uses a pair token.
 
+The card command does not contain a token. If that computer has no `machine.token` file, set `FLEET_MACHINE_TOKEN` to the `flm_` value saved when the worker was added, then answer y. The server only kept a hash, so it cannot fill that value in. Writing it does not pair. A pair token would be a different machine.
+
 The script does not pair and does not print `machine.token`. It pings
 `/health` on the URL in `config.toml` and on `FLEET_URL` from the command.
 When the program and the token are both present it asks whether to repair:

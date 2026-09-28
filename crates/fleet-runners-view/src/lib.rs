@@ -2722,6 +2722,8 @@ mod tests {
         );
         assert!(!unix.contains("FLEET_PAIR_TOKEN"));
         assert!(!windows.contains("FLEET_PAIR_TOKEN"));
+        assert!(!unix.contains("FLEET_MACHINE_TOKEN"));
+        assert!(!windows.contains("FLEET_MACHINE_TOKEN"));
         assert!(!unix.contains("machine.token"));
     }
 

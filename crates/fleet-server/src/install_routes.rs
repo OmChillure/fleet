@@ -54,22 +54,31 @@ async fn get_named_script(AxumPath(name): AxumPath<String>) -> AppResult<Respons
     reject_unsafe_name(&name)?;
     let body = script_body(&name).ok_or_else(|| AppError::not_found("install script not found"))?;
     if name == "verify.sh" {
-        let baked = bake_verify_origin(body);
+        let baked = bake_verify_origin(body, &verify_origin_from_env());
         return Ok(script_response(&name, &baked));
     }
     Ok(script_response(&name, body))
 }
 
-/// Piped `curl verify.sh | sh` has no sibling file. Stamp the worker public
-/// base into the one token the script understands. A git checkout stays
-/// unsubstituted so `sh verify.sh` next to `_unix_common.sh` is unchanged.
-fn bake_verify_origin(body: &str) -> String {
-    let origin = std::env::var("WORKER_PUBLIC_BASE")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default()
-        .replace('\'', "");
+/// Piped `curl verify.sh | sh` has no sibling file. Stamp the pair origin
+/// into the one token the script understands. `WORKER_PUBLIC_BASE` wins.
+/// The API container often has only `API_PUBLIC_BASE` (compose does not
+/// pass the worker base through). A git checkout stays unsubstituted so
+/// `sh verify.sh` next to `_unix_common.sh` is unchanged.
+fn verify_origin_from_env() -> String {
+    for key in ["WORKER_PUBLIC_BASE", "API_PUBLIC_BASE"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim().trim_end_matches('/').to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    String::new()
+}
+
+fn bake_verify_origin(body: &str, origin: &str) -> String {
+    let origin = origin.trim().trim_end_matches('/').replace('\'', "");
     body.replace("'@fleet-verify-origin@'", &format!("'{origin}'"))
 }
 
@@ -607,6 +616,20 @@ mod tests {
         }
         fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn bake_verify_origin_stamps_the_pair_url() {
+        let body = "origin='@fleet-verify-origin@'\ncase @fleet-verify-origin@ in\n";
+        let got = bake_verify_origin(body, "https://agentfleet.studio/");
+        assert_eq!(
+            got,
+            "origin='https://agentfleet.studio'\ncase @fleet-verify-origin@ in\n"
+        );
+        assert_eq!(
+            bake_verify_origin(body, ""),
+            "origin=''\ncase @fleet-verify-origin@ in\n"
+        );
     }
 
     #[test]
