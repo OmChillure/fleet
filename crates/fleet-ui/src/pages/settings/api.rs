@@ -13,6 +13,10 @@ pub struct FleetSettings {
     pub min_isolation: String,
     #[serde(default = "default_on_pc")]
     pub default_run_mode: String,
+    #[serde(default = "default_inherit")]
+    pub default_egress: String,
+    #[serde(default)]
+    pub default_egress_allowlist: String,
     #[serde(default = "default_chat_max_turns")]
     pub chat_max_turns: i32,
     #[serde(default = "default_chat_max_turns_min")]
@@ -47,6 +51,10 @@ fn default_on_pc() -> String {
     "on_pc".into()
 }
 
+fn default_inherit() -> String {
+    "inherit".into()
+}
+
 fn default_chat_max_turns() -> i32 {
     32
 }
@@ -67,6 +75,10 @@ pub struct FleetSettingsPatch {
     pub min_isolation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_run_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_egress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_egress_allowlist: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_max_turns: Option<i32>,
 }

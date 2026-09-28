@@ -41,6 +41,7 @@ pub struct KubePodOpts {
     pub memory: String,
     pub ephemeral: String,
     pub egress_mode: String,
+    pub extra_allowlist: Vec<String>,
 }
 
 impl KubePodOpts {
@@ -66,8 +67,26 @@ impl KubePodOpts {
             cpu: nonempty(&cfg.k8s_cpu, DEFAULT_CPU),
             memory: nonempty(&cfg.k8s_memory, DEFAULT_MEMORY),
             ephemeral: nonempty(&cfg.k8s_ephemeral, DEFAULT_EPHEMERAL),
-            egress_mode: nonempty(&cfg.egress_mode, "none"),
+            egress_mode: job_egress_mode(payload, cfg),
+            extra_allowlist: split_allowlist(&payload.egress_allowlist),
         }
+    }
+}
+
+fn split_allowlist(raw: &str) -> Vec<String> {
+    raw.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn job_egress_mode(payload: &SpawnPayload, cfg: &LocalConfig) -> String {
+    let job = payload.egress_mode.trim();
+    if job.is_empty() || job.eq_ignore_ascii_case("inherit") {
+        nonempty(&cfg.egress_mode, "none")
+    } else {
+        job.to_ascii_lowercase()
     }
 }
 
@@ -82,10 +101,25 @@ fn nonempty(s: &str, fallback: &str) -> String {
 
 fn network_for_opts(opts: &KubePodOpts) -> SandboxNetwork {
     let mode = opts.egress_mode.trim().to_ascii_lowercase();
+    if mode == "open" {
+        return SandboxNetwork {
+            egress_mode: "open".into(),
+            allowlist: vec![],
+        };
+    }
     // A host IP callback needs a CIDR or NetworkPolicy blocks heartbeats,
     // even when the box default is egress none.
     if mode == "allowlist" || worker_url_is_ip_literal(&opts.worker_api_url) {
-        return network_for_worker_url(&opts.worker_api_url);
+        let mut net = network_for_worker_url(&opts.worker_api_url);
+        if mode == "allowlist" {
+            net.egress_mode = "allowlist".into();
+            for cidr in &opts.extra_allowlist {
+                if !net.allowlist.iter().any(|c| c == cidr) {
+                    net.allowlist.push(cidr.clone());
+                }
+            }
+        }
+        return net;
     }
     SandboxNetwork {
         egress_mode: if mode == "dns_only" {
@@ -448,6 +482,8 @@ mod tests {
             orchestrator_url: "http://api.agent-fleet.svc.cluster.local:8080".into(),
             runtime: JobRuntime::Container,
             run_mode: Some("in_container".into()),
+            egress_mode: String::new(),
+            egress_allowlist: String::new(),
             isolation: Some("container".into()),
             task_title: "Root task".into(),
             task_spec: "Write work/plan.md".into(),
@@ -471,6 +507,7 @@ mod tests {
             memory: DEFAULT_MEMORY.into(),
             ephemeral: DEFAULT_EPHEMERAL.into(),
             egress_mode: "none".into(),
+            extra_allowlist: vec![],
         }
     }
 

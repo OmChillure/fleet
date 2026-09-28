@@ -6,27 +6,55 @@ Re-run that command whenever the diff changes — the map follows
 direct and indirect path hits in `tests/browser/surface_map.toml`.
 
 - Merge-base: `d5f706a1c3217811d38ae9307451e52c36c3cc98`
-- Tree-id: `29715dff9fee3c663956ccffdbd6d4a5b4b4df8e`
+- Tree-id: `f202bc49a0638987b3186f08a5e0228a1548e96c-53a6f9d8df8c`
 
 ## Scenes
 
+- `auth`
+- `workspace`
+- `fleet`
+- `sandboxes`
+- `settings`
 - `runners`
 - `lab`
+- `kind`
+- `k8s`
 
 ## Pause steps
 
+- Kubernetes sandboxes
+- Signup
+- Login
+- Login wall
+- Workspace switcher
 - Runners / Self-hosted
 - Workers
+- Fleet
+- Sandboxes
+- Settings
+- Settings members
 - This merge request
 
 ## Why
 
 | Path | Scenes |
 | --- | --- |
+| `Dockerfile` | `kind` |
+| `Dockerfile.ui` | `kind` |
+| `crates/fleet-db/src/repos/workspaces.rs` | `auth`, `workspace` |
+| `crates/fleet-host/src/client.rs` | `runners` |
+| `crates/fleet-host/src/exec_k8s.rs` | `runners`, `k8s`, `fleet` |
+| `crates/fleet-host/src/spawn.rs` | `runners` |
+| `crates/fleet-operator/src/reconcile.rs` | `kind` |
+| `crates/fleet-orchestrator/src/orch/spawn.rs` | `fleet` |
+| `crates/fleet-orchestrator/src/sandbox/remote.rs` | `fleet`, `sandboxes` |
 | `crates/fleet-runners-view/src/lib.rs` | `runners` |
 | `crates/fleet-sandbox-driver/sandbox-lab/tests/test_install_worker.py` | `lab` |
+| `crates/fleet-server/src/fleet_routes.rs` | `fleet` |
 | `crates/fleet-server/src/install_routes.rs` | `runners` |
 | `crates/fleet-ui/src/pages/runners/self_hosted/page.rs` | `runners` |
+| `crates/fleet-ui/src/pages/settings/api.rs` | `settings` |
+| `crates/fleet-ui/src/pages/settings/page.rs` | `settings` |
 | `scripts/install-worker/_unix_common.sh` | `runners` |
 | `scripts/install-worker/install-worker.sh` | `runners` |
 | `scripts/install-worker/verify.ps1` | `runners` |
@@ -41,7 +69,7 @@ Then inspect every scene frame under `.tmp/demos/<stamp>-frames/`
 and the `.webm`. Look for bugs: wrong heading, error toast,
 missing control, broken layout, failed action, leaked secret.
 
-- Recorded on final merge tree: f505b6a9c0560989b9b99d8f869de1de0cb06d7e (`.tmp/demos/20260927T234905Z-runners-lab.webm`). API `/health` and UI `/fleet-git-sha.txt` matched that id. Signup and login used `demo.d1556efa07@example.test`.
-- Frames + webm inspected: `.tmp/demos/20260927T234905Z-frames/` (01–15, runners.png, lab.png) and `20260927T234905Z-runners-lab.webm`
-- Bugs found:
-  - none. Offline card 5700g shows Verify installation, `sh -s -- verify`, and the Windows `FLEET_ACTION=verify` command, with no pair token. The pending card has no verify block. Copy shows "Command copied." Lab protocol frame ends OK. The pair panel shows a one-time install token, which is the add-worker command.
+- Recorded on final merge tree: 
+- Frames + webm inspected: 
+- Bugs found: 
+  - (none / list them)
