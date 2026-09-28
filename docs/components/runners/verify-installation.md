@@ -16,7 +16,7 @@ origin is `WORKER_PUBLIC_BASE` (the same origin the install command uses).
 Paste the matching one in a terminal **on that computer**.
 
 ```sh
-curl -fsSL "$ORIGIN/install-worker.sh" | FLEET_URL="$ORIGIN" sh -s -- verify
+curl -fsSL "$ORIGIN/install-worker.sh" | FLEET_URL="$ORIGIN" FLEET_MACHINE_TOKEN='<saved flm_ token>' sh -s -- verify
 ```
 
 `curl -fsSL "$ORIGIN/install/worker/verify.sh" | sh` is the same check.

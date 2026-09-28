@@ -646,7 +646,7 @@ fleet_verify() {
     case $_config_ping in reachable*) _config_up=1 ;; esac
     case $_command_ping in reachable*) _command_up=1 ;; esac
     _different=0
-    if [ -n "$_command" ] && [ "$_command" != "$_config" ]; then
+    if [ -n "$_command" ] && [ -n "$_config" ] && [ "$_command" != "$_config" ]; then
         _different=1
     fi
 
@@ -781,13 +781,83 @@ fleet_verify() {
         info "repair:          offered"
         info "repair_next:     Re-run and answer y, or pass repair. The machine token stays. It does not re-pair."
     fi
+    if [ "$_token" -eq 0 ]; then
+        _supplied=$(printf '%s' "${FLEET_MACHINE_TOKEN:-}" | tr -d '[:space:]')
+        info "means:           no machine token on this computer, and no saved control plane."
+        info "means:           The card already has a token. The server only kept a hash, so this command must include the saved flm_ value as FLEET_MACHINE_TOKEN."
+        info "means:           Writing it does not pair and does not mint a token. A pair token would be a different machine."
+        case $_supplied in
+            flm_*)
+                _ask="Write the token from this command and set the control plane to ${_command:-<set FLEET_URL>}? This does not pair. [y/N] "
+                info "ask:             $_ask"
+                _yes=0
+                case ${FLEET_VERIFY_REPAIR:-} in
+                    1|y|yes) _yes=1 ;;
+                    0|n|no) _yes=0 ;;
+                    *)
+                        if [ "$FLEET_ACTION" = repair ]; then
+                            _yes=1
+                        elif [ -t 1 ] && [ -r /dev/tty ]; then
+                            printf '%s' "$_ask" >/dev/tty
+                            _ans=
+                            read -r _ans </dev/tty || _ans=
+                            case $_ans in
+                                y|Y|yes|YES) _yes=1 ;;
+                            esac
+                        fi
+                        ;;
+                esac
+                if [ "$_yes" -ne 1 ]; then
+                    info "repair:          offered"
+                    info "repair_next:     Answer y to write that token, or pass repair. It does not re-pair."
+                    return "$_code"
+                fi
+                case $_command in
+                    http://*|https://*) ;;
+                    *)
+                        info "repair:          refused"
+                        info "repair_next:     Set FLEET_URL to the control plane before writing the token."
+                        return "$_code"
+                        ;;
+                esac
+                mkdir -p "$(dirname "$token_file")"
+                printf '%s' "$_supplied" > "$token_file"
+                unset FLEET_MACHINE_TOKEN
+                write_control_plane_url "$_command"
+                already_paired=1
+                info "repair:          wrote token from the command"
+                info "repair_url:      $_command"
+                if [ ! -x "${_bin:-}" ]; then
+                    FLEET_CONTINUE_INSTALL=1
+                    info "repair_next:     The program is not installed. Continuing with install. It will not pair."
+                    return 0
+                fi
+                start_host_service || true
+                return 0
+                ;;
+            "")
+                info "repair:          refused"
+                info "repair_next:     Re-run with FLEET_MACHINE_TOKEN set to the saved flm_ token. Do not use a pair token."
+                ;;
+            *)
+                info "repair:          refused"
+                info "repair_next:     FLEET_MACHINE_TOKEN must be the saved flm_ token, not a pair token."
+                ;;
+        esac
+    fi
     return "$_code"
 }
 
 case ${FLEET_ACTION:-install} in
     verify|repair)
         fleet_verify
-        exit $?
+        _verify_rc=$?
+        if [ "${FLEET_CONTINUE_INSTALL:-}" = 1 ]; then
+            already_paired=1
+            unset FLEET_PAIR_TOKEN
+        else
+            exit "$_verify_rc"
+        fi
         ;;
 esac
 
