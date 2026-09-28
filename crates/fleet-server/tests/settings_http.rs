@@ -472,6 +472,49 @@ async fn fleet_settings_egress_defaults_inherit_and_owner_can_open() {
 }
 
 #[tokio::test]
+async fn repo_posture_is_saved_and_envelope_defaults_wide() {
+    let app = app().await;
+    let (_email, jar, ws) = signup_and_login(&app).await;
+    let settings = fleet(&ws, "/settings");
+
+    let got = call(&app, "GET", &settings, Some(&jar), None).await;
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["run_envelope"], "on_pc", "{}", got.body);
+    assert_eq!(got.body["egress_envelope"], "open", "{}", got.body);
+
+    let capped = call(
+        &app,
+        "PATCH",
+        &settings,
+        Some(&jar),
+        Some(json!({ "run_envelope": "in_container", "egress_envelope": "none" })),
+    )
+    .await;
+    assert_eq!(capped.status, StatusCode::OK, "{}", capped.body);
+    assert_eq!(capped.body["run_envelope"], "in_container", "{}", capped.body);
+    assert_eq!(capped.body["egress_envelope"], "none", "{}", capped.body);
+
+    let saved = call(
+        &app,
+        "PUT",
+        &fleet(&ws, "/repo-postures"),
+        Some(&jar),
+        Some(json!({
+            "repo": "acme/app",
+            "run_mode": "in_container",
+            "egress_mode": "none"
+        })),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(saved.body["repo"], "acme/app", "{}", saved.body);
+
+    let listed = call(&app, "GET", &fleet(&ws, "/repo-postures"), Some(&jar), None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["repos"][0]["repo"], "acme/app", "{}", listed.body);
+}
+
+#[tokio::test]
 async fn fleet_settings_patch_min_isolation_container_persists() {
     let app = app().await;
     let (_email, jar, ws) = signup_and_login(&app).await;

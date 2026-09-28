@@ -1523,11 +1523,65 @@ pub(crate) fn stamp_plan_llm(plan: &mut WorkPlanBody, llm: &ChatLlmContext) {
 }
 
 async fn stamp_workspace_run_mode(state: &AppState, workspace_id: Uuid, plan: &mut WorkPlanBody) {
-    if let Ok(mode) = fleet_db::repos::workspaces::default_run_mode(&state.db, workspace_id).await {
-        if fleet_db::parse_worker_host_run_mode(&mode).is_some() {
-            plan.policy.run_mode = mode;
+    let ws = &state.db;
+    let run_envelope = fleet_db::repos::workspaces::run_envelope(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "on_pc".into());
+    let egress_envelope = fleet_db::repos::workspaces::egress_envelope(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "open".into());
+    let fallback_run = fleet_db::repos::workspaces::default_run_mode(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "on_pc".into());
+    let fallback_egress = fleet_db::repos::workspaces::default_egress(ws, workspace_id)
+        .await
+        .unwrap_or_else(|_| "inherit".into());
+    let repo = repo_key_from_plan(plan);
+    let stored = match repo.as_deref() {
+        Some(name) => fleet_db::repos::repo_postures::get(ws, workspace_id, name)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let resolved = fleet_db::resolve_posture(
+        &run_envelope,
+        &egress_envelope,
+        &fallback_run,
+        &fallback_egress,
+        stored.as_ref().map(|p| p.run_mode.as_str()),
+        stored.as_ref().map(|p| p.egress_mode.as_str()),
+        None,
+        None,
+    );
+    if let Ok(resolved) = resolved {
+        plan.policy.run_mode = resolved.run_mode;
+        plan.policy.egress_mode = resolved.egress_mode;
+        plan.policy.egress_allowlist = stored
+            .map(|p| p.egress_allowlist)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_default();
+        if plan.policy.egress_allowlist.is_empty() && plan.policy.egress_mode == "allowlist" {
+            if let Ok(list) =
+                fleet_db::repos::workspaces::default_egress_allowlist(ws, workspace_id).await
+            {
+                plan.policy.egress_allowlist = list;
+            }
+        }
+        plan.policy.posture_loosened = resolved.loosened;
+    }
+}
+
+fn repo_key_from_plan(plan: &WorkPlanBody) -> Option<String> {
+    for task in &plan.tasks {
+        let raw = task.external_ref.as_ref().map(|r| r.key.as_str())?;
+        let raw = raw.trim();
+        let name = raw.split(['#', ' ']).next().unwrap_or(raw).trim();
+        if name.contains('/') && !name.contains("://") {
+            return Some(name.to_string());
         }
     }
+    None
 }
 
 pub fn build_multi_task_plan(

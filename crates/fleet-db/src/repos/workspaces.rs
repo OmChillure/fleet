@@ -409,6 +409,79 @@ pub async fn set_default_egress_allowlist(
     stored.ok_or_else(|| DbError::NotFound("workspace".into()))
 }
 
+pub async fn run_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT run_envelope FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn egress_envelope(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT egress_envelope FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    row.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_run_envelope(pool: &PgPool, workspace_id: Uuid, mode: &str) -> DbResult<String> {
+    let mode = parse_worker_host_run_mode(mode).ok_or_else(|| {
+        DbError::Conflict("run_envelope must be on_pc or in_container".into())
+    })?;
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET run_envelope = $2, updated_at = now(), version = version + 1
+        WHERE id = $1
+        RETURNING run_envelope
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
+pub async fn set_egress_envelope(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    mode: &str,
+) -> DbResult<String> {
+    let mode = match mode.trim() {
+        "open" => "open",
+        "allowlist" => "allowlist",
+        "none" => "none",
+        _ => {
+            return Err(DbError::Conflict(
+                "egress_envelope must be open, allowlist, or none".into(),
+            ))
+        }
+    };
+    let stored = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE workspaces
+        SET egress_envelope = $2, updated_at = now(), version = version + 1
+        WHERE id = $1
+        RETURNING egress_envelope
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_err)?;
+    stored.ok_or_else(|| DbError::NotFound("workspace".into()))
+}
+
 pub const CHAT_MAX_TURNS_DEFAULT: i32 = 32;
 pub const CHAT_MAX_TURNS_MIN: i32 = 1;
 pub const CHAT_MAX_TURNS_MAX: i32 = 128;

@@ -17,6 +17,10 @@ pub struct FleetSettings {
     pub default_egress: String,
     #[serde(default)]
     pub default_egress_allowlist: String,
+    #[serde(default = "default_on_pc")]
+    pub run_envelope: String,
+    #[serde(default = "default_open")]
+    pub egress_envelope: String,
     #[serde(default = "default_chat_max_turns")]
     pub chat_max_turns: i32,
     #[serde(default = "default_chat_max_turns_min")]
@@ -55,6 +59,10 @@ fn default_inherit() -> String {
     "inherit".into()
 }
 
+fn default_open() -> String {
+    "open".into()
+}
+
 fn default_chat_max_turns() -> i32 {
     32
 }
@@ -79,6 +87,10 @@ pub struct FleetSettingsPatch {
     pub default_egress: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_egress_allowlist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_envelope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_envelope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_max_turns: Option<i32>,
 }
@@ -108,6 +120,35 @@ async fn authorized_get(path: &str) -> Result<reqwest::Response, String> {
         .send()
         .await
         .map_err(|e| e.to_string())
+}
+
+pub async fn put_repo_posture(path: &str, body: &impl Serialize) -> Result<(), String> {
+    let first = with_credentials(client().put(api_url(path)).json(body))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let res = if first.status().as_u16() == 401 {
+        refresh_session().await.map_err(|e| e.message())?;
+        with_credentials(client().put(api_url(path)).json(body))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        first
+    };
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        #[derive(Deserialize)]
+        struct ErrBody {
+            error: String,
+        }
+        Err(serde_json::from_str::<ErrBody>(&text)
+            .map(|b| b.error)
+            .unwrap_or_else(|_| format!("request failed ({status})")))
+    }
 }
 
 async fn authorized_patch_json(

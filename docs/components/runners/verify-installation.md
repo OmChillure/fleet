@@ -19,6 +19,11 @@ Paste the matching one in a terminal **on that computer**.
 curl -fsSL "$ORIGIN/install-worker.sh" | FLEET_URL="$ORIGIN" sh -s -- verify
 ```
 
+`curl -fsSL "$ORIGIN/install/worker/verify.sh" | sh` is the same check.
+The control plane writes its own origin into that file. Piped into `sh`,
+the script has no path on disk, so it downloads `_unix_common.sh` from
+that origin. It does not look in the current directory.
+
 ```powershell
 $env:FLEET_URL="$ORIGIN"; $env:FLEET_ACTION="verify"; irm "$ORIGIN/install-worker.ps1" | iex
 ```
