@@ -423,9 +423,12 @@ worker_base_is_local() {
 # One listen port → every local URL. Public hosts (https://studio) stay set.
 derive_local_urls() {
   if worker_base_is_local "${WORKER_PUBLIC_BASE:-}"; then
-    local ip
+    local ip bind
     ip="$(lan_ipv4)"
-    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
+    bind="${HOST:-127.0.0.1}"
+    # The dev API listens on loopback. A LAN address in the host config
+    # makes fleet-host pair and then fail every heartbeat.
+    if [[ "$bind" == "127.0.0.1" || "$bind" == "localhost" || "$bind" == "::1" || -z "$ip" || "$ip" == "127.0.0.1" ]]; then
       WORKER_PUBLIC_BASE="http://127.0.0.1:${API_PORT}"
     else
       WORKER_PUBLIC_BASE="http://${ip}:${API_PORT}"
@@ -561,6 +564,11 @@ start_host() {
   fi
   local port="${FLEET_API_PORT:-${PORT:-$API_PORT}}"
   mkdir -p "$RUN_DIR/host"
+  local want="http://127.0.0.1:${port}"
+  if [[ -f "$RUN_DIR/host/config.toml" ]] && ! grep -q "control_plane_url = \"$want\"" "$RUN_DIR/host/config.toml"; then
+    rm -f "$RUN_DIR/host/config.toml" "$RUN_DIR/host/machine.token"
+    log "Dropped stale fleet-host pair so it can reach $want"
+  fi
   log "Starting fleet-host (bootstrap pair + lease)…"
   nohup env \
     CARGO_TERM_COLOR=never \
