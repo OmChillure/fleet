@@ -333,11 +333,11 @@ pub fn Integrations(workspace_id: String) -> Element {
                                             h2 { class: "m-0 truncate text-[15px] font-semibold tracking-tight text-[var(--app-fg)]",
                                                 "{integ.name}"
                                             }
-                                            div { class: "mt-0.5 flex items-center gap-1.5 text-xs text-[var(--app-muted)]",
+                                            div { class: "mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[var(--app-muted)]",
                                                 span {
                                                     class: "inline-block h-1.5 w-1.5 shrink-0 rounded-full {status_dot}"
                                                 }
-                                                span { class: "truncate", "{subtitle}" }
+                                                span { class: "min-w-0 break-all", title: "{subtitle}", "{subtitle}" }
                                                 if connected {
                                                     span { class: "text-emerald-400/90", "· Connected" }
                                                 } else if reconnect {
