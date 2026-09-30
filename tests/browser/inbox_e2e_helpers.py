@@ -143,7 +143,7 @@ def seed_connected_github(workspace_id: str) -> None:
         "connected_at, updated_at, version"
         ") VALUES ("
         f"gen_random_uuid(), {_lit(workspace_id)}, 'github', 'connected', "
-        "'inbox-e2e', 'inbox-e2e', '{{}}'::jsonb, '{{}}'::jsonb, now(), now(), 1"
+        "'inbox-e2e', 'inbox-e2e', '{}'::jsonb, '{}'::jsonb, now(), now(), 1"
         ") ON CONFLICT (workspace_id, provider, display_name) "
         "WHERE display_name <> '' AND status <> 'disconnected' DO UPDATE SET "
         "status = 'connected', last_error = NULL, updated_at = now()",
