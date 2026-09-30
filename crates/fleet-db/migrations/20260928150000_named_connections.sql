@@ -68,7 +68,6 @@ INSERT INTO integration_provider_categories (provider, category_id) VALUES
     ('github', 'source_control'),
     ('gitlab', 'source_control'),
     ('gitea', 'source_control'),
-    ('gogs', 'source_control'),
     ('bitbucket', 'source_control'),
     ('jira', 'issue_trackers'),
     ('linear', 'issue_trackers'),
