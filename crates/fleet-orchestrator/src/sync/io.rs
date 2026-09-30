@@ -181,23 +181,23 @@ impl ExternalBoardSync for IoBoardSync {
                     }
                 }
             }
-            "gitea" => {
+            "gitea" | "gogs" => {
                 if let Some((owner, repo, number)) = parse_github_issue(key) {
                     log_io(
                         inv.invoke(
                             ws,
-                            "gitea".into(),
+                            provider.into(),
                             "add_comment".into(),
                             json!({ "owner": owner, "repo": repo, "number": number, "body": body }),
                         )
                         .await,
-                        "gitea.add_comment",
+                        &format!("{provider}.add_comment"),
                     );
                     if let Some(state) = github_issue_state(&item.status) {
                         log_io(
                             inv.invoke(
                                 ws,
-                                "gitea".into(),
+                                provider.into(),
                                 "update_issue".into(),
                                 json!({
                                     "owner": owner,
@@ -207,7 +207,7 @@ impl ExternalBoardSync for IoBoardSync {
                                 }),
                             )
                             .await,
-                            "gitea.update_issue",
+                            &format!("{provider}.update_issue"),
                         );
                     }
                 }
@@ -556,6 +556,28 @@ mod tests {
         assert_eq!(gh.2["repo"], "app");
         assert_eq!(gh.2["number"], 4);
         assert_eq!(gh.2["state"], "closed");
+    }
+
+    #[tokio::test]
+    async fn closes_gogs_issue_on_done_success() {
+        let (rec, sync) = wired_rec();
+        let ws = uuid::Uuid::new_v4();
+        sync.sync_task_status(item(ws, "gogs", "worms/game#1", "done_success"))
+            .await
+            .unwrap();
+        let calls = rec.calls.lock().unwrap();
+        let comment = calls
+            .iter()
+            .find(|(p, o, _)| p == "gogs" && o == "add_comment")
+            .expect("gogs.add_comment");
+        assert_eq!(comment.2["owner"], "worms");
+        assert_eq!(comment.2["repo"], "game");
+        assert_eq!(comment.2["number"], 1);
+        let update = calls
+            .iter()
+            .find(|(p, o, _)| p == "gogs" && o == "update_issue")
+            .expect("gogs.update_issue");
+        assert_eq!(update.2["state"], "closed");
     }
 
     #[tokio::test]

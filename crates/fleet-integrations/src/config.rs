@@ -73,6 +73,9 @@ pub struct IntegrationsConfig {
     pub gitea: Option<OAuthClientConfig>,
     /// Root of the Gitea instance (`http://localhost:3033`), no trailing slash.
     pub gitea_base_url: String,
+    /// Root of the Gogs instance (`http://localhost:3034`), no trailing slash.
+    /// Gogs has no OAuth apps; Connect exchanges a login for an API token.
+    pub gogs_base_url: String,
     pub slack: Option<OAuthClientConfig>,
     pub linear: Option<OAuthClientConfig>,
     pub jira: Option<OAuthClientConfig>,
@@ -132,6 +135,11 @@ impl IntegrationsConfig {
                 .map(|s| s.trim().trim_end_matches('/').to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "http://localhost:3033".into()),
+            gogs_base_url: env::var("GOGS_BASE_URL")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://localhost:3034".into()),
             slack: optional_oauth("SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET")?,
             linear: optional_oauth("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")?,
             jira: optional_oauth("JIRA_CLIENT_ID", "JIRA_CLIENT_SECRET")?,
@@ -169,6 +177,9 @@ impl IntegrationsConfig {
     }
 
     pub fn is_oauth_configured(&self, provider: &str) -> bool {
+        if provider == "gogs" {
+            return !self.gogs_base_url.trim().is_empty();
+        }
         self.oauth_for(provider).is_some()
     }
 

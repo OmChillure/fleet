@@ -142,6 +142,7 @@ async fn run() -> anyhow::Result<()> {
         ("github", config.integrations.github.is_some()),
         ("gitlab", config.integrations.gitlab.is_some()),
         ("gitea", config.integrations.gitea.is_some()),
+        ("gogs", !config.integrations.gogs_base_url.trim().is_empty()),
         ("slack", config.integrations.slack.is_some()),
         ("linear", config.integrations.linear.is_some()),
         ("jira", config.integrations.jira.is_some()),

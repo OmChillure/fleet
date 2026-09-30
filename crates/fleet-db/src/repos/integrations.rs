@@ -145,6 +145,32 @@ pub async fn find_proxy_connection(
 
 /// Insert or re-connect a provider for a workspace (replaces credentials).
 pub async fn upsert(pool: &PgPool, new: &UpsertConnection) -> DbResult<IntegrationConnection> {
+    // Fresh databases use UNIQUE (workspace_id, provider). A named-connection
+    // schema replaces that with a partial unique index, and Postgres will not
+    // infer the partial index from the bare column list.
+    match upsert_on_conflict(pool, new, "ON CONFLICT (workspace_id, provider)").await {
+        Err(err) if conflict_target_missing(&err) => {
+            upsert_on_conflict(
+                pool,
+                new,
+                "ON CONFLICT (workspace_id, provider) WHERE display_name = '' AND status <> 'disconnected'",
+            )
+            .await
+        }
+        other => other,
+    }
+}
+
+fn conflict_target_missing(err: &DbError) -> bool {
+    err.to_string()
+        .contains("no unique or exclusion constraint matching the ON CONFLICT")
+}
+
+async fn upsert_on_conflict(
+    pool: &PgPool,
+    new: &UpsertConnection,
+    conflict: &str,
+) -> DbResult<IntegrationConnection> {
     let q = format!(
         r#"
         INSERT INTO integration_connections (
@@ -152,7 +178,7 @@ pub async fn upsert(pool: &PgPool, new: &UpsertConnection) -> DbResult<Integrati
             connected_by, last_error, connected_at, updated_at, version
         )
         VALUES ($1, $2, $3, 'connected', $4, $5, $6, $7, NULL, $8, $8, 1)
-        ON CONFLICT (workspace_id, provider)
+        {conflict}
         DO UPDATE SET
             status = 'connected',
             account_label = EXCLUDED.account_label,

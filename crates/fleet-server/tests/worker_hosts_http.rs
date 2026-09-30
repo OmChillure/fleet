@@ -64,6 +64,7 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         gitlab: None,
         gitea: None,
         gitea_base_url: "http://localhost:3033".into(),
+        gogs_base_url: "http://localhost:3034".into(),
         slack: None,
         linear: None,
         jira: None,
@@ -1269,7 +1270,8 @@ async fn paired_plane_host_referer_only_loopback_still_tags() {
     );
 }
 
-/// Same resolution as fleet-server `local_hostname` (HOSTNAME, then /etc/hostname).
+/// Same resolution as fleet-server `local_hostname` (HOSTNAME, /etc/hostname,
+/// `uname -n`, `hostname`).
 fn plane_local_hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -1281,14 +1283,29 @@ fn plane_local_hostname() -> String {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
+        .or_else(|| command_stdout("uname", &["-n"]))
+        .or_else(|| command_stdout("hostname", &[]))
         .unwrap_or_default()
+}
+
+fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(bin).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 async fn pair_plane_box_host(app: &axum::Router, jar: &CookieJar, ws: &str) -> String {
     let local = plane_local_hostname();
     assert!(
         !local.is_empty(),
-        "HOSTNAME or /etc/hostname is required to pair a plane-box host"
+        "a local hostname is required to pair a plane-box host"
     );
     let name = format!("plane-{}", Uuid::new_v4());
     let created = call(

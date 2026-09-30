@@ -3,13 +3,23 @@
 use dioxus::prelude::*;
 
 use super::api::{
-    disconnect_integration, integration_is_connected, integration_needs_reconnect,
+    connect_gogs, disconnect_integration, integration_is_connected, integration_needs_reconnect,
     list_integrations, oauth_start_url, patch_integration_defaults, Integration,
 };
 use super::logos::IntegrationLogo;
 use crate::components::toast::show_toast;
 use crate::pages::inbox::is_inbox_app;
 use crate::Route;
+
+fn form_text(evt: &Event<FormData>, name: &str) -> String {
+    evt.data()
+        .get_first(name)
+        .map(|value| match value {
+            FormValue::Text(text) => text,
+            FormValue::File(_) => String::new(),
+        })
+        .unwrap_or_default()
+}
 
 /// How long we poll for a completed OAuth before giving up (~3 min).
 const OAUTH_POLL_ATTEMPTS: u32 = 90;
@@ -169,6 +179,11 @@ pub fn Integrations(workspace_id: String) -> Element {
     let mut connecting_provider = use_signal(|| Option::<String>::None);
     let mut busy_provider = use_signal(|| Option::<String>::None);
     let mut query = use_signal(|| String::new());
+    let mut gogs_open = use_signal(|| false);
+    let mut gogs_url = use_signal(|| "http://localhost:3034".to_string());
+    let mut gogs_user = use_signal(String::new);
+    let mut gogs_pass = use_signal(String::new);
+    let mut gogs_busy = use_signal(|| false);
 
     // Safe: only installs a JS listener that writes to thread_local (no signals).
     use_effect(move || {
@@ -216,7 +231,7 @@ pub fn Integrations(workspace_id: String) -> Element {
                     "Integrations"
                 }
                 p { class: "mt-1 text-sm text-[var(--app-muted)]",
-                    "Connect tools with OAuth. Tokens stay on the server, never in sandboxes."
+                    "Connect tools. Tokens stay on the server, never in sandboxes."
                 }
             }
 
@@ -370,6 +385,10 @@ pub fn Integrations(workspace_id: String) -> Element {
                                                         return;
                                                     }
                                                     let provider = provider_connect.clone();
+                                                    if provider == "gogs" {
+                                                        gogs_open.set(true);
+                                                        return;
+                                                    }
                                                     let ws = ws_connect.clone();
                                                     let name = provider_name.clone();
                                                     let url = oauth_start_url(&ws, &provider);
@@ -483,6 +502,110 @@ pub fn Integrations(workspace_id: String) -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            if gogs_open() {
+                div {
+                    class: "fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4",
+                    onclick: move |_| {
+                        if !gogs_busy() {
+                            gogs_open.set(false);
+                        }
+                    },
+                    form {
+                        class: "w-full max-w-sm rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg-elevated)] p-4",
+                        onclick: move |e| e.stop_propagation(),
+                        onsubmit: move |e| {
+                            e.prevent_default();
+                            if gogs_busy() {
+                                return;
+                            }
+                            // Read the DOM values. A password manager can fill the
+                            // fields without updating the signals.
+                            let base_url = form_text(&e, "gogs_base_url");
+                            let username = form_text(&e, "gogs_username");
+                            let password = form_text(&e, "gogs_password");
+                            let base_url = if base_url.trim().is_empty() {
+                                gogs_url()
+                            } else {
+                                base_url
+                            };
+                            let username = if username.trim().is_empty() {
+                                gogs_user()
+                            } else {
+                                username
+                            };
+                            let password = if password.is_empty() { gogs_pass() } else { password };
+                            gogs_url.set(base_url.clone());
+                            gogs_user.set(username.clone());
+                            let ws = workspace_id.clone();
+                            gogs_busy.set(true);
+                            spawn(async move {
+                                match connect_gogs(&ws, &base_url, &username, &password).await {
+                                    Ok(()) => {
+                                        if let Ok(list) = list_integrations(&ws).await {
+                                            items.set(list);
+                                        }
+                                        gogs_pass.set(String::new());
+                                        gogs_open.set(false);
+                                        show_toast().success("Gogs connected.");
+                                    }
+                                    Err(err) => show_toast().error(err.message()),
+                                }
+                                gogs_busy.set(false);
+                            });
+                        },
+                        h2 { class: "m-0 text-base font-semibold text-[var(--app-fg)]", "Connect Gogs" }
+                        p { class: "mt-1 text-xs text-[var(--app-muted)]",
+                            "Gogs has no OAuth app. Fleet signs in once at this instance and stores an API token on the server."
+                        }
+                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Instance URL"
+                            input {
+                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
+                                r#type: "url",
+                                name: "gogs_base_url",
+                                placeholder: "http://localhost:3034",
+                                autocomplete: "off",
+                                value: "{gogs_url}",
+                                oninput: move |e| gogs_url.set(e.value()),
+                            }
+                        }
+                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Username"
+                            input {
+                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
+                                r#type: "text",
+                                name: "gogs_username",
+                                autocomplete: "off",
+                                value: "{gogs_user}",
+                                oninput: move |e| gogs_user.set(e.value()),
+                            }
+                        }
+                        label { class: "mt-3 block text-xs text-[var(--app-muted)]", "Password"
+                            input {
+                                class: "mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]",
+                                r#type: "password",
+                                name: "gogs_password",
+                                autocomplete: "new-password",
+                                value: "{gogs_pass}",
+                                oninput: move |e| gogs_pass.set(e.value()),
+                            }
+                        }
+                        div { class: "mt-4 flex justify-end gap-2",
+                            button {
+                                class: "rounded-lg border border-[var(--app-border)] px-2.5 py-1 text-xs text-[var(--app-fg)]",
+                                r#type: "button",
+                                disabled: gogs_busy(),
+                                onclick: move |_| gogs_open.set(false),
+                                "Cancel"
+                            }
+                            button {
+                                class: "rounded-lg bg-[var(--app-accent)] px-2.5 py-1 text-xs font-semibold text-[var(--app-bg)] disabled:opacity-60",
+                                r#type: "submit",
+                                disabled: gogs_busy(),
+                                if gogs_busy() { "Connecting…" } else { "Connect" }
                             }
                         }
                     }

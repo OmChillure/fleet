@@ -135,6 +135,7 @@ fn test_state(pool: fleet_db::PgPool) -> IntegrationsState {
             gitlab: None,
             gitea: None,
             gitea_base_url: "http://localhost:3033".into(),
+            gogs_base_url: "http://localhost:3034".into(),
             slack: None,
             linear: None,
             jira: None,

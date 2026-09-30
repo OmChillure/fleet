@@ -66,6 +66,8 @@ pub struct MonitorState {
     #[serde(default)]
     pub gitea_repos: Vec<String>,
     #[serde(default)]
+    pub gogs_repos: Vec<String>,
+    #[serde(default)]
     pub linear_teams: Vec<String>,
     #[serde(default)]
     pub trello_boards: Vec<String>,
@@ -158,6 +160,8 @@ pub struct MonitorPatch {
     pub gitlab_projects: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gitea_repos: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gogs_repos: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linear_teams: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -10,8 +10,8 @@
 //! `min_isolation`.
 
 use super::Store;
-use crate::domain::{pick_isolation, IsolationClass};
-use crate::sandbox::{remote, SpawnRequest};
+use crate::domain::{IsolationClass, pick_isolation};
+use crate::sandbox::{SpawnRequest, remote};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -117,9 +117,7 @@ impl ChosenHost {
 
 /// Cluster label → not a PC (chat must not use it).
 pub fn host_is_not_a_pc(host: &AssignableHost) -> bool {
-    host.labels
-        .iter()
-        .any(|l| fleet_db::label_is_cluster(l))
+    host.labels.iter().any(|l| fleet_db::label_is_cluster(l))
 }
 
 /// Who may send work to this PC. Cluster → false.
@@ -773,12 +771,40 @@ fn local_machine_names() -> Vec<String> {
     out
 }
 
+fn push_nonloopback(out: &mut Vec<String>, raw: &str) {
+    let tok = raw.split('%').next().unwrap_or(raw).trim();
+    if tok.is_empty() || tok == "127.0.0.1" || tok == "::1" {
+        return;
+    }
+    if !out.iter().any(|have| have == tok) {
+        out.push(tok.to_string());
+    }
+}
+
 fn local_nonloopback_ips() -> Vec<String> {
     let mut out = Vec::new();
+    // GNU hostname -I. macOS hostname rejects -I, so a failed command adds nothing.
     if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
-        for tok in String::from_utf8_lossy(&output.stdout).split_whitespace() {
-            if tok != "127.0.0.1" && tok != "::1" {
-                out.push(tok.to_string());
+        if output.status.success() {
+            for tok in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                push_nonloopback(&mut out, tok);
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+            if output.status.success() {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    let line = line.trim();
+                    if let Some(rest) = line
+                        .strip_prefix("inet ")
+                        .or_else(|| line.strip_prefix("inet6 "))
+                    {
+                        if let Some(addr) = rest.split_whitespace().next() {
+                            push_nonloopback(&mut out, addr);
+                        }
+                    }
+                }
             }
         }
     }
@@ -876,15 +902,13 @@ async fn list_assignable_hosts(store: &Store, project_id: Uuid) -> Option<Vec<As
 
 async fn attach_send_allowlists(store: &Store, hosts: &mut [AssignableHost]) {
     let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
-    let map = match fleet_db::repos::worker_hosts::list_send_allowlists_for_hosts(
-        store.pool(),
-        &ids,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(_) => return,
-    };
+    let map =
+        match fleet_db::repos::worker_hosts::list_send_allowlists_for_hosts(store.pool(), &ids)
+            .await
+        {
+            Ok(m) => m,
+            Err(_) => return,
+        };
     for h in hosts.iter_mut() {
         if let Some(ids) = map.get(&h.id) {
             h.send_allowlist = ids.clone();
@@ -968,9 +992,10 @@ mod tests {
     }
 
     fn require_local_ip() -> String {
-        local_nonloopback_ips().into_iter().next().expect(
-            "advertised-IP match needs a non-loopback address from hostname -I",
-        )
+        local_nonloopback_ips()
+            .into_iter()
+            .next()
+            .expect("advertised-IP match needs a non-loopback address from hostname -I or ifconfig")
     }
 
     #[test]
@@ -1022,10 +1047,7 @@ mod tests {
         let name = require_local_name();
         let mut h = host(Uuid::new_v4(), true, false, true, false, 4);
         h.hostname = Some(name.to_ascii_uppercase());
-        assert!(
-            host_is_this_machine(&h),
-            "case-insensitive hostname {name}"
-        );
+        assert!(host_is_this_machine(&h), "case-insensitive hostname {name}");
     }
 
     #[test]
@@ -1182,12 +1204,10 @@ mod tests {
     #[test]
     fn container_need_does_not_fall_back_to_process() {
         let process_only = host(Uuid::new_v4(), true, true, true, false, 4);
-        assert!(pick_assignable_host_for(
-            &[process_only],
-            &HashMap::new(),
-            IsolationClass::Container
-        )
-        .is_none());
+        assert!(
+            pick_assignable_host_for(&[process_only], &HashMap::new(), IsolationClass::Container)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1216,8 +1236,8 @@ mod tests {
         let h = host(id, true, true, true, true, 4);
         let mut inflight = HashMap::new();
         inflight.insert(id, 3);
-        let chosen = pick_assignable_host(&[h], &inflight)
-            .expect("inflight 3 is under plane max 4");
+        let chosen =
+            pick_assignable_host(&[h], &inflight).expect("inflight 3 is under plane max 4");
         assert_eq!(chosen.id(), id);
     }
 
@@ -1241,19 +1261,13 @@ mod tests {
     #[test]
     fn host_at_capacity_clamps_nonpositive_plane_max_to_1() {
         let zero = host(Uuid::new_v4(), true, true, true, true, 0);
-        assert!(
-            host_at_capacity(1, &zero),
-            "plane max 0 clamps to 1"
-        );
+        assert!(host_at_capacity(1, &zero), "plane max 0 clamps to 1");
         assert!(
             !host_at_capacity(0, &zero),
             "clamp 1 still allows the first job"
         );
         let neg = host(Uuid::new_v4(), true, true, true, true, -5);
-        assert!(
-            host_at_capacity(1, &neg),
-            "plane max -5 clamps to 1"
-        );
+        assert!(host_at_capacity(1, &neg), "plane max -5 clamps to 1");
         assert!(
             !host_at_capacity(0, &neg),
             "clamp 1 still allows the first job"

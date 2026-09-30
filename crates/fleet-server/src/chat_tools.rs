@@ -344,7 +344,7 @@ pub fn tool_definitions() -> Value {
                     "properties": {
                         "provider": {
                             "type": "string",
-                            "description": "github | gitlab | gitea | bitbucket | jira | linear | slack | figma | notion | confluence | google_drive | teams | discord | trello | asana"
+                            "description": "github | gitlab | gitea | gogs | bitbucket | jira | linear | slack | figma | notion | confluence | google_drive | teams | discord | trello | asana"
                         },
                         "operation": {
                             "type": "string",
@@ -988,6 +988,7 @@ pub async fn execute_tool(
                     notion_databases: None,
                     gitlab_projects: None,
                     gitea_repos: None,
+                    gogs_repos: None,
                     linear_teams: None,
                     trello_boards: None,
                     auto_launch: None,
@@ -2885,6 +2886,9 @@ fn provider_capabilities(provider: &str) -> &'static str {
             "list_repos, list_issues, get_issue, list_mrs, get_mr, get_file, list_commits, commit_files, create_branch, create_mr, create_issue, add_comment"
         }
         "gitea" => {
+            "list_repos, list_issues, get_issue, list_mrs, list_prs, get_mr, get_pr, get_file, list_commits, put_file, commit_files, create_branch, create_mr, create_pr, create_issue, update_issue, add_comment, merge_mr, merge_pr"
+        }
+        "gogs" => {
             "list_repos, list_issues, get_issue, list_mrs, list_prs, get_mr, get_pr, get_file, list_commits, put_file, commit_files, create_branch, create_mr, create_pr, create_issue, update_issue, add_comment, merge_mr, merge_pr"
         }
         "jira" => {

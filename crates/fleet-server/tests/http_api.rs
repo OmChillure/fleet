@@ -78,6 +78,7 @@ fn test_integrations_config(jwt_secret: &str) -> IntegrationsConfig {
         gitlab: None,
         gitea: None,
         gitea_base_url: "http://localhost:3033".into(),
+        gogs_base_url: "http://localhost:3034".into(),
         slack: None,
         linear: None,
         jira: None,
@@ -477,6 +478,19 @@ fn partners_disclaimer(ws: &str) -> String {
     format!("/api/workspaces/{ws}/partners/disclaimer")
 }
 
+fn command_stdout(bin: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(bin).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn this_machine_hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -488,6 +502,8 @@ fn this_machine_hostname() -> String {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
+        .or_else(|| command_stdout("uname", &["-n"]))
+        .or_else(|| command_stdout("hostname", &[]))
         .unwrap_or_else(|| "test-box".into())
 }
 

@@ -33,6 +33,10 @@ pub const INBOX_SOURCES: &[InboxSource] = &[
         kind: InboxKind::Ticket,
     },
     InboxSource {
+        provider: "gogs",
+        kind: InboxKind::Ticket,
+    },
+    InboxSource {
         provider: "bitbucket",
         kind: InboxKind::Ticket,
     },
@@ -264,6 +268,10 @@ pub fn gitea_repos(filters: &Value) -> Vec<String> {
     string_list(filters, "gitea", "repos")
 }
 
+pub fn gogs_repos(filters: &Value) -> Vec<String> {
+    string_list(filters, "gogs", "repos")
+}
+
 pub fn linear_teams(filters: &Value) -> Vec<String> {
     string_list(filters, "linear", "teams")
 }
@@ -353,6 +361,10 @@ pub fn item_matches_filters(filters: &Value, provider: &str, key: &str) -> bool 
         "gitea" => {
             let repo = key.split('#').next().unwrap_or(key);
             listed_hit(&gitea_repos(filters), repo)
+        }
+        "gogs" => {
+            let repo = key.split('#').next().unwrap_or(key);
+            listed_hit(&gogs_repos(filters), repo)
         }
         "slack" => {
             let channel = key.split(':').next().unwrap_or(key);
